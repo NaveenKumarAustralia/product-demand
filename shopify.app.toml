@@ -1,9 +1,9 @@
 # This file stores configurations for your Shopify app.
-client_id = ""
+client_id = "96e96c6bb0e33380b852c0df2d0fd82b"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "write_products"
+scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_reports"
 
 [webhooks]
 api_version = "2025-10"
