@@ -26,10 +26,24 @@ export default function Auth() {
   const [shop, setShop] = useState("");
   const { errors } = actionData || loaderData;
 
+  // If rendered inside the Shopify admin iframe, accounts.shopify.com blocks
+  // OAuth redirects via X-Frame-Options. Escape to the top-level window so the
+  // OAuth flow can complete without being sandboxed.
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    if (typeof window !== "undefined" && window.top !== window.self) {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const data = new FormData(form);
+      const shopValue = data.get("shop") as string;
+      const params = new URLSearchParams({ shop: shopValue });
+      window.top!.location.href = `/auth/login?${params.toString()}`;
+    }
+  }
+
   return (
     <AppProvider embedded={false}>
       <s-page>
-        <Form method="post">
+        <Form method="post" onSubmit={handleSubmit}>
         <s-section heading="Log in">
           <s-text-field
             name="shop"
