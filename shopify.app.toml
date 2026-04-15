@@ -1,8 +1,17 @@
 # This file stores configurations for your Shopify app.
+name = "Product Demand"
 client_id = "96e96c6bb0e33380b852c0df2d0fd82b"
+application_url = "https://product-demand-production.up.railway.app"
+embedded = true
+
+[auth]
+redirect_urls = [
+  "https://product-demand-production.up.railway.app/auth/callback",
+  "https://product-demand-production.up.railway.app/auth/shopify/callback",
+  "https://product-demand-production.up.railway.app/api/auth/callback"
+]
 
 [access_scopes]
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_reports"
 
 [webhooks]
@@ -17,25 +26,3 @@ api_version = "2025-10"
   [[webhooks.subscriptions]]
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
-
-  # Webhooks can have filters
-  # Only receive webhooks for product updates with a product price >= 10.00
-  # See: https://shopify.dev/docs/apps/build/webhooks/customize/filters
-  # [[webhooks.subscriptions]]
-  # topics = ["products/update"]
-  # uri = "/webhooks/products/update"
-  # filter = "variants.price:>=10.00"
-
-  # Mandatory compliance topic for public apps only
-  # See: https://shopify.dev/docs/apps/build/privacy-law-compliance
-  # [[webhooks.subscriptions]]
-  # uri = "/webhooks/customers/data_request"
-  # compliance_topics = ["customers/data_request"]
-
-  # [[webhooks.subscriptions]]
-  # uri = "/webhooks/customers/redact"
-  # compliance_topics = ["customers/redact"]
-
-  # [[webhooks.subscriptions]]
-  # uri = "/webhooks/shop/redact"
-  # compliance_topics = ["shop/redact"]
