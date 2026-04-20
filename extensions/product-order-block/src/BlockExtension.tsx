@@ -32,31 +32,33 @@ function ProductOrderBlock() {
 
   const [order, setOrder] = useState<OrderStatus>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!productGid) {
       setLoading(false);
+      setErrorMsg(`No product ID found in extension data`);
       return;
     }
 
     async function fetchStatus() {
       try {
         const token = await sessionToken.get();
-        const res = await fetch(
-          `${APP_URL}/api/order-status?productId=${encodeURIComponent(productGid!)}`,
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-              "Content-Type": "application/json",
-            },
+        const url = `${APP_URL}/api/order-status?productId=${encodeURIComponent(productGid!)}`;
+        const res = await fetch(url, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
           },
-        );
-        if (!res.ok) throw new Error("Failed to fetch");
+        });
         const json = await res.json();
+        if (!res.ok) {
+          setErrorMsg(`API ${res.status}: ${json.error ?? "unknown"}`);
+          return;
+        }
         setOrder(json.order ?? null);
-      } catch {
-        setError(true);
+      } catch (e: any) {
+        setErrorMsg(`Fetch error: ${e?.message ?? String(e)}`);
       } finally {
         setLoading(false);
       }
@@ -80,13 +82,11 @@ function ProductOrderBlock() {
     );
   }
 
-  if (error) {
+  if (errorMsg) {
     return (
       <BlockStack gap="base">
         <Text fontWeight="bold">Supplier Ordering</Text>
-        <Banner status="warning">
-          Could not load order status. Check app is running.
-        </Banner>
+        <Banner status="warning">{errorMsg}</Banner>
       </BlockStack>
     );
   }
