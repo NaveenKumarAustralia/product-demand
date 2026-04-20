@@ -99,7 +99,7 @@ function ProductOrderBlock() {
         if (res.ok) {
           const nextOrder = json.order ?? null;
           setOrder(nextOrder);
-          const onOrderByVariant = new Map(
+          const onOrderByVariant = new Map<string, number>(
             (nextOrder?.lines ?? []).map((line: OrderLineStatus) => [line.variantId, line.qtyOrdered]),
           );
           setVariants((prev) => prev.map((variant) => ({
@@ -122,7 +122,11 @@ function ProductOrderBlock() {
 
   async function handleSubmit() {
     const orderedLines = variants.filter((v) => Number(v.qtyOrdered) > 0);
-    if (!orderedLines.length) { setFormError("Enter a quantity for at least one variant"); return; }
+    const trimmedNotes = notes.trim();
+    if (!orderedLines.length && !trimmedNotes) {
+      setFormError("Enter a quantity or add an order note");
+      return;
+    }
     setFormError(null);
     setSubmitting(true);
     try {
@@ -135,7 +139,7 @@ function ProductOrderBlock() {
           shop, productId: productGid, productTitle,
           productImageUrl: productImageUrl || undefined,
           supplier: productVendor || "Unknown",
-          notes: notes.trim() || undefined,
+          notes: trimmedNotes || undefined,
           lines: orderedLines.map((v) => ({
             variantId: v.id, variantTitle: v.title,
             sku: v.sku || undefined, qtyOrdered: Number(v.qtyOrdered),
@@ -145,7 +149,7 @@ function ProductOrderBlock() {
       const json = await res.json();
       if (!res.ok) { setFormError(`Error ${res.status}: ${json.error ?? "unknown"}`); return; }
       const total = orderedLines.reduce((s, v) => s + Number(v.qtyOrdered), 0);
-      setSuccessMsg(`Order placed — ${total} units`);
+      setSuccessMsg(total > 0 ? `Order placed — ${total} units` : "Order note added");
       const nextLines = orderedLines.map((v) => ({
         variantId: v.id,
         qtyOrdered: Number(v.qtyOrdered),
@@ -192,7 +196,7 @@ function ProductOrderBlock() {
       <BlockStack gap="base">
         {successMsg && <Banner status="success">{successMsg}</Banner>}
         {statusRow}
-        <Button onPress={() => setShowForm(true)}>{order ? "Add order" : "Place order"}</Button>
+        <Button onPress={() => setShowForm(true)}>Add order or order note</Button>
       </BlockStack>
     );
   }
@@ -256,7 +260,7 @@ function ProductOrderBlock() {
       />
       <Divider />
       <InlineStack gap="base">
-        <Button variant="primary" onPress={handleSubmit} loading={submitting}>{order ? "Add Order" : "Place Order"}</Button>
+        <Button variant="primary" onPress={handleSubmit} loading={submitting}>Add order or order note</Button>
         <Button variant="plain" onPress={() => { setShowForm(false); setFormError(null); }}>Cancel</Button>
       </InlineStack>
     </BlockStack>

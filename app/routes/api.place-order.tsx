@@ -61,7 +61,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     poNumber?: string;
     eta?: string;
     notes?: string;
-    lines: Array<{
+    lines?: Array<{
       variantId: string;
       variantTitle: string;
       sku?: string;
@@ -78,14 +78,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const { shop, productId, productTitle, productImageUrl, supplier, poNumber, eta, notes, lines } = body;
 
-  if (!shop || !productId || !supplier || !lines?.length) {
+  if (!shop || !productId || !supplier) {
     return Response.json(
-      { error: "shop, productId, supplier, and lines are required" },
+      { error: "shop, productId, and supplier are required" },
       { status: 400, headers: CORS },
     );
   }
 
-  const totalQty = lines.reduce((sum, l) => sum + (l.qtyOrdered || 0), 0);
+  const orderLines = (lines ?? []).filter((line) => Number(line.qtyOrdered || 0) > 0);
+
+  if (!orderLines.length && !notes?.trim()) {
+    return Response.json(
+      { error: "Add at least one quantity or an order note" },
+      { status: 400, headers: CORS },
+    );
+  }
+
+  const totalQty = orderLines.reduce((sum, l) => sum + (l.qtyOrdered || 0), 0);
 
   try {
     const order = await prisma.supplierOrder.create({
@@ -101,15 +110,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         notes: notes || null,
         totalQty,
         status: "open",
-        lines: {
-          create: lines.map((l) => ({
-            variantId: l.variantId,
-            variantTitle: l.variantTitle || "",
-            sku: l.sku || null,
-            qtyOrdered: l.qtyOrdered,
-            costPrice: l.costPrice ?? null,
-          })),
-        },
+        lines: orderLines.length
+          ? {
+              create: orderLines.map((l) => ({
+                variantId: l.variantId,
+                variantTitle: l.variantTitle || "",
+                sku: l.sku || null,
+                qtyOrdered: l.qtyOrdered,
+                costPrice: l.costPrice ?? null,
+              })),
+            }
+          : undefined,
       },
       select: { id: true, poNumber: true, totalQty: true },
     });
