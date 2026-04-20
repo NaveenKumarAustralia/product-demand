@@ -1,0 +1,10 @@
+api_version = "2025-10"
+
+[[extensions]]
+type = "ui_extension"
+name = "Product Order Block"
+handle = "product-order-block"
+
+  [[extensions.targeting]]
+  module = "./src/BlockExtension.tsx"
+  target = "admin.product-details.block.render"

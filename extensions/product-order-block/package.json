@@ -1,0 +1,12 @@
+{
+  "name": "product-order-block",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@shopify/ui-extensions-react": "^2025.1.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/react": "^18.0.0"
+  }
+}
