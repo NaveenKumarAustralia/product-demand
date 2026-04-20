@@ -1,61 +1,28 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Form, redirect, useLoaderData, useNavigation } from "react-router";
+import { Form, useLoaderData, useNavigation } from "react-router";
 import prisma from "../db.server";
-import { getSession, commitSession, destroySession } from "../portal.session.server";
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const session = await getSession(request.headers.get("Cookie"));
-  const supplierId = session.get("supplierId");
-  if (!supplierId) throw redirect("/portal/login");
-
-  const account = await prisma.supplierAccount.findUnique({
-    where: { id: Number(supplierId) },
-  });
-  if (!account || !account.active) {
-    throw redirect("/portal/login", {
-      headers: { "Set-Cookie": await destroySession(session) },
-    });
-  }
-
+export const loader = async ({}: LoaderFunctionArgs) => {
   const orders = await prisma.supplierOrder.findMany({
-    where: { shop: account.shop, supplier: account.name, status: "open" },
+    where: { status: "open" },
     include: { lines: { orderBy: { id: "asc" } } },
     orderBy: { createdAt: "desc" },
   });
-
-  return { supplierName: account.name, orders };
+  return { orders };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const session = await getSession(request.headers.get("Cookie"));
-  const supplierId = session.get("supplierId");
-  if (!supplierId) throw redirect("/portal/login");
-
   const form = await request.formData();
   const intent = form.get("intent");
-
-  if (intent === "logout") {
-    throw redirect("/portal/login", {
-      headers: { "Set-Cookie": await destroySession(session) },
-    });
-  }
 
   if (intent === "update_status") {
     const orderId = Number(form.get("orderId"));
     const newStatus = String(form.get("newStatus"));
     const supplierNotes = String(form.get("supplierNotes") ?? "").trim();
 
-    const account = await prisma.supplierAccount.findUnique({
-      where: { id: Number(supplierId) },
-    });
-    if (!account) throw redirect("/portal/login");
-
-    await prisma.supplierOrder.updateMany({
-      where: { id: orderId, shop: account.shop, supplier: account.name },
-      data: {
-        supplierStatus: newStatus,
-        supplierNotes: supplierNotes || null,
-      },
+    await prisma.supplierOrder.update({
+      where: { id: orderId },
+      data: { supplierStatus: newStatus, supplierNotes: supplierNotes || null },
     });
   }
 
@@ -71,33 +38,27 @@ const STATUS_LABELS: Record<string, { label: string; color: string; bg: string }
 };
 
 export default function PortalDashboard() {
-  const { supplierName, orders } = useLoaderData<typeof loader>();
+  const { orders } = useLoaderData<typeof loader>();
   const navigation = useNavigation();
+  const submitting = navigation.state === "submitting";
 
   return (
     <div style={styles.page}>
       <header style={styles.header}>
         <div style={styles.headerInner}>
-          <div>
-            <span style={styles.logo}>Supplier Portal</span>
-            <span style={styles.supplierBadge}>{supplierName}</span>
-          </div>
-          <Form method="post">
-            <input type="hidden" name="intent" value="logout" />
-            <button type="submit" style={styles.logoutBtn}>Sign out</button>
-          </Form>
+          <span style={styles.logo}>Supplier Portal</span>
         </div>
       </header>
 
       <main style={styles.main}>
-        <h2 style={styles.heading}>Your Orders</h2>
+        <h2 style={styles.heading}>Open Orders</h2>
 
         {orders.length === 0 ? (
           <div style={styles.empty}>No open orders at the moment.</div>
         ) : (
           <div style={styles.grid}>
             {orders.map((order) => (
-              <OrderCard key={order.id} order={order} submitting={navigation.state === "submitting"} />
+              <OrderCard key={order.id} order={order} submitting={submitting} />
             ))}
           </div>
         )}
@@ -121,9 +82,9 @@ function OrderCard({ order, submitting }: { order: Order; submitting: boolean })
         <div>
           <div style={styles.productTitle}>{order.productTitle}</div>
           <div style={styles.meta}>
-            {order.totalQty} units
+            {order.supplier} · {order.totalQty} units
             {order.eta && ` · ETA ${new Date(order.eta).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })}`}
-            {" · "}Placed {new Date(order.createdAt).toLocaleDateString("en-AU", { day: "numeric", month: "short" })}
+            {" · Placed "}{new Date(order.createdAt).toLocaleDateString("en-AU", { day: "numeric", month: "short" })}
           </div>
         </div>
         <span style={{ ...styles.badge, color: statusInfo.color, background: statusInfo.bg }}>
@@ -166,7 +127,7 @@ function OrderCard({ order, submitting }: { order: Order; submitting: boolean })
               name="supplierNotes"
               defaultValue={order.supplierNotes ?? ""}
               style={styles.input}
-              placeholder="e.g. estimated dispatch date, tracking info…"
+              placeholder="e.g. tracking info, dispatch date…"
             />
           </div>
           <button type="submit" disabled={submitting} style={styles.actionBtn}>
@@ -201,29 +162,8 @@ const styles: Record<string, React.CSSProperties> = {
     maxWidth: 900,
     margin: "0 auto",
     padding: "16px 24px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
   },
   logo: { fontSize: 18, fontWeight: 700, color: "#1a1a1a" },
-  supplierBadge: {
-    marginLeft: 12,
-    background: "#ecfdf5",
-    color: "#065f46",
-    padding: "3px 10px",
-    borderRadius: 20,
-    fontSize: 13,
-    fontWeight: 600,
-  },
-  logoutBtn: {
-    background: "none",
-    border: "1px solid #d1d5db",
-    borderRadius: 8,
-    padding: "6px 14px",
-    fontSize: 13,
-    cursor: "pointer",
-    color: "#374151",
-  },
   main: { maxWidth: 900, margin: "0 auto", padding: "32px 24px" },
   heading: { margin: "0 0 24px", fontSize: 22, fontWeight: 700, color: "#111827" },
   empty: {
