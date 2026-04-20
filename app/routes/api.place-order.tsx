@@ -109,7 +109,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
       const existingOrder = await prisma.supplierOrder.findFirst({
         where: { id: orderId, shop, productId, status: "open" },
-        select: { id: true, notes: true, totalQty: true },
+        select: {
+          id: true,
+          notes: true,
+          totalQty: true,
+          lines: {
+            select: {
+              id: true,
+              variantId: true,
+              qtyOrdered: true,
+            },
+          },
+        },
       });
 
       if (!existingOrder) {
@@ -124,27 +135,52 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         ? [existingOrder.notes, trimmedNotes].filter(Boolean).join("\n")
         : existingOrder.notes;
 
-      const order = await prisma.supplierOrder.update({
-        where: { id: existingOrder.id },
-        data: {
-          notes: nextNotes || null,
-          totalQty: existingOrder.totalQty + totalQty,
-          lines: orderLines.length
-            ? {
-                create: orderLines.map((l) => ({
-                  variantId: l.variantId,
-                  variantTitle: l.variantTitle || "",
-                  sku: l.sku || null,
-                  qtyOrdered: l.qtyOrdered,
-                  costPrice: l.costPrice ?? null,
-                })),
-              }
-            : undefined,
-        },
-        select: { id: true, poNumber: true, totalQty: true },
+      const order = await prisma.$transaction(async (tx) => {
+        const updatedOrder = await tx.supplierOrder.update({
+          where: { id: existingOrder.id },
+          data: {
+            notes: nextNotes || null,
+            totalQty: existingOrder.totalQty + totalQty,
+          },
+          select: { id: true, poNumber: true, totalQty: true },
+        });
+
+        for (const line of orderLines) {
+          const existingLine = existingOrder.lines.find((item) => item.variantId === line.variantId);
+          if (existingLine) {
+            await tx.orderLine.update({
+              where: { id: existingLine.id },
+              data: { qtyOrdered: existingLine.qtyOrdered + line.qtyOrdered },
+            });
+          } else {
+            await tx.orderLine.create({
+              data: {
+                orderId: existingOrder.id,
+                variantId: line.variantId,
+                variantTitle: line.variantTitle || "",
+                sku: line.sku || null,
+                qtyOrdered: line.qtyOrdered,
+                costPrice: line.costPrice ?? null,
+              },
+            });
+          }
+        }
+
+        return updatedOrder;
       });
 
       return Response.json({ success: true, order }, { headers: CORS });
+    }
+
+    const openOrderCount = await prisma.supplierOrder.count({
+      where: { shop, productId, status: "open" },
+    });
+
+    if (openOrderCount >= 2) {
+      return Response.json(
+        { error: "This product already has 2 open orders. Add to an existing order instead." },
+        { status: 400, headers: CORS },
+      );
     }
 
     const order = await prisma.supplierOrder.create({

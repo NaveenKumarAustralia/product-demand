@@ -82,19 +82,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         },
       },
       orderBy: { createdAt: "desc" },
+      take: 2,
     });
 
     const latestOrder = orders[0] ?? null;
-    const qtyByVariant = new Map<string, number>();
-
-    for (const order of orders) {
-      for (const line of order.lines) {
-        qtyByVariant.set(
-          line.variantId,
-          (qtyByVariant.get(line.variantId) ?? 0) + line.qtyOrdered,
-        );
-      }
-    }
+    const formattedOrders = orders.map((order) => ({
+      ...order,
+      eta: order.eta?.toISOString() ?? null,
+    }));
+    const totalQty = orders.reduce((sum, order) => sum + order.totalQty, 0);
 
     return Response.json(
       {
@@ -102,18 +98,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           ? {
               id: latestOrder.id,
               supplier: latestOrder.supplier,
-              totalQty: orders.reduce((sum, order) => sum + order.totalQty, 0),
+              totalQty,
               eta: latestOrder.eta?.toISOString() ?? null,
               status: latestOrder.status,
               supplierStatus: latestOrder.supplierStatus,
               priority: latestOrder.priority,
               notes: latestOrder.notes,
-              lines: Array.from(qtyByVariant.entries()).map(([variantId, qtyOrdered]) => ({
-                variantId,
-                qtyOrdered,
-              })),
+              lines: formattedOrders.flatMap((order) => order.lines),
             }
           : null,
+        orders: formattedOrders,
       },
       { headers: CORS },
     );

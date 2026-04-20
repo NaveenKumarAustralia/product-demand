@@ -40,6 +40,44 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     updates.eta = raw ? new Date(raw) : null;
   }
 
+  if (intent === "update_qty") {
+    const size = String(form.get("size") ?? "");
+    const qtyOrdered = Math.max(0, Number(form.get("value") ?? 0) || 0);
+
+    await prisma.$transaction(async (tx) => {
+      const lines = await tx.orderLine.findMany({
+        where: { orderId, variantTitle: size },
+        orderBy: { id: "asc" },
+        select: { id: true },
+      });
+
+      if (!lines.length) return;
+
+      await tx.orderLine.update({
+        where: { id: lines[0].id },
+        data: { qtyOrdered },
+      });
+
+      if (lines.length > 1) {
+        await tx.orderLine.updateMany({
+          where: { id: { in: lines.slice(1).map((line) => line.id) } },
+          data: { qtyOrdered: 0 },
+        });
+      }
+
+      const allLines = await tx.orderLine.findMany({
+        where: { orderId },
+        select: { qtyOrdered: true },
+      });
+      await tx.supplierOrder.update({
+        where: { id: orderId },
+        data: { totalQty: allLines.reduce((sum, line) => sum + line.qtyOrdered, 0) },
+      });
+    });
+
+    return null;
+  }
+
   if (Object.keys(updates).length) {
     await prisma.supplierOrder.update({ where: { id: orderId }, data: updates });
   }
@@ -100,6 +138,7 @@ export default function PortalDashboard() {
               <thead>
                 <tr style={s.headerRow}>
                   <Th>Factory Notes</Th>
+                  <Th>Order Date</Th>
                   <Th>Picture</Th>
                   <Th>Name</Th>
                   <Th>SKU</Th>
@@ -127,14 +166,25 @@ export default function PortalDashboard() {
 // ─── Row ─────────────────────────────────────────────────────────────────────
 
 function OrderRow({ order, sizes }: { order: Order; sizes: string[] }) {
-  const qtyBySize = Object.fromEntries(order.lines.map((l) => [l.variantTitle, l.qtyOrdered]));
+  const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
+    acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
+    return acc;
+  }, {});
   const allSkus = order.lines.map((l) => l.sku).filter(Boolean).join("\n");
   const etaValue = order.eta ? new Date(order.eta).toISOString().slice(0, 10) : "";
+  const orderDate = new Date(order.createdAt).toLocaleDateString("en-AU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+  });
 
   return (
     <tr style={s.row}>
       {/* Factory notes */}
       <Td><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} /></Td>
+
+      {/* Order date */}
+      <Td center><span style={s.dateText}>{orderDate}</span></Td>
 
       {/* Picture */}
       <Td center>
@@ -152,9 +202,7 @@ function OrderRow({ order, sizes }: { order: Order; sizes: string[] }) {
       {/* Size columns */}
       {sizes.map((sz) => (
         <Td key={sz} center>
-          <span style={(qtyBySize[sz] ?? 0) > 0 ? s.qty : s.qtyZero}>
-            {qtyBySize[sz] ?? 0}
-          </span>
+          <QtyCell orderId={order.id} size={sz} value={qtyBySize[sz] ?? 0} />
         </Td>
       ))}
 
@@ -265,6 +313,31 @@ function EtaCell({ orderId, value }: { orderId: number; value: string }) {
   );
 }
 
+function QtyCell({ orderId, size, value }: { orderId: number; size: string; value: number }) {
+  const fetcher = useFetcher();
+  const current = fetcher.formData ? String(fetcher.formData.get("value")) : String(value);
+  const numericCurrent = Number(current) || 0;
+
+  return (
+    <fetcher.Form method="post">
+      <input type="hidden" name="intent" value="update_qty" />
+      <input type="hidden" name="orderId" value={orderId} />
+      <input type="hidden" name="size" value={size} />
+      <input
+        type="number"
+        min="0"
+        name="value"
+        defaultValue={value}
+        onBlur={(e) => fetcher.submit(e.currentTarget.form!)}
+        style={{
+          ...s.qtyInput,
+          ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
+        }}
+      />
+    </fetcher.Form>
+  );
+}
+
 // ─── Table helpers ────────────────────────────────────────────────────────────
 
 function Th({ children, center }: { children: React.ReactNode; center?: boolean }) {
@@ -324,6 +397,7 @@ const s: Record<string, React.CSSProperties> = {
   sku: { fontFamily: "monospace", fontSize: 11, color: "#6b7280", whiteSpace: "pre-line" },
   qty: { fontWeight: 700, color: "#111827" },
   qtyZero: { color: "#d1d5db" },
+  dateText: { color: "#374151", fontWeight: 600, whiteSpace: "nowrap" },
   total: { fontWeight: 700, fontSize: 14, color: "#111827" },
   noteText: { fontSize: 12, color: "#6b7280", maxWidth: 160, display: "block", whiteSpace: "pre-wrap" },
   select: {
@@ -355,4 +429,17 @@ const s: Record<string, React.CSSProperties> = {
     outline: "none",
     color: "#374151",
   },
+  qtyInput: {
+    width: 44,
+    border: "1px solid transparent",
+    borderRadius: 3,
+    padding: "4px 6px",
+    fontSize: 13,
+    fontWeight: 700,
+    textAlign: "center",
+    outline: "none",
+    background: "transparent",
+  },
+  qtyInputActive: { color: "#111827" },
+  qtyInputZero: { color: "#d1d5db" },
 };

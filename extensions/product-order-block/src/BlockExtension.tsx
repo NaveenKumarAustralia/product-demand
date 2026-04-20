@@ -22,7 +22,7 @@ const APP_URL = "https://product-demand-production.up.railway.app";
 export default reactExtension(TARGET, () => <ProductOrderBlock />);
 
 type OrderLineStatus = { variantId: string; qtyOrdered: number };
-type OrderStatus = {
+type OrderStatusItem = {
   id: number;
   supplier: string;
   totalQty: number;
@@ -31,10 +31,12 @@ type OrderStatus = {
   priority?: string | null;
   notes?: string | null;
   lines?: OrderLineStatus[];
-} | null;
+};
+type OrderStatus = OrderStatusItem | null;
 type Variant = { id: string; title: string; sku: string; stockQty: number; onOrderQty: number; qtyOrdered: string };
 
-const W = { size: "22%", stock: "15%", onOrder: "17%", addOrder: "25%", total: "15%", gap: "base" } as const;
+const ORDER_LIMIT = 2;
+const W = { size: "14%", stock: "12%", order: "13%", addOrder: "21%", total: "12%", gap: "small" } as const;
 const STATUS_OPTIONS = [
   { value: "on_order", label: "On Order" },
   { value: "on_production", label: "On Production" },
@@ -56,6 +58,13 @@ function labelFor(options: Array<{ value: string; label: string }>, value?: stri
   return options.find((option) => option.value === value)?.label ?? "On Order";
 }
 
+function formatShortDate(value?: string | null) {
+  if (!value) return "No ETA";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "No ETA";
+  return date.toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit", year: "2-digit" });
+}
+
 function Col({ w, align = "start", children }: { w: string; align?: "start" | "end" | "center"; children: React.ReactNode }) {
   return (
     <Box inlineSize={w as any}>
@@ -73,6 +82,7 @@ function ProductOrderBlock() {
   const [productVendor, setProductVendor] = useState("");
   const [productImageUrl, setProductImageUrl] = useState<string | null>(null);
   const [order, setOrder] = useState<OrderStatus>(null);
+  const [orders, setOrders] = useState<OrderStatusItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
@@ -85,7 +95,41 @@ function ProductOrderBlock() {
   const [orderStatus, setOrderStatus] = useState("on_order");
   const [orderPriority, setOrderPriority] = useState("");
   const [orderEta, setOrderEta] = useState("");
-  const [orderNotes, setOrderNotes] = useState("");
+
+  const applyOrderStatus = useCallback((nextOrder: OrderStatus, nextOrders: OrderStatusItem[]) => {
+    const visibleOrders = nextOrders.slice(0, ORDER_LIMIT);
+    setOrder(nextOrder);
+    setOrders(visibleOrders);
+    setOrderStatus(nextOrder?.supplierStatus || "on_order");
+    setOrderPriority(nextOrder?.priority || "");
+    setOrderEta(nextOrder?.eta ? String(nextOrder.eta).slice(0, 10) : "");
+
+    const onOrderByVariant = new Map<string, number>();
+    for (const item of visibleOrders) {
+      for (const line of item.lines ?? []) {
+        onOrderByVariant.set(
+          line.variantId,
+          (onOrderByVariant.get(line.variantId) ?? 0) + line.qtyOrdered,
+        );
+      }
+    }
+    setVariants((prev) => prev.map((variant) => ({
+      ...variant,
+      onOrderQty: onOrderByVariant.get(variant.id) ?? 0,
+    })));
+  }, []);
+
+  const refreshOrderStatus = useCallback(async (shopDomain: string, productId: string) => {
+    const token = await auth.idToken();
+    if (!token) throw new Error("No auth token");
+    const res = await fetch(
+      `${APP_URL}/api/order-status?productId=${encodeURIComponent(productId)}&shop=${encodeURIComponent(shopDomain)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error ?? "Could not load order status");
+    applyOrderStatus(json.order ?? null, json.orders ?? []);
+  }, [applyOrderStatus, auth]);
 
   useEffect(() => {
     if (!productGid) { setLoading(false); return; }
@@ -119,28 +163,7 @@ function ProductOrderBlock() {
             stockQty: v.inventoryQuantity ?? 0, onOrderQty: 0, qtyOrdered: "",
           })));
         }
-        const token = await auth.idToken();
-        if (!token) throw new Error("No auth token");
-        const res = await fetch(
-          `${APP_URL}/api/order-status?productId=${encodeURIComponent(productGid!)}&shop=${encodeURIComponent(shopDomain)}`,
-          { headers: { Authorization: `Bearer ${token}` } },
-        );
-        const json = await res.json();
-        if (res.ok) {
-          const nextOrder = json.order ?? null;
-          setOrder(nextOrder);
-          setOrderStatus(nextOrder?.supplierStatus || "on_order");
-          setOrderPriority(nextOrder?.priority || "");
-          setOrderEta(nextOrder?.eta ? String(nextOrder.eta).slice(0, 10) : "");
-          setOrderNotes(nextOrder?.notes || "");
-          const onOrderByVariant = new Map<string, number>(
-            (nextOrder?.lines ?? []).map((line: OrderLineStatus) => [line.variantId, line.qtyOrdered]),
-          );
-          setVariants((prev) => prev.map((variant) => ({
-            ...variant,
-            onOrderQty: onOrderByVariant.get(variant.id) ?? 0,
-          })));
-        }
+        await refreshOrderStatus(shopDomain, productGid!);
       } catch (e: any) {
         setErrorMsg(`Error: ${e?.message ?? String(e)}`);
       } finally {
@@ -148,7 +171,7 @@ function ProductOrderBlock() {
       }
     }
     init();
-  }, [productGid]);
+  }, [productGid, query, refreshOrderStatus]);
 
   const updateQty = useCallback((idx: number, val: string) => {
     setVariants((prev) => prev.map((v, i) => i === idx ? { ...v, qtyOrdered: val.replace(/\D/g, "") } : v));
@@ -170,7 +193,6 @@ function ProductOrderBlock() {
           supplierStatus: orderStatus,
           priority: orderPriority,
           eta: orderEta || null,
-          notes: orderNotes,
         }),
       });
       const json = await res.json();
@@ -180,8 +202,13 @@ function ProductOrderBlock() {
         supplierStatus: json.order.supplierStatus,
         priority: json.order.priority,
         eta: json.order.eta,
-        notes: json.order.notes,
       } : current);
+      setOrders((current) => current.map((item) => item.id === json.order.id ? {
+        ...item,
+        supplierStatus: json.order.supplierStatus,
+        priority: json.order.priority,
+        eta: json.order.eta,
+      } : item));
       setSuccessMsg("Order details saved");
     } catch (e: any) {
       setFormError(`Error: ${e?.message ?? String(e)}`);
@@ -225,37 +252,10 @@ function ProductOrderBlock() {
           ? `${mode === "existing" ? "Existing order updated" : "New order created"} — ${total} units`
           : `${mode === "existing" ? "Existing order note added" : "New order note created"}`,
       );
-      const nextLines = orderedLines.map((v) => ({
-        variantId: v.id,
-        qtyOrdered: Number(v.qtyOrdered),
-      }));
-      const nextNotes = mode === "existing"
-        ? [order?.notes, trimmedNotes].filter(Boolean).join("\n")
-        : trimmedNotes || "";
-      const nextStatus = mode === "existing" ? order?.supplierStatus ?? "on_order" : "on_order";
-      const nextPriority = mode === "existing" ? order?.priority ?? null : null;
-      const nextEta = mode === "existing" ? order?.eta ?? null : null;
-      setOrder({
-        id: json.order.id,
-        supplier: productVendor,
-        totalQty: (order?.totalQty ?? 0) + total,
-        eta: nextEta,
-        supplierStatus: nextStatus,
-        priority: nextPriority,
-        notes: nextNotes || null,
-        lines: nextLines,
-      });
+      if (shop && productGid) await refreshOrderStatus(shop, productGid);
       setShowForm(false);
-      setOrderStatus(nextStatus);
-      setOrderPriority(nextPriority ?? "");
-      setOrderEta(nextEta ? String(nextEta).slice(0, 10) : "");
-      setOrderNotes(nextNotes);
       setNotes("");
-      setVariants((prev) => prev.map((v) => ({
-        ...v,
-        onOrderQty: v.onOrderQty + (nextLines.find((line) => line.variantId === v.id)?.qtyOrdered ?? 0),
-        qtyOrdered: "",
-      })));
+      setVariants((prev) => prev.map((v) => ({ ...v, qtyOrdered: "" })));
     } catch (e: any) {
       setFormError(`Error: ${e?.message ?? String(e)}`);
     } finally {
@@ -264,7 +264,7 @@ function ProductOrderBlock() {
   }
 
   if (loading) return <InlineStack inlineAlignment="center"><ProgressIndicator size="small-200" /></InlineStack>;
-  if (errorMsg) return <Banner status="warning">{errorMsg}</Banner>;
+  if (errorMsg) return <Banner tone="warning">{errorMsg}</Banner>;
 
   const statusRow = (
     <InlineStack gap="small" blockAlignment="center">
@@ -286,7 +286,7 @@ function ProductOrderBlock() {
   if (!showForm) {
     return (
       <BlockStack gap="base">
-        {successMsg && <Banner status="success">{successMsg}</Banner>}
+        {successMsg && <Banner tone="success">{successMsg}</Banner>}
         {statusRow}
         <Button onPress={() => setShowForm(true)}>Add order or order note</Button>
       </BlockStack>
@@ -294,6 +294,11 @@ function ProductOrderBlock() {
   }
 
   const totalStock = variants.reduce((s, v) => s + v.stockQty, 0);
+  const orderColumns = orders.slice(0, ORDER_LIMIT);
+  const getOrderQty = (item: OrderStatusItem, variantId: string) =>
+    (item.lines ?? [])
+      .filter((line) => line.variantId === variantId)
+      .reduce((sum, line) => sum + line.qtyOrdered, 0);
   const totalOnOrder = variants.reduce((s, v) => s + v.onOrderQty, 0);
   const totalAddOrder = variants.reduce((s, v) => s + (Number(v.qtyOrdered) || 0), 0);
 
@@ -301,7 +306,7 @@ function ProductOrderBlock() {
     <BlockStack gap="small">
       {statusRow}
       <Divider />
-      {formError && <Banner status="critical">{formError}</Banner>}
+      {formError && <Banner tone="critical">{formError}</Banner>}
 
       {order && (
         <BlockStack gap="small">
@@ -325,11 +330,6 @@ function ProductOrderBlock() {
               onChange={setOrderEta}
             />
           </InlineStack>
-          <TextField
-            label="Order notes"
-            value={orderNotes}
-            onChange={setOrderNotes}
-          />
           <InlineStack gap="base">
             <Button onPress={handleSaveOrderDetails}>{savingDetails ? "Saving..." : "Save order details"}</Button>
           </InlineStack>
@@ -339,11 +339,18 @@ function ProductOrderBlock() {
 
       {/* Header */}
       <InlineStack gap={W.gap} blockAlignment="center">
-        <Col w={W.size}><Text tone="subdued" fontWeight="bold">Size</Text></Col>
-        <Col w={W.stock} align="center"><Text tone="subdued" fontWeight="bold">In stock</Text></Col>
-        <Col w={W.onOrder} align="center"><Text tone="subdued" fontWeight="bold">On order</Text></Col>
-        <Col w={W.addOrder} align="center"><Text tone="subdued" fontWeight="bold">Add order</Text></Col>
-        <Col w={W.total} align="center"><Text tone="subdued" fontWeight="bold">Total</Text></Col>
+        <Col w={W.size}><Text fontWeight="bold">Size</Text></Col>
+        <Col w={W.stock} align="center"><Text fontWeight="bold">In stock</Text></Col>
+        {orderColumns.map((item, idx) => (
+          <Col key={item.id} w={W.order} align="center">
+            <BlockStack gap="none">
+              <Text fontWeight="bold">{formatShortDate(item.eta)}</Text>
+              <Text fontWeight="bold">On order {idx + 1}</Text>
+            </BlockStack>
+          </Col>
+        ))}
+        <Col w={W.addOrder} align="center"><Text fontWeight="bold">Add order</Text></Col>
+        <Col w={W.total} align="center"><Text fontWeight="bold">Total</Text></Col>
       </InlineStack>
       <Divider />
 
@@ -354,7 +361,9 @@ function ProductOrderBlock() {
           <InlineStack key={v.id} gap={W.gap} blockAlignment="center">
             <Col w={W.size}><Text>{v.title}</Text></Col>
             <Col w={W.stock} align="center"><Text>{v.stockQty}</Text></Col>
-            <Col w={W.onOrder} align="center"><Text>{v.onOrderQty}</Text></Col>
+            {orderColumns.map((item) => (
+              <Col key={item.id} w={W.order} align="center"><Text>{getOrderQty(item, v.id)}</Text></Col>
+            ))}
             <Col w={W.addOrder} align="center">
               <TextField
                 label=" "
@@ -373,7 +382,9 @@ function ProductOrderBlock() {
       <InlineStack gap={W.gap} blockAlignment="center">
         <Col w={W.size}><Text fontWeight="bold">Total</Text></Col>
         <Col w={W.stock} align="center"><Text fontWeight="bold">{totalStock}</Text></Col>
-        <Col w={W.onOrder} align="center"><Text fontWeight="bold">{totalOnOrder}</Text></Col>
+        {orderColumns.map((item) => (
+          <Col key={item.id} w={W.order} align="center"><Text fontWeight="bold">{item.totalQty}</Text></Col>
+        ))}
         <Col w={W.addOrder} align="center"><Text fontWeight="bold">{totalAddOrder}</Text></Col>
         <Col w={W.total} align="center"><Text fontWeight="bold">{totalStock + totalOnOrder + totalAddOrder}</Text></Col>
       </InlineStack>
@@ -387,14 +398,18 @@ function ProductOrderBlock() {
       <Divider />
       <InlineStack gap="base">
         {order && (
-          <Button variant="primary" onPress={() => handleSubmit("existing")} loading={submitting}>
-            Add to existing order
+          <Button variant="primary" onPress={() => handleSubmit("existing")}>
+            {submitting ? "Saving..." : "Add to existing order"}
           </Button>
         )}
-        <Button variant={order ? "secondary" : "primary"} onPress={() => handleSubmit("new")} loading={submitting}>
-          Create new order
-        </Button>
-        <Button variant="plain" onPress={() => { setShowForm(false); setFormError(null); }}>Cancel</Button>
+        {orders.length < ORDER_LIMIT ? (
+          <Button variant={order ? "secondary" : "primary"} onPress={() => handleSubmit("new")}>
+            {submitting ? "Saving..." : "Create new order"}
+          </Button>
+        ) : (
+          <Text>Maximum 2 open orders. Add to existing order.</Text>
+        )}
+        <Button variant="tertiary" onPress={() => { setShowForm(false); setFormError(null); }}>Cancel</Button>
       </InlineStack>
     </BlockStack>
   );
