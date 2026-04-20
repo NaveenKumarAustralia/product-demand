@@ -31,6 +31,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const updates: Record<string, unknown> = {};
 
+  if (intent === "delete_order") {
+    await prisma.supplierOrder.delete({ where: { id: orderId } });
+    return null;
+  }
+
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
   if (intent === "update_factory_notes") updates.factoryNotes = form.get("value");
@@ -148,6 +153,7 @@ export default function PortalDashboard() {
                   <Th>Notes</Th>
                   <Th>Priority</Th>
                   <Th>ETA</Th>
+                  <Th center>Delete</Th>
                 </tr>
               </thead>
               <tbody>
@@ -220,6 +226,9 @@ function OrderRow({ order, sizes }: { order: Order; sizes: string[] }) {
 
       {/* ETA */}
       <Td><EtaCell orderId={order.id} value={etaValue} /></Td>
+
+      {/* Delete */}
+      <Td center><DeleteCell orderId={order.id} /></Td>
     </tr>
   );
 }
@@ -343,6 +352,24 @@ function QtyCell({ orderId, size, value }: { orderId: number; size: string; valu
   );
 }
 
+function DeleteCell({ orderId }: { orderId: number }) {
+  const fetcher = useFetcher();
+  return (
+    <fetcher.Form
+      method="post"
+      onSubmit={(e) => {
+        if (!window.confirm("Are you sure you want to delete this order?")) {
+          e.preventDefault();
+        }
+      }}
+    >
+      <input type="hidden" name="intent" value="delete_order" />
+      <input type="hidden" name="orderId" value={orderId} />
+      <button type="submit" style={s.deleteButton}>Delete</button>
+    </fetcher.Form>
+  );
+}
+
 // ─── Table helpers ────────────────────────────────────────────────────────────
 
 function Th({ children, center }: { children: React.ReactNode; center?: boolean }) {
@@ -447,4 +474,14 @@ const s: Record<string, React.CSSProperties> = {
   },
   qtyInputActive: { color: "#111827" },
   qtyInputZero: { color: "#d1d5db" },
+  deleteButton: {
+    border: "1px solid #fecaca",
+    borderRadius: 3,
+    padding: "5px 8px",
+    background: "#fee2e2",
+    color: "#991b1b",
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
 };

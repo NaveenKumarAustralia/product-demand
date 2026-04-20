@@ -12,6 +12,7 @@ import {
   Badge,
   ProgressIndicator,
   TextField,
+  Select,
 } from "@shopify/ui-extensions-react/admin";
 
 const TARGET = "admin.product-details.block.render";
@@ -43,6 +44,13 @@ const STATUS_OPTIONS = [
   { value: "arrived_loaded", label: "Arrived and Loaded" },
   { value: "cancelled", label: "Cancelled" },
   { value: "ready_to_send", label: "Ready To Send" },
+];
+const PRIORITY_OPTIONS = [
+  { value: "", label: "— Priority —" },
+  { value: "low", label: "LOW" },
+  { value: "high", label: "HIGH" },
+  { value: "urgent", label: "URGENT" },
+  { value: "cancelled", label: "Cancelled" },
 ];
 
 function labelFor(options: Array<{ value: string; label: string }>, value?: string | null) {
@@ -80,13 +88,16 @@ function ProductOrderBlock() {
   const [variants, setVariants] = useState<Variant[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [savingPriority, setSavingPriority] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
+  const [orderPriority, setOrderPriority] = useState("");
 
   const applyOrderStatus = useCallback((nextOrder: OrderStatus, nextOrders: OrderStatusItem[]) => {
     const visibleOrders = nextOrders.slice(0, ORDER_LIMIT);
     setOrder(nextOrder);
     setOrders(visibleOrders);
+    setOrderPriority(nextOrder?.priority || "");
 
     const onOrderByVariant = new Map<string, number>();
     for (const item of visibleOrders) {
@@ -160,6 +171,36 @@ function ProductOrderBlock() {
   const updateQty = useCallback((idx: number, val: string) => {
     setVariants((prev) => prev.map((v, i) => i === idx ? { ...v, qtyOrdered: val.replace(/\D/g, "") } : v));
   }, []);
+
+  async function updatePriority(nextPriority: string) {
+    setOrderPriority(nextPriority);
+    if (!order || !shop) return;
+    setSavingPriority(true);
+    setFormError(null);
+    try {
+      const token = await auth.idToken();
+      if (!token) throw new Error("No auth token");
+      const res = await fetch(`${APP_URL}/api/update-order`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          shop,
+          orderId: order.id,
+          priority: nextPriority,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) { setFormError(`Error ${res.status}: ${json.error ?? "unknown"}`); return; }
+      setOrder((current) => current ? { ...current, priority: json.order.priority } : current);
+      setOrders((current) => current.map((item) => (
+        item.id === json.order.id ? { ...item, priority: json.order.priority } : item
+      )));
+    } catch (e: any) {
+      setFormError(`Error: ${e?.message ?? String(e)}`);
+    } finally {
+      setSavingPriority(false);
+    }
+  }
 
   async function handleSubmit(mode: "existing" | "new") {
     const orderedLines = variants.filter((v) => Number(v.qtyOrdered) > 0);
@@ -250,11 +291,25 @@ function ProductOrderBlock() {
       <Divider />
       {formError && <Banner tone="critical">{formError}</Banner>}
 
-      <TextField
-        label="Notes for supplier portal"
-        value={notes}
-        onChange={setNotes}
-      />
+      <InlineStack gap="base" blockAlignment="end">
+        {order && (
+          <Box inlineSize="30%">
+            <Select
+              label={savingPriority ? "Priority saving..." : "Priority"}
+              value={orderPriority}
+              options={PRIORITY_OPTIONS}
+              onChange={updatePriority}
+            />
+          </Box>
+        )}
+        <Box inlineSize={order ? "67%" : "100%"}>
+          <TextField
+            label="Notes for supplier portal"
+            value={notes}
+            onChange={setNotes}
+          />
+        </Box>
+      </InlineStack>
       <Divider />
 
       {/* Header */}
