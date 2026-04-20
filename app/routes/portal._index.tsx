@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import prisma from "../db.server";
@@ -118,12 +119,98 @@ const PRIORITY_OPTIONS = [
   { value: "cancelled", label: "Cancelled", bg: "#d97706", color: "#fff" },
 ];
 
+const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
+const MIN_COLUMN_WIDTH = 52;
+const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
+  factoryNotes: 190,
+  orderDate: 92,
+  picture: 88,
+  name: 260,
+  sku: 115,
+  total: 80,
+  status: 210,
+  notes: 150,
+  priority: 160,
+  eta: 145,
+  delete: 82,
+};
+
+type ColumnDef = { id: string; label: string; center?: boolean };
+
+function sizeColumnId(size: string) {
+  return `size:${size}`;
+}
+
+function defaultColumnWidth(columnId: string) {
+  return columnId.startsWith("size:") ? 58 : DEFAULT_COLUMN_WIDTHS[columnId] ?? 110;
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 type Order = Awaited<ReturnType<typeof loader>>["orders"][number];
 
 export default function PortalDashboard() {
   const { orders, sizes } = useLoaderData<typeof loader>();
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
+  const [hasLoadedColumnWidths, setHasLoadedColumnWidths] = useState(false);
+  const columns: ColumnDef[] = [
+    { id: "factoryNotes", label: "Factory Notes" },
+    { id: "orderDate", label: "Order Date" },
+    { id: "picture", label: "Picture" },
+    { id: "name", label: "Name" },
+    { id: "sku", label: "SKU" },
+    ...sizes.map((size) => ({ id: sizeColumnId(size), label: size, center: true })),
+    { id: "total", label: "Total", center: true },
+    { id: "status", label: "Status" },
+    { id: "notes", label: "Notes" },
+    { id: "priority", label: "Priority" },
+    { id: "eta", label: "ETA" },
+    { id: "delete", label: "Delete", center: true },
+  ];
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(COLUMN_WIDTHS_KEY);
+      if (saved) setColumnWidths(JSON.parse(saved));
+    } catch {
+      // Ignore corrupt or blocked localStorage and fall back to defaults.
+    } finally {
+      setHasLoadedColumnWidths(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedColumnWidths) return;
+    window.localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(columnWidths));
+  }, [columnWidths, hasLoadedColumnWidths]);
+
+  const widthFor = (columnId: string) => columnWidths[columnId] ?? defaultColumnWidth(columnId);
+  const tableWidth = columns.reduce((sum, column) => sum + widthFor(column.id), 0);
+
+  const startResize = (columnId: string, event: React.MouseEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = widthFor(columnId);
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      const nextWidth = Math.max(MIN_COLUMN_WIDTH, startWidth + moveEvent.clientX - startX);
+      setColumnWidths((current) => ({ ...current, [columnId]: nextWidth }));
+    };
+    const handleUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      document.removeEventListener("mousemove", handleMove);
+      document.removeEventListener("mouseup", handleUp);
+    };
+
+    document.addEventListener("mousemove", handleMove);
+    document.addEventListener("mouseup", handleUp);
+  };
 
   return (
     <div style={s.page}>
@@ -139,21 +226,23 @@ export default function PortalDashboard() {
           <div style={s.empty}>No open orders at the moment.</div>
         ) : (
           <div style={s.tableWrap}>
-            <table style={s.table}>
+            <table style={{ ...s.table, width: tableWidth }}>
+              <colgroup>
+                {columns.map((column) => (
+                  <col key={column.id} style={{ width: widthFor(column.id) }} />
+                ))}
+              </colgroup>
               <thead>
                 <tr style={s.headerRow}>
-                  <Th>Factory Notes</Th>
-                  <Th>Order Date</Th>
-                  <Th>Picture</Th>
-                  <Th>Name</Th>
-                  <Th>SKU</Th>
-                  {sizes.map((sz) => <Th key={sz} center>{sz}</Th>)}
-                  <Th center>Total</Th>
-                  <Th>Status</Th>
-                  <Th>Notes</Th>
-                  <Th>Priority</Th>
-                  <Th>ETA</Th>
-                  <Th center>Delete</Th>
+                  {columns.map((column) => (
+                    <Th
+                      key={column.id}
+                      center={column.center}
+                      onResizeStart={(event) => startResize(column.id, event)}
+                    >
+                      {column.label}
+                    </Th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -372,8 +461,27 @@ function DeleteCell({ orderId }: { orderId: number }) {
 
 // ─── Table helpers ────────────────────────────────────────────────────────────
 
-function Th({ children, center }: { children: React.ReactNode; center?: boolean }) {
-  return <th style={{ ...s.th, textAlign: center ? "center" : "left" }}>{children}</th>;
+function Th({
+  children,
+  center,
+  onResizeStart,
+}: {
+  children: React.ReactNode;
+  center?: boolean;
+  onResizeStart: (event: React.MouseEvent<HTMLSpanElement>) => void;
+}) {
+  return (
+    <th style={{ ...s.th, textAlign: center ? "center" : "left" }}>
+      <span style={s.thContent}>{children}</span>
+      <span
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={`Resize ${String(children)} column`}
+        onMouseDown={onResizeStart}
+        style={s.resizeHandle}
+      />
+    </th>
+  );
 }
 function Td({ children, center }: { children: React.ReactNode; center?: boolean }) {
   return <td style={{ ...s.td, textAlign: center ? "center" : "left" }}>{children}</td>;
@@ -396,12 +504,11 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
   },
   table: {
-    width: "100%",
     borderCollapse: "collapse",
     borderSpacing: 0,
     fontSize: 13,
     minWidth: 900,
-    tableLayout: "auto",
+    tableLayout: "fixed",
   },
   headerRow: { background: "#eef2f7" },
   th: {
@@ -414,6 +521,20 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #cbd5e1",
     whiteSpace: "nowrap",
     background: "#eef2f7",
+    position: "relative",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
+  thContent: { display: "block", overflow: "hidden", textOverflow: "ellipsis" },
+  resizeHandle: {
+    position: "absolute",
+    top: 0,
+    right: -3,
+    width: 8,
+    height: "100%",
+    cursor: "col-resize",
+    zIndex: 2,
+    touchAction: "none",
   },
   row: { background: "#fff" },
   td: {
@@ -422,10 +543,11 @@ const s: Record<string, React.CSSProperties> = {
     color: "#374151",
     border: "1px solid #d1d5db",
     background: "#fff",
+    overflow: "hidden",
   },
   thumb: { width: 48, height: 64, objectFit: "cover", borderRadius: 2, display: "block", margin: "0 auto" },
   noImg: { color: "#d1d5db", textAlign: "center" },
-  productName: { fontWeight: 600, color: "#111827", whiteSpace: "nowrap" },
+  productName: { fontWeight: 600, color: "#111827", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 },
   sku: { fontFamily: "monospace", fontSize: 11, color: "#6b7280", whiteSpace: "pre-line" },
   qty: { fontWeight: 700, color: "#111827" },
   qtyZero: { color: "#d1d5db" },
@@ -448,7 +570,8 @@ const s: Record<string, React.CSSProperties> = {
     padding: "6px 8px",
     fontSize: 12,
     resize: "vertical",
-    width: 140,
+    width: "100%",
+    boxSizing: "border-box",
     fontFamily: "inherit",
     outline: "none",
     color: "#374151",
@@ -460,6 +583,8 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 12,
     outline: "none",
     color: "#374151",
+    width: "100%",
+    boxSizing: "border-box",
   },
   qtyInput: {
     width: 44,
