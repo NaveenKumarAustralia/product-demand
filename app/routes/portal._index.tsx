@@ -147,6 +147,13 @@ const PRIORITY_OPTIONS = [
 
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const MIN_COLUMN_WIDTH = 52;
+const FOCUSABLE_CELL_SELECTOR = [
+  "input:not([type='hidden'])",
+  "select",
+  "textarea",
+  "button",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   factoryNotes: 190,
   orderDate: 92,
@@ -240,6 +247,7 @@ export default function PortalDashboard() {
 
   const handleGridKeyDown = (event: React.KeyboardEvent<HTMLTableElement>) => {
     if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
 
     const currentCell = (event.target as HTMLElement).closest<HTMLElement>("[data-grid-row][data-grid-col]");
     if (!currentCell) return;
@@ -260,12 +268,12 @@ export default function PortalDashboard() {
     if (!nextCell) return;
 
     event.preventDefault();
-    const focusTarget = nextCell.querySelector<HTMLElement>(
-      "input, select, textarea, button, [tabindex]:not([tabindex='-1'])",
-    ) ?? nextCell;
+    const focusTarget = nextCell.querySelector<HTMLElement>(FOCUSABLE_CELL_SELECTOR) ?? nextCell;
     focusTarget.focus();
 
     if (focusTarget instanceof HTMLInputElement) {
+      focusTarget.select();
+    } else if (focusTarget instanceof HTMLTextAreaElement) {
       focusTarget.select();
     }
   };
