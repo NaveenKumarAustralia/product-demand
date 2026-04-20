@@ -1,253 +1,235 @@
-import { useEffect } from "react";
-import type {
-  ActionFunctionArgs,
-  HeadersFunction,
-  LoaderFunctionArgs,
-} from "react-router";
-import { useFetcher } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { authenticate } from "../shopify.server";
+import type { HeadersFunction, LoaderFunctionArgs } from "react-router";
+import { useLoaderData } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
+import { authenticate } from "../shopify.server";
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
-
-  return null;
+type Variant = {
+  id: string;
+  title: string;
+  sku: string;
+  inventoryQuantity: number | null;
 };
 
-export const action = async ({ request }: ActionFunctionArgs) => {
+type Product = {
+  id: string;
+  title: string;
+  vendor: string;
+  status: string;
+  featuredImage: { url: string; altText: string | null } | null;
+  variants: Variant[];
+};
+
+export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
-    `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
+
+  const response = await admin.graphql(`
+    #graphql
+    query getProducts {
+      products(first: 50, sortKey: TITLE) {
+        edges {
+          node {
             id
             title
-            handle
+            vendor
             status
+            featuredImage {
+              url
+              altText
+            }
             variants(first: 10) {
               edges {
                 node {
                   id
-                  price
-                  barcode
-                  createdAt
+                  title
+                  sku
+                  inventoryQuantity
                 }
               }
             }
           }
         }
-      }`,
-    {
-      variables: {
-        product: {
-          title: `${color} Snowboard`,
-        },
-      },
-    },
-  );
-  const responseJson = await response.json();
-
-  const product = responseJson.data!.productCreate!.product!;
-  const variantId = product.variants.edges[0]!.node!.id!;
-
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          price
-          barcode
-          createdAt
-        }
       }
-    }`,
-    {
-      variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
-      },
-    },
-  );
+    }
+  `);
 
-  const variantResponseJson = await variantResponse.json();
+  const json = await response.json();
+  const products: Product[] = json.data.products.edges.map((edge: any) => ({
+    ...edge.node,
+    variants: edge.node.variants.edges.map((v: any) => v.node),
+  }));
 
-  return {
-    product: responseJson!.data!.productCreate!.product,
-    variant:
-      variantResponseJson!.data!.productVariantsBulkUpdate!.productVariants,
-  };
+  return { products };
 };
 
-export default function Index() {
-  const fetcher = useFetcher<typeof action>();
+function totalStock(variants: Variant[]) {
+  return variants.reduce((sum, v) => sum + (v.inventoryQuantity ?? 0), 0);
+}
 
-  const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
+function StockBadge({ stock }: { stock: number }) {
+  if (stock === 0) {
+    return (
+      <span style={styles.badge("critical")}>Out of stock</span>
+    );
+  }
+  if (stock < 10) {
+    return (
+      <span style={styles.badge("warning")}>Low: {stock}</span>
+    );
+  }
+  return (
+    <span style={styles.badge("success")}>In stock: {stock}</span>
+  );
+}
 
-  useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
-    }
-  }, [fetcher.data?.product?.id, shopify]);
-
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+export default function ProductList() {
+  const { products } = useLoaderData<typeof loader>();
 
   return (
-    <s-page heading="Shopify app template">
-      <s-button slot="primary-action" onClick={generateProduct}>
-        Generate a product
-      </s-button>
+    <s-page heading="Product Demand">
+      <s-section heading={`${products.length} Products`}>
+        <div style={styles.tableWrapper}>
+          {/* Header row */}
+          <div style={styles.headerRow}>
+            <div style={{ ...styles.col, width: 56 }} />
+            <div style={{ ...styles.col, flex: 3 }}>
+              <s-text>Product</s-text>
+            </div>
+            <div style={{ ...styles.col, flex: 2 }}>
+              <s-text>Supplier</s-text>
+            </div>
+            <div style={{ ...styles.col, flex: 2 }}>
+              <s-text>Stock</s-text>
+            </div>
+            <div style={{ ...styles.col, flex: 2 }}>
+              <s-text>Order status</s-text>
+            </div>
+            <div style={{ ...styles.col, flex: 1 }} />
+          </div>
 
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
-        <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
-          >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href="/app/additional">additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
-        </s-paragraph>
-      </s-section>
-      <s-section heading="Get started with products">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references.
-        </s-paragraph>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
-          </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
-            >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
+          {/* Product rows */}
+          {products.map((product) => {
+            const stock = totalStock(product.variants);
+            const variantSummary = product.variants
+              .map((v) =>
+                v.title !== "Default Title"
+                  ? `${v.title}: ${v.inventoryQuantity ?? 0}`
+                  : null,
+              )
+              .filter(Boolean)
+              .join(" · ");
 
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
-              </s-box>
-            </s-stack>
-          </s-section>
-        )}
-      </s-section>
+            return (
+              <div key={product.id} style={styles.productRow}>
+                {/* Image */}
+                <div style={{ ...styles.col, width: 56 }}>
+                  {product.featuredImage ? (
+                    <img
+                      src={product.featuredImage.url}
+                      alt={product.featuredImage.altText || product.title}
+                      style={styles.thumbnail}
+                    />
+                  ) : (
+                    <div style={styles.noImage} />
+                  )}
+                </div>
 
-      <s-section slot="aside" heading="App template specs">
-        <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://www.prisma.io/" target="_blank">
-            Prisma
-          </s-link>
-        </s-paragraph>
-      </s-section>
+                {/* Title + variants */}
+                <div style={{ ...styles.col, flex: 3 }}>
+                  <s-text>{product.title}</s-text>
+                  {variantSummary && (
+                    <div style={{ marginTop: 4 }}>
+                      <s-text>{variantSummary}</s-text>
+                    </div>
+                  )}
+                </div>
 
-      <s-section slot="aside" heading="Next steps">
-        <s-unordered-list>
-          <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
-            >
-              example app
-            </s-link>
-          </s-list-item>
-          <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
-          </s-list-item>
-        </s-unordered-list>
+                {/* Supplier */}
+                <div style={{ ...styles.col, flex: 2 }}>
+                  <s-text>{product.vendor || "—"}</s-text>
+                </div>
+
+                {/* Stock */}
+                <div style={{ ...styles.col, flex: 2 }}>
+                  <StockBadge stock={stock} />
+                </div>
+
+                {/* Order status */}
+                <div style={{ ...styles.col, flex: 2 }}>
+                  <span style={styles.badge("neutral")}>Not on order</span>
+                </div>
+
+                {/* Action */}
+                <div style={{ ...styles.col, flex: 1 }}>
+                  <s-button variant="primary">Place order</s-button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </s-section>
     </s-page>
   );
 }
+
+const styles = {
+  tableWrapper: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 1,
+  },
+  headerRow: {
+    display: "flex",
+    alignItems: "center",
+    padding: "8px 12px",
+    gap: 12,
+    borderBottom: "1px solid #e1e3e5",
+    opacity: 0.6,
+  },
+  productRow: {
+    display: "flex",
+    alignItems: "center",
+    padding: "12px",
+    gap: 12,
+    borderBottom: "1px solid #f1f2f3",
+    borderRadius: 8,
+  },
+  col: {
+    display: "flex",
+    flexDirection: "column" as const,
+    justifyContent: "center" as const,
+  },
+  thumbnail: {
+    width: 48,
+    height: 48,
+    objectFit: "cover" as const,
+    borderRadius: 6,
+    border: "1px solid #e1e3e5",
+  },
+  noImage: {
+    width: 48,
+    height: 48,
+    borderRadius: 6,
+    background: "#f1f2f3",
+    border: "1px solid #e1e3e5",
+  },
+  badge: (tone: "success" | "warning" | "critical" | "neutral") => {
+    const colors = {
+      success: { bg: "#d3f5e2", color: "#1a6640" },
+      warning: { bg: "#fff3cd", color: "#7d5c00" },
+      critical: { bg: "#fde8e8", color: "#8c1515" },
+      neutral: { bg: "#f1f2f3", color: "#4a4a4a" },
+    };
+    return {
+      display: "inline-block",
+      padding: "3px 10px",
+      borderRadius: 12,
+      fontSize: 12,
+      fontWeight: 500,
+      background: colors[tone].bg,
+      color: colors[tone].color,
+    };
+  },
+};
 
 export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
