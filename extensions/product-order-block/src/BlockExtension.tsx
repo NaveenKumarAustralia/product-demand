@@ -26,7 +26,7 @@ type OrderStatus = {
 } | null;
 
 function ProductOrderBlock() {
-  const { data, sessionToken, navigation } = useApi(TARGET);
+  const { data, auth, query, navigation } = useApi(TARGET);
 
   const productGid: string | undefined = data.selected?.[0]?.id;
 
@@ -37,20 +37,34 @@ function ProductOrderBlock() {
   useEffect(() => {
     if (!productGid) {
       setLoading(false);
-      setErrorMsg(`No product ID found in extension data`);
+      setErrorMsg("No product ID in extension data");
       return;
     }
 
     async function fetchStatus() {
       try {
-        const token = await sessionToken.get();
-        const url = `${APP_URL}/api/order-status?productId=${encodeURIComponent(productGid!)}`;
-        const res = await fetch(url, {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
+        // Get shop domain via authenticated GraphQL query
+        const shopResult = await query<{
+          shop: { myshopifyDomain: string };
+        }>(`{ shop { myshopifyDomain } }`);
+
+        const shop = shopResult.data?.shop?.myshopifyDomain;
+        if (!shop) throw new Error("Could not resolve shop domain");
+
+        // Get ID token for backend authentication
+        const token = await auth.idToken();
+        if (!token) throw new Error("No auth token");
+
+        const res = await fetch(
+          `${APP_URL}/api/order-status?productId=${encodeURIComponent(productGid!)}&shop=${encodeURIComponent(shop)}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
           },
-        });
+        );
+
         const json = await res.json();
         if (!res.ok) {
           setErrorMsg(`API ${res.status}: ${json.error ?? "unknown"}`);
@@ -58,7 +72,7 @@ function ProductOrderBlock() {
         }
         setOrder(json.order ?? null);
       } catch (e: any) {
-        setErrorMsg(`Fetch error: ${e?.message ?? String(e)}`);
+        setErrorMsg(`Error: ${e?.message ?? String(e)}`);
       } finally {
         setLoading(false);
       }
@@ -100,7 +114,9 @@ function ProductOrderBlock() {
         <BlockStack gap="small">
           <InlineStack gap="small" blockAlignment="center">
             <Badge tone="info">On order</Badge>
-            <Text>{order.totalQty} units · {order.supplier}</Text>
+            <Text>
+              {order.totalQty} units · {order.supplier}
+            </Text>
           </InlineStack>
           {order.eta && (
             <Text tone="subdued">
