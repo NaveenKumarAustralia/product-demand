@@ -317,6 +317,9 @@ function QtyCell({ orderId, size, value }: { orderId: number; size: string; valu
   const fetcher = useFetcher();
   const current = fetcher.formData ? String(fetcher.formData.get("value")) : String(value);
   const numericCurrent = Number(current) || 0;
+  const normalizeQty = (input: HTMLInputElement) => {
+    input.value = input.value.replace(/\D/g, "");
+  };
 
   return (
     <fetcher.Form method="post">
@@ -324,10 +327,12 @@ function QtyCell({ orderId, size, value }: { orderId: number; size: string; valu
       <input type="hidden" name="orderId" value={orderId} />
       <input type="hidden" name="size" value={size} />
       <input
-        type="number"
-        min="0"
+        type="text"
+        inputMode="numeric"
+        pattern="[0-9]*"
         name="value"
         defaultValue={value}
+        onChange={(e) => normalizeQty(e.currentTarget)}
         onBlur={(e) => fetcher.submit(e.currentTarget.form!)}
         style={{
           ...s.qtyInput,

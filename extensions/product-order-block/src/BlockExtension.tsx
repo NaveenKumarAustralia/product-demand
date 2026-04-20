@@ -273,8 +273,6 @@ function ProductOrderBlock() {
           <Badge tone="success">On order</Badge>
           <Text>
             {order.totalQty} units · {order.supplier} · {labelFor(STATUS_OPTIONS, order.supplierStatus)}
-            {order.priority ? ` · ${labelFor(PRIORITY_OPTIONS, order.priority)}` : ""}
-            {order.eta ? ` · ETA ${new Date(order.eta).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })}` : ""}
           </Text>
         </>
       ) : (
