@@ -1,4 +1,4 @@
-import type { ActionFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 
 const CORS = {
@@ -15,6 +15,13 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
     return null;
   }
 }
+
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS });
+  }
+  return new Response(null, { status: 405, headers: CORS });
+};
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   if (request.method === "OPTIONS") {
