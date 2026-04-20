@@ -4,6 +4,7 @@ import {
   useApi,
   BlockStack,
   InlineStack,
+  Box,
   Text,
   Button,
   Banner,
@@ -11,8 +12,6 @@ import {
   Badge,
   ProgressIndicator,
   TextField,
-  NumberField,
-  Select,
 } from "@shopify/ui-extensions-react/admin";
 
 const TARGET = "admin.product-details.block.render";
@@ -20,20 +19,18 @@ const APP_URL = "https://product-demand-production.up.railway.app";
 
 export default reactExtension(TARGET, () => <ProductOrderBlock />);
 
-type OrderStatus = {
-  id: number;
-  supplier: string;
-  totalQty: number;
-  eta: string | null;
-  status: string;
-} | null;
+type OrderStatus = { id: number; supplier: string; totalQty: number; eta: string | null } | null;
+type Variant = { id: string; title: string; sku: string; stockQty: number; qtyOrdered: string };
 
-type Variant = {
-  id: string;
-  title: string;
-  sku: string;
-  qtyOrdered: number;
-};
+const W = { size: "28%", stock: "18%", order: "28%", total: "18%", gap: "base" } as const;
+
+function Col({ w, align = "start", children }: { w: string; align?: "start" | "end" | "center"; children: React.ReactNode }) {
+  return (
+    <Box inlineSize={w as any}>
+      <InlineStack inlineAlignment={align} blockAlignment="center">{children}</InlineStack>
+    </Box>
+  );
+}
 
 function ProductOrderBlock() {
   const { data, auth, query } = useApi(TARGET);
@@ -41,260 +38,183 @@ function ProductOrderBlock() {
 
   const [shop, setShop] = useState<string | null>(null);
   const [productTitle, setProductTitle] = useState("");
+  const [productVendor, setProductVendor] = useState("");
+  const [productImageUrl, setProductImageUrl] = useState<string | null>(null);
   const [order, setOrder] = useState<OrderStatus>(null);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
+  const [showForm, setShowForm] = useState(false);
   const [variants, setVariants] = useState<Variant[]>([]);
-  const [supplierOptions, setSupplierOptions] = useState<Array<{ label: string; value: string }>>([]);
-  const [supplier, setSupplier] = useState("");
-  const [customSupplier, setCustomSupplier] = useState("");
-  const [eta, setEta] = useState("");
-  const [notes, setNotes] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!productGid) {
-      setLoading(false);
-      setErrorMsg("No product ID in extension data");
-      return;
-    }
-
+    if (!productGid) { setLoading(false); return; }
     async function init() {
       try {
         const result = await query<{
           shop: { myshopifyDomain: string };
           product: {
-            title: string;
-            variants: { nodes: Array<{ id: string; title: string; sku: string }> };
+            title: string; vendor: string;
+            featuredImage: { url: string } | null;
+            variants: { nodes: Array<{ id: string; title: string; sku: string; inventoryQuantity: number }> };
           };
         }>(`{
           shop { myshopifyDomain }
           product(id: "${productGid}") {
-            title
-            variants(first: 50) { nodes { id title sku } }
+            title vendor
+            featuredImage { url }
+            variants(first: 100) { nodes { id title sku inventoryQuantity } }
           }
         }`);
-
         const shopDomain = result.data?.shop?.myshopifyDomain;
-        if (!shopDomain) throw new Error("Could not resolve shop domain");
+        if (!shopDomain) throw new Error("Could not resolve shop");
         setShop(shopDomain);
-
         const p = result.data?.product;
         if (p) {
           setProductTitle(p.title);
-          setVariants(
-            (p.variants?.nodes ?? []).map((v) => ({
-              id: v.id,
-              title: v.title,
-              sku: v.sku ?? "",
-              qtyOrdered: 0,
-            })),
-          );
+          setProductVendor(p.vendor ?? "");
+          setProductImageUrl(p.featuredImage?.url ?? null);
+          setVariants((p.variants?.nodes ?? []).map((v) => ({
+            id: v.id, title: v.title, sku: v.sku ?? "",
+            stockQty: v.inventoryQuantity ?? 0, qtyOrdered: "",
+          })));
         }
-
         const token = await auth.idToken();
         if (!token) throw new Error("No auth token");
-
-        // Fetch existing suppliers and order status in parallel
-        const [statusRes, suppliersRes] = await Promise.all([
-          fetch(
-            `${APP_URL}/api/order-status?productId=${encodeURIComponent(productGid!)}&shop=${encodeURIComponent(shopDomain)}`,
-            { headers: { Authorization: `Bearer ${token}` } },
-          ),
-          fetch(
-            `${APP_URL}/api/suppliers?shop=${encodeURIComponent(shopDomain)}`,
-            { headers: { Authorization: `Bearer ${token}` } },
-          ),
-        ]);
-
-        const statusJson = await statusRes.json();
-        if (statusRes.ok) setOrder(statusJson.order ?? null);
-
-        const suppliersJson = await suppliersRes.json();
-        const names: string[] = suppliersJson.suppliers ?? [];
-        const opts = names.map((s) => ({ label: s, value: s }));
-        opts.push({ label: "Add new supplier…", value: "__new__" });
-        setSupplierOptions(opts);
-        if (names.length > 0) setSupplier(names[0]);
-        else setSupplier("__new__");
+        const res = await fetch(
+          `${APP_URL}/api/order-status?productId=${encodeURIComponent(productGid!)}&shop=${encodeURIComponent(shopDomain)}`,
+          { headers: { Authorization: `Bearer ${token}` } },
+        );
+        const json = await res.json();
+        if (res.ok) setOrder(json.order ?? null);
       } catch (e: any) {
         setErrorMsg(`Error: ${e?.message ?? String(e)}`);
       } finally {
         setLoading(false);
       }
     }
-
     init();
   }, [productGid]);
 
-  const updateQty = useCallback((idx: number, val: number) => {
-    setVariants((prev) => prev.map((v, i) => (i === idx ? { ...v, qtyOrdered: val } : v)));
+  const updateQty = useCallback((idx: number, val: string) => {
+    setVariants((prev) => prev.map((v, i) => i === idx ? { ...v, qtyOrdered: val.replace(/\D/g, "") } : v));
   }, []);
 
   async function handleSubmit() {
-    const resolvedSupplier = supplier === "__new__" ? customSupplier.trim() : supplier;
-    if (!resolvedSupplier) {
-      setFormError("Supplier name is required");
-      return;
-    }
     const orderedLines = variants.filter((v) => Number(v.qtyOrdered) > 0);
-    if (!orderedLines.length) {
-      setFormError("Enter a quantity for at least one variant");
-      return;
-    }
-
+    if (!orderedLines.length) { setFormError("Enter a quantity for at least one variant"); return; }
     setFormError(null);
     setSubmitting(true);
-
     try {
       const token = await auth.idToken();
       if (!token) throw new Error("No auth token");
-
       const res = await fetch(`${APP_URL}/api/place-order`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          shop,
-          productId: productGid,
-          productTitle,
-          supplier: resolvedSupplier,
-          eta: eta || undefined,
-          notes: notes.trim() || undefined,
+          shop, productId: productGid, productTitle,
+          productImageUrl: productImageUrl || undefined,
+          supplier: productVendor || "Unknown",
           lines: orderedLines.map((v) => ({
-            variantId: v.id,
-            variantTitle: v.title,
-            sku: v.sku || undefined,
-            qtyOrdered: Number(v.qtyOrdered),
+            variantId: v.id, variantTitle: v.title,
+            sku: v.sku || undefined, qtyOrdered: Number(v.qtyOrdered),
           })),
         }),
       });
-
       const json = await res.json();
-      if (!res.ok) {
-        setFormError(`Error ${res.status}: ${json.error ?? "unknown"}`);
-        return;
-      }
-
-      const totalOrdered = orderedLines.reduce((s, v) => s + Number(v.qtyOrdered), 0);
-      setSuccessMsg(`Order placed — ${totalOrdered} units from ${resolvedSupplier}`);
-      setOrder({ id: json.order.id, supplier: resolvedSupplier, totalQty: totalOrdered, eta: eta || null, status: "open" });
-
-      // Add new supplier to the dropdown
-      if (supplier === "__new__" && resolvedSupplier) {
-        setSupplierOptions((prev) => [
-          { label: resolvedSupplier, value: resolvedSupplier },
-          ...prev.filter((o) => o.value !== "__new__"),
-          { label: "Add new supplier…", value: "__new__" },
-        ]);
-        setSupplier(resolvedSupplier);
-        setCustomSupplier("");
-      }
-
-      // Reset quantities
-      setVariants((prev) => prev.map((v) => ({ ...v, qtyOrdered: 0 })));
-      setEta("");
-      setNotes("");
+      if (!res.ok) { setFormError(`Error ${res.status}: ${json.error ?? "unknown"}`); return; }
+      const total = orderedLines.reduce((s, v) => s + Number(v.qtyOrdered), 0);
+      setSuccessMsg(`Order placed — ${total} units`);
+      setOrder({ id: json.order.id, supplier: productVendor, totalQty: total, eta: null });
+      setShowForm(false);
+      setVariants((prev) => prev.map((v) => ({ ...v, qtyOrdered: "" })));
     } catch (e: any) {
-      setFormError(`Submit error: ${e?.message ?? String(e)}`);
+      setFormError(`Error: ${e?.message ?? String(e)}`);
     } finally {
       setSubmitting(false);
     }
   }
 
-  if (loading) {
+  if (loading) return <InlineStack inlineAlignment="center"><ProgressIndicator size="small-200" /></InlineStack>;
+  if (errorMsg) return <Banner status="warning">{errorMsg}</Banner>;
+
+  const statusRow = (
+    <InlineStack gap="small" blockAlignment="center">
+      {order ? (
+        <>
+          <Badge tone="success">On order</Badge>
+          <Text>{order.totalQty} units · {order.supplier}{order.eta ? ` · ETA ${new Date(order.eta).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })}` : ""}</Text>
+        </>
+      ) : (
+        <Badge>Not on order</Badge>
+      )}
+    </InlineStack>
+  );
+
+  if (!showForm) {
     return (
       <BlockStack gap="base">
-        <Text fontWeight="bold">Supplier Ordering</Text>
-        <InlineStack inlineAlignment="center">
-          <ProgressIndicator size="small-200" />
-        </InlineStack>
+        {successMsg && <Banner status="success">{successMsg}</Banner>}
+        {statusRow}
+        <Button onPress={() => setShowForm(true)}>{order ? "Reorder" : "Place order"}</Button>
       </BlockStack>
     );
   }
 
-  if (errorMsg) {
-    return (
-      <BlockStack gap="base">
-        <Text fontWeight="bold">Supplier Ordering</Text>
-        <Banner status="warning">{errorMsg}</Banner>
-      </BlockStack>
-    );
-  }
+  const totalStock = variants.reduce((s, v) => s + v.stockQty, 0);
+  const totalOrder = variants.reduce((s, v) => s + (Number(v.qtyOrdered) || 0), 0);
 
   return (
-    <BlockStack gap="base">
-      <Text fontWeight="bold">Supplier Ordering</Text>
+    <BlockStack gap="small">
+      {statusRow}
       <Divider />
-
-      {/* Current order status */}
-      {successMsg ? (
-        <Banner status="success">{successMsg}</Banner>
-      ) : order ? (
-        <BlockStack gap="extraSmall">
-          <InlineStack gap="small" blockAlignment="center">
-            <Badge tone="info">On order</Badge>
-            <Text>{order.totalQty} units · {order.supplier}</Text>
-          </InlineStack>
-          {order.eta && (
-            <Text tone="subdued">
-              ETA {new Date(order.eta).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })}
-            </Text>
-          )}
-        </BlockStack>
-      ) : (
-        <InlineStack gap="small" blockAlignment="center">
-          <Badge>Not on order</Badge>
-          <Text tone="subdued">No open supplier orders</Text>
-        </InlineStack>
-      )}
-
-      <Divider />
-      <Text fontWeight="bold">{order ? "Place another order" : "Place order"}</Text>
-
       {formError && <Banner status="critical">{formError}</Banner>}
 
-      {supplierOptions.length > 0 ? (
-        <Select
-          label="Supplier"
-          options={supplierOptions}
-          value={supplier}
-          onChange={setSupplier}
-        />
-      ) : (
-        <TextField label="Supplier" value={customSupplier} onChange={setCustomSupplier} />
-      )}
+      {/* Header */}
+      <InlineStack gap={W.gap} blockAlignment="center">
+        <Col w={W.size}><Text tone="subdued" fontWeight="bold">Size</Text></Col>
+        <Col w={W.stock} align="center"><Text tone="subdued" fontWeight="bold">In stock</Text></Col>
+        <Col w={W.order} align="center"><Text tone="subdued" fontWeight="bold">On order</Text></Col>
+        <Col w={W.total} align="center"><Text tone="subdued" fontWeight="bold">Total</Text></Col>
+      </InlineStack>
+      <Divider />
 
-      {supplier === "__new__" && supplierOptions.length > 0 && (
-        <TextField label="New supplier name" value={customSupplier} onChange={setCustomSupplier} />
-      )}
-
-      <TextField label="ETA (YYYY-MM-DD)" value={eta} onChange={setEta} />
-      <TextField label="Notes" value={notes} onChange={setNotes} />
+      {/* Rows */}
+      {variants.map((v, idx) => {
+        const rowTotal = v.stockQty + (Number(v.qtyOrdered) || 0);
+        return (
+          <InlineStack key={v.id} gap={W.gap} blockAlignment="center">
+            <Col w={W.size}><Text>{v.title}</Text></Col>
+            <Col w={W.stock} align="center"><Text>{v.stockQty}</Text></Col>
+            <Col w={W.order} align="center">
+              <TextField
+                label=" "
+                value={v.qtyOrdered}
+                onChange={(val) => updateQty(idx, val)}
+              />
+            </Col>
+            <Col w={W.total} align="center"><Text fontWeight="bold">{rowTotal}</Text></Col>
+          </InlineStack>
+        );
+      })}
 
       <Divider />
 
-      {variants.map((v, idx) => (
-        <InlineStack key={v.id} gap="base" blockAlignment="center">
-          <BlockStack gap="none">
-            <Text>{v.title}</Text>
-            {v.sku ? <Text tone="subdued">{v.sku}</Text> : null}
-          </BlockStack>
-          <NumberField
-            label="Qty"
-            value={v.qtyOrdered}
-            min={0}
-            onChange={(val) => updateQty(idx, val)}
-          />
-        </InlineStack>
-      ))}
+      {/* Totals */}
+      <InlineStack gap={W.gap} blockAlignment="center">
+        <Col w={W.size}><Text fontWeight="bold">Total</Text></Col>
+        <Col w={W.stock} align="center"><Text fontWeight="bold">{totalStock}</Text></Col>
+        <Col w={W.order} align="center"><Text fontWeight="bold">{totalOrder}</Text></Col>
+        <Col w={W.total} align="center"><Text fontWeight="bold">{totalStock + totalOrder}</Text></Col>
+      </InlineStack>
 
       <Divider />
-      <Button variant="primary" onPress={handleSubmit} loading={submitting}>
-        Place Order
-      </Button>
+      <InlineStack gap="base">
+        <Button variant="primary" onPress={handleSubmit} loading={submitting}>Place Order</Button>
+        <Button variant="plain" onPress={() => { setShowForm(false); setFormError(null); }}>Cancel</Button>
+      </InlineStack>
     </BlockStack>
   );
 }
