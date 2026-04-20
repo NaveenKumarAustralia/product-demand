@@ -63,7 +63,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   try {
-    const order = await prisma.supplierOrder.findFirst({
+    const orders = await prisma.supplierOrder.findMany({
       where: { shop, productId, status: "open" },
       select: {
         id: true,
@@ -71,19 +71,41 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         totalQty: true,
         eta: true,
         status: true,
+        lines: {
+          select: {
+            variantId: true,
+            qtyOrdered: true,
+          },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
 
+    const latestOrder = orders[0] ?? null;
+    const qtyByVariant = new Map<string, number>();
+
+    for (const order of orders) {
+      for (const line of order.lines) {
+        qtyByVariant.set(
+          line.variantId,
+          (qtyByVariant.get(line.variantId) ?? 0) + line.qtyOrdered,
+        );
+      }
+    }
+
     return Response.json(
       {
-        order: order
+        order: latestOrder
           ? {
-              id: order.id,
-              supplier: order.supplier,
-              totalQty: order.totalQty,
-              eta: order.eta?.toISOString() ?? null,
-              status: order.status,
+              id: latestOrder.id,
+              supplier: latestOrder.supplier,
+              totalQty: orders.reduce((sum, order) => sum + order.totalQty, 0),
+              eta: latestOrder.eta?.toISOString() ?? null,
+              status: latestOrder.status,
+              lines: Array.from(qtyByVariant.entries()).map(([variantId, qtyOrdered]) => ({
+                variantId,
+                qtyOrdered,
+              })),
             }
           : null,
       },

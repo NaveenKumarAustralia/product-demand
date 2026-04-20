@@ -19,10 +19,17 @@ const APP_URL = "https://product-demand-production.up.railway.app";
 
 export default reactExtension(TARGET, () => <ProductOrderBlock />);
 
-type OrderStatus = { id: number; supplier: string; totalQty: number; eta: string | null } | null;
-type Variant = { id: string; title: string; sku: string; stockQty: number; qtyOrdered: string };
+type OrderLineStatus = { variantId: string; qtyOrdered: number };
+type OrderStatus = {
+  id: number;
+  supplier: string;
+  totalQty: number;
+  eta: string | null;
+  lines?: OrderLineStatus[];
+} | null;
+type Variant = { id: string; title: string; sku: string; stockQty: number; onOrderQty: number; qtyOrdered: string };
 
-const W = { size: "28%", stock: "18%", order: "28%", total: "18%", gap: "base" } as const;
+const W = { size: "22%", stock: "15%", onOrder: "17%", addOrder: "25%", total: "15%", gap: "base" } as const;
 
 function Col({ w, align = "start", children }: { w: string; align?: "start" | "end" | "center"; children: React.ReactNode }) {
   return (
@@ -48,6 +55,7 @@ function ProductOrderBlock() {
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [notes, setNotes] = useState("");
 
   useEffect(() => {
     if (!productGid) { setLoading(false); return; }
@@ -78,7 +86,7 @@ function ProductOrderBlock() {
           setProductImageUrl(p.featuredImage?.url ?? null);
           setVariants((p.variants?.nodes ?? []).map((v) => ({
             id: v.id, title: v.title, sku: v.sku ?? "",
-            stockQty: v.inventoryQuantity ?? 0, qtyOrdered: "",
+            stockQty: v.inventoryQuantity ?? 0, onOrderQty: 0, qtyOrdered: "",
           })));
         }
         const token = await auth.idToken();
@@ -88,7 +96,17 @@ function ProductOrderBlock() {
           { headers: { Authorization: `Bearer ${token}` } },
         );
         const json = await res.json();
-        if (res.ok) setOrder(json.order ?? null);
+        if (res.ok) {
+          const nextOrder = json.order ?? null;
+          setOrder(nextOrder);
+          const onOrderByVariant = new Map(
+            (nextOrder?.lines ?? []).map((line: OrderLineStatus) => [line.variantId, line.qtyOrdered]),
+          );
+          setVariants((prev) => prev.map((variant) => ({
+            ...variant,
+            onOrderQty: onOrderByVariant.get(variant.id) ?? 0,
+          })));
+        }
       } catch (e: any) {
         setErrorMsg(`Error: ${e?.message ?? String(e)}`);
       } finally {
@@ -117,6 +135,7 @@ function ProductOrderBlock() {
           shop, productId: productGid, productTitle,
           productImageUrl: productImageUrl || undefined,
           supplier: productVendor || "Unknown",
+          notes: notes.trim() || undefined,
           lines: orderedLines.map((v) => ({
             variantId: v.id, variantTitle: v.title,
             sku: v.sku || undefined, qtyOrdered: Number(v.qtyOrdered),
@@ -127,9 +146,24 @@ function ProductOrderBlock() {
       if (!res.ok) { setFormError(`Error ${res.status}: ${json.error ?? "unknown"}`); return; }
       const total = orderedLines.reduce((s, v) => s + Number(v.qtyOrdered), 0);
       setSuccessMsg(`Order placed — ${total} units`);
-      setOrder({ id: json.order.id, supplier: productVendor, totalQty: total, eta: null });
+      const nextLines = orderedLines.map((v) => ({
+        variantId: v.id,
+        qtyOrdered: Number(v.qtyOrdered),
+      }));
+      setOrder({
+        id: json.order.id,
+        supplier: productVendor,
+        totalQty: (order?.totalQty ?? 0) + total,
+        eta: order?.eta ?? null,
+        lines: nextLines,
+      });
       setShowForm(false);
-      setVariants((prev) => prev.map((v) => ({ ...v, qtyOrdered: "" })));
+      setNotes("");
+      setVariants((prev) => prev.map((v) => ({
+        ...v,
+        onOrderQty: v.onOrderQty + (nextLines.find((line) => line.variantId === v.id)?.qtyOrdered ?? 0),
+        qtyOrdered: "",
+      })));
     } catch (e: any) {
       setFormError(`Error: ${e?.message ?? String(e)}`);
     } finally {
@@ -158,13 +192,14 @@ function ProductOrderBlock() {
       <BlockStack gap="base">
         {successMsg && <Banner status="success">{successMsg}</Banner>}
         {statusRow}
-        <Button onPress={() => setShowForm(true)}>{order ? "Reorder" : "Place order"}</Button>
+        <Button onPress={() => setShowForm(true)}>{order ? "Add order" : "Place order"}</Button>
       </BlockStack>
     );
   }
 
   const totalStock = variants.reduce((s, v) => s + v.stockQty, 0);
-  const totalOrder = variants.reduce((s, v) => s + (Number(v.qtyOrdered) || 0), 0);
+  const totalOnOrder = variants.reduce((s, v) => s + v.onOrderQty, 0);
+  const totalAddOrder = variants.reduce((s, v) => s + (Number(v.qtyOrdered) || 0), 0);
 
   return (
     <BlockStack gap="small">
@@ -176,19 +211,21 @@ function ProductOrderBlock() {
       <InlineStack gap={W.gap} blockAlignment="center">
         <Col w={W.size}><Text tone="subdued" fontWeight="bold">Size</Text></Col>
         <Col w={W.stock} align="center"><Text tone="subdued" fontWeight="bold">In stock</Text></Col>
-        <Col w={W.order} align="center"><Text tone="subdued" fontWeight="bold">On order</Text></Col>
+        <Col w={W.onOrder} align="center"><Text tone="subdued" fontWeight="bold">On order</Text></Col>
+        <Col w={W.addOrder} align="center"><Text tone="subdued" fontWeight="bold">Add order</Text></Col>
         <Col w={W.total} align="center"><Text tone="subdued" fontWeight="bold">Total</Text></Col>
       </InlineStack>
       <Divider />
 
       {/* Rows */}
       {variants.map((v, idx) => {
-        const rowTotal = v.stockQty + (Number(v.qtyOrdered) || 0);
+        const rowTotal = v.stockQty + v.onOrderQty + (Number(v.qtyOrdered) || 0);
         return (
           <InlineStack key={v.id} gap={W.gap} blockAlignment="center">
             <Col w={W.size}><Text>{v.title}</Text></Col>
             <Col w={W.stock} align="center"><Text>{v.stockQty}</Text></Col>
-            <Col w={W.order} align="center">
+            <Col w={W.onOrder} align="center"><Text>{v.onOrderQty}</Text></Col>
+            <Col w={W.addOrder} align="center">
               <TextField
                 label=" "
                 value={v.qtyOrdered}
@@ -206,13 +243,20 @@ function ProductOrderBlock() {
       <InlineStack gap={W.gap} blockAlignment="center">
         <Col w={W.size}><Text fontWeight="bold">Total</Text></Col>
         <Col w={W.stock} align="center"><Text fontWeight="bold">{totalStock}</Text></Col>
-        <Col w={W.order} align="center"><Text fontWeight="bold">{totalOrder}</Text></Col>
-        <Col w={W.total} align="center"><Text fontWeight="bold">{totalStock + totalOrder}</Text></Col>
+        <Col w={W.onOrder} align="center"><Text fontWeight="bold">{totalOnOrder}</Text></Col>
+        <Col w={W.addOrder} align="center"><Text fontWeight="bold">{totalAddOrder}</Text></Col>
+        <Col w={W.total} align="center"><Text fontWeight="bold">{totalStock + totalOnOrder + totalAddOrder}</Text></Col>
       </InlineStack>
 
       <Divider />
+      <TextField
+        label="Notes for supplier portal"
+        value={notes}
+        onChange={setNotes}
+      />
+      <Divider />
       <InlineStack gap="base">
-        <Button variant="primary" onPress={handleSubmit} loading={submitting}>Place Order</Button>
+        <Button variant="primary" onPress={handleSubmit} loading={submitting}>{order ? "Add Order" : "Place Order"}</Button>
         <Button variant="plain" onPress={() => { setShowForm(false); setFormError(null); }}>Cancel</Button>
       </InlineStack>
     </BlockStack>
