@@ -12,6 +12,8 @@ import {
   Badge,
   ProgressIndicator,
   TextField,
+  Select,
+  DateField,
 } from "@shopify/ui-extensions-react/admin";
 
 const TARGET = "admin.product-details.block.render";
@@ -25,11 +27,34 @@ type OrderStatus = {
   supplier: string;
   totalQty: number;
   eta: string | null;
+  supplierStatus?: string | null;
+  priority?: string | null;
+  notes?: string | null;
   lines?: OrderLineStatus[];
 } | null;
 type Variant = { id: string; title: string; sku: string; stockQty: number; onOrderQty: number; qtyOrdered: string };
 
 const W = { size: "22%", stock: "15%", onOrder: "17%", addOrder: "25%", total: "15%", gap: "base" } as const;
+const STATUS_OPTIONS = [
+  { value: "on_order", label: "On Order" },
+  { value: "on_production", label: "On Production" },
+  { value: "in_shipment", label: "In Shipment" },
+  { value: "arrived", label: "Arrived" },
+  { value: "arrived_loaded", label: "Arrived and Loaded" },
+  { value: "cancelled", label: "Cancelled" },
+  { value: "ready_to_send", label: "Ready To Send" },
+];
+const PRIORITY_OPTIONS = [
+  { value: "", label: "— Priority —" },
+  { value: "low", label: "LOW" },
+  { value: "high", label: "HIGH" },
+  { value: "urgent", label: "URGENT" },
+  { value: "cancelled", label: "Cancelled" },
+];
+
+function labelFor(options: Array<{ value: string; label: string }>, value?: string | null) {
+  return options.find((option) => option.value === value)?.label ?? "On Order";
+}
 
 function Col({ w, align = "start", children }: { w: string; align?: "start" | "end" | "center"; children: React.ReactNode }) {
   return (
@@ -54,8 +79,13 @@ function ProductOrderBlock() {
   const [variants, setVariants] = useState<Variant[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [savingDetails, setSavingDetails] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
+  const [orderStatus, setOrderStatus] = useState("on_order");
+  const [orderPriority, setOrderPriority] = useState("");
+  const [orderEta, setOrderEta] = useState("");
+  const [orderNotes, setOrderNotes] = useState("");
 
   useEffect(() => {
     if (!productGid) { setLoading(false); return; }
@@ -99,6 +129,10 @@ function ProductOrderBlock() {
         if (res.ok) {
           const nextOrder = json.order ?? null;
           setOrder(nextOrder);
+          setOrderStatus(nextOrder?.supplierStatus || "on_order");
+          setOrderPriority(nextOrder?.priority || "");
+          setOrderEta(nextOrder?.eta ? String(nextOrder.eta).slice(0, 10) : "");
+          setOrderNotes(nextOrder?.notes || "");
           const onOrderByVariant = new Map<string, number>(
             (nextOrder?.lines ?? []).map((line: OrderLineStatus) => [line.variantId, line.qtyOrdered]),
           );
@@ -119,6 +153,42 @@ function ProductOrderBlock() {
   const updateQty = useCallback((idx: number, val: string) => {
     setVariants((prev) => prev.map((v, i) => i === idx ? { ...v, qtyOrdered: val.replace(/\D/g, "") } : v));
   }, []);
+
+  async function handleSaveOrderDetails() {
+    if (!order) return;
+    setSavingDetails(true);
+    setFormError(null);
+    try {
+      const token = await auth.idToken();
+      if (!token) throw new Error("No auth token");
+      const res = await fetch(`${APP_URL}/api/update-order`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          shop,
+          orderId: order.id,
+          supplierStatus: orderStatus,
+          priority: orderPriority,
+          eta: orderEta || null,
+          notes: orderNotes,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) { setFormError(`Error ${res.status}: ${json.error ?? "unknown"}`); return; }
+      setOrder((current) => current ? {
+        ...current,
+        supplierStatus: json.order.supplierStatus,
+        priority: json.order.priority,
+        eta: json.order.eta,
+        notes: json.order.notes,
+      } : current);
+      setSuccessMsg("Order details saved");
+    } catch (e: any) {
+      setFormError(`Error: ${e?.message ?? String(e)}`);
+    } finally {
+      setSavingDetails(false);
+    }
+  }
 
   async function handleSubmit(mode: "existing" | "new") {
     const orderedLines = variants.filter((v) => Number(v.qtyOrdered) > 0);
@@ -159,14 +229,27 @@ function ProductOrderBlock() {
         variantId: v.id,
         qtyOrdered: Number(v.qtyOrdered),
       }));
+      const nextNotes = mode === "existing"
+        ? [order?.notes, trimmedNotes].filter(Boolean).join("\n")
+        : trimmedNotes || "";
+      const nextStatus = mode === "existing" ? order?.supplierStatus ?? "on_order" : "on_order";
+      const nextPriority = mode === "existing" ? order?.priority ?? null : null;
+      const nextEta = mode === "existing" ? order?.eta ?? null : null;
       setOrder({
         id: json.order.id,
         supplier: productVendor,
         totalQty: (order?.totalQty ?? 0) + total,
-        eta: order?.eta ?? null,
+        eta: nextEta,
+        supplierStatus: nextStatus,
+        priority: nextPriority,
+        notes: nextNotes || null,
         lines: nextLines,
       });
       setShowForm(false);
+      setOrderStatus(nextStatus);
+      setOrderPriority(nextPriority ?? "");
+      setOrderEta(nextEta ? String(nextEta).slice(0, 10) : "");
+      setOrderNotes(nextNotes);
       setNotes("");
       setVariants((prev) => prev.map((v) => ({
         ...v,
@@ -188,7 +271,11 @@ function ProductOrderBlock() {
       {order ? (
         <>
           <Badge tone="success">On order</Badge>
-          <Text>{order.totalQty} units · {order.supplier}{order.eta ? ` · ETA ${new Date(order.eta).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })}` : ""}</Text>
+          <Text>
+            {order.totalQty} units · {order.supplier} · {labelFor(STATUS_OPTIONS, order.supplierStatus)}
+            {order.priority ? ` · ${labelFor(PRIORITY_OPTIONS, order.priority)}` : ""}
+            {order.eta ? ` · ETA ${new Date(order.eta).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })}` : ""}
+          </Text>
         </>
       ) : (
         <Badge>Not on order</Badge>
@@ -215,6 +302,40 @@ function ProductOrderBlock() {
       {statusRow}
       <Divider />
       {formError && <Banner status="critical">{formError}</Banner>}
+
+      {order && (
+        <BlockStack gap="small">
+          <Text fontWeight="bold">Existing order details</Text>
+          <InlineStack gap="base">
+            <Select
+              label="Status"
+              value={orderStatus}
+              options={STATUS_OPTIONS}
+              onChange={setOrderStatus}
+            />
+            <Select
+              label="Priority"
+              value={orderPriority}
+              options={PRIORITY_OPTIONS}
+              onChange={setOrderPriority}
+            />
+            <DateField
+              label="ETA"
+              value={orderEta}
+              onChange={setOrderEta}
+            />
+          </InlineStack>
+          <TextField
+            label="Order notes"
+            value={orderNotes}
+            onChange={setOrderNotes}
+          />
+          <InlineStack gap="base">
+            <Button onPress={handleSaveOrderDetails}>{savingDetails ? "Saving..." : "Save order details"}</Button>
+          </InlineStack>
+          <Divider />
+        </BlockStack>
+      )}
 
       {/* Header */}
       <InlineStack gap={W.gap} blockAlignment="center">

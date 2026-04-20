@@ -34,6 +34,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
   if (intent === "update_factory_notes") updates.factoryNotes = form.get("value");
+  if (intent === "update_notes")         updates.notes = form.get("value");
   if (intent === "update_eta") {
     const raw = String(form.get("value") ?? "");
     updates.eta = raw ? new Date(raw) : null;
@@ -164,7 +165,7 @@ function OrderRow({ order, sizes }: { order: Order; sizes: string[] }) {
       <Td><StatusCell orderId={order.id} value={order.supplierStatus} /></Td>
 
       {/* Notes (from order) */}
-      <Td><span style={s.noteText}>{order.notes || "—"}</span></Td>
+      <Td><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} /></Td>
 
       {/* Priority */}
       <Td><PriorityCell orderId={order.id} value={order.priority ?? ""} /></Td>

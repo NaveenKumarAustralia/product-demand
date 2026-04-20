@@ -71,6 +71,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         totalQty: true,
         eta: true,
         status: true,
+        supplierStatus: true,
+        priority: true,
+        notes: true,
         lines: {
           select: {
             variantId: true,
@@ -102,6 +105,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               totalQty: orders.reduce((sum, order) => sum + order.totalQty, 0),
               eta: latestOrder.eta?.toISOString() ?? null,
               status: latestOrder.status,
+              supplierStatus: latestOrder.supplierStatus,
+              priority: latestOrder.priority,
+              notes: latestOrder.notes,
               lines: Array.from(qtyByVariant.entries()).map(([variantId, qtyOrdered]) => ({
                 variantId,
                 qtyOrdered,
