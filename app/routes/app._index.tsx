@@ -516,16 +516,16 @@ const s = {
   },
 
   thumbnail: {
-    width: 48,
-    height: 48,
-    objectFit: "cover" as const,
+    width: 56,
+    height: "auto",
+    display: "block",
     borderRadius: 6,
     border: "1px solid #e1e3e5",
   },
 
   noImage: {
-    width: 48,
-    height: 48,
+    width: 56,
+    height: 72,
     borderRadius: 6,
     background: "#f1f2f3",
     border: "1px solid #e1e3e5",
