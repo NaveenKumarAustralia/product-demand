@@ -1,14 +1,20 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData } from "react-router";
 import prisma from "../db.server";
 
 export const loader = async ({}: LoaderFunctionArgs) => {
-  const orders = await prisma.supplierOrder.findMany({
-    where: { status: "open" },
-    include: { lines: { orderBy: { id: "asc" } } },
-    orderBy: { createdAt: "desc" },
-  });
+  const [orders, columnWidthsSetting] = await Promise.all([
+    prisma.supplierOrder.findMany({
+      where: { status: "open" },
+      include: { lines: { orderBy: { id: "asc" } } },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: COLUMN_WIDTHS_KEY },
+      select: { value: true },
+    }),
+  ]);
 
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","S/M","M","M/L","L","L/XL","XL","2XL","3XL","4XL","ONE SIZE"];
@@ -22,7 +28,11 @@ export const loader = async ({}: LoaderFunctionArgs) => {
     return ai - bi;
   });
 
-  return { orders, sizes: allSizes };
+  return {
+    orders,
+    sizes: allSizes,
+    columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
+  };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -34,6 +44,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "delete_order") {
     await prisma.supplierOrder.delete({ where: { id: orderId } });
+    return null;
+  }
+
+  if (intent === "update_column_widths") {
+    let columnWidths: Record<string, number>;
+    try {
+      columnWidths = normalizeColumnWidths(JSON.parse(String(form.get("value") ?? "{}")));
+    } catch {
+      return null;
+    }
+
+    await prisma.portalSetting.upsert({
+      where: { key: COLUMN_WIDTHS_KEY },
+      create: { key: COLUMN_WIDTHS_KEY, value: columnWidths },
+      update: { value: columnWidths },
+    });
     return null;
   }
 
@@ -145,14 +171,24 @@ function defaultColumnWidth(columnId: string) {
   return columnId.startsWith("size:") ? 58 : DEFAULT_COLUMN_WIDTHS[columnId] ?? 110;
 }
 
+function normalizeColumnWidths(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, width]) => [key, Math.max(MIN_COLUMN_WIDTH, Number(width) || 0)] as const)
+      .filter(([, width]) => width >= MIN_COLUMN_WIDTH),
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 type Order = Awaited<ReturnType<typeof loader>>["orders"][number];
 
 export default function PortalDashboard() {
-  const { orders, sizes } = useLoaderData<typeof loader>();
-  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({});
-  const [hasLoadedColumnWidths, setHasLoadedColumnWidths] = useState(false);
+  const { orders, sizes, columnWidths: savedColumnWidths } = useLoaderData<typeof loader>();
+  const columnWidthsFetcher = useFetcher();
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
     { id: "orderDate", label: "Order Date" },
@@ -168,22 +204,6 @@ export default function PortalDashboard() {
     { id: "delete", label: "Delete", center: true },
   ];
 
-  useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem(COLUMN_WIDTHS_KEY);
-      if (saved) setColumnWidths(JSON.parse(saved));
-    } catch {
-      // Ignore corrupt or blocked localStorage and fall back to defaults.
-    } finally {
-      setHasLoadedColumnWidths(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!hasLoadedColumnWidths) return;
-    window.localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(columnWidths));
-  }, [columnWidths, hasLoadedColumnWidths]);
-
   const widthFor = (columnId: string) => columnWidths[columnId] ?? defaultColumnWidth(columnId);
   const tableWidth = columns.reduce((sum, column) => sum + widthFor(column.id), 0);
 
@@ -191,6 +211,7 @@ export default function PortalDashboard() {
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = widthFor(columnId);
+    let nextColumnWidths = columnWidths;
     const previousCursor = document.body.style.cursor;
     const previousUserSelect = document.body.style.userSelect;
 
@@ -199,13 +220,18 @@ export default function PortalDashboard() {
 
     const handleMove = (moveEvent: MouseEvent) => {
       const nextWidth = Math.max(MIN_COLUMN_WIDTH, startWidth + moveEvent.clientX - startX);
-      setColumnWidths((current) => ({ ...current, [columnId]: nextWidth }));
+      nextColumnWidths = { ...nextColumnWidths, [columnId]: nextWidth };
+      setColumnWidths(nextColumnWidths);
     };
     const handleUp = () => {
       document.body.style.cursor = previousCursor;
       document.body.style.userSelect = previousUserSelect;
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
+      const formData = new FormData();
+      formData.set("intent", "update_column_widths");
+      formData.set("value", JSON.stringify(nextColumnWidths));
+      columnWidthsFetcher.submit(formData, { method: "post" });
     };
 
     document.addEventListener("mousemove", handleMove);
