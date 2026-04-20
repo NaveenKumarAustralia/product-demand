@@ -238,6 +238,38 @@ export default function PortalDashboard() {
     document.addEventListener("mouseup", handleUp);
   };
 
+  const handleGridKeyDown = (event: React.KeyboardEvent<HTMLTableElement>) => {
+    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+
+    const currentCell = (event.target as HTMLElement).closest<HTMLElement>("[data-grid-row][data-grid-col]");
+    if (!currentCell) return;
+
+    const row = Number(currentCell.dataset.gridRow);
+    const col = Number(currentCell.dataset.gridCol);
+    const next = {
+      ArrowUp: [row - 1, col],
+      ArrowDown: [row + 1, col],
+      ArrowLeft: [row, col - 1],
+      ArrowRight: [row, col + 1],
+    }[event.key]!;
+    const [nextRow, nextCol] = next;
+    const nextCell = event.currentTarget.querySelector<HTMLElement>(
+      `[data-grid-row="${nextRow}"][data-grid-col="${nextCol}"]`,
+    );
+
+    if (!nextCell) return;
+
+    event.preventDefault();
+    const focusTarget = nextCell.querySelector<HTMLElement>(
+      "input, select, textarea, button, [tabindex]:not([tabindex='-1'])",
+    ) ?? nextCell;
+    focusTarget.focus();
+
+    if (focusTarget instanceof HTMLInputElement) {
+      focusTarget.select();
+    }
+  };
+
   return (
     <div style={s.page}>
       <header style={s.header}>
@@ -252,7 +284,7 @@ export default function PortalDashboard() {
           <div style={s.empty}>No open orders at the moment.</div>
         ) : (
           <div style={s.tableWrap}>
-            <table style={{ ...s.table, width: tableWidth }}>
+            <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleGridKeyDown}>
               <colgroup>
                 {columns.map((column) => (
                   <col key={column.id} style={{ width: widthFor(column.id) }} />
@@ -272,8 +304,8 @@ export default function PortalDashboard() {
                 </tr>
               </thead>
               <tbody>
-                {orders.map((order) => (
-                  <OrderRow key={order.id} order={order} sizes={sizes} />
+                {orders.map((order, rowIndex) => (
+                  <OrderRow key={order.id} order={order} rowIndex={rowIndex} sizes={sizes} />
                 ))}
               </tbody>
             </table>
@@ -286,7 +318,7 @@ export default function PortalDashboard() {
 
 // ─── Row ─────────────────────────────────────────────────────────────────────
 
-function OrderRow({ order, sizes }: { order: Order; sizes: string[] }) {
+function OrderRow({ order, rowIndex, sizes }: { order: Order; rowIndex: number; sizes: string[] }) {
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
     return acc;
@@ -298,52 +330,58 @@ function OrderRow({ order, sizes }: { order: Order; sizes: string[] }) {
     month: "2-digit",
     year: "2-digit",
   });
+  const totalCol = 5 + sizes.length;
+  const statusCol = totalCol + 1;
+  const notesCol = totalCol + 2;
+  const priorityCol = totalCol + 3;
+  const etaCol = totalCol + 4;
+  const deleteCol = totalCol + 5;
 
   return (
     <tr style={s.row}>
       {/* Factory notes */}
-      <Td><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} /></Td>
+      <Td rowIndex={rowIndex} colIndex={0}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} /></Td>
 
       {/* Order date */}
-      <Td center><span style={s.dateText}>{orderDate}</span></Td>
+      <Td rowIndex={rowIndex} colIndex={1} center><span style={s.dateText}>{orderDate}</span></Td>
 
       {/* Picture */}
-      <Td center>
+      <Td rowIndex={rowIndex} colIndex={2} center>
         {order.productImageUrl
           ? <img src={order.productImageUrl} alt="" style={s.thumb} />
           : <div style={s.noImg}>—</div>}
       </Td>
 
       {/* Name */}
-      <Td><span style={s.productName}>{order.productTitle}</span></Td>
+      <Td rowIndex={rowIndex} colIndex={3}><span style={s.productName}>{order.productTitle}</span></Td>
 
       {/* SKU */}
-      <Td><span style={s.sku}>{allSkus || "—"}</span></Td>
+      <Td rowIndex={rowIndex} colIndex={4}><span style={s.sku}>{allSkus || "—"}</span></Td>
 
       {/* Size columns */}
-      {sizes.map((sz) => (
-        <Td key={sz} center>
+      {sizes.map((sz, sizeIndex) => (
+        <Td key={sz} rowIndex={rowIndex} colIndex={5 + sizeIndex} center>
           <QtyCell orderId={order.id} size={sz} value={qtyBySize[sz] ?? 0} />
         </Td>
       ))}
 
       {/* Total */}
-      <Td center><span style={s.total}>{order.totalQty}</span></Td>
+      <Td rowIndex={rowIndex} colIndex={totalCol} center><span style={s.total}>{order.totalQty}</span></Td>
 
       {/* Status */}
-      <Td><StatusCell orderId={order.id} value={order.supplierStatus} /></Td>
+      <Td rowIndex={rowIndex} colIndex={statusCol}><StatusCell orderId={order.id} value={order.supplierStatus} /></Td>
 
       {/* Notes (from order) */}
-      <Td><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} /></Td>
+      <Td rowIndex={rowIndex} colIndex={notesCol}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} /></Td>
 
       {/* Priority */}
-      <Td><PriorityCell orderId={order.id} value={order.priority ?? ""} /></Td>
+      <Td rowIndex={rowIndex} colIndex={priorityCol}><PriorityCell orderId={order.id} value={order.priority ?? ""} /></Td>
 
       {/* ETA */}
-      <Td><EtaCell orderId={order.id} value={etaValue} /></Td>
+      <Td rowIndex={rowIndex} colIndex={etaCol}><EtaCell orderId={order.id} value={etaValue} /></Td>
 
       {/* Delete */}
-      <Td center><DeleteCell orderId={order.id} /></Td>
+      <Td rowIndex={rowIndex} colIndex={deleteCol} center><DeleteCell orderId={order.id} /></Td>
     </tr>
   );
 }
@@ -509,8 +547,27 @@ function Th({
     </th>
   );
 }
-function Td({ children, center }: { children: React.ReactNode; center?: boolean }) {
-  return <td style={{ ...s.td, textAlign: center ? "center" : "left" }}>{children}</td>;
+function Td({
+  children,
+  center,
+  rowIndex,
+  colIndex,
+}: {
+  children: React.ReactNode;
+  center?: boolean;
+  rowIndex: number;
+  colIndex: number;
+}) {
+  return (
+    <td
+      data-grid-row={rowIndex}
+      data-grid-col={colIndex}
+      tabIndex={0}
+      style={{ ...s.td, textAlign: center ? "center" : "left" }}
+    >
+      {children}
+    </td>
+  );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
