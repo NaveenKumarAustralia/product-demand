@@ -61,6 +61,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     poNumber?: string;
     eta?: string;
     notes?: string;
+    existingOrderId?: number;
     lines?: Array<{
       variantId: string;
       variantTitle: string;
@@ -76,7 +77,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return Response.json({ error: "Invalid JSON body" }, { status: 400, headers: CORS });
   }
 
-  const { shop, productId, productTitle, productImageUrl, supplier, poNumber, eta, notes, lines } = body;
+  const { shop, productId, productTitle, productImageUrl, supplier, poNumber, eta, notes, existingOrderId, lines } = body;
 
   if (!shop || !productId || !supplier) {
     return Response.json(
@@ -97,6 +98,55 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const totalQty = orderLines.reduce((sum, l) => sum + (l.qtyOrdered || 0), 0);
 
   try {
+    if (existingOrderId != null) {
+      const orderId = Number(existingOrderId);
+      if (!Number.isInteger(orderId)) {
+        return Response.json(
+          { error: "existingOrderId must be a valid order id" },
+          { status: 400, headers: CORS },
+        );
+      }
+
+      const existingOrder = await prisma.supplierOrder.findFirst({
+        where: { id: orderId, shop, productId, status: "open" },
+        select: { id: true, notes: true, totalQty: true },
+      });
+
+      if (!existingOrder) {
+        return Response.json(
+          { error: "Existing open order was not found for this product" },
+          { status: 404, headers: CORS },
+        );
+      }
+
+      const trimmedNotes = notes?.trim();
+      const nextNotes = trimmedNotes
+        ? [existingOrder.notes, trimmedNotes].filter(Boolean).join("\n")
+        : existingOrder.notes;
+
+      const order = await prisma.supplierOrder.update({
+        where: { id: existingOrder.id },
+        data: {
+          notes: nextNotes || null,
+          totalQty: existingOrder.totalQty + totalQty,
+          lines: orderLines.length
+            ? {
+                create: orderLines.map((l) => ({
+                  variantId: l.variantId,
+                  variantTitle: l.variantTitle || "",
+                  sku: l.sku || null,
+                  qtyOrdered: l.qtyOrdered,
+                  costPrice: l.costPrice ?? null,
+                })),
+              }
+            : undefined,
+        },
+        select: { id: true, poNumber: true, totalQty: true },
+      });
+
+      return Response.json({ success: true, order }, { headers: CORS });
+    }
+
     const order = await prisma.supplierOrder.create({
       data: {
         shop,

@@ -120,7 +120,7 @@ function ProductOrderBlock() {
     setVariants((prev) => prev.map((v, i) => i === idx ? { ...v, qtyOrdered: val.replace(/\D/g, "") } : v));
   }, []);
 
-  async function handleSubmit() {
+  async function handleSubmit(mode: "existing" | "new") {
     const orderedLines = variants.filter((v) => Number(v.qtyOrdered) > 0);
     const trimmedNotes = notes.trim();
     if (!orderedLines.length && !trimmedNotes) {
@@ -140,6 +140,7 @@ function ProductOrderBlock() {
           productImageUrl: productImageUrl || undefined,
           supplier: productVendor || "Unknown",
           notes: trimmedNotes || undefined,
+          existingOrderId: mode === "existing" ? order?.id : undefined,
           lines: orderedLines.map((v) => ({
             variantId: v.id, variantTitle: v.title,
             sku: v.sku || undefined, qtyOrdered: Number(v.qtyOrdered),
@@ -149,7 +150,11 @@ function ProductOrderBlock() {
       const json = await res.json();
       if (!res.ok) { setFormError(`Error ${res.status}: ${json.error ?? "unknown"}`); return; }
       const total = orderedLines.reduce((s, v) => s + Number(v.qtyOrdered), 0);
-      setSuccessMsg(total > 0 ? `Order placed — ${total} units` : "Order note added");
+      setSuccessMsg(
+        total > 0
+          ? `${mode === "existing" ? "Existing order updated" : "New order created"} — ${total} units`
+          : `${mode === "existing" ? "Existing order note added" : "New order note created"}`,
+      );
       const nextLines = orderedLines.map((v) => ({
         variantId: v.id,
         qtyOrdered: Number(v.qtyOrdered),
@@ -260,7 +265,14 @@ function ProductOrderBlock() {
       />
       <Divider />
       <InlineStack gap="base">
-        <Button variant="primary" onPress={handleSubmit} loading={submitting}>Add order or order note</Button>
+        {order && (
+          <Button variant="primary" onPress={() => handleSubmit("existing")} loading={submitting}>
+            Add to existing order
+          </Button>
+        )}
+        <Button variant={order ? "secondary" : "primary"} onPress={() => handleSubmit("new")} loading={submitting}>
+          Create new order
+        </Button>
         <Button variant="plain" onPress={() => { setShowForm(false); setFormError(null); }}>Cancel</Button>
       </InlineStack>
     </BlockStack>
