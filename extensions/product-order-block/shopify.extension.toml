@@ -1,6 +1,7 @@
 api_version = "2025-10"
 
 [[extensions]]
+uid = "3e0cf115-e650-c61b-761c-5cc2e7a2c4a24ed81c33"
 type = "ui_extension"
 name = "Product Order Block"
 handle = "product-order-block"
