@@ -9,3 +9,13 @@ handle = "product-order-block"
   [[extensions.targeting]]
   module = "./src/BlockExtension.tsx"
   target = "admin.product-details.block.render"
+
+[[extensions]]
+type = "ui_extension"
+name = "Product Order Action"
+handle = "product-order-action"
+uid = "b9867cbf-d901-7bd7-d5d9-ed0ac356c09f5b3b901a"
+
+  [[extensions.targeting]]
+  module = "./src/ActionExtension.tsx"
+  target = "admin.product-details.action.render"

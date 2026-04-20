@@ -34,9 +34,11 @@ model SupplierOrder {
   supplier     String
   productId    String
   productTitle String
-  status       String      @default("open")
-  eta          DateTime?
-  notes        String?
+  status         String      @default("open")
+  supplierStatus String      @default("pending")
+  supplierNotes  String?
+  eta            DateTime?
+  notes          String?
   totalQty     Int         @default(0)
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
@@ -54,4 +56,17 @@ model OrderLine {
   qtyReceived  Int           @default(0)
   costPrice    Float?
   createdAt    DateTime      @default(now())
+}
+
+model SupplierAccount {
+  id           Int      @id @default(autoincrement())
+  shop         String
+  name         String
+  email        String
+  passwordHash String
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([shop, email])
 }
