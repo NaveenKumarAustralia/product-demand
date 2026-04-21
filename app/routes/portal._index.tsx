@@ -15,6 +15,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const searchTitle = url.searchParams.get("q") ?? "";
   const packingId = Number(url.searchParams.get("packingId") ?? 0) || null;
   const productSearch = url.searchParams.get("productSearch") ?? "";
+  const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const [allOrders, columnWidthsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
     prisma.supplierOrder.findMany({
@@ -103,6 +104,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     packingLists,
     selectedPackingList,
     productSearch,
+    packingSearchLineId,
     productResults,
     loginRequired,
     users,
@@ -199,6 +201,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       data: {
         title,
         shipmentDate,
+        lines: {
+          create: Array.from({ length: DEFAULT_PACKING_ROWS }, (_, index) => ({
+            productTitle: "",
+            isCustom: true,
+            sortOrder: index + 1,
+          })),
+        },
       },
     });
     return new Response(null, {
@@ -236,7 +245,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await prisma.packingListLine.create({
       data: {
         packingListId: packingId,
-        productTitle: "Custom item",
+        productTitle: "",
         isCustom: true,
         sortOrder: (maxLine?.sortOrder ?? 0) + 1,
       },
@@ -266,13 +275,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "apply_product_to_packing_line") {
+    const lineId = Number(form.get("lineId"));
+    const product = JSON.parse(String(form.get("product") ?? "{}")) as ShopifySearchProduct;
+    if (!lineId || !product?.id) return null;
+    await prisma.packingListLine.update({
+      where: { id: lineId },
+      data: {
+        productId: product.id,
+        productTitle: product.title || "Untitled product",
+        productImageUrl: product.imageUrl || null,
+        sku: product.skus?.filter(Boolean).join("\n") || null,
+        isCustom: false,
+        qtys: Object.fromEntries((product.sizes ?? []).map((size) => [size, 0])),
+      },
+    });
+    return null;
+  }
+
   if (intent === "update_packing_line") {
     const lineId = Number(form.get("lineId"));
     const field = String(form.get("field") ?? "");
     const value = String(form.get("value") ?? "");
     const data: Record<string, unknown> = {};
     if (field === "boxNumber") data.boxNumber = value || null;
-    if (field === "productTitle") data.productTitle = value || "Untitled item";
+    if (field === "productTitle") data.productTitle = value;
     if (field === "sku") data.sku = value || null;
     if (field === "priceRupees") data.priceRupees = value ? Number(value) || 0 : null;
     if (field === "weight") data.weight = value ? Number(value) || 0 : null;
@@ -441,6 +468,20 @@ const PACKING_STATUS_OPTIONS = [
   { value: "completed", label: "Completed" },
 ];
 const PACKING_SIZES = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
+const DEFAULT_PACKING_ROWS = 5;
+const PACKING_COLUMNS = [
+  { id: "box", label: "Box", width: 70, center: true },
+  { id: "picture", label: "Picture", width: 105, center: true },
+  { id: "fabric", label: "Fabric Image", width: 120, center: true },
+  { id: "name", label: "Name", width: 300 },
+  { id: "sku", label: "SKU", width: 150 },
+  ...PACKING_SIZES.map((size) => ({ id: `qty:${size}`, label: size, width: 76, center: true })),
+  { id: "total", label: "Total", width: 82, center: true },
+  { id: "price", label: "Price ₹", width: 92, center: true },
+  { id: "value", label: "Value ₹", width: 96, center: true },
+  { id: "weight", label: "Weight", width: 90, center: true },
+  { id: "actions", label: "Actions", width: 112, center: true },
+];
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
 };
@@ -756,6 +797,7 @@ export default function PortalDashboard() {
     packingLists,
     selectedPackingList,
     productSearch,
+    packingSearchLineId,
     productResults,
     loginRequired,
     users,
@@ -999,6 +1041,7 @@ export default function PortalDashboard() {
             packingLists={packingLists}
             selectedPackingList={selectedPackingList}
             productSearch={productSearch}
+            packingSearchLineId={packingSearchLineId}
             productResults={productResults}
             updateParams={updateParams}
           />
@@ -1153,12 +1196,14 @@ function PackingListsPanel({
   packingLists,
   selectedPackingList,
   productSearch,
+  packingSearchLineId,
   productResults,
   updateParams,
 }: {
   packingLists: PackingListWithLines[];
   selectedPackingList: PackingListWithLines | null;
   productSearch: string;
+  packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
   updateParams: (updates: Record<string, string>) => void;
 }) {
@@ -1195,6 +1240,7 @@ function PackingListsPanel({
           <PackingListDetail
             packingList={selectedPackingList}
             productSearch={productSearch}
+            packingSearchLineId={packingSearchLineId}
             productResults={productResults}
             updateParams={updateParams}
           />
@@ -1207,27 +1253,18 @@ function PackingListsPanel({
 function PackingListDetail({
   packingList,
   productSearch,
+  packingSearchLineId,
   productResults,
   updateParams,
 }: {
   packingList: PackingListWithLines;
   productSearch: string;
+  packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
-  const [productSearchInput, setProductSearchInput] = useState(productSearch);
-  const tableWidth = 1280;
-
-  useEffect(() => {
-    setProductSearchInput(productSearch);
-  }, [productSearch]);
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      if (productSearchInput !== productSearch) updateParams({ productSearch: productSearchInput });
-    }, 450);
-    return () => window.clearTimeout(timer);
-  }, [productSearchInput, productSearch]);
+  const packingTableWidth = PACKING_COLUMNS.reduce((sum, column) => sum + column.width, 0);
 
   return (
     <div style={s.packingDetailInner}>
@@ -1278,86 +1315,68 @@ function PackingListDetail({
             </select>
           </label>
         </div>
-
-        <div style={s.packingActions}>
-          <button
-            type="button"
-            style={s.secondaryButton}
-            onClick={() => submitPortalCell(fetcher, {
-              intent: "add_custom_packing_line",
-              packingId: packingList.id,
-            })}
-          >
-            Add custom row
-          </button>
-        </div>
-      </div>
-
-      <div style={s.productSearchPanel}>
-        <label style={s.filterLabel}>
-          Add Shopify product
-          <input
-            type="search"
-            value={productSearchInput}
-            onChange={(event) => setProductSearchInput(event.currentTarget.value)}
-            style={s.productSearchInput}
-            placeholder="Search product title"
-          />
-        </label>
-        {productSearchInput.trim().length >= 2 && productSearchInput !== productSearch && (
-          <div style={s.settingsHint}>Searching...</div>
-        )}
-        {productSearchInput.trim().length >= 2 && productSearchInput === productSearch && (
-          <div style={s.productResults}>
-            {productResults.length ? productResults.map((product) => (
-              <div key={product.id} style={s.productResult}>
-                {product.imageUrl ? <img src={product.imageUrl} alt="" style={s.productResultImage} /> : <div style={s.noImg}>—</div>}
-                <div style={s.productResultText}>
-                  <strong>{product.title}</strong>
-                  <span>{product.skus.slice(0, 4).join(", ") || "No SKU"}</span>
-                </div>
-                <button
-                  type="button"
-                  style={s.secondaryButton}
-                  onClick={() => submitPortalCell(fetcher, {
-                    intent: "add_product_packing_line",
-                    packingId: packingList.id,
-                    product: JSON.stringify(product),
-                  })}
-                >
-                  Add
-                </button>
-              </div>
-            )) : (
-              <div style={s.settingsHint}>No products found.</div>
-            )}
-          </div>
-        )}
       </div>
 
       <div style={s.packingTableWrap}>
-        <table style={{ ...s.table, width: tableWidth }}>
+        <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }}>
+          <colgroup>
+            {PACKING_COLUMNS.map((column) => (
+              <col key={column.id} style={{ width: column.width }} />
+            ))}
+          </colgroup>
           <thead>
             <tr style={s.headerRow}>
-              {["Box", "Product picture", "Fabric image", "Name", "SKU", ...PACKING_SIZES, "Total", "Price ₹", "Value ₹", "Weight", "Actions"].map((heading) => (
-                <th key={heading} style={{ ...s.th, textAlign: PACKING_SIZES.includes(heading) || ["Total", "Price ₹", "Value ₹", "Weight"].includes(heading) ? "center" : "left" }}>
-                  <span style={s.thContent}>{heading}</span>
+              {PACKING_COLUMNS.map((column) => (
+                <th key={column.id} style={{ ...s.th, textAlign: column.center ? "center" : "left" }}>
+                  <span style={s.thContent}>{column.label}</span>
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {packingList.lines.map((line) => (
-              <PackingListLineRow key={line.id} line={line} />
+              <PackingListLineRow
+                key={line.id}
+                line={line}
+                activeSearchLineId={packingSearchLineId}
+                productSearch={productSearch}
+                productResults={productResults}
+                updateParams={updateParams}
+              />
             ))}
           </tbody>
         </table>
+      </div>
+
+      <div style={s.packingFooterActions}>
+        <button
+          type="button"
+          style={s.smallButton}
+          onClick={() => submitPortalCell(fetcher, {
+            intent: "add_custom_packing_line",
+            packingId: packingList.id,
+          })}
+        >
+          Add row
+        </button>
       </div>
     </div>
   );
 }
 
-function PackingListLineRow({ line }: { line: PackingListWithLines["lines"][number] }) {
+function PackingListLineRow({
+  line,
+  activeSearchLineId,
+  productSearch,
+  productResults,
+  updateParams,
+}: {
+  line: PackingListWithLines["lines"][number];
+  activeSearchLineId: number | null;
+  productSearch: string;
+  productResults: ShopifySearchProduct[];
+  updateParams: (updates: Record<string, string>) => void;
+}) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
   const total = packingTotal(qtys);
@@ -1369,7 +1388,15 @@ function PackingListLineRow({ line }: { line: PackingListWithLines["lines"][numb
       <td style={s.td}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></td>
       <td style={{ ...s.td, textAlign: "center" }}>{line.productImageUrl ? <img src={line.productImageUrl} alt="" style={s.packingThumb} /> : <div style={s.noImg}>—</div>}</td>
       <td style={{ ...s.td, textAlign: "center" }}><FabricImageCell lineId={line.id} value={line.fabricImageData ?? ""} /></td>
-      <td style={s.td}><PackingTextInput lineId={line.id} field="productTitle" value={line.productTitle} /></td>
+      <td style={s.td}>
+        <PackingProductNameCell
+          line={line}
+          isActiveSearch={activeSearchLineId === line.id}
+          productSearch={productSearch}
+          productResults={productResults}
+          updateParams={updateParams}
+        />
+      </td>
       <td style={s.td}><PackingTextInput lineId={line.id} field="sku" value={line.sku ?? ""} multiline /></td>
       {PACKING_SIZES.map((size) => (
         <td key={size} style={{ ...s.td, textAlign: "center" }}>
@@ -1399,6 +1426,99 @@ function PackingListLineRow({ line }: { line: PackingListWithLines["lines"][numb
         </div>
       </td>
     </tr>
+  );
+}
+
+function PackingProductNameCell({
+  line,
+  isActiveSearch,
+  productSearch,
+  productResults,
+  updateParams,
+}: {
+  line: PackingListWithLines["lines"][number];
+  isActiveSearch: boolean;
+  productSearch: string;
+  productResults: ShopifySearchProduct[];
+  updateParams: (updates: Record<string, string>) => void;
+}) {
+  const fetcher = useFetcher();
+  const displayValue = line.isCustom && line.productTitle === "Custom item" ? "" : line.productTitle;
+  const [value, setValue] = useState(displayValue);
+  const shouldShowResults = isActiveSearch && value.trim().length >= 2;
+
+  useEffect(() => {
+    setValue(displayValue);
+  }, [displayValue, line.id]);
+
+  useEffect(() => {
+    if (!isActiveSearch) return;
+    const timer = window.setTimeout(() => {
+      const trimmed = value.trim();
+      updateParams({
+        productSearch: trimmed.length >= 2 ? trimmed : "",
+        packingSearchLineId: trimmed.length >= 2 ? String(line.id) : "",
+      });
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [value, isActiveSearch, line.id]);
+
+  const applyProduct = (product: ShopifySearchProduct) => {
+    setValue(product.title);
+    submitPortalCell(fetcher, {
+      intent: "apply_product_to_packing_line",
+      lineId: line.id,
+      product: JSON.stringify(product),
+    });
+    updateParams({ productSearch: "", packingSearchLineId: "" });
+  };
+
+  return (
+    <div style={s.productCellSearch}>
+      <input
+        type="search"
+        value={value}
+        onFocus={() => {
+          if (value.trim().length >= 2) {
+            updateParams({ productSearch: value.trim(), packingSearchLineId: String(line.id) });
+          }
+        }}
+        onChange={(event) => setValue(event.currentTarget.value)}
+        onBlur={(event) => {
+          submitPortalCell(fetcher, {
+            intent: "update_packing_line",
+            lineId: line.id,
+            field: "productTitle",
+            value: event.currentTarget.value,
+          });
+        }}
+        placeholder="Search or type product"
+        style={s.packingCellInput}
+      />
+      {shouldShowResults && (
+        <div style={s.productCellResults}>
+          {value.trim() !== productSearch ? (
+            <div style={s.productCellResultEmpty}>Searching...</div>
+          ) : productResults.length ? productResults.map((product) => (
+            <button
+              key={product.id}
+              type="button"
+              style={s.productCellResult}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => applyProduct(product)}
+            >
+              {product.imageUrl ? <img src={product.imageUrl} alt="" style={s.productCellResultImage} /> : <span style={s.productCellNoImage}>—</span>}
+              <span style={s.productCellResultText}>
+                <strong>{product.title}</strong>
+                <span>{product.skus.slice(0, 3).join(", ") || "No SKU"}</span>
+              </span>
+            </button>
+          )) : (
+            <div style={s.productCellResultEmpty}>No products found. Keep typed text for a custom row.</div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2036,7 +2156,7 @@ const s: Record<string, React.CSSProperties> = {
   adminCheckbox: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 800, color: "#374151" },
   packingLayout: {
     display: "grid",
-    gridTemplateColumns: "260px minmax(0, 1fr)",
+    gridTemplateColumns: "300px minmax(0, 1fr)",
     gap: 16,
     alignItems: "start",
   },
@@ -2072,7 +2192,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   packingListLinkActive: { background: "#111827", color: "#fff", borderColor: "#111827" },
   packingDetail: { minWidth: 0 },
-  packingDetailInner: { display: "grid", gap: 12 },
+  packingDetailInner: { display: "grid", gap: 10 },
   packingTop: {
     display: "flex",
     justifyContent: "space-between",
@@ -2115,13 +2235,20 @@ const s: Record<string, React.CSSProperties> = {
   productResultImage: { width: 42, height: 56, objectFit: "cover", borderRadius: 4 },
   productResultText: { display: "grid", gap: 3, flex: 1, fontSize: 13, color: "#374151" },
   packingTableWrap: {
-    maxHeight: "calc(100vh - 230px)",
+    maxHeight: "calc(100vh - 185px)",
     overflow: "auto",
     background: "#fff",
     border: "1px solid #cbd5e1",
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
   },
-  packingThumb: { width: 64, height: 86, objectFit: "cover", borderRadius: 3 },
+  packingFooterActions: {
+    display: "flex",
+    justifyContent: "flex-start",
+    alignItems: "center",
+    gap: 8,
+    padding: "0 0 4px",
+  },
+  packingThumb: { width: 72, height: 96, objectFit: "cover", borderRadius: 3 },
   fabricThumb: { width: 82, height: 82, objectFit: "cover", borderRadius: 3 },
   fabricImageDrop: {
     position: "relative",
@@ -2153,6 +2280,7 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     color: "#111827",
     boxSizing: "border-box",
+    textAlign: "inherit",
   },
   packingTextarea: {
     width: "100%",
@@ -2166,6 +2294,50 @@ const s: Record<string, React.CSSProperties> = {
     boxSizing: "border-box",
     fontFamily: "inherit",
   },
+  productCellSearch: {
+    position: "relative",
+    minWidth: 0,
+  },
+  productCellResults: {
+    position: "absolute",
+    top: "calc(100% + 6px)",
+    left: 0,
+    width: 340,
+    maxHeight: 280,
+    overflow: "auto",
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 10,
+    boxShadow: "0 16px 30px rgba(15,23,42,0.2)",
+    zIndex: 20,
+    padding: 6,
+  },
+  productCellResult: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    width: "100%",
+    border: 0,
+    borderRadius: 8,
+    padding: 7,
+    background: "#fff",
+    color: "#111827",
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  productCellResultImage: { width: 34, height: 46, objectFit: "cover", borderRadius: 4, flex: "0 0 auto" },
+  productCellNoImage: {
+    width: 34,
+    height: 46,
+    display: "grid",
+    placeItems: "center",
+    borderRadius: 4,
+    background: "#f3f4f6",
+    color: "#9ca3af",
+    flex: "0 0 auto",
+  },
+  productCellResultText: { display: "grid", gap: 2, fontSize: 12, lineHeight: 1.25 },
+  productCellResultEmpty: { padding: 10, fontSize: 12, fontWeight: 700, color: "#6b7280" },
   rowActions: { display: "grid", gap: 6 },
   smallButton: {
     border: "1px solid #d1d5db",
