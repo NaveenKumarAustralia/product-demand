@@ -284,6 +284,7 @@ function ProductOrderBlock() {
           productImageUrl: productImageUrl || undefined,
           supplier: productVendor || "Unknown",
           notes: trimmedNotes || undefined,
+          priority: orderPriority || undefined,
           existingOrderId: mode === "existing" ? order?.id : undefined,
           lines: orderedLines.map((v) => ({
             variantId: v.id, variantTitle: v.title,
@@ -355,17 +356,15 @@ function ProductOrderBlock() {
       {formError && <Banner tone="critical">{formError}</Banner>}
 
       <InlineStack gap="base" blockAlignment="end">
-        {order && (
-          <Box inlineSize="30%">
-            <Select
-              label={savingPriority ? "Priority saving..." : "Priority"}
-              value={orderPriority}
-              options={PRIORITY_OPTIONS}
-              onChange={updatePriority}
-            />
-          </Box>
-        )}
-        <Box inlineSize={order ? "30%" : "100%"}>
+        <Box inlineSize="30%">
+          <Select
+            label={savingPriority ? "Priority saving..." : "Priority"}
+            value={orderPriority}
+            options={PRIORITY_OPTIONS}
+            onChange={updatePriority}
+          />
+        </Box>
+        <Box inlineSize="30%">
           <Select
             label={savingProductGroup ? "Group saving..." : "Product group"}
             value={orderProductGroup}

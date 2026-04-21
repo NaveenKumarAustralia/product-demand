@@ -363,15 +363,6 @@ export default function PortalDashboard() {
             <nav style={s.nav}>
               <a href="/portal?page=dashboard" style={{ ...s.navItem, ...(page === "dashboard" ? s.navItemActive : {}) }}>Dashboard</a>
               <a href="/portal" style={{ ...s.navItem, ...(page === "restock" && !selectedProductGroup ? s.navItemActive : {}) }}>Existing Products Restock</a>
-              {productGroups.map((group) => (
-                <a
-                  key={group}
-                  href={`/portal?productGroup=${encodeURIComponent(group)}`}
-                  style={{ ...s.navSubItem, ...(selectedProductGroup === group ? s.navItemActive : {}) }}
-                >
-                  {group}
-                </a>
-              ))}
               <a href="/portal?page=fabric" style={{ ...s.navItem, ...(page === "fabric" ? s.navItemActive : {}) }}>Fabric in stock</a>
             </nav>
             <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), ...s.settingsLink }}>Settings</a>
