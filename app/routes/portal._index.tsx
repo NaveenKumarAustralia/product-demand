@@ -1453,15 +1453,35 @@ function PackingProductNameCell({
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const displayValue = line.isCustom && line.productTitle === "Custom item" ? "" : line.productTitle;
   const [value, setValue] = useState(displayValue);
   const [isFocused, setIsFocused] = useState(false);
+  const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
   const canSearch = isFocused || isActiveSearch;
   const shouldShowResults = canSearch && value.trim().length >= 2;
+  const updateDropdownRect = () => {
+    if (!inputRef.current) return;
+    setDropdownRect(inputRef.current.getBoundingClientRect());
+  };
 
   useEffect(() => {
     setValue(displayValue);
   }, [displayValue, line.id]);
+
+  useEffect(() => {
+    if (!shouldShowResults) {
+      setDropdownRect(null);
+      return;
+    }
+    updateDropdownRect();
+    window.addEventListener("resize", updateDropdownRect);
+    window.addEventListener("scroll", updateDropdownRect, true);
+    return () => {
+      window.removeEventListener("resize", updateDropdownRect);
+      window.removeEventListener("scroll", updateDropdownRect, true);
+    };
+  }, [shouldShowResults, value, line.id]);
 
   useEffect(() => {
     if (!canSearch) return;
@@ -1488,6 +1508,7 @@ function PackingProductNameCell({
   return (
     <div style={s.productCellSearch}>
       <input
+        ref={inputRef}
         type="search"
         value={value}
         onFocus={() => {
@@ -1510,7 +1531,18 @@ function PackingProductNameCell({
         style={s.packingCellInput}
       />
       {shouldShowResults && (
-        <div style={s.productCellResults}>
+        <div
+          style={{
+            ...s.productCellResults,
+            ...(dropdownRect
+              ? {
+                  top: dropdownRect.bottom + 8,
+                  left: dropdownRect.left,
+                  width: Math.max(dropdownRect.width, 460),
+                }
+              : {}),
+          }}
+        >
           {value.trim() !== productSearch ? (
             <div style={s.productCellResultEmpty}>Searching...</div>
           ) : productResults.length ? productResults.map((product) => (
@@ -2358,10 +2390,10 @@ const s: Record<string, React.CSSProperties> = {
     minWidth: 0,
   },
   productCellResults: {
-    position: "absolute",
-    top: "calc(100% + 6px)",
+    position: "fixed",
+    top: 0,
     left: 0,
-    width: 340,
+    width: 460,
     maxHeight: 280,
     overflow: "auto",
     background: "#fff",
