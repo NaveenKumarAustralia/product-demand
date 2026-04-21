@@ -320,6 +320,14 @@ function ProductOrderBlock() {
   }
 
   async function handleSubmit(mode: "existing" | "new") {
+    const selectedProductGroup = orderProductGroup === NEW_PRODUCT_GROUP_VALUE
+      ? normalizeProductGroup(customProductGroup)
+      : normalizeProductGroup(orderProductGroup);
+    if (!isRealProductGroup(selectedProductGroup)) {
+      setFormError("Select or create a product group");
+      return;
+    }
+
     const orderedLines = variants.filter((v) => Number(v.qtyOrdered) > 0);
     const trimmedNotes = notes.trim();
     if (!orderedLines.length && !trimmedNotes) {
@@ -328,14 +336,6 @@ function ProductOrderBlock() {
     }
     setFormError(null);
     setSubmitting(true);
-    const selectedProductGroup = orderProductGroup === NEW_PRODUCT_GROUP_VALUE
-      ? normalizeProductGroup(customProductGroup)
-      : normalizeProductGroup(orderProductGroup);
-    if (!isRealProductGroup(selectedProductGroup)) {
-      setSubmitting(false);
-      setFormError("Select or create a product group");
-      return;
-    }
     try {
       const token = await auth.idToken();
       if (!token) throw new Error("No auth token");
@@ -411,6 +411,10 @@ function ProductOrderBlock() {
       .reduce((sum, line) => sum + line.qtyOrdered, 0);
   const totalOnOrder = variants.reduce((s, v) => s + v.onOrderQty, 0);
   const totalAddOrder = variants.reduce((s, v) => s + (Number(v.qtyOrdered) || 0), 0);
+  const selectedProductGroup = orderProductGroup === NEW_PRODUCT_GROUP_VALUE
+    ? normalizeProductGroup(customProductGroup)
+    : normalizeProductGroup(orderProductGroup);
+  const hasProductGroup = isRealProductGroup(selectedProductGroup);
 
   return (
     <BlockStack gap="small">
@@ -444,6 +448,9 @@ function ProductOrderBlock() {
           onChange={updateCustomProductGroup}
           placeholder="Type new group name"
         />
+      )}
+      {!hasProductGroup && (
+        <Banner tone="warning">Select or create a product group before adding an order.</Banner>
       )}
       <TextField
         label="Notes for supplier portal"
@@ -504,12 +511,12 @@ function ProductOrderBlock() {
       <Divider />
       <InlineStack gap="base">
         {order && (
-          <Button variant="primary" onPress={() => handleSubmit("existing")}>
+          <Button variant="primary" disabled={!hasProductGroup || submitting} onPress={() => handleSubmit("existing")}>
             {submitting ? "Saving..." : "Add to existing order"}
           </Button>
         )}
         {orders.length < ORDER_LIMIT ? (
-          <Button variant={order ? "secondary" : "primary"} onPress={() => handleSubmit("new")}>
+          <Button variant={order ? "secondary" : "primary"} disabled={!hasProductGroup || submitting} onPress={() => handleSubmit("new")}>
             {submitting ? "Saving..." : "Create new order"}
           </Button>
         ) : (

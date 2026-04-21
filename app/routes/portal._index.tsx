@@ -590,26 +590,36 @@ function OrderRow({ order, rowIndex, sizes }: { order: Order; rowIndex: number; 
 
 // ─── Editable cells ───────────────────────────────────────────────────────────
 
+function submitPortalCell(
+  fetcher: ReturnType<typeof useFetcher>,
+  fields: Record<string, string | number>,
+) {
+  const formData = new FormData();
+  for (const [key, value] of Object.entries(fields)) {
+    formData.set(key, String(value));
+  }
+  fetcher.submit(formData, { method: "post" });
+}
+
 function StatusCell({ orderId, value }: { orderId: number; value: string }) {
   const fetcher = useFetcher();
   const current = fetcher.formData ? String(fetcher.formData.get("value")) : value;
   const bg = STATUS_COLORS[current] ?? "#f3f4f6";
 
   return (
-    <fetcher.Form method="post">
-      <input type="hidden" name="intent" value="update_status" />
-      <input type="hidden" name="orderId" value={orderId} />
-      <select
-        name="value"
-        value={current}
-        onChange={(e) => fetcher.submit(e.currentTarget.form!)}
-        style={{ ...s.select, background: bg }}
-      >
-        {STATUS_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
-    </fetcher.Form>
+    <select
+      value={current}
+      onChange={(e) => submitPortalCell(fetcher, {
+        intent: "update_status",
+        orderId,
+        value: e.currentTarget.value,
+      })}
+      style={{ ...s.select, background: bg }}
+    >
+      {STATUS_OPTIONS.map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
   );
 }
 
@@ -619,62 +629,59 @@ function PriorityCell({ orderId, value }: { orderId: number; value: string }) {
   const opt = PRIORITY_OPTIONS.find((o) => o.value === current);
 
   return (
-    <fetcher.Form method="post">
-      <input type="hidden" name="intent" value="update_priority" />
-      <input type="hidden" name="orderId" value={orderId} />
-      <select
-        name="value"
-        value={current}
-        onChange={(e) => fetcher.submit(e.currentTarget.form!)}
-        style={{
-          ...s.select,
-          background: opt?.bg ?? "#f3f4f6",
-          color: opt?.color ?? "#374151",
-          fontWeight: 700,
-        }}
-      >
-        <option value="">— Priority —</option>
-        {PRIORITY_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
-    </fetcher.Form>
+    <select
+      value={current}
+      onChange={(e) => submitPortalCell(fetcher, {
+        intent: "update_priority",
+        orderId,
+        value: e.currentTarget.value,
+      })}
+      style={{
+        ...s.select,
+        background: opt?.bg ?? "#f3f4f6",
+        color: opt?.color ?? "#374151",
+        fontWeight: 700,
+      }}
+    >
+      <option value="">— Priority —</option>
+      {PRIORITY_OPTIONS.map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
   );
 }
 
 function NotesCell({ orderId, field, value }: { orderId: number; field: string; value: string }) {
   const fetcher = useFetcher();
   return (
-    <fetcher.Form method="post">
-      <input type="hidden" name="intent" value={`update_${field}`} />
-      <input type="hidden" name="orderId" value={orderId} />
-      <textarea
-        name="value"
-        defaultValue={value}
-        onBlur={(e) => fetcher.submit(e.currentTarget.form!)}
-        rows={2}
-        style={s.textarea}
-        placeholder="Add note…"
-      />
-    </fetcher.Form>
+    <textarea
+      defaultValue={value}
+      onBlur={(e) => submitPortalCell(fetcher, {
+        intent: `update_${field}`,
+        orderId,
+        value: e.currentTarget.value,
+      })}
+      rows={2}
+      style={s.textarea}
+      placeholder="Add note…"
+    />
   );
 }
 
 function EtaCell({ orderId, value }: { orderId: number; value: string }) {
   const fetcher = useFetcher();
   return (
-    <fetcher.Form method="post">
-      <input type="hidden" name="intent" value="update_eta" />
-      <input type="hidden" name="orderId" value={orderId} />
-      <input
-        type="text"
-        name="value"
-        defaultValue={value}
-        onBlur={(e) => fetcher.submit(e.currentTarget.form!)}
-        style={s.dateInput}
-        placeholder="dd/mm/yy"
-      />
-    </fetcher.Form>
+    <input
+      type="text"
+      defaultValue={value}
+      onBlur={(e) => submitPortalCell(fetcher, {
+        intent: "update_eta",
+        orderId,
+        value: e.currentTarget.value,
+      })}
+      style={s.dateInput}
+      placeholder="dd/mm/yy"
+    />
   );
 }
 
@@ -687,24 +694,23 @@ function QtyCell({ orderId, size, value }: { orderId: number; size: string; valu
   };
 
   return (
-    <fetcher.Form method="post">
-      <input type="hidden" name="intent" value="update_qty" />
-      <input type="hidden" name="orderId" value={orderId} />
-      <input type="hidden" name="size" value={size} />
-      <input
-        type="text"
-        inputMode="numeric"
-        pattern="[0-9]*"
-        name="value"
-        defaultValue={value}
-        onChange={(e) => normalizeQty(e.currentTarget)}
-        onBlur={(e) => fetcher.submit(e.currentTarget.form!)}
-        style={{
-          ...s.qtyInput,
-          ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
-        }}
-      />
-    </fetcher.Form>
+    <input
+      type="text"
+      inputMode="numeric"
+      pattern="[0-9]*"
+      defaultValue={value}
+      onChange={(e) => normalizeQty(e.currentTarget)}
+      onBlur={(e) => submitPortalCell(fetcher, {
+        intent: "update_qty",
+        orderId,
+        size,
+        value: e.currentTarget.value,
+      })}
+      style={{
+        ...s.qtyInput,
+        ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
+      }}
+    />
   );
 }
 
