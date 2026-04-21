@@ -1211,27 +1211,37 @@ function PackingListsPanel({
 
   return (
     <div style={s.packingLayout}>
-      <aside style={s.packingSidebar}>
+      <div style={s.packingToolbar}>
+        <label style={s.filterLabel}>
+          Packing list
+          <select
+            value={selectedPackingList?.id ?? ""}
+            onChange={(event) => {
+              updateParams({
+                packingId: event.currentTarget.value,
+                productSearch: "",
+                packingSearchLineId: "",
+              });
+            }}
+            style={s.packingSelect}
+          >
+            {packingLists.length ? packingLists.map((list) => (
+              <option key={list.id} value={list.id}>
+                {list.title} · {formatPortalDate(list.shipmentDate)} · {labelForPackingStatus(list.status)}
+              </option>
+            )) : (
+              <option value="">No packing lists yet</option>
+            )}
+          </select>
+        </label>
+
         <fetcher.Form method="post" style={s.packingCreateForm}>
           <input type="hidden" name="intent" value="create_packing_list" />
           <input name="title" placeholder="Shipment name" style={s.packingInput} />
           <input name="shipmentDate" placeholder="dd/mm/yy" style={s.packingInput} />
           <button type="submit" style={s.loginButton}>New packing list</button>
         </fetcher.Form>
-
-        <div style={s.packingListNav}>
-          {packingLists.map((list) => (
-            <a
-              key={list.id}
-              href={`/portal?page=packing&packingId=${list.id}`}
-              style={{ ...s.packingListLink, ...(selectedPackingList?.id === list.id ? s.packingListLinkActive : {}) }}
-            >
-              <strong>{list.title}</strong>
-              <span>{formatPortalDate(list.shipmentDate)} · {labelForPackingStatus(list.status)}</span>
-            </a>
-          ))}
-        </div>
-      </aside>
+      </div>
 
       <section style={s.packingDetail}>
         {!selectedPackingList ? (
@@ -2156,19 +2166,20 @@ const s: Record<string, React.CSSProperties> = {
   adminCheckbox: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 800, color: "#374151" },
   packingLayout: {
     display: "grid",
-    gridTemplateColumns: "300px minmax(0, 1fr)",
-    gap: 16,
-    alignItems: "start",
+    gridTemplateColumns: "minmax(0, 1fr)",
+    gap: 10,
   },
-  packingSidebar: {
+  packingToolbar: {
     background: "#fff",
     border: "1px solid #cbd5e1",
     borderRadius: 12,
-    padding: 12,
-    display: "grid",
+    padding: "10px 12px",
+    display: "flex",
+    alignItems: "flex-end",
+    flexWrap: "wrap",
     gap: 12,
   },
-  packingCreateForm: { display: "grid", gap: 8 },
+  packingCreateForm: { display: "flex", alignItems: "flex-end", flexWrap: "wrap", gap: 8 },
   packingInput: {
     border: "1px solid #b6c0cc",
     borderRadius: 7,
@@ -2177,6 +2188,15 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     background: "#fff",
     minWidth: 130,
+  },
+  packingSelect: {
+    border: "1px solid #b6c0cc",
+    borderRadius: 7,
+    padding: "8px 10px",
+    fontSize: 13,
+    fontWeight: 800,
+    background: "#fff",
+    minWidth: 360,
   },
   packingListNav: { display: "grid", gap: 8 },
   packingListLink: {
