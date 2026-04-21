@@ -34,6 +34,7 @@ model SupplierOrder {
   supplier     String
   productId    String
   productTitle String
+  productType  String?
   status          String    @default("open")
   supplierStatus  String    @default("on_order")
   supplierNotes   String?

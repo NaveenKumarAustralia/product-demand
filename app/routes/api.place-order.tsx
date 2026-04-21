@@ -56,6 +56,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     shop: string;
     productId: string;
     productTitle: string;
+    productType?: string;
     productImageUrl?: string;
     supplier: string;
     poNumber?: string;
@@ -77,7 +78,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return Response.json({ error: "Invalid JSON body" }, { status: 400, headers: CORS });
   }
 
-  const { shop, productId, productTitle, productImageUrl, supplier, poNumber, eta, notes, existingOrderId, lines } = body;
+  const { shop, productId, productTitle, productType, productImageUrl, supplier, poNumber, eta, notes, existingOrderId, lines } = body;
 
   if (!shop || !productId || !supplier) {
     return Response.json(
@@ -141,6 +142,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           data: {
             notes: nextNotes || null,
             totalQty: existingOrder.totalQty + totalQty,
+            productType: productType?.trim() || undefined,
           },
           select: { id: true, poNumber: true, totalQty: true },
         });
@@ -188,6 +190,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         shop,
         productId,
         productTitle: productTitle || "",
+        productType: productType?.trim() || null,
         productImageUrl: productImageUrl || null,
         supplier,
         supplierStatus: "on_order",

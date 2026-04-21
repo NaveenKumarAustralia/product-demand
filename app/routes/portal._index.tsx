@@ -1,10 +1,12 @@
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useSearchParams } from "react-router";
 import prisma from "../db.server";
 
-export const loader = async ({}: LoaderFunctionArgs) => {
-  const [orders, columnWidthsSetting] = await Promise.all([
+export const loader = async ({ request }: LoaderFunctionArgs) => {
+  const url = new URL(request.url);
+  const selectedProductType = url.searchParams.get("productType") ?? "";
+  const [allOrders, columnWidthsSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -15,6 +17,11 @@ export const loader = async ({}: LoaderFunctionArgs) => {
       select: { value: true },
     }),
   ]);
+  const productTypes = Array.from(new Set(allOrders.map((order) => order.productType).filter(Boolean) as string[]))
+    .sort((a, b) => a.localeCompare(b));
+  const orders = selectedProductType
+    ? allOrders.filter((order) => order.productType === selectedProductType)
+    : allOrders;
 
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","S/M","M","M/L","L","L/XL","XL","2XL","3XL","4XL","ONE SIZE"];
@@ -31,6 +38,8 @@ export const loader = async ({}: LoaderFunctionArgs) => {
   return {
     orders,
     sizes: allSizes,
+    productTypes,
+    selectedProductType,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
   };
 };
@@ -65,6 +74,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
+  if (intent === "update_product_type")  updates.productType = String(form.get("value") ?? "").trim() || null;
   if (intent === "update_factory_notes") updates.factoryNotes = form.get("value");
   if (intent === "update_notes")         updates.notes = form.get("value");
   if (intent === "update_eta") {
@@ -193,7 +203,14 @@ function normalizeColumnWidths(value: unknown): Record<string, number> {
 type Order = Awaited<ReturnType<typeof loader>>["orders"][number];
 
 export default function PortalDashboard() {
-  const { orders, sizes, columnWidths: savedColumnWidths } = useLoaderData<typeof loader>();
+  const {
+    orders,
+    sizes,
+    productTypes,
+    selectedProductType,
+    columnWidths: savedColumnWidths,
+  } = useLoaderData<typeof loader>();
+  const [, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const columns: ColumnDef[] = [
@@ -279,15 +296,39 @@ export default function PortalDashboard() {
   };
 
   return (
-    <div style={s.page}>
-      <header style={s.header}>
-        <div style={s.headerInner}>
-          <span style={s.logo}>Supplier Portal</span>
-          <span style={s.count}>{orders.length} open order{orders.length !== 1 ? "s" : ""}</span>
-        </div>
-      </header>
+    <div style={s.appShell}>
+      <aside style={s.sidebar}>
+        <div style={s.sidebarTitle}>Supplier Portal</div>
+        <nav style={s.nav}>
+          <a href="/portal" style={s.navItem}>Dashboard</a>
+          <a href="/portal" style={{ ...s.navItem, ...s.navItemActive }}>Existing Products Restock</a>
+        </nav>
+      </aside>
 
       <main style={s.main}>
+        <header style={s.pageHeader}>
+          <div>
+            <h1 style={s.pageTitle}>Existing Products Restock</h1>
+            <span style={s.count}>{orders.length} open order{orders.length !== 1 ? "s" : ""}</span>
+          </div>
+          <label style={s.filterLabel}>
+            Product type
+            <select
+              value={selectedProductType}
+              onChange={(event) => {
+                const nextType = event.currentTarget.value;
+                setSearchParams(nextType ? { productType: nextType } : {});
+              }}
+              style={s.productTypeFilter}
+            >
+              <option value="">All product types</option>
+              {productTypes.map((type) => (
+                <option key={type} value={type}>{type}</option>
+              ))}
+            </select>
+          </label>
+        </header>
+
         {orders.length === 0 ? (
           <div style={s.empty}>No open orders at the moment.</div>
         ) : (
@@ -581,12 +622,52 @@ function Td({
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s: Record<string, React.CSSProperties> = {
-  page: { minHeight: "100vh", background: "#f3f4f6", fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" },
-  header: { background: "#fff", borderBottom: "1px solid #e5e7eb", position: "sticky", top: 0, zIndex: 10 },
-  headerInner: { maxWidth: "100%", padding: "14px 24px", display: "flex", alignItems: "center", gap: 16 },
-  logo: { fontSize: 17, fontWeight: 700, color: "#1a1a1a" },
+  appShell: {
+    minHeight: "100vh",
+    background: "#f3f4f6",
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    display: "flex",
+  },
+  sidebar: {
+    width: 230,
+    flexShrink: 0,
+    background: "#111827",
+    color: "#fff",
+    borderRight: "1px solid #0f172a",
+    padding: "18px 14px",
+  },
+  sidebarTitle: { fontSize: 17, fontWeight: 800, marginBottom: 22 },
+  nav: { display: "flex", flexDirection: "column", gap: 8 },
+  navItem: {
+    display: "block",
+    color: "#cbd5e1",
+    textDecoration: "none",
+    borderRadius: 8,
+    padding: "10px 12px",
+    fontSize: 13,
+    fontWeight: 700,
+  },
+  navItemActive: { background: "#fff", color: "#111827" },
   count: { fontSize: 13, color: "#6b7280" },
-  main: { padding: "24px 16px" },
+  main: { flex: 1, minWidth: 0, padding: "24px 16px" },
+  pageHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 16,
+    marginBottom: 18,
+  },
+  pageTitle: { margin: 0, fontSize: 24, color: "#111827", lineHeight: 1.2 },
+  filterLabel: { display: "flex", alignItems: "center", gap: 10, fontSize: 13, fontWeight: 700, color: "#374151" },
+  productTypeFilter: {
+    border: "1px solid #b6c0cc",
+    borderRadius: 6,
+    padding: "7px 10px",
+    minWidth: 180,
+    background: "#fff",
+    fontSize: 13,
+    fontWeight: 600,
+  },
   empty: { background: "#fff", borderRadius: 12, padding: 40, textAlign: "center", color: "#6b7280" },
   tableWrap: {
     overflowX: "auto",

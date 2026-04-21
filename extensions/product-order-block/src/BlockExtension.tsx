@@ -25,6 +25,7 @@ type OrderStatusItem = {
   id: number;
   supplier: string;
   totalQty: number;
+  productType?: string | null;
   eta: string | null;
   supplierStatus?: string | null;
   priority?: string | null;
@@ -35,7 +36,7 @@ type OrderStatus = OrderStatusItem | null;
 type Variant = { id: string; title: string; sku: string; stockQty: number; onOrderQty: number; qtyOrdered: string };
 
 const ORDER_LIMIT = 2;
-const W = { size: "14%", stock: "12%", order: "13%", addOrder: "21%", total: "12%", gap: "small" } as const;
+const GAP = "small" as const;
 const STATUS_OPTIONS = [
   { value: "on_order", label: "On Order" },
   { value: "on_production", label: "On Production" },
@@ -52,6 +53,15 @@ const PRIORITY_OPTIONS = [
   { value: "urgent", label: "URGENT" },
   { value: "cancelled", label: "Cancelled" },
 ];
+const BASE_PRODUCT_TYPE_OPTIONS = [
+  "Dresses",
+  "Tops",
+  "Bottoms",
+  "Sets",
+  "Accessories",
+  "Shoes",
+  "Other",
+];
 
 function labelFor(options: Array<{ value: string; label: string }>, value?: string | null) {
   return options.find((option) => option.value === value)?.label ?? "On Order";
@@ -62,6 +72,22 @@ function formatShortDate(value?: string | null) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "No ETA";
   return date.toLocaleDateString("en-AU", { day: "2-digit", month: "2-digit", year: "2-digit" });
+}
+
+function tableWidths(orderCount: number) {
+  return orderCount <= 1
+    ? { size: "16%", stock: "16%", order: "18%", addOrder: "24%", total: "16%" }
+    : { size: "14%", stock: "12%", order: "13%", addOrder: "21%", total: "12%" };
+}
+
+function productTypeOptions(currentType: string) {
+  const options = [currentType, ...BASE_PRODUCT_TYPE_OPTIONS]
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return [
+    { value: "", label: "— Product type —" },
+    ...Array.from(new Set(options)).map((value) => ({ value, label: value })),
+  ];
 }
 
 function Col({ w, align = "start", children }: { w: string; align?: "start" | "end" | "center"; children: React.ReactNode }) {
@@ -78,6 +104,7 @@ function ProductOrderBlock() {
 
   const [shop, setShop] = useState<string | null>(null);
   const [productTitle, setProductTitle] = useState("");
+  const [productType, setProductType] = useState("");
   const [productVendor, setProductVendor] = useState("");
   const [productImageUrl, setProductImageUrl] = useState<string | null>(null);
   const [order, setOrder] = useState<OrderStatus>(null);
@@ -89,15 +116,18 @@ function ProductOrderBlock() {
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [savingPriority, setSavingPriority] = useState(false);
+  const [savingProductType, setSavingProductType] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [orderPriority, setOrderPriority] = useState("");
+  const [orderProductType, setOrderProductType] = useState("");
 
   const applyOrderStatus = useCallback((nextOrder: OrderStatus, nextOrders: OrderStatusItem[]) => {
     const visibleOrders = nextOrders.slice(0, ORDER_LIMIT);
     setOrder(nextOrder);
     setOrders(visibleOrders);
     setOrderPriority(nextOrder?.priority || "");
+    setOrderProductType(nextOrder?.productType || productType || "");
 
     const onOrderByVariant = new Map<string, number>();
     for (const item of visibleOrders) {
@@ -112,7 +142,7 @@ function ProductOrderBlock() {
       ...variant,
       onOrderQty: onOrderByVariant.get(variant.id) ?? 0,
     })));
-  }, []);
+  }, [productType]);
 
   const refreshOrderStatus = useCallback(async (shopDomain: string, productId: string) => {
     const token = await auth.idToken();
@@ -134,13 +164,14 @@ function ProductOrderBlock() {
           shop: { myshopifyDomain: string };
           product: {
             title: string; vendor: string;
+            productType: string;
             featuredImage: { url: string } | null;
             variants: { nodes: Array<{ id: string; title: string; sku: string; inventoryQuantity: number }> };
           };
         }>(`{
           shop { myshopifyDomain }
           product(id: "${productGid}") {
-            title vendor
+            title vendor productType
             featuredImage { url }
             variants(first: 100) { nodes { id title sku inventoryQuantity } }
           }
@@ -151,6 +182,8 @@ function ProductOrderBlock() {
         const p = result.data?.product;
         if (p) {
           setProductTitle(p.title);
+          setProductType(p.productType ?? "");
+          setOrderProductType((current) => current || p.productType || "");
           setProductVendor(p.vendor ?? "");
           setProductImageUrl(p.featuredImage?.url ?? null);
           setVariants((p.variants?.nodes ?? []).map((v) => ({
@@ -202,6 +235,36 @@ function ProductOrderBlock() {
     }
   }
 
+  async function updateProductType(nextProductType: string) {
+    setOrderProductType(nextProductType);
+    if (!order || !shop) return;
+    setSavingProductType(true);
+    setFormError(null);
+    try {
+      const token = await auth.idToken();
+      if (!token) throw new Error("No auth token");
+      const res = await fetch(`${APP_URL}/api/update-order`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          shop,
+          orderId: order.id,
+          productType: nextProductType,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) { setFormError(`Error ${res.status}: ${json.error ?? "unknown"}`); return; }
+      setOrder((current) => current ? { ...current, productType: json.order.productType } : current);
+      setOrders((current) => current.map((item) => (
+        item.id === json.order.id ? { ...item, productType: json.order.productType } : item
+      )));
+    } catch (e: any) {
+      setFormError(`Error: ${e?.message ?? String(e)}`);
+    } finally {
+      setSavingProductType(false);
+    }
+  }
+
   async function handleSubmit(mode: "existing" | "new") {
     const orderedLines = variants.filter((v) => Number(v.qtyOrdered) > 0);
     const trimmedNotes = notes.trim();
@@ -219,6 +282,7 @@ function ProductOrderBlock() {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           shop, productId: productGid, productTitle,
+          productType: orderProductType || undefined,
           productImageUrl: productImageUrl || undefined,
           supplier: productVendor || "Unknown",
           notes: trimmedNotes || undefined,
@@ -278,6 +342,7 @@ function ProductOrderBlock() {
 
   const totalStock = variants.reduce((s, v) => s + v.stockQty, 0);
   const orderColumns = orders.slice(0, ORDER_LIMIT);
+  const W = tableWidths(orderColumns.length);
   const getOrderQty = (item: OrderStatusItem, variantId: string) =>
     (item.lines ?? [])
       .filter((line) => line.variantId === variantId)
@@ -302,18 +367,24 @@ function ProductOrderBlock() {
             />
           </Box>
         )}
-        <Box inlineSize={order ? "67%" : "100%"}>
-          <TextField
-            label="Notes for supplier portal"
-            value={notes}
-            onChange={setNotes}
+        <Box inlineSize={order ? "30%" : "100%"}>
+          <Select
+            label={savingProductType ? "Type saving..." : "Product type"}
+            value={orderProductType}
+            options={productTypeOptions(productType || orderProductType)}
+            onChange={updateProductType}
           />
         </Box>
       </InlineStack>
+      <TextField
+        label="Notes for supplier portal"
+        value={notes}
+        onChange={setNotes}
+      />
       <Divider />
 
       {/* Header */}
-      <InlineStack gap={W.gap} blockAlignment="center">
+      <InlineStack gap={GAP} blockAlignment="center">
         <Col w={W.size}><Text fontWeight="bold">Size</Text></Col>
         <Col w={W.stock} align="center"><Text fontWeight="bold">In stock</Text></Col>
         {orderColumns.map((item, idx) => (
@@ -333,7 +404,7 @@ function ProductOrderBlock() {
       {variants.map((v, idx) => {
         const rowTotal = v.stockQty + v.onOrderQty + (Number(v.qtyOrdered) || 0);
         return (
-          <InlineStack key={v.id} gap={W.gap} blockAlignment="center">
+          <InlineStack key={v.id} gap={GAP} blockAlignment="center">
             <Col w={W.size}><Text>{v.title}</Text></Col>
             <Col w={W.stock} align="center"><Text>{v.stockQty}</Text></Col>
             {orderColumns.map((item) => (
@@ -354,7 +425,7 @@ function ProductOrderBlock() {
       <Divider />
 
       {/* Totals */}
-      <InlineStack gap={W.gap} blockAlignment="center">
+      <InlineStack gap={GAP} blockAlignment="center">
         <Col w={W.size}><Text fontWeight="bold">Total</Text></Col>
         <Col w={W.stock} align="center"><Text fontWeight="bold">{totalStock}</Text></Col>
         {orderColumns.map((item) => (

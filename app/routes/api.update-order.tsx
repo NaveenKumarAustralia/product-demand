@@ -57,6 +57,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     orderId: number;
     supplierStatus?: string;
     priority?: string;
+    productType?: string;
     eta?: string | null;
     notes?: string;
   };
@@ -67,7 +68,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return Response.json({ error: "Invalid JSON body" }, { status: 400, headers: CORS });
   }
 
-  const { shop, orderId, supplierStatus, priority, eta, notes } = body;
+  const { shop, orderId, supplierStatus, priority, productType, eta, notes } = body;
   const id = Number(orderId);
 
   if (!shop || !Number.isInteger(id)) {
@@ -77,6 +78,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const data: Record<string, unknown> = {};
   if (supplierStatus !== undefined) data.supplierStatus = supplierStatus;
   if (priority !== undefined) data.priority = priority || null;
+  if (productType !== undefined) data.productType = productType.trim() || null;
   if (eta !== undefined) data.eta = eta ? new Date(eta) : null;
   if (notes !== undefined) data.notes = notes || null;
 
@@ -101,6 +103,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         id: true,
         supplierStatus: true,
         priority: true,
+        productType: true,
         eta: true,
         notes: true,
       },
