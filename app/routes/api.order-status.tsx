@@ -6,6 +6,14 @@ const CORS = {
   "Access-Control-Allow-Methods": "GET, OPTIONS",
   "Access-Control-Allow-Headers": "Authorization, Content-Type",
 };
+const PRODUCT_GROUP_RENAMES: Record<string, string> = {
+  "Short Sleeve Dresses": "Dresses",
+};
+
+function normalizeProductGroup(value?: string | null) {
+  const trimmed = value?.trim() ?? "";
+  return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
+}
 
 /**
  * Decode the JWT payload (base64url) and return the parsed object.
@@ -89,6 +97,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const latestOrder = orders[0] ?? null;
     const formattedOrders = orders.map((order) => ({
       ...order,
+      productType: normalizeProductGroup(order.productType) || null,
       eta: order.eta?.toISOString() ?? null,
     }));
     const totalQty = orders.reduce((sum, order) => sum + order.totalQty, 0);
@@ -100,7 +109,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               id: latestOrder.id,
               supplier: latestOrder.supplier,
               totalQty,
-              productType: latestOrder.productType,
+              productType: normalizeProductGroup(latestOrder.productType) || null,
               eta: latestOrder.eta?.toISOString() ?? null,
               status: latestOrder.status,
               supplierStatus: latestOrder.supplierStatus,

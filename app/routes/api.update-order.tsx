@@ -6,6 +6,14 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Authorization, Content-Type",
 };
+const PRODUCT_GROUP_RENAMES: Record<string, string> = {
+  "Short Sleeve Dresses": "Dresses",
+};
+
+function normalizeProductGroup(value?: string | null) {
+  const trimmed = value?.trim() ?? "";
+  return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
+}
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
@@ -78,7 +86,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const data: Record<string, unknown> = {};
   if (supplierStatus !== undefined) data.supplierStatus = supplierStatus;
   if (priority !== undefined) data.priority = priority || null;
-  if (productType !== undefined) data.productType = productType.trim() || null;
+  if (productType !== undefined) data.productType = normalizeProductGroup(productType) || null;
   if (eta !== undefined) data.eta = eta ? new Date(eta) : null;
   if (notes !== undefined) data.notes = notes || null;
 
@@ -113,6 +121,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       success: true,
       order: {
         ...order,
+        productType: normalizeProductGroup(order.productType) || null,
         eta: order.eta?.toISOString() ?? null,
       },
     }, { headers: CORS });

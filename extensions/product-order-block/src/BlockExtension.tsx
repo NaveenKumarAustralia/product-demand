@@ -60,6 +60,14 @@ const BASE_PRODUCT_GROUP_OPTIONS = [
   "Pants",
   "Corduroy",
 ];
+const PRODUCT_GROUP_RENAMES: Record<string, string> = {
+  "Short Sleeve Dresses": "Dresses",
+};
+
+function normalizeProductGroup(value?: string | null) {
+  const trimmed = value?.trim() ?? "";
+  return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
+}
 
 function labelFor(options: Array<{ value: string; label: string }>, value?: string | null) {
   return options.find((option) => option.value === value)?.label ?? "On Order";
@@ -80,7 +88,7 @@ function tableWidths(orderCount: number) {
 
 function productGroupOptions(currentGroup: string) {
   const options = [currentGroup, ...BASE_PRODUCT_GROUP_OPTIONS]
-    .map((value) => value.trim())
+    .map((value) => normalizeProductGroup(value))
     .filter(Boolean);
   return [
     { value: "", label: "— Product group —" },
@@ -151,7 +159,9 @@ function ProductOrderBlock() {
     setOrder(nextOrder);
     setOrders(visibleOrders);
     setOrderPriority(nextOrder?.priority || "");
-    setOrderProductGroup((current) => nextOrder?.productType || current || productGroup || "");
+    setOrderProductGroup((current) => (
+      normalizeProductGroup(nextOrder?.productType || current || productGroup)
+    ));
 
     const onOrderByVariant = new Map<string, number>();
     for (const item of visibleOrders) {
@@ -206,8 +216,9 @@ function ProductOrderBlock() {
         const p = result.data?.product;
         if (p) {
           setProductTitle(p.title);
-          setProductGroup(p.productType ?? "");
-          setOrderProductGroup((current) => current || p.productType || "");
+          const normalizedProductGroup = normalizeProductGroup(p.productType);
+          setProductGroup(normalizedProductGroup);
+          setOrderProductGroup((current) => current || normalizedProductGroup);
           setProductVendor(p.vendor ?? "");
           setProductImageUrl(p.featuredImage?.url ?? null);
           setVariants((p.variants?.nodes ?? []).map((v) => ({

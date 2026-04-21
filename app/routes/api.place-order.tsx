@@ -6,6 +6,14 @@ const CORS = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Authorization, Content-Type",
 };
+const PRODUCT_GROUP_RENAMES: Record<string, string> = {
+  "Short Sleeve Dresses": "Dresses",
+};
+
+function normalizeProductGroup(value?: string | null) {
+  const trimmed = value?.trim() ?? "";
+  return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
+}
 
 function decodeJwtPayload(token: string): Record<string, unknown> | null {
   try {
@@ -80,6 +88,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   const { shop, productId, productTitle, productType, productImageUrl, supplier, poNumber, eta, notes, priority, existingOrderId, lines } = body;
+  const normalizedProductType = normalizeProductGroup(productType);
 
   if (!shop || !productId || !supplier) {
     return Response.json(
@@ -143,7 +152,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           data: {
             notes: nextNotes || null,
             totalQty: existingOrder.totalQty + totalQty,
-            productType: productType?.trim() || undefined,
+            productType: normalizedProductType || undefined,
             priority: priority || undefined,
           },
           select: { id: true, poNumber: true, totalQty: true },
@@ -192,7 +201,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         shop,
         productId,
         productTitle: productTitle || "",
-        productType: productType?.trim() || null,
+        productType: normalizedProductType || null,
         productImageUrl: productImageUrl || null,
         supplier,
         supplierStatus: "on_order",

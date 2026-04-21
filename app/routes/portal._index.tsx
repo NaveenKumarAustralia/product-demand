@@ -6,7 +6,9 @@ import prisma from "../db.server";
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const page = url.searchParams.get("page") ?? "restock";
-  const selectedProductGroup = url.searchParams.get("productGroup") ?? url.searchParams.get("productType") ?? "";
+  const selectedProductGroup = normalizeProductGroup(
+    url.searchParams.get("productGroup") ?? url.searchParams.get("productType") ?? "",
+  );
   const selectedStatus = url.searchParams.get("status") ?? "";
   const selectedPriority = url.searchParams.get("priority") ?? "";
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
@@ -21,13 +23,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       select: { value: true },
     }),
   ]);
-  const productGroups = Array.from(new Set(allOrders.map((order) => order.productType).filter(Boolean) as string[]))
+  const normalizedOrders = allOrders.map((order) => ({
+    ...order,
+    productType: normalizeProductGroup(order.productType) || null,
+  }));
+  const productGroups = Array.from(new Set(normalizedOrders.map((order) => order.productType).filter(Boolean) as string[]))
     .sort((a, b) => a.localeCompare(b));
-  const statusFilters = Array.from(new Set(allOrders.map((order) => order.supplierStatus).filter(Boolean)))
+  const statusFilters = Array.from(new Set(normalizedOrders.map((order) => order.supplierStatus).filter(Boolean)))
     .sort((a, b) => labelForStatus(a).localeCompare(labelForStatus(b)));
-  const priorityFilters = Array.from(new Set(allOrders.map((order) => order.priority).filter(Boolean) as string[]))
+  const priorityFilters = Array.from(new Set(normalizedOrders.map((order) => order.priority).filter(Boolean) as string[]))
     .sort((a, b) => labelForPriority(a).localeCompare(labelForPriority(b)));
-  const orders = allOrders
+  const orders = normalizedOrders
     .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
     .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
     .filter((order) => !selectedPriority || order.priority === selectedPriority)
@@ -95,7 +101,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
-  if (intent === "update_product_type")  updates.productType = String(form.get("value") ?? "").trim() || null;
+  if (intent === "update_product_type")  updates.productType = normalizeProductGroup(String(form.get("value") ?? "")) || null;
   if (intent === "update_factory_notes") updates.factoryNotes = form.get("value");
   if (intent === "update_notes")         updates.notes = form.get("value");
   if (intent === "update_eta") {
@@ -175,6 +181,14 @@ const PRIORITY_OPTIONS = [
   { value: "urgent",    label: "URGENT",    bg: "#dc2626", color: "#fff" },
   { value: "cancelled", label: "Cancelled", bg: "#d97706", color: "#fff" },
 ];
+const PRODUCT_GROUP_RENAMES: Record<string, string> = {
+  "Short Sleeve Dresses": "Dresses",
+};
+
+function normalizeProductGroup(value?: string | null) {
+  const trimmed = value?.trim() ?? "";
+  return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
+}
 
 function labelForStatus(value: string) {
   return STATUS_OPTIONS.find((option) => option.value === value)?.label ?? value;
