@@ -456,13 +456,12 @@ function ProductOrderBlock() {
       <InlineStack gap={GAP} blockAlignment="center">
         <Col w={W.size}><Text fontWeight="bold">Size</Text></Col>
         <Col w={W.stock} align="center"><Text fontWeight="bold">In stock</Text></Col>
-        {orderColumns.map((item, idx) => (
+        {orderColumns.map((item) => (
           <Col key={item.id} w={W.order} align="center">
             <BlockStack gap="none">
               <Text>ETA</Text>
               <Text fontWeight="bold">{formatShortDate(item.eta)}</Text>
               <Text>{labelFor(STATUS_OPTIONS, item.supplierStatus)}</Text>
-              <Text fontWeight="bold">Order {idx + 1}</Text>
             </BlockStack>
           </Col>
         ))}
