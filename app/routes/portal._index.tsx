@@ -630,61 +630,66 @@ export default function PortalDashboard() {
             <h1 style={s.pageTitle}>{activePageTitle}</h1>
           </div>
           {page === "restock" && (
-            <div style={s.filters}>
-              <label style={s.filterLabel}>
-                Product group
-                <select
-                  value={selectedProductGroup}
-                  onChange={(event) => updateParams({ productGroup: event.currentTarget.value, productType: "" })}
-                  style={s.productTypeFilter}
-                >
-                  <option value="">All groups</option>
-                  {productGroups.map((group) => (
-                    <option key={group} value={group}>{group}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={s.filterLabel}>
-                Sort
-                <select value={sortBy} onChange={(event) => updateParams({ sortBy: event.currentTarget.value })} style={s.productTypeFilter}>
-                  <option value="orderDateDesc">Order date newest</option>
-                  <option value="orderDateAsc">Order date oldest</option>
-                  <option value="titleAsc">Product title A-Z</option>
-                  <option value="titleDesc">Product title Z-A</option>
-                </select>
-              </label>
-              <label style={s.filterLabel}>
-                Status
-                <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
-                  <option value="">All statuses</option>
-                  {statusFilters.map((status) => (
-                    <option key={status} value={status}>{labelForStatus(status)}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={s.filterLabel}>
-                Priority
-                <select value={selectedPriority} onChange={(event) => updateParams({ priority: event.currentTarget.value })} style={s.productTypeFilter}>
-                  <option value="">All priorities</option>
-                  {priorityFilters.map((priority) => (
-                    <option key={priority} value={priority}>{labelForPriority(priority)}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={s.filterLabel}>
-                Search
-                <input
-                  type="search"
-                  value={searchTitle}
-                  onChange={(event) => updateParams({ q: event.currentTarget.value })}
-                  style={s.searchInput}
-                  placeholder="Product title"
-                />
-              </label>
-              <div style={s.activeUsers} title="Currently active">
-                {activeUsers.length ? activeUsers.map((user) => (
-                  <span key={user.id} style={s.activeUserBadge} title={user.name}>{user.initials}</span>
-                )) : <span style={s.activeUserEmpty}>No active users</span>}
+            <div style={s.headerControls}>
+              <div style={s.utilityBar}>
+                <label style={s.filterLabel}>
+                  Search
+                  <input
+                    type="search"
+                    value={searchTitle}
+                    onChange={(event) => updateParams({ q: event.currentTarget.value })}
+                    style={s.searchInput}
+                    placeholder="Product title"
+                  />
+                </label>
+                <div style={s.activeUsers} title="Currently active">
+                  <span style={s.activeUsersLabel}>Active</span>
+                  {activeUsers.length ? activeUsers.map((user) => (
+                    <span key={user.id} style={s.activeUserBadge} title={user.name}>{user.initials}</span>
+                  )) : <span style={s.activeUserEmpty}>No active users</span>}
+                </div>
+              </div>
+              <div style={s.filters}>
+                <label style={s.filterLabel}>
+                  Product group
+                  <select
+                    value={selectedProductGroup}
+                    onChange={(event) => updateParams({ productGroup: event.currentTarget.value, productType: "" })}
+                    style={s.productTypeFilter}
+                  >
+                    <option value="">All groups</option>
+                    {productGroups.map((group) => (
+                      <option key={group} value={group}>{group}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={s.filterLabel}>
+                  Sort
+                  <select value={sortBy} onChange={(event) => updateParams({ sortBy: event.currentTarget.value })} style={s.productTypeFilter}>
+                    <option value="orderDateDesc">Order date newest</option>
+                    <option value="orderDateAsc">Order date oldest</option>
+                    <option value="titleAsc">Product title A-Z</option>
+                    <option value="titleDesc">Product title Z-A</option>
+                  </select>
+                </label>
+                <label style={s.filterLabel}>
+                  Status
+                  <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
+                    <option value="">All statuses</option>
+                    {statusFilters.map((status) => (
+                      <option key={status} value={status}>{labelForStatus(status)}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={s.filterLabel}>
+                  Priority
+                  <select value={selectedPriority} onChange={(event) => updateParams({ priority: event.currentTarget.value })} style={s.productTypeFilter}>
+                    <option value="">All priorities</option>
+                    {priorityFilters.map((priority) => (
+                      <option key={priority} value={priority}>{labelForPriority(priority)}</option>
+                    ))}
+                  </select>
+                </label>
               </div>
             </div>
           )}
@@ -1243,6 +1248,23 @@ const s: Record<string, React.CSSProperties> = {
     marginBottom: 18,
   },
   pageTitle: { margin: 0, fontSize: 24, color: "#111827", lineHeight: 1.2 },
+  headerControls: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end",
+    gap: 8,
+  },
+  utilityBar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    flexWrap: "wrap",
+    gap: 12,
+    padding: "6px 8px",
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+    background: "#f8fafc",
+  },
   filters: { display: "flex", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 10 },
   filterLabel: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#374151" },
   productTypeFilter: {
@@ -1270,6 +1292,7 @@ const s: Record<string, React.CSSProperties> = {
     gap: 6,
     minHeight: 32,
   },
+  activeUsersLabel: { color: "#4b5563", fontSize: 12, fontWeight: 800 },
   activeUserBadge: {
     display: "inline-flex",
     alignItems: "center",
