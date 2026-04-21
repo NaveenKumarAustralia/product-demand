@@ -91,7 +91,7 @@ function productGroupOptions(currentGroup: string) {
 function Col({ w, align = "start", children }: { w: string; align?: "start" | "end" | "center"; children: React.ReactNode }) {
   return (
     <Box inlineSize={w as any}>
-      <InlineStack inlineAlignment={align} blockAlignment="center">{children}</InlineStack>
+      <InlineStack inlineAlignment={align} blockAlignment="center" inlineSize="100%">{children}</InlineStack>
     </Box>
   );
 }

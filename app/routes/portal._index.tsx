@@ -248,6 +248,7 @@ export default function PortalDashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
     { id: "orderDate", label: "Order Date" },
@@ -347,23 +348,35 @@ export default function PortalDashboard() {
 
   return (
     <div style={s.appShell}>
-      <aside style={s.sidebar}>
-        <div style={s.sidebarTitle}>Supplier Portal</div>
-        <nav style={s.nav}>
-          <a href="/portal?page=dashboard" style={{ ...s.navItem, ...(page === "dashboard" ? s.navItemActive : {}) }}>Dashboard</a>
-          <a href="/portal" style={{ ...s.navItem, ...(page === "restock" && !selectedProductGroup ? s.navItemActive : {}) }}>Existing Products Restock</a>
-          {productGroups.map((group) => (
-            <a
-              key={group}
-              href={`/portal?productGroup=${encodeURIComponent(group)}`}
-              style={{ ...s.navSubItem, ...(selectedProductGroup === group ? s.navItemActive : {}) }}
-            >
-              {group}
-            </a>
-          ))}
-          <a href="/portal?page=fabric" style={{ ...s.navItem, ...(page === "fabric" ? s.navItemActive : {}) }}>Fabric in stock</a>
-        </nav>
-        <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), ...s.settingsLink }}>Settings</a>
+      <aside style={{ ...s.sidebar, ...(sidebarCollapsed ? s.sidebarCollapsed : {}) }}>
+        <button
+          type="button"
+          onClick={() => setSidebarCollapsed((current) => !current)}
+          style={s.collapseButton}
+          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {sidebarCollapsed ? ">" : "<"}
+        </button>
+        {!sidebarCollapsed && (
+          <>
+            <div style={s.sidebarTitle}>Supplier Portal</div>
+            <nav style={s.nav}>
+              <a href="/portal?page=dashboard" style={{ ...s.navItem, ...(page === "dashboard" ? s.navItemActive : {}) }}>Dashboard</a>
+              <a href="/portal" style={{ ...s.navItem, ...(page === "restock" && !selectedProductGroup ? s.navItemActive : {}) }}>Existing Products Restock</a>
+              {productGroups.map((group) => (
+                <a
+                  key={group}
+                  href={`/portal?productGroup=${encodeURIComponent(group)}`}
+                  style={{ ...s.navSubItem, ...(selectedProductGroup === group ? s.navItemActive : {}) }}
+                >
+                  {group}
+                </a>
+              ))}
+              <a href="/portal?page=fabric" style={{ ...s.navItem, ...(page === "fabric" ? s.navItemActive : {}) }}>Fabric in stock</a>
+            </nav>
+            <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), ...s.settingsLink }}>Settings</a>
+          </>
+        )}
       </aside>
 
       <main style={s.main}>
@@ -727,6 +740,24 @@ const s: Record<string, React.CSSProperties> = {
     padding: "18px 14px",
     display: "flex",
     flexDirection: "column",
+    position: "relative",
+    transition: "width 160ms ease, padding 160ms ease",
+  },
+  sidebarCollapsed: { width: 44, padding: "18px 8px" },
+  collapseButton: {
+    position: "absolute",
+    top: 14,
+    right: -14,
+    width: 28,
+    height: 28,
+    borderRadius: 999,
+    border: "1px solid #334155",
+    background: "#fff",
+    color: "#111827",
+    fontWeight: 800,
+    cursor: "pointer",
+    zIndex: 20,
+    boxShadow: "0 1px 3px rgba(15,23,42,0.2)",
   },
   sidebarTitle: { fontSize: 17, fontWeight: 800, marginBottom: 22 },
   nav: { display: "flex", flexDirection: "column", gap: 8 },
