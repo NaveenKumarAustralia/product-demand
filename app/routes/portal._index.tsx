@@ -1537,6 +1537,9 @@ function PackingProductNameCell({
   const [canPortalDropdown, setCanPortalDropdown] = useState(false);
   const canSearch = isFocused || isActiveSearch;
   const shouldShowResults = canSearch && value.trim().length >= 2;
+  const dropdownHeight = value.trim() !== productSearch || !productResults.length
+    ? 48
+    : Math.min(320, productResults.length * 62 + 12);
   const updateDropdownRect = () => {
     if (!inputRef.current) return;
     setDropdownRect(inputRef.current.getBoundingClientRect());
@@ -1618,6 +1621,7 @@ function PackingProductNameCell({
             top: dropdownRect.bottom + 8,
             left: dropdownRect.left,
             width: Math.max(dropdownRect.width, 460),
+            height: dropdownHeight,
           }}
         >
           {value.trim() !== productSearch ? (
@@ -2472,14 +2476,15 @@ const s: Record<string, React.CSSProperties> = {
     top: 0,
     left: 0,
     width: 460,
-    maxHeight: 280,
+    maxHeight: 320,
     overflow: "auto",
-    background: "#fff",
+    background: "#ffffff",
     border: "1px solid #cbd5e1",
     borderRadius: 10,
-    boxShadow: "0 16px 30px rgba(15,23,42,0.2)",
-    zIndex: 100,
+    boxShadow: "0 22px 50px rgba(15,23,42,0.32)",
+    zIndex: 2147483647,
     padding: 6,
+    isolation: "isolate",
   },
   productCellResult: {
     display: "flex",
