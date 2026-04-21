@@ -711,28 +711,31 @@ function DeleteCell({ orderId }: { orderId: number }) {
       <button type="submit" style={s.deleteButton}>Delete</button>
       {confirmOpen && (
         <div style={s.deleteConfirm}>
-          <div style={s.deleteConfirmText}>Are you sure you want to delete this order?</div>
-          <div style={s.deleteConfirmActions}>
-            <button
-              type="submit"
-              style={{ ...s.deleteConfirmButton, ...s.deleteConfirmDanger }}
-              onClick={() => { confirmedRef.current = true; }}
-            >
-              Yes
-            </button>
-            <button type="button" style={s.deleteConfirmButton} onClick={() => setConfirmOpen(false)}>
-              No
-            </button>
-            <button
-              type="submit"
-              style={s.deleteConfirmButton}
-              onClick={() => {
-                skipConfirmForToday();
-                confirmedRef.current = true;
-              }}
-            >
-              Don’t ask me again for a day
-            </button>
+          <div style={s.deleteConfirmCard}>
+            <div style={s.deleteConfirmTitle}>Delete order?</div>
+            <div style={s.deleteConfirmText}>Are you sure you want to delete this order?</div>
+            <div style={s.deleteConfirmActions}>
+              <button
+                type="submit"
+                style={{ ...s.deleteConfirmButton, ...s.deleteConfirmDanger }}
+                onClick={() => { confirmedRef.current = true; }}
+              >
+                Yes, delete
+              </button>
+              <button type="button" style={s.deleteConfirmButton} onClick={() => setConfirmOpen(false)}>
+                No
+              </button>
+              <button
+                type="submit"
+                style={s.deleteConfirmButton}
+                onClick={() => {
+                  skipConfirmForToday();
+                  confirmedRef.current = true;
+                }}
+              >
+                Don’t ask me again for a day
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -1014,32 +1017,50 @@ const s: Record<string, React.CSSProperties> = {
     cursor: "pointer",
   },
   deleteConfirm: {
-    marginTop: 8,
-    padding: 8,
+    position: "fixed",
+    inset: 0,
+    zIndex: 1000,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    background: "rgba(15, 23, 42, 0.38)",
+  },
+  deleteConfirmCard: {
+    width: "min(420px, 100%)",
+    padding: 22,
     border: "1px solid #fecaca",
-    borderRadius: 6,
-    background: "#fff7f7",
+    borderRadius: 14,
+    background: "#fff",
     textAlign: "left",
+    boxShadow: "0 24px 70px rgba(15, 23, 42, 0.28)",
+  },
+  deleteConfirmTitle: {
+    marginBottom: 8,
+    color: "#111827",
+    fontSize: 18,
+    fontWeight: 800,
   },
   deleteConfirmText: {
-    marginBottom: 8,
-    color: "#7f1d1d",
-    fontSize: 12,
-    fontWeight: 700,
-    lineHeight: 1.35,
+    marginBottom: 18,
+    color: "#4b5563",
+    fontSize: 14,
+    fontWeight: 600,
+    lineHeight: 1.45,
   },
   deleteConfirmActions: {
     display: "flex",
     flexWrap: "wrap",
-    gap: 6,
+    justifyContent: "flex-end",
+    gap: 10,
   },
   deleteConfirmButton: {
     border: "1px solid #d1d5db",
-    borderRadius: 4,
-    padding: "4px 7px",
+    borderRadius: 8,
+    padding: "9px 12px",
     background: "#fff",
     color: "#374151",
-    fontSize: 11,
+    fontSize: 13,
     fontWeight: 700,
     cursor: "pointer",
   },
