@@ -1455,14 +1455,16 @@ function PackingProductNameCell({
   const fetcher = useFetcher();
   const displayValue = line.isCustom && line.productTitle === "Custom item" ? "" : line.productTitle;
   const [value, setValue] = useState(displayValue);
-  const shouldShowResults = isActiveSearch && value.trim().length >= 2;
+  const [isFocused, setIsFocused] = useState(false);
+  const canSearch = isFocused || isActiveSearch;
+  const shouldShowResults = canSearch && value.trim().length >= 2;
 
   useEffect(() => {
     setValue(displayValue);
   }, [displayValue, line.id]);
 
   useEffect(() => {
-    if (!isActiveSearch) return;
+    if (!canSearch) return;
     const timer = window.setTimeout(() => {
       const trimmed = value.trim();
       updateParams({
@@ -1471,7 +1473,7 @@ function PackingProductNameCell({
       });
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [value, isActiveSearch, line.id]);
+  }, [value, canSearch, line.id]);
 
   const applyProduct = (product: ShopifySearchProduct) => {
     setValue(product.title);
@@ -1489,12 +1491,14 @@ function PackingProductNameCell({
         type="search"
         value={value}
         onFocus={() => {
+          setIsFocused(true);
           if (value.trim().length >= 2) {
             updateParams({ productSearch: value.trim(), packingSearchLineId: String(line.id) });
           }
         }}
         onChange={(event) => setValue(event.currentTarget.value)}
         onBlur={(event) => {
+          setIsFocused(false);
           submitPortalCell(fetcher, {
             intent: "update_packing_line",
             lineId: line.id,
