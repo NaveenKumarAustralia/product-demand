@@ -471,10 +471,10 @@ const PACKING_SIZES = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L
 const DEFAULT_PACKING_ROWS = 5;
 const PACKING_COLUMNS = [
   { id: "box", label: "Box", width: 70, center: true },
-  { id: "picture", label: "Picture", width: 105, center: true },
-  { id: "fabric", label: "Fabric Image", width: 120, center: true },
-  { id: "name", label: "Name", width: 300 },
-  { id: "sku", label: "SKU", width: 150 },
+  { id: "picture", label: "Picture", width: 150, center: true },
+  { id: "fabric", label: "Fabric Image", width: 150, center: true },
+  { id: "name", label: "Name", width: 320 },
+  { id: "sku", label: "SKU", width: 220 },
   ...PACKING_SIZES.map((size) => ({ id: `qty:${size}`, label: size, width: 76, center: true })),
   { id: "total", label: "Total", width: 82, center: true },
   { id: "price", label: "Price ₹", width: 92, center: true },
@@ -1407,7 +1407,7 @@ function PackingListLineRow({
           updateParams={updateParams}
         />
       </td>
-      <td style={s.td}><PackingTextInput lineId={line.id} field="sku" value={line.sku ?? ""} multiline /></td>
+      <td style={s.td}><PackingSkuCell lineId={line.id} value={line.sku ?? ""} /></td>
       {PACKING_SIZES.map((size) => (
         <td key={size} style={{ ...s.td, textAlign: "center" }}>
           <input
@@ -1549,6 +1549,24 @@ function PackingTextInput({ lineId, field, value, multiline, center }: { lineId:
     style: { ...(multiline ? s.packingTextarea : s.packingCellInput), ...(center ? { textAlign: "center" as const } : {}) },
   };
   return multiline ? <textarea rows={3} {...common} /> : <input type="text" {...common} />;
+}
+
+function PackingSkuCell({ lineId, value }: { lineId: number; value: string }) {
+  const fetcher = useFetcher();
+
+  return (
+    <textarea
+      rows={7}
+      defaultValue={value}
+      onBlur={(event) => submitPortalCell(fetcher, {
+        intent: "update_packing_line",
+        lineId,
+        field: "sku",
+        value: event.currentTarget.value,
+      })}
+      style={s.packingSkuTextarea}
+    />
+  );
 }
 
 function FabricImageCell({ lineId, value }: { lineId: number; value: string }) {
@@ -2273,14 +2291,14 @@ const s: Record<string, React.CSSProperties> = {
     gap: 8,
     padding: "0 0 4px",
   },
-  packingThumb: { width: 72, height: 96, objectFit: "cover", borderRadius: 3 },
-  fabricThumb: { width: 82, height: 82, objectFit: "cover", borderRadius: 3 },
+  packingThumb: { width: 108, height: 144, objectFit: "cover", borderRadius: 3 },
+  fabricThumb: { width: 120, height: 120, objectFit: "cover", borderRadius: 3 },
   fabricImageDrop: {
     position: "relative",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    minHeight: 82,
+    minHeight: 120,
     border: "1px dashed #94a3b8",
     borderRadius: 6,
     color: "#64748b",
@@ -2318,6 +2336,22 @@ const s: Record<string, React.CSSProperties> = {
     resize: "vertical",
     boxSizing: "border-box",
     fontFamily: "inherit",
+  },
+  packingSkuTextarea: {
+    width: "100%",
+    minHeight: 142,
+    border: "1px solid transparent",
+    background: "transparent",
+    outline: "none",
+    fontSize: 13,
+    lineHeight: 1.35,
+    fontWeight: 800,
+    color: "#4b5563",
+    resize: "none",
+    boxSizing: "border-box",
+    fontFamily: "monospace",
+    whiteSpace: "pre-line",
+    overflow: "hidden",
   },
   productCellSearch: {
     position: "relative",
