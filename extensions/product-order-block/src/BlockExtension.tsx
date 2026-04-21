@@ -92,8 +92,8 @@ function formatShortDate(value?: string | null) {
 
 function tableWidths(orderCount: number) {
   return orderCount <= 1
-    ? { size: "16%", stock: "16%", order: "18%", addOrder: "24%", total: "16%" }
-    : { size: "14%", stock: "12%", order: "13%", addOrder: "21%", total: "12%" };
+    ? { size: "16%", stock: "15%", order: "20%", addOrder: "23%", total: "16%" }
+    : { size: "13%", stock: "11%", order: "15%", addOrder: "19%", total: "10%" };
 }
 
 function productGroupOptions(currentGroup: string) {
@@ -383,7 +383,7 @@ function ProductOrderBlock() {
     <InlineStack gap="small" blockAlignment="center">
       {order ? (
         <>
-          <Badge tone="success">{labelFor(STATUS_OPTIONS, order.supplierStatus)}</Badge>
+          <Badge tone="success">{orders.length > 1 ? `${orders.length} open orders` : "On order"}</Badge>
           <Text>{order.totalQty} units</Text>
         </>
       ) : (
@@ -459,8 +459,10 @@ function ProductOrderBlock() {
         {orderColumns.map((item, idx) => (
           <Col key={item.id} w={W.order} align="center">
             <BlockStack gap="none">
+              <Text>ETA</Text>
               <Text fontWeight="bold">{formatShortDate(item.eta)}</Text>
-              <Text fontWeight="bold">On order {idx + 1}</Text>
+              <Text>{labelFor(STATUS_OPTIONS, item.supplierStatus)}</Text>
+              <Text fontWeight="bold">Order {idx + 1}</Text>
             </BlockStack>
           </Col>
         ))}
