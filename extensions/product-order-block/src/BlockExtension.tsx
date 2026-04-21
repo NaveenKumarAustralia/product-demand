@@ -60,6 +60,7 @@ const BASE_PRODUCT_GROUP_OPTIONS = [
   "Pants",
   "Corduroy",
 ];
+const PRODUCT_GROUP_PLACEHOLDER_VALUE = "__select_product_group__";
 const NEW_PRODUCT_GROUP_VALUE = "__new_product_group__";
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
@@ -68,6 +69,14 @@ const PRODUCT_GROUP_RENAMES: Record<string, string> = {
 function normalizeProductGroup(value?: string | null) {
   const trimmed = value?.trim() ?? "";
   return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
+}
+
+function isRealProductGroup(value?: string | null) {
+  return Boolean(
+    value &&
+    value !== PRODUCT_GROUP_PLACEHOLDER_VALUE &&
+    value !== NEW_PRODUCT_GROUP_VALUE,
+  );
 }
 
 function labelFor(options: Array<{ value: string; label: string }>, value?: string | null) {
@@ -90,9 +99,9 @@ function tableWidths(orderCount: number) {
 function productGroupOptions(currentGroup: string) {
   const options = [...BASE_PRODUCT_GROUP_OPTIONS, currentGroup]
     .map((value) => normalizeProductGroup(value))
-    .filter(Boolean);
+    .filter(isRealProductGroup);
   return [
-    { value: "", label: "Select product group" },
+    { value: PRODUCT_GROUP_PLACEHOLDER_VALUE, label: "Select product group" },
     ...Array.from(new Set(options)).map((value) => ({ value, label: value })),
     { value: NEW_PRODUCT_GROUP_VALUE, label: "Create new group" },
   ];
@@ -153,7 +162,7 @@ function ProductOrderBlock() {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [orderPriority, setOrderPriority] = useState("");
-  const [orderProductGroup, setOrderProductGroup] = useState("");
+  const [orderProductGroup, setOrderProductGroup] = useState(PRODUCT_GROUP_PLACEHOLDER_VALUE);
   const [customProductGroup, setCustomProductGroup] = useState("");
 
   const applyOrderStatus = useCallback((nextOrder: OrderStatus, nextOrders: OrderStatusItem[]) => {
@@ -162,7 +171,7 @@ function ProductOrderBlock() {
     setOrders(visibleOrders);
     setOrderPriority(nextOrder?.priority || "");
     setOrderProductGroup((current) => (
-      normalizeProductGroup(nextOrder?.productType || current)
+      normalizeProductGroup(nextOrder?.productType) || current || PRODUCT_GROUP_PLACEHOLDER_VALUE
     ));
 
     const onOrderByVariant = new Map<string, number>();
@@ -200,14 +209,13 @@ function ProductOrderBlock() {
           shop: { myshopifyDomain: string };
           product: {
             title: string; vendor: string;
-            productType: string;
             featuredImage: { url: string } | null;
             variants: { nodes: Array<{ id: string; title: string; sku: string; inventoryQuantity: number }> };
           };
         }>(`{
           shop { myshopifyDomain }
           product(id: "${productGid}") {
-            title vendor productType
+            title vendor
             featuredImage { url }
             variants(first: 100) { nodes { id title sku inventoryQuantity } }
           }
@@ -300,7 +308,7 @@ function ProductOrderBlock() {
 
   async function updateProductGroup(nextProductGroup: string) {
     setOrderProductGroup(nextProductGroup);
-    if (nextProductGroup === NEW_PRODUCT_GROUP_VALUE) return;
+    if (nextProductGroup === NEW_PRODUCT_GROUP_VALUE || nextProductGroup === PRODUCT_GROUP_PLACEHOLDER_VALUE) return;
     setCustomProductGroup("");
     await saveProductGroup(nextProductGroup);
   }
@@ -323,6 +331,11 @@ function ProductOrderBlock() {
     const selectedProductGroup = orderProductGroup === NEW_PRODUCT_GROUP_VALUE
       ? normalizeProductGroup(customProductGroup)
       : normalizeProductGroup(orderProductGroup);
+    if (!isRealProductGroup(selectedProductGroup)) {
+      setSubmitting(false);
+      setFormError("Select or create a product group");
+      return;
+    }
     try {
       const token = await auth.idToken();
       if (!token) throw new Error("No auth token");
@@ -427,6 +440,7 @@ function ProductOrderBlock() {
         <TextField
           label="New product group"
           value={customProductGroup}
+          onInput={(value) => setCustomProductGroup(normalizeProductGroup(value))}
           onChange={updateCustomProductGroup}
           placeholder="Type new group name"
         />
