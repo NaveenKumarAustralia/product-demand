@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useSearchParams } from "react-router";
 import prisma from "../db.server";
@@ -1533,6 +1534,7 @@ function PackingProductNameCell({
   const [value, setValue] = useState(displayValue);
   const [isFocused, setIsFocused] = useState(false);
   const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
+  const [canPortalDropdown, setCanPortalDropdown] = useState(false);
   const canSearch = isFocused || isActiveSearch;
   const shouldShowResults = canSearch && value.trim().length >= 2;
   const updateDropdownRect = () => {
@@ -1543,6 +1545,10 @@ function PackingProductNameCell({
   useEffect(() => {
     setValue(displayValue);
   }, [displayValue, line.id]);
+
+  useEffect(() => {
+    setCanPortalDropdown(true);
+  }, []);
 
   useEffect(() => {
     if (!shouldShowResults) {
@@ -1605,17 +1611,13 @@ function PackingProductNameCell({
         placeholder="Search or type product"
         style={s.packingCellInput}
       />
-      {shouldShowResults && (
+      {shouldShowResults && canPortalDropdown && dropdownRect && createPortal(
         <div
           style={{
             ...s.productCellResults,
-            ...(dropdownRect
-              ? {
-                  top: dropdownRect.bottom + 8,
-                  left: dropdownRect.left,
-                  width: Math.max(dropdownRect.width, 460),
-                }
-              : {}),
+            top: dropdownRect.bottom + 8,
+            left: dropdownRect.left,
+            width: Math.max(dropdownRect.width, 460),
           }}
         >
           {value.trim() !== productSearch ? (
@@ -1637,7 +1639,8 @@ function PackingProductNameCell({
           )) : (
             <div style={s.productCellResultEmpty}>No products found. Keep typed text for a custom row.</div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
