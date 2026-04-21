@@ -1,7 +1,8 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useSearchParams } from "react-router";
 import prisma from "../db.server";
+import { unauthenticated } from "../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
@@ -627,46 +628,41 @@ function packingTotal(qtys: Record<string, number>) {
 }
 
 async function searchShopifyProducts(query: string): Promise<ShopifySearchProduct[]> {
+  const trimmedQuery = query.trim();
+  if (trimmedQuery.length < 2) return [];
+
   const session = await prisma.session.findFirst({
     where: {
       accessToken: { not: "" },
     },
-    orderBy: { expires: "asc" },
+    orderBy: { isOnline: "asc" },
   });
   if (!session?.shop || !session.accessToken) return [];
 
-  const response = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": session.accessToken,
-    },
-    body: JSON.stringify({
-      query: `#graphql
-        query PackingProductSearch($query: String!) {
-          products(first: 8, query: $query, sortKey: TITLE) {
-            edges {
-              node {
-                id
-                title
-                featuredImage { url }
-                variants(first: 50) {
-                  edges {
-                    node { title sku }
-                  }
+  const escapedQuery = trimmedQuery.replace(/[\\"]/g, "\\$&");
+  const graphqlQuery = `#graphql
+    query PackingProductSearch($query: String) {
+      products(first: 20, query: $query, sortKey: TITLE) {
+        edges {
+          node {
+            id
+            title
+            featuredImage { url }
+            variants(first: 50) {
+              edges {
+                node {
+                  title
+                  sku
                 }
               }
             }
           }
         }
-      `,
-      variables: { query: `${query}*` },
-    }),
-  });
-  if (!response.ok) return [];
+      }
+    }
+  `;
 
-  const json = await response.json();
-  return (json.data?.products?.edges ?? []).map((edge: any) => {
+  const mapProducts = (json: any) => (json.data?.products?.edges ?? []).map((edge: any) => {
     const variants = edge.node.variants.edges.map((variantEdge: any) => variantEdge.node);
     return {
       id: edge.node.id,
@@ -676,6 +672,49 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
       sizes: Array.from(new Set(variants.map((variant: any) => variant.title).filter(Boolean))),
     };
   });
+
+  const matchesLocally = (product: ShopifySearchProduct) => {
+    const needle = trimmedQuery.toLowerCase();
+    return product.title.toLowerCase().includes(needle) || product.skus.some((sku) => sku.toLowerCase().includes(needle));
+  };
+  const directFetch = async (shopifyQuery: string | null) => {
+    try {
+      const response = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": session.accessToken,
+        },
+        body: JSON.stringify({
+          query: graphqlQuery,
+          variables: { query: shopifyQuery },
+        }),
+      });
+      if (!response.ok) return [];
+      return mapProducts(await response.json()) as ShopifySearchProduct[];
+    } catch {
+      return [];
+    }
+  };
+
+  try {
+    const { admin } = await unauthenticated.admin(session.shop);
+    const response = await admin.graphql(graphqlQuery, {
+      variables: { query: `title:*${escapedQuery}* OR sku:*${escapedQuery}*` },
+    });
+    const json = await response.json();
+    const products = mapProducts(json);
+    if (products.length) return products;
+
+    const fallbackResponse = await admin.graphql(graphqlQuery, { variables: { query: null } });
+    const fallbackJson = await fallbackResponse.json();
+    return mapProducts(fallbackJson).filter(matchesLocally).slice(0, 8);
+  } catch (error) {
+    console.error("Shopify product search failed", error);
+    const products = await directFetch(`title:*${escapedQuery}* OR sku:*${escapedQuery}*`);
+    if (products.length) return products;
+    return (await directFetch(null)).filter(matchesLocally).slice(0, 8);
+  }
 }
 
 function sizeColumnId(size: string) {
@@ -728,6 +767,7 @@ export default function PortalDashboard() {
   const columnWidthsFetcher = useFetcher();
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
     { id: "orderDate", label: "Order Date" },
@@ -751,8 +791,17 @@ export default function PortalDashboard() {
       if (value) next.set(key, value);
       else next.delete(key);
     }
-    setSearchParams(next);
+    setSearchParams(next, { replace: true, preventScrollReset: true });
   };
+  useEffect(() => {
+    setSearchTitleInput(searchTitle);
+  }, [searchTitle]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [searchTitleInput, searchTitle]);
   const activePageTitle = page === "dashboard"
     ? "Dashboard"
     : page === "fabric"
@@ -880,8 +929,8 @@ export default function PortalDashboard() {
                   Search
                   <input
                     type="search"
-                    value={searchTitle}
-                    onChange={(event) => updateParams({ q: event.currentTarget.value })}
+                    value={searchTitleInput}
+                    onChange={(event) => setSearchTitleInput(event.currentTarget.value)}
                     style={s.searchInput}
                     placeholder="Product title"
                   />
@@ -1167,7 +1216,18 @@ function PackingListDetail({
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
+  const [productSearchInput, setProductSearchInput] = useState(productSearch);
   const tableWidth = 1280;
+
+  useEffect(() => {
+    setProductSearchInput(productSearch);
+  }, [productSearch]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (productSearchInput !== productSearch) updateParams({ productSearch: productSearchInput });
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [productSearchInput, productSearch]);
 
   return (
     <div style={s.packingDetailInner}>
@@ -1238,13 +1298,16 @@ function PackingListDetail({
           Add Shopify product
           <input
             type="search"
-            value={productSearch}
-            onChange={(event) => updateParams({ productSearch: event.currentTarget.value })}
+            value={productSearchInput}
+            onChange={(event) => setProductSearchInput(event.currentTarget.value)}
             style={s.productSearchInput}
             placeholder="Search product title"
           />
         </label>
-        {productSearch.trim().length >= 2 && (
+        {productSearchInput.trim().length >= 2 && productSearchInput !== productSearch && (
+          <div style={s.settingsHint}>Searching...</div>
+        )}
+        {productSearchInput.trim().length >= 2 && productSearchInput === productSearch && (
           <div style={s.productResults}>
             {productResults.length ? productResults.map((product) => (
               <div key={product.id} style={s.productResult}>
