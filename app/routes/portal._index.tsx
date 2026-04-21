@@ -516,9 +516,11 @@ function OrderRow({ order, rowIndex, sizes }: { order: Order; rowIndex: number; 
 
       {/* Picture */}
       <Td rowIndex={rowIndex} colIndex={2} center>
-        {order.productImageUrl
-          ? <img src={order.productImageUrl} alt="" style={s.thumb} />
-          : <div style={s.noImg}>—</div>}
+        <div style={s.imageCell}>
+          {order.productImageUrl
+            ? <img src={order.productImageUrl} alt="" style={s.thumb} />
+            : <div style={s.noImg}>—</div>}
+        </div>
       </Td>
 
       {/* Name */}
@@ -938,6 +940,12 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #d1d5db",
     background: "#fff",
     overflow: "hidden",
+  },
+  imageCell: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: "100%",
   },
   thumb: { width: 86, height: 115, objectFit: "cover", borderRadius: 2, display: "block", margin: "0 auto" },
   noImg: { color: "#d1d5db", textAlign: "center" },
