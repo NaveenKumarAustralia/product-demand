@@ -1398,7 +1398,7 @@ function PackingListLineRow({
       <td style={s.td}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></td>
       <td style={{ ...s.td, textAlign: "center" }}>{line.productImageUrl ? <img src={line.productImageUrl} alt="" style={s.packingThumb} /> : <div style={s.noImg}>—</div>}</td>
       <td style={{ ...s.td, textAlign: "center" }}><FabricImageCell lineId={line.id} value={line.fabricImageData ?? ""} /></td>
-      <td style={s.td}>
+      <td style={{ ...s.td, ...s.dropdownTd }}>
         <PackingProductNameCell
           line={line}
           isActiveSearch={activeSearchLineId === line.id}
@@ -2260,7 +2260,8 @@ const s: Record<string, React.CSSProperties> = {
   productResultText: { display: "grid", gap: 3, flex: 1, fontSize: 13, color: "#374151" },
   packingTableWrap: {
     maxHeight: "calc(100vh - 185px)",
-    overflow: "auto",
+    overflowX: "auto",
+    overflowY: "visible",
     background: "#fff",
     border: "1px solid #cbd5e1",
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
@@ -2333,7 +2334,7 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #cbd5e1",
     borderRadius: 10,
     boxShadow: "0 16px 30px rgba(15,23,42,0.2)",
-    zIndex: 20,
+    zIndex: 100,
     padding: 6,
   },
   productCellResult: {
@@ -2424,6 +2425,11 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #d1d5db",
     background: "#fff",
     overflow: "hidden",
+  },
+  dropdownTd: {
+    overflow: "visible",
+    position: "relative",
+    zIndex: 30,
   },
   imageCell: {
     display: "flex",
