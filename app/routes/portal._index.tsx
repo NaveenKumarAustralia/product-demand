@@ -349,17 +349,28 @@ export default function PortalDashboard() {
   return (
     <div style={s.appShell}>
       <aside style={{ ...s.sidebar, ...(sidebarCollapsed ? s.sidebarCollapsed : {}) }}>
-        <button
-          type="button"
-          onClick={() => setSidebarCollapsed((current) => !current)}
-          style={s.collapseButton}
-          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-        >
-          {sidebarCollapsed ? ">" : "<"}
-        </button>
-        {!sidebarCollapsed && (
+        <div style={sidebarCollapsed ? s.sidebarTopCollapsed : s.sidebarTop}>
+          {!sidebarCollapsed && <div style={s.sidebarTitle}>Supplier Portal</div>}
+          <button
+            type="button"
+            onClick={() => setSidebarCollapsed((current) => !current)}
+            style={s.collapseButton}
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            {sidebarCollapsed ? ">" : "<"}
+          </button>
+        </div>
+        {sidebarCollapsed ? (
           <>
-            <div style={s.sidebarTitle}>Supplier Portal</div>
+            <nav style={s.iconNav}>
+              <a title="Dashboard" href="/portal?page=dashboard" style={{ ...s.iconNavItem, ...(page === "dashboard" ? s.iconNavItemActive : {}) }}>D</a>
+              <a title="Existing Products Restock" href="/portal" style={{ ...s.iconNavItem, ...(page === "restock" && !selectedProductGroup ? s.iconNavItemActive : {}) }}>R</a>
+              <a title="Fabric in stock" href="/portal?page=fabric" style={{ ...s.iconNavItem, ...(page === "fabric" ? s.iconNavItemActive : {}) }}>F</a>
+            </nav>
+            <a title="Settings" href="/portal?page=settings" style={{ ...s.iconNavItem, ...(page === "settings" ? s.iconNavItemActive : {}), ...s.settingsLink }}>S</a>
+          </>
+        ) : (
+          <>
             <nav style={s.nav}>
               <a href="/portal?page=dashboard" style={{ ...s.navItem, ...(page === "dashboard" ? s.navItemActive : {}) }}>Dashboard</a>
               <a href="/portal" style={{ ...s.navItem, ...(page === "restock" && !selectedProductGroup ? s.navItemActive : {}) }}>Existing Products Restock</a>
@@ -734,24 +745,34 @@ const s: Record<string, React.CSSProperties> = {
     position: "relative",
     transition: "width 160ms ease, padding 160ms ease",
   },
-  sidebarCollapsed: { width: 44, padding: "18px 8px" },
+  sidebarCollapsed: { width: 68, padding: "18px 10px", alignItems: "center" },
+  sidebarTop: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    marginBottom: 22,
+  },
+  sidebarTopCollapsed: {
+    display: "flex",
+    justifyContent: "center",
+    marginBottom: 22,
+    width: "100%",
+  },
   collapseButton: {
-    position: "absolute",
-    top: 14,
-    right: -14,
-    width: 28,
-    height: 28,
+    width: 32,
+    height: 32,
     borderRadius: 999,
     border: "1px solid #334155",
-    background: "#fff",
-    color: "#111827",
+    background: "#1f2937",
+    color: "#f8fafc",
     fontWeight: 800,
     cursor: "pointer",
-    zIndex: 20,
-    boxShadow: "0 1px 3px rgba(15,23,42,0.2)",
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.08)",
   },
-  sidebarTitle: { fontSize: 17, fontWeight: 800, marginBottom: 22 },
+  sidebarTitle: { fontSize: 17, fontWeight: 800 },
   nav: { display: "flex", flexDirection: "column", gap: 8 },
+  iconNav: { display: "flex", flexDirection: "column", gap: 10, alignItems: "center", width: "100%" },
   navItem: {
     display: "block",
     color: "#cbd5e1",
@@ -771,6 +792,21 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 700,
   },
   navItemActive: { background: "#fff", color: "#111827" },
+  iconNavItem: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 40,
+    height: 40,
+    color: "#cbd5e1",
+    textDecoration: "none",
+    borderRadius: 10,
+    fontSize: 13,
+    fontWeight: 800,
+    border: "1px solid rgba(148,163,184,0.18)",
+    background: "rgba(15,23,42,0.35)",
+  },
+  iconNavItemActive: { background: "#fff", color: "#111827", borderColor: "#fff" },
   settingsLink: { marginTop: "auto" },
   count: { fontSize: 13, color: "#6b7280" },
   main: { flex: 1, minWidth: 0, padding: "24px 16px" },
