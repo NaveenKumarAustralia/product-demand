@@ -370,10 +370,8 @@ function ProductOrderBlock() {
     <InlineStack gap="small" blockAlignment="center">
       {order ? (
         <>
-          <Badge tone="success">On order</Badge>
-          <Text>
-            {order.totalQty} units · {order.supplier} · {labelFor(STATUS_OPTIONS, order.supplierStatus)}
-          </Text>
+          <Badge tone="success">{labelFor(STATUS_OPTIONS, order.supplierStatus)}</Badge>
+          <Text>{order.totalQty} units</Text>
         </>
       ) : (
         <Badge>Not on order</Badge>
