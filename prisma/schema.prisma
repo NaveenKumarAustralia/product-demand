@@ -81,3 +81,34 @@ model PortalSetting {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+model PackingList {
+  id           Int               @id @default(autoincrement())
+  title        String
+  shipmentDate DateTime?
+  status       String            @default("draft")
+  notes        String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  lines        PackingListLine[]
+}
+
+model PackingListLine {
+  id              Int         @id @default(autoincrement())
+  packingListId   Int
+  packingList     PackingList @relation(fields: [packingListId], references: [id], onDelete: Cascade)
+  boxNumber       String?
+  productId       String?
+  productTitle    String
+  productImageUrl String?
+  fabricImageData String?
+  sku             String?
+  isCustom        Boolean     @default(false)
+  qtys            Json        @default("{}")
+  priceRupees     Float?
+  weight          Float?
+  notes           String?
+  sortOrder       Int         @default(0)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+}

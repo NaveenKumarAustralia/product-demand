@@ -12,8 +12,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const selectedStatus = url.searchParams.get("status") ?? "";
   const selectedPriority = url.searchParams.get("priority") ?? "";
   const searchTitle = url.searchParams.get("q") ?? "";
+  const packingId = Number(url.searchParams.get("packingId") ?? 0) || null;
+  const productSearch = url.searchParams.get("productSearch") ?? "";
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
-  const [allOrders, columnWidthsSetting, loginRequiredSetting, usersSetting, activeUsersSetting] = await Promise.all([
+  const [allOrders, columnWidthsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -34,6 +36,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     prisma.portalSetting.findUnique({
       where: { key: PORTAL_ACTIVE_USERS_KEY },
       select: { value: true },
+    }),
+    prisma.packingList.findMany({
+      orderBy: { createdAt: "desc" },
+      include: { lines: { orderBy: [{ boxNumber: "asc" }, { sortOrder: "asc" }, { id: "asc" }] } },
     }),
   ]);
   const users = normalizePortalUsers(usersSetting?.value);
@@ -61,6 +67,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (sortBy === "orderDateAsc") return a.createdAt.getTime() - b.createdAt.getTime();
       return b.createdAt.getTime() - a.createdAt.getTime();
     });
+  const selectedPackingList = packingId
+    ? packingLists.find((list) => list.id === packingId) ?? null
+    : packingLists[0] ?? null;
+  const productResults = page === "packing" && selectedPackingList && productSearch.trim().length >= 2
+    ? await searchShopifyProducts(productSearch)
+    : [];
 
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","S/M","M","M/L","L","L/XL","XL","2XL","3XL","4XL","ONE SIZE"];
@@ -87,6 +99,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     sortBy,
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
+    packingLists,
+    selectedPackingList,
+    productSearch,
+    productResults,
     loginRequired,
     users,
     currentUser,
@@ -172,6 +188,140 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (loginRequired && users.length > 0 && !currentUser) {
+    return null;
+  }
+
+  if (intent === "create_packing_list") {
+    const title = String(form.get("title") ?? "").trim() || `Shipment ${formatPortalDate(new Date())}`;
+    const shipmentDate = parsePortalDate(String(form.get("shipmentDate") ?? ""));
+    const packingList = await prisma.packingList.create({
+      data: {
+        title,
+        shipmentDate,
+      },
+    });
+    return new Response(null, {
+      status: 303,
+      headers: { Location: `/portal?page=packing&packingId=${packingList.id}` },
+    });
+  }
+
+  if (intent === "update_packing_list") {
+    const packingId = Number(form.get("packingId"));
+    const field = String(form.get("field") ?? "");
+    const value = String(form.get("value") ?? "");
+    const data: Record<string, unknown> = {};
+    if (field === "title") data.title = value.trim() || "Untitled shipment";
+    if (field === "status") data.status = value || "draft";
+    if (field === "shipmentDate") {
+      const parsedDate = value ? parsePortalDate(value) : null;
+      if (value && !parsedDate) return null;
+      data.shipmentDate = parsedDate;
+    }
+    if (field === "notes") data.notes = value || null;
+    if (packingId && Object.keys(data).length) {
+      await prisma.packingList.update({ where: { id: packingId }, data });
+    }
+    return null;
+  }
+
+  if (intent === "add_custom_packing_line") {
+    const packingId = Number(form.get("packingId"));
+    const maxLine = await prisma.packingListLine.findFirst({
+      where: { packingListId: packingId },
+      orderBy: { sortOrder: "desc" },
+      select: { sortOrder: true },
+    });
+    await prisma.packingListLine.create({
+      data: {
+        packingListId: packingId,
+        productTitle: "Custom item",
+        isCustom: true,
+        sortOrder: (maxLine?.sortOrder ?? 0) + 1,
+      },
+    });
+    return null;
+  }
+
+  if (intent === "add_product_packing_line") {
+    const packingId = Number(form.get("packingId"));
+    const product = JSON.parse(String(form.get("product") ?? "{}")) as ShopifySearchProduct;
+    const maxLine = await prisma.packingListLine.findFirst({
+      where: { packingListId: packingId },
+      orderBy: { sortOrder: "desc" },
+      select: { sortOrder: true },
+    });
+    await prisma.packingListLine.create({
+      data: {
+        packingListId: packingId,
+        productId: product.id || null,
+        productTitle: product.title || "Untitled product",
+        productImageUrl: product.imageUrl || null,
+        sku: product.skus?.filter(Boolean).join("\n") || null,
+        qtys: Object.fromEntries((product.sizes ?? []).map((size) => [size, 0])),
+        sortOrder: (maxLine?.sortOrder ?? 0) + 1,
+      },
+    });
+    return null;
+  }
+
+  if (intent === "update_packing_line") {
+    const lineId = Number(form.get("lineId"));
+    const field = String(form.get("field") ?? "");
+    const value = String(form.get("value") ?? "");
+    const data: Record<string, unknown> = {};
+    if (field === "boxNumber") data.boxNumber = value || null;
+    if (field === "productTitle") data.productTitle = value || "Untitled item";
+    if (field === "sku") data.sku = value || null;
+    if (field === "priceRupees") data.priceRupees = value ? Number(value) || 0 : null;
+    if (field === "weight") data.weight = value ? Number(value) || 0 : null;
+    if (field === "notes") data.notes = value || null;
+    if (field === "fabricImageData") data.fabricImageData = value || null;
+    if (lineId && Object.keys(data).length) {
+      await prisma.packingListLine.update({ where: { id: lineId }, data });
+    }
+    return null;
+  }
+
+  if (intent === "update_packing_qty") {
+    const lineId = Number(form.get("lineId"));
+    const size = String(form.get("size") ?? "");
+    const value = Math.max(0, Number(form.get("value") ?? 0) || 0);
+    const line = await prisma.packingListLine.findUnique({ where: { id: lineId }, select: { qtys: true } });
+    if (!line || !size) return null;
+    const qtys = normalizeQtys(line.qtys);
+    qtys[size] = value;
+    await prisma.packingListLine.update({ where: { id: lineId }, data: { qtys } });
+    return null;
+  }
+
+  if (intent === "duplicate_packing_line") {
+    const lineId = Number(form.get("lineId"));
+    const line = await prisma.packingListLine.findUnique({ where: { id: lineId } });
+    if (!line) return null;
+    await prisma.packingListLine.create({
+      data: {
+        packingListId: line.packingListId,
+        boxNumber: line.boxNumber,
+        productId: line.productId,
+        productTitle: line.productTitle,
+        productImageUrl: line.productImageUrl,
+        fabricImageData: line.fabricImageData,
+        sku: line.sku,
+        isCustom: line.isCustom,
+        qtys: line.qtys ?? {},
+        priceRupees: line.priceRupees,
+        weight: line.weight,
+        notes: line.notes,
+        sortOrder: line.sortOrder + 1,
+      },
+    });
+    return null;
+  }
+
+  if (intent === "delete_packing_line") {
+    const lineId = Number(form.get("lineId"));
+    if (lineId) await prisma.packingListLine.delete({ where: { id: lineId } });
     return null;
   }
 
@@ -280,6 +430,16 @@ const PRIORITY_OPTIONS = [
   { value: "urgent",    label: "URGENT",    bg: "#dc2626", color: "#fff" },
   { value: "cancelled", label: "Cancelled", bg: "#d97706", color: "#fff" },
 ];
+const PACKING_STATUS_OPTIONS = [
+  { value: "draft", label: "Draft" },
+  { value: "sent_to_supplier", label: "Sent to supplier" },
+  { value: "confirmed", label: "Confirmed" },
+  { value: "in_shipment", label: "In shipment" },
+  { value: "arrived", label: "Arrived" },
+  { value: "checked", label: "Checked" },
+  { value: "completed", label: "Completed" },
+];
+const PACKING_SIZES = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
 };
@@ -330,6 +490,10 @@ function labelForPriority(value: string) {
   return PRIORITY_OPTIONS.find((option) => option.value === value)?.label ?? value;
 }
 
+function labelForPackingStatus(value: string) {
+  return PACKING_STATUS_OPTIONS.find((option) => option.value === value)?.label ?? value;
+}
+
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -362,6 +526,13 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
 type ColumnDef = { id: string; label: string; center?: boolean };
 type PortalUser = { id: string; name: string; admin: boolean; active: boolean };
 type ActivePortalUser = PortalUser & { initials: string; lastSeen: number };
+type ShopifySearchProduct = {
+  id: string;
+  title: string;
+  imageUrl: string | null;
+  skus: string[];
+  sizes: string[];
+};
 
 function normalizePortalUsers(value: unknown): PortalUser[] {
   if (!Array.isArray(value)) return [];
@@ -442,6 +613,71 @@ async function savePortalUsers(users: PortalUser[]) {
   });
 }
 
+function normalizeQtys(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([size, qty]) => [size, Math.max(0, Number(qty) || 0)] as const)
+      .filter(([size]) => Boolean(size)),
+  );
+}
+
+function packingTotal(qtys: Record<string, number>) {
+  return Object.values(qtys).reduce((sum, qty) => sum + qty, 0);
+}
+
+async function searchShopifyProducts(query: string): Promise<ShopifySearchProduct[]> {
+  const session = await prisma.session.findFirst({
+    where: {
+      accessToken: { not: "" },
+    },
+    orderBy: { expires: "asc" },
+  });
+  if (!session?.shop || !session.accessToken) return [];
+
+  const response = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": session.accessToken,
+    },
+    body: JSON.stringify({
+      query: `#graphql
+        query PackingProductSearch($query: String!) {
+          products(first: 8, query: $query, sortKey: TITLE) {
+            edges {
+              node {
+                id
+                title
+                featuredImage { url }
+                variants(first: 50) {
+                  edges {
+                    node { title sku }
+                  }
+                }
+              }
+            }
+          }
+        }
+      `,
+      variables: { query: `${query}*` },
+    }),
+  });
+  if (!response.ok) return [];
+
+  const json = await response.json();
+  return (json.data?.products?.edges ?? []).map((edge: any) => {
+    const variants = edge.node.variants.edges.map((variantEdge: any) => variantEdge.node);
+    return {
+      id: edge.node.id,
+      title: edge.node.title,
+      imageUrl: edge.node.featuredImage?.url ?? null,
+      skus: variants.map((variant: any) => variant.sku).filter(Boolean),
+      sizes: Array.from(new Set(variants.map((variant: any) => variant.title).filter(Boolean))),
+    };
+  });
+}
+
 function sizeColumnId(size: string) {
   return `size:${size}`;
 }
@@ -478,6 +714,10 @@ export default function PortalDashboard() {
     sortBy,
     page,
     columnWidths: savedColumnWidths,
+    packingLists,
+    selectedPackingList,
+    productSearch,
+    productResults,
     loginRequired,
     users,
     currentUser,
@@ -519,6 +759,8 @@ export default function PortalDashboard() {
       ? "Fabric in stock"
       : page === "settings"
         ? "Settings"
+        : page === "packing"
+          ? "Packing Lists"
         : selectedProductGroup || "Existing Products Restock";
 
   if (loginBlocked) {
@@ -609,6 +851,7 @@ export default function PortalDashboard() {
               <a title="Dashboard" href="/portal?page=dashboard" style={{ ...s.iconNavItem, ...(page === "dashboard" ? s.iconNavItemActive : {}) }}>D</a>
               <a title="Existing Products Restock" href="/portal" style={{ ...s.iconNavItem, ...(page === "restock" && !selectedProductGroup ? s.iconNavItemActive : {}) }}>R</a>
               <a title="Fabric in stock" href="/portal?page=fabric" style={{ ...s.iconNavItem, ...(page === "fabric" ? s.iconNavItemActive : {}) }}>F</a>
+              <a title="Packing Lists" href="/portal?page=packing" style={{ ...s.iconNavItem, ...(page === "packing" ? s.iconNavItemActive : {}) }}>P</a>
             </nav>
             <a title="Settings" href="/portal?page=settings" style={{ ...s.iconNavItem, ...(page === "settings" ? s.iconNavItemActive : {}), ...s.settingsLink }}>S</a>
           </>
@@ -618,6 +861,7 @@ export default function PortalDashboard() {
               <a href="/portal?page=dashboard" style={{ ...s.navItem, ...(page === "dashboard" ? s.navItemActive : {}) }}>Dashboard</a>
               <a href="/portal" style={{ ...s.navItem, ...(page === "restock" && !selectedProductGroup ? s.navItemActive : {}) }}>Existing Products Restock</a>
               <a href="/portal?page=fabric" style={{ ...s.navItem, ...(page === "fabric" ? s.navItemActive : {}) }}>Fabric in stock</a>
+              <a href="/portal?page=packing" style={{ ...s.navItem, ...(page === "packing" ? s.navItemActive : {}) }}>Packing Lists</a>
             </nav>
             <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), ...s.settingsLink }}>Settings</a>
           </>
@@ -700,6 +944,14 @@ export default function PortalDashboard() {
             users={users}
             currentUser={currentUser}
             loginRequired={loginRequired}
+          />
+        ) : page === "packing" ? (
+          <PackingListsPanel
+            packingLists={packingLists}
+            selectedPackingList={selectedPackingList}
+            productSearch={productSearch}
+            productResults={productResults}
+            updateParams={updateParams}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -842,6 +1094,300 @@ function SettingsPanel({
           </settingsFetcher.Form>
         )}
       </section>
+    </div>
+  );
+}
+
+type PackingListWithLines = Awaited<ReturnType<typeof loader>>["packingLists"][number];
+
+function PackingListsPanel({
+  packingLists,
+  selectedPackingList,
+  productSearch,
+  productResults,
+  updateParams,
+}: {
+  packingLists: PackingListWithLines[];
+  selectedPackingList: PackingListWithLines | null;
+  productSearch: string;
+  productResults: ShopifySearchProduct[];
+  updateParams: (updates: Record<string, string>) => void;
+}) {
+  const fetcher = useFetcher();
+
+  return (
+    <div style={s.packingLayout}>
+      <aside style={s.packingSidebar}>
+        <fetcher.Form method="post" style={s.packingCreateForm}>
+          <input type="hidden" name="intent" value="create_packing_list" />
+          <input name="title" placeholder="Shipment name" style={s.packingInput} />
+          <input name="shipmentDate" placeholder="dd/mm/yy" style={s.packingInput} />
+          <button type="submit" style={s.loginButton}>New packing list</button>
+        </fetcher.Form>
+
+        <div style={s.packingListNav}>
+          {packingLists.map((list) => (
+            <a
+              key={list.id}
+              href={`/portal?page=packing&packingId=${list.id}`}
+              style={{ ...s.packingListLink, ...(selectedPackingList?.id === list.id ? s.packingListLinkActive : {}) }}
+            >
+              <strong>{list.title}</strong>
+              <span>{formatPortalDate(list.shipmentDate)} · {labelForPackingStatus(list.status)}</span>
+            </a>
+          ))}
+        </div>
+      </aside>
+
+      <section style={s.packingDetail}>
+        {!selectedPackingList ? (
+          <div style={s.empty}>Create a packing list to get started.</div>
+        ) : (
+          <PackingListDetail
+            packingList={selectedPackingList}
+            productSearch={productSearch}
+            productResults={productResults}
+            updateParams={updateParams}
+          />
+        )}
+      </section>
+    </div>
+  );
+}
+
+function PackingListDetail({
+  packingList,
+  productSearch,
+  productResults,
+  updateParams,
+}: {
+  packingList: PackingListWithLines;
+  productSearch: string;
+  productResults: ShopifySearchProduct[];
+  updateParams: (updates: Record<string, string>) => void;
+}) {
+  const fetcher = useFetcher();
+  const tableWidth = 1280;
+
+  return (
+    <div style={s.packingDetailInner}>
+      <div style={s.packingTop}>
+        <div style={s.packingMeta}>
+          <label style={s.filterLabel}>
+            Shipment
+            <input
+              defaultValue={packingList.title}
+              onBlur={(event) => submitPortalCell(fetcher, {
+                intent: "update_packing_list",
+                packingId: packingList.id,
+                field: "title",
+                value: event.currentTarget.value,
+              })}
+              style={s.packingInput}
+            />
+          </label>
+          <label style={s.filterLabel}>
+            Date
+            <input
+              defaultValue={formatPortalDate(packingList.shipmentDate)}
+              onBlur={(event) => submitPortalCell(fetcher, {
+                intent: "update_packing_list",
+                packingId: packingList.id,
+                field: "shipmentDate",
+                value: event.currentTarget.value,
+              })}
+              placeholder="dd/mm/yy"
+              style={s.packingInput}
+            />
+          </label>
+          <label style={s.filterLabel}>
+            Status
+            <select
+              value={packingList.status}
+              onChange={(event) => submitPortalCell(fetcher, {
+                intent: "update_packing_list",
+                packingId: packingList.id,
+                field: "status",
+                value: event.currentTarget.value,
+              })}
+              style={s.productTypeFilter}
+            >
+              {PACKING_STATUS_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div style={s.packingActions}>
+          <button
+            type="button"
+            style={s.secondaryButton}
+            onClick={() => submitPortalCell(fetcher, {
+              intent: "add_custom_packing_line",
+              packingId: packingList.id,
+            })}
+          >
+            Add custom row
+          </button>
+        </div>
+      </div>
+
+      <div style={s.productSearchPanel}>
+        <label style={s.filterLabel}>
+          Add Shopify product
+          <input
+            type="search"
+            value={productSearch}
+            onChange={(event) => updateParams({ productSearch: event.currentTarget.value })}
+            style={s.productSearchInput}
+            placeholder="Search product title"
+          />
+        </label>
+        {productSearch.trim().length >= 2 && (
+          <div style={s.productResults}>
+            {productResults.length ? productResults.map((product) => (
+              <div key={product.id} style={s.productResult}>
+                {product.imageUrl ? <img src={product.imageUrl} alt="" style={s.productResultImage} /> : <div style={s.noImg}>—</div>}
+                <div style={s.productResultText}>
+                  <strong>{product.title}</strong>
+                  <span>{product.skus.slice(0, 4).join(", ") || "No SKU"}</span>
+                </div>
+                <button
+                  type="button"
+                  style={s.secondaryButton}
+                  onClick={() => submitPortalCell(fetcher, {
+                    intent: "add_product_packing_line",
+                    packingId: packingList.id,
+                    product: JSON.stringify(product),
+                  })}
+                >
+                  Add
+                </button>
+              </div>
+            )) : (
+              <div style={s.settingsHint}>No products found.</div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={s.packingTableWrap}>
+        <table style={{ ...s.table, width: tableWidth }}>
+          <thead>
+            <tr style={s.headerRow}>
+              {["Box", "Product picture", "Fabric image", "Name", "SKU", ...PACKING_SIZES, "Total", "Price ₹", "Value ₹", "Weight", "Actions"].map((heading) => (
+                <th key={heading} style={{ ...s.th, textAlign: PACKING_SIZES.includes(heading) || ["Total", "Price ₹", "Value ₹", "Weight"].includes(heading) ? "center" : "left" }}>
+                  <span style={s.thContent}>{heading}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {packingList.lines.map((line) => (
+              <PackingListLineRow key={line.id} line={line} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function PackingListLineRow({ line }: { line: PackingListWithLines["lines"][number] }) {
+  const fetcher = useFetcher();
+  const qtys = normalizeQtys(line.qtys);
+  const total = packingTotal(qtys);
+  const price = line.priceRupees ?? 0;
+  const value = total * price;
+
+  return (
+    <tr style={s.row}>
+      <td style={s.td}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></td>
+      <td style={{ ...s.td, textAlign: "center" }}>{line.productImageUrl ? <img src={line.productImageUrl} alt="" style={s.packingThumb} /> : <div style={s.noImg}>—</div>}</td>
+      <td style={{ ...s.td, textAlign: "center" }}><FabricImageCell lineId={line.id} value={line.fabricImageData ?? ""} /></td>
+      <td style={s.td}><PackingTextInput lineId={line.id} field="productTitle" value={line.productTitle} /></td>
+      <td style={s.td}><PackingTextInput lineId={line.id} field="sku" value={line.sku ?? ""} multiline /></td>
+      {PACKING_SIZES.map((size) => (
+        <td key={size} style={{ ...s.td, textAlign: "center" }}>
+          <input
+            type="text"
+            inputMode="numeric"
+            defaultValue={qtys[size] || ""}
+            onChange={(event) => { event.currentTarget.value = event.currentTarget.value.replace(/\D/g, ""); }}
+            onBlur={(event) => submitPortalCell(fetcher, {
+              intent: "update_packing_qty",
+              lineId: line.id,
+              size,
+              value: event.currentTarget.value,
+            })}
+            style={s.qtyInput}
+          />
+        </td>
+      ))}
+      <td style={{ ...s.td, textAlign: "center" }}><span style={s.total}>{total}</span></td>
+      <td style={{ ...s.td, textAlign: "center" }}><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></td>
+      <td style={{ ...s.td, textAlign: "center" }}><span style={s.total}>{value ? Math.round(value) : ""}</span></td>
+      <td style={{ ...s.td, textAlign: "center" }}><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></td>
+      <td style={{ ...s.td, textAlign: "center" }}>
+        <div style={s.rowActions}>
+          <button type="button" style={s.smallButton} onClick={() => submitPortalCell(fetcher, { intent: "duplicate_packing_line", lineId: line.id })}>Duplicate</button>
+          <button type="button" style={s.removeUserButton} onClick={() => submitPortalCell(fetcher, { intent: "delete_packing_line", lineId: line.id })}>Delete</button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function PackingTextInput({ lineId, field, value, multiline, center }: { lineId: number; field: string; value: string; multiline?: boolean; center?: boolean }) {
+  const fetcher = useFetcher();
+  const common = {
+    defaultValue: value,
+    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => submitPortalCell(fetcher, {
+      intent: "update_packing_line",
+      lineId,
+      field,
+      value: event.currentTarget.value,
+    }),
+    style: { ...(multiline ? s.packingTextarea : s.packingCellInput), ...(center ? { textAlign: "center" as const } : {}) },
+  };
+  return multiline ? <textarea rows={3} {...common} /> : <input type="text" {...common} />;
+}
+
+function FabricImageCell({ lineId, value }: { lineId: number; value: string }) {
+  const fetcher = useFetcher();
+
+  const saveFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => submitPortalCell(fetcher, {
+      intent: "update_packing_line",
+      lineId,
+      field: "fabricImageData",
+      value: String(reader.result ?? ""),
+    });
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div
+      tabIndex={0}
+      style={s.fabricImageDrop}
+      onPaste={(event) => {
+        const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
+        if (file) saveFile(file);
+      }}
+      title="Paste or upload fabric image"
+    >
+      {value ? <img src={value} alt="" style={s.fabricThumb} /> : <span>Paste image</span>}
+      <input
+        type="file"
+        accept="image/*"
+        style={s.hiddenFileInput}
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          if (file) saveFile(file);
+        }}
+      />
     </div>
   );
 }
@@ -1425,6 +1971,149 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 700,
   },
   adminCheckbox: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 800, color: "#374151" },
+  packingLayout: {
+    display: "grid",
+    gridTemplateColumns: "260px minmax(0, 1fr)",
+    gap: 16,
+    alignItems: "start",
+  },
+  packingSidebar: {
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    padding: 12,
+    display: "grid",
+    gap: 12,
+  },
+  packingCreateForm: { display: "grid", gap: 8 },
+  packingInput: {
+    border: "1px solid #b6c0cc",
+    borderRadius: 7,
+    padding: "8px 10px",
+    fontSize: 13,
+    fontWeight: 700,
+    background: "#fff",
+    minWidth: 130,
+  },
+  packingListNav: { display: "grid", gap: 8 },
+  packingListLink: {
+    display: "grid",
+    gap: 3,
+    padding: 10,
+    borderRadius: 9,
+    border: "1px solid #e5e7eb",
+    background: "#f8fafc",
+    color: "#374151",
+    textDecoration: "none",
+    fontSize: 13,
+  },
+  packingListLinkActive: { background: "#111827", color: "#fff", borderColor: "#111827" },
+  packingDetail: { minWidth: 0 },
+  packingDetailInner: { display: "grid", gap: 12 },
+  packingTop: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-end",
+    gap: 12,
+    flexWrap: "wrap",
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    padding: 12,
+  },
+  packingMeta: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10 },
+  packingActions: { display: "flex", gap: 8 },
+  productSearchPanel: {
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    padding: 12,
+    display: "grid",
+    gap: 10,
+  },
+  productSearchInput: {
+    border: "1px solid #b6c0cc",
+    borderRadius: 7,
+    padding: "8px 10px",
+    width: 280,
+    fontSize: 13,
+    fontWeight: 700,
+  },
+  productResults: { display: "grid", gap: 8 },
+  productResult: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: 8,
+    borderRadius: 9,
+    border: "1px solid #e5e7eb",
+    background: "#f8fafc",
+  },
+  productResultImage: { width: 42, height: 56, objectFit: "cover", borderRadius: 4 },
+  productResultText: { display: "grid", gap: 3, flex: 1, fontSize: 13, color: "#374151" },
+  packingTableWrap: {
+    maxHeight: "calc(100vh - 230px)",
+    overflow: "auto",
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
+  },
+  packingThumb: { width: 64, height: 86, objectFit: "cover", borderRadius: 3 },
+  fabricThumb: { width: 82, height: 82, objectFit: "cover", borderRadius: 3 },
+  fabricImageDrop: {
+    position: "relative",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 82,
+    border: "1px dashed #94a3b8",
+    borderRadius: 6,
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: 800,
+    overflow: "hidden",
+    cursor: "pointer",
+    background: "#f8fafc",
+  },
+  hiddenFileInput: {
+    position: "absolute",
+    inset: 0,
+    opacity: 0,
+    cursor: "pointer",
+  },
+  packingCellInput: {
+    width: "100%",
+    border: "1px solid transparent",
+    background: "transparent",
+    outline: "none",
+    fontSize: 13,
+    fontWeight: 700,
+    color: "#111827",
+    boxSizing: "border-box",
+  },
+  packingTextarea: {
+    width: "100%",
+    border: "1px solid transparent",
+    background: "transparent",
+    outline: "none",
+    fontSize: 12,
+    fontWeight: 700,
+    color: "#4b5563",
+    resize: "vertical",
+    boxSizing: "border-box",
+    fontFamily: "inherit",
+  },
+  rowActions: { display: "grid", gap: 6 },
+  smallButton: {
+    border: "1px solid #d1d5db",
+    borderRadius: 6,
+    padding: "5px 7px",
+    background: "#fff",
+    color: "#374151",
+    fontSize: 11,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
   empty: { background: "#fff", borderRadius: 12, padding: 40, textAlign: "center", color: "#6b7280" },
   tableWrap: {
     maxHeight: "calc(100vh - 118px)",
