@@ -17,7 +17,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productSearch = url.searchParams.get("productSearch") ?? "";
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
-  const [allOrders, columnWidthsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -25,6 +25,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
     prisma.portalSetting.findUnique({
       where: { key: COLUMN_WIDTHS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: PACKING_COLUMN_WIDTHS_KEY },
       select: { value: true },
     }),
     prisma.portalSetting.findUnique({
@@ -101,6 +105,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     sortBy,
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
+    packingColumnWidths: normalizeColumnWidths(packingColumnWidthsSetting?.value),
     packingLists,
     selectedPackingList,
     productSearch,
@@ -374,6 +379,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_packing_column_widths") {
+    let columnWidths: Record<string, number>;
+    try {
+      columnWidths = normalizeColumnWidths(JSON.parse(String(form.get("value") ?? "{}")));
+    } catch {
+      return null;
+    }
+
+    await prisma.portalSetting.upsert({
+      where: { key: PACKING_COLUMN_WIDTHS_KEY },
+      create: { key: PACKING_COLUMN_WIDTHS_KEY, value: columnWidths },
+      update: { value: columnWidths },
+    });
+    return null;
+  }
+
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
   if (intent === "update_product_type")  updates.productType = normalizeProductGroup(String(form.get("value") ?? "")) || null;
@@ -537,6 +558,7 @@ function labelForPackingStatus(value: string) {
 }
 
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
+const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
 const PORTAL_USERS_KEY = "supplier-portal-users-v1";
@@ -766,6 +788,10 @@ function defaultColumnWidth(columnId: string) {
   return columnId.startsWith("size:") ? 58 : DEFAULT_COLUMN_WIDTHS[columnId] ?? 110;
 }
 
+function defaultPackingColumnWidth(columnId: string) {
+  return PACKING_COLUMNS.find((column) => column.id === columnId)?.width ?? 110;
+}
+
 function normalizeColumnWidths(value: unknown): Record<string, number> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 
@@ -794,6 +820,7 @@ export default function PortalDashboard() {
     sortBy,
     page,
     columnWidths: savedColumnWidths,
+    packingColumnWidths,
     packingLists,
     selectedPackingList,
     productSearch,
@@ -1040,6 +1067,7 @@ export default function PortalDashboard() {
           <PackingListsPanel
             packingLists={packingLists}
             selectedPackingList={selectedPackingList}
+            savedPackingColumnWidths={packingColumnWidths}
             productSearch={productSearch}
             packingSearchLineId={packingSearchLineId}
             productResults={productResults}
@@ -1195,6 +1223,7 @@ type PackingListWithLines = Awaited<ReturnType<typeof loader>>["packingLists"][n
 function PackingListsPanel({
   packingLists,
   selectedPackingList,
+  savedPackingColumnWidths,
   productSearch,
   packingSearchLineId,
   productResults,
@@ -1202,6 +1231,7 @@ function PackingListsPanel({
 }: {
   packingLists: PackingListWithLines[];
   selectedPackingList: PackingListWithLines | null;
+  savedPackingColumnWidths: Record<string, number>;
   productSearch: string;
   packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
@@ -1249,6 +1279,7 @@ function PackingListsPanel({
         ) : (
           <PackingListDetail
             packingList={selectedPackingList}
+            savedPackingColumnWidths={savedPackingColumnWidths}
             productSearch={productSearch}
             packingSearchLineId={packingSearchLineId}
             productResults={productResults}
@@ -1262,19 +1293,59 @@ function PackingListsPanel({
 
 function PackingListDetail({
   packingList,
+  savedPackingColumnWidths,
   productSearch,
   packingSearchLineId,
   productResults,
   updateParams,
 }: {
   packingList: PackingListWithLines;
+  savedPackingColumnWidths: Record<string, number>;
   productSearch: string;
   packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
-  const packingTableWidth = PACKING_COLUMNS.reduce((sum, column) => sum + column.width, 0);
+  const columnWidthsFetcher = useFetcher();
+  const [packingColumnWidths, setPackingColumnWidths] = useState<Record<string, number>>(savedPackingColumnWidths);
+  const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
+  const packingTableWidth = PACKING_COLUMNS.reduce((sum, column) => sum + packingWidthFor(column.id), 0);
+
+  useEffect(() => {
+    setPackingColumnWidths(savedPackingColumnWidths);
+  }, [savedPackingColumnWidths]);
+
+  const startPackingResize = (columnId: string, event: React.MouseEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = packingWidthFor(columnId);
+    let nextColumnWidths = packingColumnWidths;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      const nextWidth = Math.max(MIN_COLUMN_WIDTH, startWidth + moveEvent.clientX - startX);
+      nextColumnWidths = { ...nextColumnWidths, [columnId]: nextWidth };
+      setPackingColumnWidths(nextColumnWidths);
+    };
+    const handleUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      document.removeEventListener("mousemove", handleMove);
+      document.removeEventListener("mouseup", handleUp);
+      const formData = new FormData();
+      formData.set("intent", "update_packing_column_widths");
+      formData.set("value", JSON.stringify(nextColumnWidths));
+      columnWidthsFetcher.submit(formData, { method: "post" });
+    };
+
+    document.addEventListener("mousemove", handleMove);
+    document.addEventListener("mouseup", handleUp);
+  };
 
   return (
     <div style={s.packingDetailInner}>
@@ -1331,15 +1402,19 @@ function PackingListDetail({
         <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }}>
           <colgroup>
             {PACKING_COLUMNS.map((column) => (
-              <col key={column.id} style={{ width: column.width }} />
+              <col key={column.id} style={{ width: packingWidthFor(column.id) }} />
             ))}
           </colgroup>
           <thead>
             <tr style={s.headerRow}>
               {PACKING_COLUMNS.map((column) => (
-                <th key={column.id} style={{ ...s.th, textAlign: column.center ? "center" : "left" }}>
-                  <span style={s.thContent}>{column.label}</span>
-                </th>
+                <Th
+                  key={column.id}
+                  center={column.center}
+                  onResizeStart={(event) => startPackingResize(column.id, event)}
+                >
+                  {column.label}
+                </Th>
               ))}
             </tr>
           </thead>
