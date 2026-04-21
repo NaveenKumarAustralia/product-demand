@@ -11,8 +11,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   );
   const selectedStatus = url.searchParams.get("status") ?? "";
   const selectedPriority = url.searchParams.get("priority") ?? "";
+  const searchTitle = url.searchParams.get("q") ?? "";
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
-  const [allOrders, columnWidthsSetting] = await Promise.all([
+  const [allOrders, columnWidthsSetting, loginRequiredSetting, usersSetting, activeUsersSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -22,7 +23,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       where: { key: COLUMN_WIDTHS_KEY },
       select: { value: true },
     }),
+    prisma.portalSetting.findUnique({
+      where: { key: PORTAL_LOGIN_REQUIRED_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: PORTAL_USERS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: PORTAL_ACTIVE_USERS_KEY },
+      select: { value: true },
+    }),
   ]);
+  const users = normalizePortalUsers(usersSetting?.value);
+  const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
+  const currentUser = getCurrentPortalUser(request, users);
+  const activeUsers = await recordAndGetActiveUsers(currentUser, users, activeUsersSetting?.value);
   const normalizedOrders = allOrders.map((order) => ({
     ...order,
     productType: normalizeProductGroup(order.productType) || null,
@@ -37,6 +54,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
     .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
     .filter((order) => !selectedPriority || order.priority === selectedPriority)
+    .filter((order) => !searchTitle || order.productTitle.toLowerCase().includes(searchTitle.toLowerCase()))
     .sort((a, b) => {
       if (sortBy === "titleAsc") return a.productTitle.localeCompare(b.productTitle);
       if (sortBy === "titleDesc") return b.productTitle.localeCompare(a.productTitle);
@@ -63,11 +81,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     selectedProductGroup,
     selectedStatus,
     selectedPriority,
+    searchTitle,
     statusFilters,
     priorityFilters,
     sortBy,
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
+    loginRequired,
+    users,
+    currentUser,
+    activeUsers,
+    loginBlocked: loginRequired && users.length > 0 && !currentUser,
   };
 };
 
@@ -75,8 +99,81 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const form = await request.formData();
   const intent = String(form.get("intent"));
   const orderId = Number(form.get("orderId"));
+  const usersSetting = await prisma.portalSetting.findUnique({
+    where: { key: PORTAL_USERS_KEY },
+    select: { value: true },
+  });
+  const loginRequiredSetting = await prisma.portalSetting.findUnique({
+    where: { key: PORTAL_LOGIN_REQUIRED_KEY },
+    select: { value: true },
+  });
+  const users = normalizePortalUsers(usersSetting?.value);
+  const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
+  const currentUser = getCurrentPortalUser(request, users);
+  const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
 
   const updates: Record<string, unknown> = {};
+
+  if (intent === "portal_login") {
+    const userId = String(form.get("userId") ?? "");
+    const user = users.find((item) => item.id === userId && item.active);
+    if (!user) return null;
+    return new Response(null, {
+      status: 303,
+      headers: {
+        Location: "/portal",
+        "Set-Cookie": `${PORTAL_USER_COOKIE}=${encodeURIComponent(user.id)}; Path=/; SameSite=Lax; Max-Age=2592000`,
+      },
+    });
+  }
+
+  if (intent === "portal_logout") {
+    return new Response(null, {
+      status: 303,
+      headers: {
+        Location: "/portal",
+        "Set-Cookie": `${PORTAL_USER_COOKIE}=; Path=/; SameSite=Lax; Max-Age=0`,
+      },
+    });
+  }
+
+  if (intent === "update_login_required") {
+    if (!canManageUsers) return null;
+    await prisma.portalSetting.upsert({
+      where: { key: PORTAL_LOGIN_REQUIRED_KEY },
+      create: { key: PORTAL_LOGIN_REQUIRED_KEY, value: form.get("value") === "on" },
+      update: { value: form.get("value") === "on" },
+    });
+    return null;
+  }
+
+  if (intent === "add_portal_user") {
+    if (!canManageUsers) return null;
+    const name = String(form.get("name") ?? "").trim();
+    if (!name) return null;
+    const nextUsers = [
+      ...users,
+      {
+        id: crypto.randomUUID(),
+        name,
+        admin: form.get("admin") === "on",
+        active: true,
+      },
+    ];
+    await savePortalUsers(nextUsers);
+    return null;
+  }
+
+  if (intent === "remove_portal_user") {
+    if (!canManageUsers) return null;
+    const userId = String(form.get("userId") ?? "");
+    await savePortalUsers(users.filter((user) => user.id !== userId));
+    return null;
+  }
+
+  if (loginRequired && users.length > 0 && !currentUser) {
+    return null;
+  }
 
   if (intent === "delete_order") {
     await prisma.supplierOrder.delete({ where: { id: orderId } });
@@ -235,6 +332,11 @@ function labelForPriority(value: string) {
 
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
+const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
+const PORTAL_USERS_KEY = "supplier-portal-users-v1";
+const PORTAL_ACTIVE_USERS_KEY = "supplier-portal-active-users-v1";
+const PORTAL_USER_COOKIE = "supplier_portal_user";
+const ACTIVE_USER_WINDOW_MS = 5 * 60 * 1000;
 const MIN_COLUMN_WIDTH = 52;
 const FOCUSABLE_CELL_SELECTOR = [
   "input:not([type='hidden'])",
@@ -258,6 +360,87 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
 };
 
 type ColumnDef = { id: string; label: string; center?: boolean };
+type PortalUser = { id: string; name: string; admin: boolean; active: boolean };
+type ActivePortalUser = PortalUser & { initials: string; lastSeen: number };
+
+function normalizePortalUsers(value: unknown): PortalUser[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const user = item as Record<string, unknown>;
+      const id = String(user.id ?? "");
+      const name = String(user.name ?? "").trim();
+      if (!id || !name) return null;
+      return {
+        id,
+        name,
+        admin: Boolean(user.admin),
+        active: user.active !== false,
+      };
+    })
+    .filter(Boolean) as PortalUser[];
+}
+
+function normalizeBooleanSetting(value: unknown) {
+  return value === true;
+}
+
+function getCookieValue(request: Request, key: string) {
+  const cookie = request.headers.get("Cookie") ?? "";
+  return cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(`${key}=`))
+    ?.slice(key.length + 1);
+}
+
+function getCurrentPortalUser(request: Request, users: PortalUser[]) {
+  const userId = decodeURIComponent(getCookieValue(request, PORTAL_USER_COOKIE) ?? "");
+  return users.find((user) => user.id === userId && user.active) ?? null;
+}
+
+function initialsForName(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return (parts.length > 1 ? `${parts[0][0]}${parts[parts.length - 1][0]}` : name.slice(0, 2)).toUpperCase();
+}
+
+function normalizeActiveUsers(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, timestamp]) => [key, Number(timestamp) || 0] as const)
+      .filter(([, timestamp]) => timestamp > 0),
+  );
+}
+
+async function recordAndGetActiveUsers(currentUser: PortalUser | null, users: PortalUser[], value: unknown) {
+  const now = Date.now();
+  const activeMap = normalizeActiveUsers(value);
+  if (currentUser) activeMap[currentUser.id] = now;
+  const freshActiveMap = Object.fromEntries(
+    Object.entries(activeMap).filter(([, timestamp]) => now - timestamp <= ACTIVE_USER_WINDOW_MS),
+  );
+  if (currentUser) {
+    await prisma.portalSetting.upsert({
+      where: { key: PORTAL_ACTIVE_USERS_KEY },
+      create: { key: PORTAL_ACTIVE_USERS_KEY, value: freshActiveMap },
+      update: { value: freshActiveMap },
+    });
+  }
+  return users
+    .filter((user) => user.active && freshActiveMap[user.id])
+    .map((user) => ({ ...user, initials: initialsForName(user.name), lastSeen: freshActiveMap[user.id] }))
+    .sort((a, b) => b.lastSeen - a.lastSeen);
+}
+
+async function savePortalUsers(users: PortalUser[]) {
+  await prisma.portalSetting.upsert({
+    where: { key: PORTAL_USERS_KEY },
+    create: { key: PORTAL_USERS_KEY, value: users },
+    update: { value: users },
+  });
+}
 
 function sizeColumnId(size: string) {
   return `size:${size}`;
@@ -289,11 +472,17 @@ export default function PortalDashboard() {
     selectedProductGroup,
     selectedStatus,
     selectedPriority,
+    searchTitle,
     statusFilters,
     priorityFilters,
     sortBy,
     page,
     columnWidths: savedColumnWidths,
+    loginRequired,
+    users,
+    currentUser,
+    activeUsers,
+    loginBlocked,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
@@ -331,6 +520,10 @@ export default function PortalDashboard() {
       : page === "settings"
         ? "Settings"
         : selectedProductGroup || "Existing Products Restock";
+
+  if (loginBlocked) {
+    return <PortalLogin users={users} />;
+  }
 
   const startResize = (columnId: string, event: React.MouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
@@ -478,11 +671,32 @@ export default function PortalDashboard() {
                   ))}
                 </select>
               </label>
+              <label style={s.filterLabel}>
+                Search
+                <input
+                  type="search"
+                  value={searchTitle}
+                  onChange={(event) => updateParams({ q: event.currentTarget.value })}
+                  style={s.searchInput}
+                  placeholder="Product title"
+                />
+              </label>
+              <div style={s.activeUsers} title="Currently active">
+                {activeUsers.length ? activeUsers.map((user) => (
+                  <span key={user.id} style={s.activeUserBadge} title={user.name}>{user.initials}</span>
+                )) : <span style={s.activeUserEmpty}>No active users</span>}
+              </div>
             </div>
           )}
         </header>
 
-        {page !== "restock" ? (
+        {page === "settings" ? (
+          <SettingsPanel
+            users={users}
+            currentUser={currentUser}
+            loginRequired={loginRequired}
+          />
+        ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : orders.length === 0 ? (
           <div style={s.empty}>No open orders at the moment.</div>
@@ -516,6 +730,113 @@ export default function PortalDashboard() {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+function PortalLogin({ users }: { users: PortalUser[] }) {
+  return (
+    <div style={s.loginShell}>
+      <form method="post" style={s.loginCard}>
+        <input type="hidden" name="intent" value="portal_login" />
+        <h1 style={s.loginTitle}>Supplier Portal</h1>
+        <p style={s.loginText}>Select your name to enter the portal.</p>
+        <select name="userId" required style={s.loginSelect}>
+          <option value="">Select your name</option>
+          {users.filter((user) => user.active).map((user) => (
+            <option key={user.id} value={user.id}>{user.name}</option>
+          ))}
+        </select>
+        <button type="submit" style={s.loginButton}>Enter portal</button>
+      </form>
+    </div>
+  );
+}
+
+function SettingsPanel({
+  users,
+  currentUser,
+  loginRequired,
+}: {
+  users: PortalUser[];
+  currentUser: PortalUser | null;
+  loginRequired: boolean;
+}) {
+  const settingsFetcher = useFetcher();
+  const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
+
+  return (
+    <div style={s.settingsPanel}>
+      <section style={s.settingsCard}>
+        <div style={s.settingsHeader}>
+          <div>
+            <h2 style={s.settingsTitle}>Portal access</h2>
+            <p style={s.settingsHint}>Use lightweight name access to see who is working in the portal.</p>
+          </div>
+          {currentUser && (
+            <form method="post">
+              <input type="hidden" name="intent" value="portal_logout" />
+              <button type="submit" style={s.secondaryButton}>Log out {currentUser.name}</button>
+            </form>
+          )}
+        </div>
+
+        <label style={s.switchRow}>
+          <input
+            type="checkbox"
+            checked={loginRequired}
+            disabled={!canManageUsers}
+            onChange={(event) => submitPortalCell(settingsFetcher, {
+              intent: "update_login_required",
+              value: event.currentTarget.checked ? "on" : "off",
+            })}
+          />
+          Require users to select their name before entering
+        </label>
+
+        {!canManageUsers && (
+          <div style={s.settingsWarning}>Only an admin user can add/remove names or change portal access.</div>
+        )}
+      </section>
+
+      <section style={s.settingsCard}>
+        <h2 style={s.settingsTitle}>Allowed users</h2>
+        <div style={s.userList}>
+          {users.length ? users.map((user) => (
+            <div key={user.id} style={s.userRow}>
+              <span style={s.activeUserBadge}>{initialsForName(user.name)}</span>
+              <span style={s.userName}>{user.name}</span>
+              {user.admin && <span style={s.adminPill}>Admin</span>}
+              {canManageUsers && (
+                <button
+                  type="button"
+                  style={s.removeUserButton}
+                  onClick={() => submitPortalCell(settingsFetcher, {
+                    intent: "remove_portal_user",
+                    userId: user.id,
+                  })}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          )) : (
+            <div style={s.settingsHint}>No names added yet.</div>
+          )}
+        </div>
+
+        {canManageUsers && (
+          <settingsFetcher.Form method="post" style={s.addUserForm}>
+            <input type="hidden" name="intent" value="add_portal_user" />
+            <input name="name" required placeholder="First and last name" style={s.addUserInput} />
+            <label style={s.adminCheckbox}>
+              <input type="checkbox" name="admin" />
+              Admin
+            </label>
+            <button type="submit" style={s.loginButton}>Add user</button>
+          </settingsFetcher.Form>
+        )}
+      </section>
     </div>
   );
 }
@@ -933,6 +1254,154 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 600,
   },
+  searchInput: {
+    border: "1px solid #b6c0cc",
+    borderRadius: 6,
+    padding: "7px 10px",
+    width: 180,
+    background: "#fff",
+    fontSize: 13,
+    fontWeight: 600,
+    outline: "none",
+  },
+  activeUsers: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    minHeight: 32,
+  },
+  activeUserBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    background: "#111827",
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: 800,
+    letterSpacing: "0.04em",
+  },
+  activeUserEmpty: { color: "#6b7280", fontSize: 12, fontWeight: 700 },
+  loginShell: {
+    minHeight: "100vh",
+    background: "linear-gradient(135deg, #f8fafc 0%, #e5edf6 100%)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+  },
+  loginCard: {
+    width: "min(420px, 100%)",
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 18,
+    padding: 28,
+    boxShadow: "0 28px 80px rgba(15,23,42,0.18)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 14,
+  },
+  loginTitle: { margin: 0, fontSize: 26, color: "#111827" },
+  loginText: { margin: 0, color: "#6b7280", fontSize: 14, fontWeight: 600 },
+  loginSelect: {
+    border: "1px solid #b6c0cc",
+    borderRadius: 8,
+    padding: "10px 12px",
+    fontSize: 15,
+    fontWeight: 700,
+    background: "#fff",
+  },
+  loginButton: {
+    border: "1px solid #111827",
+    borderRadius: 8,
+    padding: "10px 14px",
+    background: "#111827",
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  settingsPanel: { display: "grid", gap: 16, maxWidth: 880 },
+  settingsCard: {
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 14,
+    padding: 18,
+    boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
+  },
+  settingsHeader: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
+  settingsTitle: { margin: 0, fontSize: 18, color: "#111827" },
+  settingsHint: { margin: "6px 0 0", color: "#6b7280", fontSize: 13, fontWeight: 600 },
+  switchRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    marginTop: 16,
+    fontSize: 14,
+    fontWeight: 800,
+    color: "#374151",
+  },
+  settingsWarning: {
+    marginTop: 12,
+    padding: 10,
+    borderRadius: 8,
+    background: "#fef3c7",
+    color: "#92400e",
+    fontSize: 13,
+    fontWeight: 700,
+  },
+  secondaryButton: {
+    border: "1px solid #d1d5db",
+    borderRadius: 8,
+    padding: "8px 10px",
+    background: "#fff",
+    color: "#374151",
+    fontSize: 13,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  userList: { display: "grid", gap: 8, marginTop: 14 },
+  userRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: 10,
+    borderRadius: 10,
+    background: "#f8fafc",
+    border: "1px solid #e5e7eb",
+  },
+  userName: { fontSize: 14, fontWeight: 800, color: "#111827", flex: 1 },
+  adminPill: {
+    padding: "3px 7px",
+    borderRadius: 999,
+    background: "#dcfce7",
+    color: "#166534",
+    fontSize: 11,
+    fontWeight: 800,
+  },
+  removeUserButton: {
+    border: "1px solid #fecaca",
+    borderRadius: 7,
+    padding: "6px 8px",
+    background: "#fee2e2",
+    color: "#991b1b",
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  addUserForm: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10, marginTop: 16 },
+  addUserInput: {
+    border: "1px solid #b6c0cc",
+    borderRadius: 8,
+    padding: "10px 12px",
+    minWidth: 260,
+    fontSize: 14,
+    fontWeight: 700,
+  },
+  adminCheckbox: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 800, color: "#374151" },
   empty: { background: "#fff", borderRadius: 12, padding: 40, textAlign: "center", color: "#6b7280" },
   tableWrap: {
     maxHeight: "calc(100vh - 118px)",
