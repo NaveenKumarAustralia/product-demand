@@ -60,6 +60,7 @@ const BASE_PRODUCT_GROUP_OPTIONS = [
   "Pants",
   "Corduroy",
 ];
+const NEW_PRODUCT_GROUP_VALUE = "__new_product_group__";
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
 };
@@ -87,12 +88,13 @@ function tableWidths(orderCount: number) {
 }
 
 function productGroupOptions(currentGroup: string) {
-  const options = [currentGroup, ...BASE_PRODUCT_GROUP_OPTIONS]
+  const options = [...BASE_PRODUCT_GROUP_OPTIONS, currentGroup]
     .map((value) => normalizeProductGroup(value))
     .filter(Boolean);
   return [
-    { value: "", label: "— Product group —" },
+    { value: "", label: "Select product group" },
     ...Array.from(new Set(options)).map((value) => ({ value, label: value })),
+    { value: NEW_PRODUCT_GROUP_VALUE, label: "Create new group" },
   ];
 }
 
@@ -136,7 +138,6 @@ function ProductOrderBlock() {
 
   const [shop, setShop] = useState<string | null>(null);
   const [productTitle, setProductTitle] = useState("");
-  const [productGroup, setProductGroup] = useState("");
   const [productVendor, setProductVendor] = useState("");
   const [productImageUrl, setProductImageUrl] = useState<string | null>(null);
   const [order, setOrder] = useState<OrderStatus>(null);
@@ -153,6 +154,7 @@ function ProductOrderBlock() {
   const [notes, setNotes] = useState("");
   const [orderPriority, setOrderPriority] = useState("");
   const [orderProductGroup, setOrderProductGroup] = useState("");
+  const [customProductGroup, setCustomProductGroup] = useState("");
 
   const applyOrderStatus = useCallback((nextOrder: OrderStatus, nextOrders: OrderStatusItem[]) => {
     const visibleOrders = nextOrders.slice(0, ORDER_LIMIT);
@@ -160,7 +162,7 @@ function ProductOrderBlock() {
     setOrders(visibleOrders);
     setOrderPriority(nextOrder?.priority || "");
     setOrderProductGroup((current) => (
-      normalizeProductGroup(nextOrder?.productType || current || productGroup)
+      normalizeProductGroup(nextOrder?.productType || current)
     ));
 
     const onOrderByVariant = new Map<string, number>();
@@ -176,7 +178,7 @@ function ProductOrderBlock() {
       ...variant,
       onOrderQty: onOrderByVariant.get(variant.id) ?? 0,
     })));
-  }, [productGroup]);
+  }, []);
 
   const refreshOrderStatus = useCallback(async (shopDomain: string, productId: string) => {
     const token = await auth.idToken();
@@ -216,9 +218,6 @@ function ProductOrderBlock() {
         const p = result.data?.product;
         if (p) {
           setProductTitle(p.title);
-          const normalizedProductGroup = normalizeProductGroup(p.productType);
-          setProductGroup(normalizedProductGroup);
-          setOrderProductGroup((current) => current || normalizedProductGroup);
           setProductVendor(p.vendor ?? "");
           setProductImageUrl(p.featuredImage?.url ?? null);
           setVariants((p.variants?.nodes ?? []).map((v) => ({
@@ -270,8 +269,7 @@ function ProductOrderBlock() {
     }
   }
 
-  async function updateProductGroup(nextProductGroup: string) {
-    setOrderProductGroup(nextProductGroup);
+  async function saveProductGroup(nextProductGroup: string) {
     if (!order || !shop) return;
     setSavingProductGroup(true);
     setFormError(null);
@@ -300,6 +298,19 @@ function ProductOrderBlock() {
     }
   }
 
+  async function updateProductGroup(nextProductGroup: string) {
+    setOrderProductGroup(nextProductGroup);
+    if (nextProductGroup === NEW_PRODUCT_GROUP_VALUE) return;
+    setCustomProductGroup("");
+    await saveProductGroup(nextProductGroup);
+  }
+
+  async function updateCustomProductGroup(nextProductGroup: string) {
+    const normalizedProductGroup = normalizeProductGroup(nextProductGroup);
+    setCustomProductGroup(normalizedProductGroup);
+    if (normalizedProductGroup) await saveProductGroup(normalizedProductGroup);
+  }
+
   async function handleSubmit(mode: "existing" | "new") {
     const orderedLines = variants.filter((v) => Number(v.qtyOrdered) > 0);
     const trimmedNotes = notes.trim();
@@ -309,6 +320,9 @@ function ProductOrderBlock() {
     }
     setFormError(null);
     setSubmitting(true);
+    const selectedProductGroup = orderProductGroup === NEW_PRODUCT_GROUP_VALUE
+      ? normalizeProductGroup(customProductGroup)
+      : normalizeProductGroup(orderProductGroup);
     try {
       const token = await auth.idToken();
       if (!token) throw new Error("No auth token");
@@ -317,7 +331,7 @@ function ProductOrderBlock() {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           shop, productId: productGid, productTitle,
-          productType: orderProductGroup || undefined,
+          productType: selectedProductGroup || undefined,
           productImageUrl: productImageUrl || undefined,
           supplier: productVendor || "Unknown",
           notes: trimmedNotes || undefined,
@@ -340,6 +354,7 @@ function ProductOrderBlock() {
       if (shop && productGid) await refreshOrderStatus(shop, productGid);
       setShowForm(false);
       setNotes("");
+      setCustomProductGroup("");
       setVariants((prev) => prev.map((v) => ({ ...v, qtyOrdered: "" })));
     } catch (e: any) {
       setFormError(`Error: ${e?.message ?? String(e)}`);
@@ -405,11 +420,19 @@ function ProductOrderBlock() {
           <Select
             label={savingProductGroup ? "Group saving..." : "Product group"}
             value={orderProductGroup}
-            options={productGroupOptions(productGroup || orderProductGroup)}
+            options={productGroupOptions(orderProductGroup === NEW_PRODUCT_GROUP_VALUE ? customProductGroup : orderProductGroup)}
             onChange={updateProductGroup}
           />
         </Box>
       </InlineStack>
+      {orderProductGroup === NEW_PRODUCT_GROUP_VALUE && (
+        <TextField
+          label="New product group"
+          value={customProductGroup}
+          onChange={updateCustomProductGroup}
+          placeholder="Type new group name"
+        />
+      )}
       <TextField
         label="Notes for supplier portal"
         value={notes}

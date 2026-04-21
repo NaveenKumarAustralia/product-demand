@@ -106,7 +106,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "update_notes")         updates.notes = form.get("value");
   if (intent === "update_eta") {
     const raw = String(form.get("value") ?? "");
-    updates.eta = raw ? new Date(raw) : null;
+    const parsedDate = raw ? parsePortalDate(raw) : null;
+    if (raw && !parsedDate) return null;
+    updates.eta = parsedDate;
   }
 
   if (intent === "update_qty") {
@@ -188,6 +190,39 @@ const PRODUCT_GROUP_RENAMES: Record<string, string> = {
 function normalizeProductGroup(value?: string | null) {
   const trimmed = value?.trim() ?? "";
   return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
+}
+
+function formatPortalDate(value?: string | Date | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const day = String(date.getDate()).padStart(2, "0");
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const year = String(date.getFullYear()).slice(-2);
+  return `${day}/${month}/${year}`;
+}
+
+function parsePortalDate(value: string) {
+  const trimmed = value.trim();
+  const auMatch = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2}|\d{4})$/);
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+
+  const parts = auMatch
+    ? { day: Number(auMatch[1]), month: Number(auMatch[2]), year: Number(auMatch[3]) }
+    : isoMatch
+      ? { day: Number(isoMatch[3]), month: Number(isoMatch[2]), year: Number(isoMatch[1]) }
+      : null;
+
+  if (!parts) return null;
+
+  const fullYear = parts.year < 100 ? 2000 + parts.year : parts.year;
+  const date = new Date(Date.UTC(fullYear, parts.month - 1, parts.day));
+  const valid =
+    date.getUTCFullYear() === fullYear &&
+    date.getUTCMonth() === parts.month - 1 &&
+    date.getUTCDate() === parts.day;
+
+  return valid ? date : null;
 }
 
 function labelForStatus(value: string) {
@@ -493,12 +528,8 @@ function OrderRow({ order, rowIndex, sizes }: { order: Order; rowIndex: number; 
     return acc;
   }, {});
   const allSkus = order.lines.map((l) => l.sku).filter(Boolean).join("\n");
-  const etaValue = order.eta ? new Date(order.eta).toISOString().slice(0, 10) : "";
-  const orderDate = new Date(order.createdAt).toLocaleDateString("en-AU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "2-digit",
-  });
+  const etaValue = formatPortalDate(order.eta);
+  const orderDate = formatPortalDate(order.createdAt);
   const totalCol = 5 + sizes.length;
   const statusCol = totalCol + 1;
   const notesCol = totalCol + 2;
@@ -636,11 +667,12 @@ function EtaCell({ orderId, value }: { orderId: number; value: string }) {
       <input type="hidden" name="intent" value="update_eta" />
       <input type="hidden" name="orderId" value={orderId} />
       <input
-        type="date"
+        type="text"
         name="value"
         defaultValue={value}
         onBlur={(e) => fetcher.submit(e.currentTarget.form!)}
         style={s.dateInput}
+        placeholder="dd/mm/yy"
       />
     </fetcher.Form>
   );
