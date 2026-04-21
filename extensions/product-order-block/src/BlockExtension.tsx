@@ -91,8 +91,34 @@ function productGroupOptions(currentGroup: string) {
 function Col({ w, align = "start", children }: { w: string; align?: "start" | "end" | "center"; children: React.ReactNode }) {
   return (
     <Box inlineSize={w as any}>
-      <InlineStack inlineAlignment={align} blockAlignment="center" inlineSize="100%">{children}</InlineStack>
+      <Box inlineSize="100%">
+        <InlineStack inlineAlignment={align} blockAlignment="center">{children}</InlineStack>
+      </Box>
     </Box>
+  );
+}
+
+function CenterCell({ children }: { children: React.ReactNode }) {
+  return (
+    <Box inlineSize="100%">
+      <InlineStack inlineAlignment="center" blockAlignment="center">
+        {children}
+      </InlineStack>
+    </Box>
+  );
+}
+
+function AddOrderCell({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return (
+    <CenterCell>
+      <Box inlineSize="78%">
+        <TextField
+          label=" "
+          value={value}
+          onChange={onChange}
+        />
+      </Box>
+    </CenterCell>
   );
 }
 
@@ -403,18 +429,14 @@ function ProductOrderBlock() {
         return (
           <InlineStack key={v.id} gap={GAP} blockAlignment="center">
             <Col w={W.size}><Text>{v.title}</Text></Col>
-            <Col w={W.stock} align="center"><Text>{v.stockQty}</Text></Col>
+            <Col w={W.stock} align="center"><CenterCell><Text>{v.stockQty}</Text></CenterCell></Col>
             {orderColumns.map((item) => (
-              <Col key={item.id} w={W.order} align="center"><Text>{getOrderQty(item, v.id)}</Text></Col>
+              <Col key={item.id} w={W.order} align="center"><CenterCell><Text>{getOrderQty(item, v.id)}</Text></CenterCell></Col>
             ))}
             <Col w={W.addOrder} align="center">
-              <TextField
-                label=" "
-                value={v.qtyOrdered}
-                onChange={(val) => updateQty(idx, val)}
-              />
+              <AddOrderCell value={v.qtyOrdered} onChange={(val) => updateQty(idx, val)} />
             </Col>
-            <Col w={W.total} align="center"><Text fontWeight="bold">{rowTotal}</Text></Col>
+            <Col w={W.total} align="center"><CenterCell><Text fontWeight="bold">{rowTotal}</Text></CenterCell></Col>
           </InlineStack>
         );
       })}

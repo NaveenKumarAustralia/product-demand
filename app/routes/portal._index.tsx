@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useSearchParams } from "react-router";
 import prisma from "../db.server";
@@ -185,6 +185,7 @@ function labelForPriority(value: string) {
 }
 
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
+const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const MIN_COLUMN_WIDTH = 52;
 const FOCUSABLE_CELL_SELECTOR = [
   "input:not([type='hidden'])",
@@ -661,18 +662,64 @@ function QtyCell({ orderId, size, value }: { orderId: number; size: string; valu
 
 function DeleteCell({ orderId }: { orderId: number }) {
   const fetcher = useFetcher();
+  const confirmedRef = useRef(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const skipConfirmForToday = () => {
+    window.localStorage.setItem(
+      DELETE_CONFIRM_SKIP_KEY,
+      String(Date.now() + 24 * 60 * 60 * 1000),
+    );
+  };
+
+  const shouldSkipConfirm = () => {
+    const skipUntil = Number(window.localStorage.getItem(DELETE_CONFIRM_SKIP_KEY) ?? 0);
+    return skipUntil > Date.now();
+  };
+
   return (
     <fetcher.Form
       method="post"
       onSubmit={(e) => {
-        if (!window.confirm("Are you sure you want to delete this order?")) {
-          e.preventDefault();
+        if (confirmedRef.current || shouldSkipConfirm()) {
+          confirmedRef.current = false;
+          return;
         }
+
+        e.preventDefault();
+        setConfirmOpen(true);
       }}
     >
       <input type="hidden" name="intent" value="delete_order" />
       <input type="hidden" name="orderId" value={orderId} />
       <button type="submit" style={s.deleteButton}>Delete</button>
+      {confirmOpen && (
+        <div style={s.deleteConfirm}>
+          <div style={s.deleteConfirmText}>Are you sure you want to delete this order?</div>
+          <div style={s.deleteConfirmActions}>
+            <button
+              type="submit"
+              style={{ ...s.deleteConfirmButton, ...s.deleteConfirmDanger }}
+              onClick={() => { confirmedRef.current = true; }}
+            >
+              Yes
+            </button>
+            <button type="button" style={s.deleteConfirmButton} onClick={() => setConfirmOpen(false)}>
+              No
+            </button>
+            <button
+              type="submit"
+              style={s.deleteConfirmButton}
+              onClick={() => {
+                skipConfirmForToday();
+                confirmedRef.current = true;
+              }}
+            >
+              Don’t ask me again for a day
+            </button>
+          </div>
+        </div>
+      )}
     </fetcher.Form>
   );
 }
@@ -943,5 +990,40 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 12,
     fontWeight: 700,
     cursor: "pointer",
+  },
+  deleteConfirm: {
+    marginTop: 8,
+    padding: 8,
+    border: "1px solid #fecaca",
+    borderRadius: 6,
+    background: "#fff7f7",
+    textAlign: "left",
+  },
+  deleteConfirmText: {
+    marginBottom: 8,
+    color: "#7f1d1d",
+    fontSize: 12,
+    fontWeight: 700,
+    lineHeight: 1.35,
+  },
+  deleteConfirmActions: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  deleteConfirmButton: {
+    border: "1px solid #d1d5db",
+    borderRadius: 4,
+    padding: "4px 7px",
+    background: "#fff",
+    color: "#374151",
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  deleteConfirmDanger: {
+    borderColor: "#fca5a5",
+    background: "#fee2e2",
+    color: "#991b1b",
   },
 };
