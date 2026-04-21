@@ -5,7 +5,11 @@ import prisma from "../db.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
-  const selectedProductType = url.searchParams.get("productType") ?? "";
+  const page = url.searchParams.get("page") ?? "restock";
+  const selectedProductGroup = url.searchParams.get("productGroup") ?? url.searchParams.get("productType") ?? "";
+  const selectedStatus = url.searchParams.get("status") ?? "";
+  const selectedPriority = url.searchParams.get("priority") ?? "";
+  const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const [allOrders, columnWidthsSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
@@ -17,11 +21,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       select: { value: true },
     }),
   ]);
-  const productTypes = Array.from(new Set(allOrders.map((order) => order.productType).filter(Boolean) as string[]))
+  const productGroups = Array.from(new Set(allOrders.map((order) => order.productType).filter(Boolean) as string[]))
     .sort((a, b) => a.localeCompare(b));
-  const orders = selectedProductType
-    ? allOrders.filter((order) => order.productType === selectedProductType)
-    : allOrders;
+  const statusFilters = Array.from(new Set(allOrders.map((order) => order.supplierStatus).filter(Boolean)))
+    .sort((a, b) => labelForStatus(a).localeCompare(labelForStatus(b)));
+  const priorityFilters = Array.from(new Set(allOrders.map((order) => order.priority).filter(Boolean) as string[]))
+    .sort((a, b) => labelForPriority(a).localeCompare(labelForPriority(b)));
+  const orders = allOrders
+    .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
+    .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
+    .filter((order) => !selectedPriority || order.priority === selectedPriority)
+    .sort((a, b) => {
+      if (sortBy === "titleAsc") return a.productTitle.localeCompare(b.productTitle);
+      if (sortBy === "titleDesc") return b.productTitle.localeCompare(a.productTitle);
+      if (sortBy === "orderDateAsc") return a.createdAt.getTime() - b.createdAt.getTime();
+      return b.createdAt.getTime() - a.createdAt.getTime();
+    });
 
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","S/M","M","M/L","L","L/XL","XL","2XL","3XL","4XL","ONE SIZE"];
@@ -38,8 +53,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return {
     orders,
     sizes: allSizes,
-    productTypes,
-    selectedProductType,
+    productGroups,
+    selectedProductGroup,
+    selectedStatus,
+    selectedPriority,
+    statusFilters,
+    priorityFilters,
+    sortBy,
+    page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
   };
 };
@@ -155,6 +176,14 @@ const PRIORITY_OPTIONS = [
   { value: "cancelled", label: "Cancelled", bg: "#d97706", color: "#fff" },
 ];
 
+function labelForStatus(value: string) {
+  return STATUS_OPTIONS.find((option) => option.value === value)?.label ?? value;
+}
+
+function labelForPriority(value: string) {
+  return PRIORITY_OPTIONS.find((option) => option.value === value)?.label ?? value;
+}
+
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const MIN_COLUMN_WIDTH = 52;
 const FOCUSABLE_CELL_SELECTOR = [
@@ -206,11 +235,17 @@ export default function PortalDashboard() {
   const {
     orders,
     sizes,
-    productTypes,
-    selectedProductType,
+    productGroups,
+    selectedProductGroup,
+    selectedStatus,
+    selectedPriority,
+    statusFilters,
+    priorityFilters,
+    sortBy,
+    page,
     columnWidths: savedColumnWidths,
   } = useLoaderData<typeof loader>();
-  const [, setSearchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const columns: ColumnDef[] = [
@@ -230,6 +265,21 @@ export default function PortalDashboard() {
 
   const widthFor = (columnId: string) => columnWidths[columnId] ?? defaultColumnWidth(columnId);
   const tableWidth = columns.reduce((sum, column) => sum + widthFor(column.id), 0);
+  const updateParams = (updates: Record<string, string>) => {
+    const next = new URLSearchParams(searchParams);
+    for (const [key, value] of Object.entries(updates)) {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    }
+    setSearchParams(next);
+  };
+  const activePageTitle = page === "dashboard"
+    ? "Dashboard"
+    : page === "fabric"
+      ? "Fabric in stock"
+      : page === "settings"
+        ? "Settings"
+        : selectedProductGroup || "Existing Products Restock";
 
   const startResize = (columnId: string, event: React.MouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
@@ -300,36 +350,76 @@ export default function PortalDashboard() {
       <aside style={s.sidebar}>
         <div style={s.sidebarTitle}>Supplier Portal</div>
         <nav style={s.nav}>
-          <a href="/portal" style={s.navItem}>Dashboard</a>
-          <a href="/portal" style={{ ...s.navItem, ...s.navItemActive }}>Existing Products Restock</a>
+          <a href="/portal?page=dashboard" style={{ ...s.navItem, ...(page === "dashboard" ? s.navItemActive : {}) }}>Dashboard</a>
+          <a href="/portal" style={{ ...s.navItem, ...(page === "restock" && !selectedProductGroup ? s.navItemActive : {}) }}>Existing Products Restock</a>
+          {productGroups.map((group) => (
+            <a
+              key={group}
+              href={`/portal?productGroup=${encodeURIComponent(group)}`}
+              style={{ ...s.navSubItem, ...(selectedProductGroup === group ? s.navItemActive : {}) }}
+            >
+              {group}
+            </a>
+          ))}
+          <a href="/portal?page=fabric" style={{ ...s.navItem, ...(page === "fabric" ? s.navItemActive : {}) }}>Fabric in stock</a>
         </nav>
+        <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), ...s.settingsLink }}>Settings</a>
       </aside>
 
       <main style={s.main}>
         <header style={s.pageHeader}>
           <div>
-            <h1 style={s.pageTitle}>Existing Products Restock</h1>
-            <span style={s.count}>{orders.length} open order{orders.length !== 1 ? "s" : ""}</span>
+            <h1 style={s.pageTitle}>{activePageTitle}</h1>
           </div>
-          <label style={s.filterLabel}>
-            Product type
-            <select
-              value={selectedProductType}
-              onChange={(event) => {
-                const nextType = event.currentTarget.value;
-                setSearchParams(nextType ? { productType: nextType } : {});
-              }}
-              style={s.productTypeFilter}
-            >
-              <option value="">All product types</option>
-              {productTypes.map((type) => (
-                <option key={type} value={type}>{type}</option>
-              ))}
-            </select>
-          </label>
+          {page === "restock" && (
+            <div style={s.filters}>
+              <label style={s.filterLabel}>
+                Product group
+                <select
+                  value={selectedProductGroup}
+                  onChange={(event) => updateParams({ productGroup: event.currentTarget.value, productType: "" })}
+                  style={s.productTypeFilter}
+                >
+                  <option value="">All groups</option>
+                  {productGroups.map((group) => (
+                    <option key={group} value={group}>{group}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={s.filterLabel}>
+                Sort
+                <select value={sortBy} onChange={(event) => updateParams({ sortBy: event.currentTarget.value })} style={s.productTypeFilter}>
+                  <option value="orderDateDesc">Order date newest</option>
+                  <option value="orderDateAsc">Order date oldest</option>
+                  <option value="titleAsc">Product title A-Z</option>
+                  <option value="titleDesc">Product title Z-A</option>
+                </select>
+              </label>
+              <label style={s.filterLabel}>
+                Status
+                <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
+                  <option value="">All statuses</option>
+                  {statusFilters.map((status) => (
+                    <option key={status} value={status}>{labelForStatus(status)}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={s.filterLabel}>
+                Priority
+                <select value={selectedPriority} onChange={(event) => updateParams({ priority: event.currentTarget.value })} style={s.productTypeFilter}>
+                  <option value="">All priorities</option>
+                  {priorityFilters.map((priority) => (
+                    <option key={priority} value={priority}>{labelForPriority(priority)}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          )}
         </header>
 
-        {orders.length === 0 ? (
+        {page !== "restock" ? (
+          <div style={s.empty}>{activePageTitle} will be set up here.</div>
+        ) : orders.length === 0 ? (
           <div style={s.empty}>No open orders at the moment.</div>
         ) : (
           <div style={s.tableWrap}>
@@ -635,6 +725,8 @@ const s: Record<string, React.CSSProperties> = {
     color: "#fff",
     borderRight: "1px solid #0f172a",
     padding: "18px 14px",
+    display: "flex",
+    flexDirection: "column",
   },
   sidebarTitle: { fontSize: 17, fontWeight: 800, marginBottom: 22 },
   nav: { display: "flex", flexDirection: "column", gap: 8 },
@@ -647,7 +739,17 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 700,
   },
+  navSubItem: {
+    display: "block",
+    color: "#cbd5e1",
+    textDecoration: "none",
+    borderRadius: 8,
+    padding: "8px 12px 8px 24px",
+    fontSize: 12,
+    fontWeight: 700,
+  },
   navItemActive: { background: "#fff", color: "#111827" },
+  settingsLink: { marginTop: "auto" },
   count: { fontSize: 13, color: "#6b7280" },
   main: { flex: 1, minWidth: 0, padding: "24px 16px" },
   pageHeader: {
@@ -658,12 +760,13 @@ const s: Record<string, React.CSSProperties> = {
     marginBottom: 18,
   },
   pageTitle: { margin: 0, fontSize: 24, color: "#111827", lineHeight: 1.2 },
-  filterLabel: { display: "flex", alignItems: "center", gap: 10, fontSize: 13, fontWeight: 700, color: "#374151" },
+  filters: { display: "flex", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 10 },
+  filterLabel: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#374151" },
   productTypeFilter: {
     border: "1px solid #b6c0cc",
     borderRadius: 6,
     padding: "7px 10px",
-    minWidth: 180,
+    minWidth: 150,
     background: "#fff",
     fontSize: 13,
     fontWeight: 600,

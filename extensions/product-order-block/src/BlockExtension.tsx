@@ -53,14 +53,12 @@ const PRIORITY_OPTIONS = [
   { value: "urgent", label: "URGENT" },
   { value: "cancelled", label: "Cancelled" },
 ];
-const BASE_PRODUCT_TYPE_OPTIONS = [
+const BASE_PRODUCT_GROUP_OPTIONS = [
   "Dresses",
   "Tops",
-  "Bottoms",
-  "Sets",
-  "Accessories",
-  "Shoes",
-  "Other",
+  "Skirts",
+  "Pants",
+  "Corduroy",
 ];
 
 function labelFor(options: Array<{ value: string; label: string }>, value?: string | null) {
@@ -80,12 +78,12 @@ function tableWidths(orderCount: number) {
     : { size: "14%", stock: "12%", order: "13%", addOrder: "21%", total: "12%" };
 }
 
-function productTypeOptions(currentType: string) {
-  const options = [currentType, ...BASE_PRODUCT_TYPE_OPTIONS]
+function productGroupOptions(currentGroup: string) {
+  const options = [currentGroup, ...BASE_PRODUCT_GROUP_OPTIONS]
     .map((value) => value.trim())
     .filter(Boolean);
   return [
-    { value: "", label: "— Product type —" },
+    { value: "", label: "— Product group —" },
     ...Array.from(new Set(options)).map((value) => ({ value, label: value })),
   ];
 }
@@ -104,7 +102,7 @@ function ProductOrderBlock() {
 
   const [shop, setShop] = useState<string | null>(null);
   const [productTitle, setProductTitle] = useState("");
-  const [productType, setProductType] = useState("");
+  const [productGroup, setProductGroup] = useState("");
   const [productVendor, setProductVendor] = useState("");
   const [productImageUrl, setProductImageUrl] = useState<string | null>(null);
   const [order, setOrder] = useState<OrderStatus>(null);
@@ -116,18 +114,18 @@ function ProductOrderBlock() {
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [savingPriority, setSavingPriority] = useState(false);
-  const [savingProductType, setSavingProductType] = useState(false);
+  const [savingProductGroup, setSavingProductGroup] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [orderPriority, setOrderPriority] = useState("");
-  const [orderProductType, setOrderProductType] = useState("");
+  const [orderProductGroup, setOrderProductGroup] = useState("");
 
   const applyOrderStatus = useCallback((nextOrder: OrderStatus, nextOrders: OrderStatusItem[]) => {
     const visibleOrders = nextOrders.slice(0, ORDER_LIMIT);
     setOrder(nextOrder);
     setOrders(visibleOrders);
     setOrderPriority(nextOrder?.priority || "");
-    setOrderProductType(nextOrder?.productType || productType || "");
+    setOrderProductGroup((current) => nextOrder?.productType || current || productGroup || "");
 
     const onOrderByVariant = new Map<string, number>();
     for (const item of visibleOrders) {
@@ -142,7 +140,7 @@ function ProductOrderBlock() {
       ...variant,
       onOrderQty: onOrderByVariant.get(variant.id) ?? 0,
     })));
-  }, [productType]);
+  }, [productGroup]);
 
   const refreshOrderStatus = useCallback(async (shopDomain: string, productId: string) => {
     const token = await auth.idToken();
@@ -182,8 +180,8 @@ function ProductOrderBlock() {
         const p = result.data?.product;
         if (p) {
           setProductTitle(p.title);
-          setProductType(p.productType ?? "");
-          setOrderProductType((current) => current || p.productType || "");
+          setProductGroup(p.productType ?? "");
+          setOrderProductGroup((current) => current || p.productType || "");
           setProductVendor(p.vendor ?? "");
           setProductImageUrl(p.featuredImage?.url ?? null);
           setVariants((p.variants?.nodes ?? []).map((v) => ({
@@ -235,10 +233,10 @@ function ProductOrderBlock() {
     }
   }
 
-  async function updateProductType(nextProductType: string) {
-    setOrderProductType(nextProductType);
+  async function updateProductGroup(nextProductGroup: string) {
+    setOrderProductGroup(nextProductGroup);
     if (!order || !shop) return;
-    setSavingProductType(true);
+    setSavingProductGroup(true);
     setFormError(null);
     try {
       const token = await auth.idToken();
@@ -249,7 +247,7 @@ function ProductOrderBlock() {
         body: JSON.stringify({
           shop,
           orderId: order.id,
-          productType: nextProductType,
+          productType: nextProductGroup,
         }),
       });
       const json = await res.json();
@@ -261,7 +259,7 @@ function ProductOrderBlock() {
     } catch (e: any) {
       setFormError(`Error: ${e?.message ?? String(e)}`);
     } finally {
-      setSavingProductType(false);
+      setSavingProductGroup(false);
     }
   }
 
@@ -282,7 +280,7 @@ function ProductOrderBlock() {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           shop, productId: productGid, productTitle,
-          productType: orderProductType || undefined,
+          productType: orderProductGroup || undefined,
           productImageUrl: productImageUrl || undefined,
           supplier: productVendor || "Unknown",
           notes: trimmedNotes || undefined,
@@ -369,10 +367,10 @@ function ProductOrderBlock() {
         )}
         <Box inlineSize={order ? "30%" : "100%"}>
           <Select
-            label={savingProductType ? "Type saving..." : "Product type"}
-            value={orderProductType}
-            options={productTypeOptions(productType || orderProductType)}
-            onChange={updateProductType}
+            label={savingProductGroup ? "Group saving..." : "Product group"}
+            value={orderProductGroup}
+            options={productGroupOptions(productGroup || orderProductGroup)}
+            onChange={updateProductGroup}
           />
         </Box>
       </InlineStack>
