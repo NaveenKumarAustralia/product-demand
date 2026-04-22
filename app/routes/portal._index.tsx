@@ -347,6 +347,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         sku: product.skus?.filter(Boolean).join("\n") || null,
         isCustom: false,
         qtys: Object.fromEntries((product.sizes ?? []).map((size) => [size, 0])),
+        shopifyLoadedQtys: {},
       },
     });
     return null;
@@ -374,11 +375,69 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const lineId = Number(form.get("lineId"));
     const size = String(form.get("size") ?? "");
     const value = Math.max(0, Number(form.get("value") ?? 0) || 0);
-    const line = await prisma.packingListLine.findUnique({ where: { id: lineId }, select: { qtys: true } });
+    const line = await prisma.packingListLine.findUnique({ where: { id: lineId }, select: { qtys: true, shopifyLoadedQtys: true } });
     if (!line || !size) return null;
     const qtys = normalizeQtys(line.qtys);
+    const shopifyLoadedQtys = normalizeQtys(line.shopifyLoadedQtys);
     qtys[size] = value;
-    await prisma.packingListLine.update({ where: { id: lineId }, data: { qtys } });
+    delete shopifyLoadedQtys[size];
+    await prisma.packingListLine.update({ where: { id: lineId }, data: { qtys, shopifyLoadedQtys } });
+    return null;
+  }
+
+  if (intent === "load_packing_inventory") {
+    const packingId = Number(form.get("packingId"));
+    const skipWords = String(form.get("skipWords") ?? "")
+      .split(",")
+      .map((word) => word.trim().toLowerCase())
+      .filter(Boolean);
+    const packingList = await prisma.packingList.findUnique({
+      where: { id: packingId },
+      include: { lines: { orderBy: [{ boxNumber: "asc" }, { sortOrder: "asc" }, { id: "asc" }] } },
+    });
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    });
+    if (!packingList || !session?.shop || !session.accessToken) return null;
+
+    const variantCache = new Map<string, ShopifyInventoryVariantInfo[]>();
+    const getVariants = async (productId: string) => {
+      if (!variantCache.has(productId)) {
+        variantCache.set(productId, await getShopifyInventoryVariants(session.shop, productId));
+      }
+      return variantCache.get(productId) ?? [];
+    };
+
+    for (const line of packingList.lines) {
+      const title = line.productTitle.toLowerCase();
+      if (!line.productId || line.isCustom || skipWords.some((word) => title.includes(word))) continue;
+
+      const qtys = normalizeQtys(line.qtys);
+      const loadedQtys = normalizeQtys(line.shopifyLoadedQtys);
+      const variants = await getVariants(line.productId);
+      const changes: ShopifyInventoryChange[] = [];
+      const nextLoadedQtys: Record<string, number> = { ...loadedQtys };
+
+      for (const [size, qty] of Object.entries(qtys)) {
+        if (qty <= 0 || loadedQtys[size] === qty) continue;
+        const variant = matchingVariantForSize(variants, size);
+        if (!variant?.inventoryItemId) continue;
+        changes.push({ size, qty, inventoryItemId: variant.inventoryItemId });
+      }
+
+      if (!changes.length) continue;
+      const loadedSizes = await addShopifyInventory(session.shop, session.accessToken, changes);
+      if (!loadedSizes.length) continue;
+      for (const size of loadedSizes) {
+        nextLoadedQtys[size] = qtys[size] ?? 0;
+      }
+      await prisma.packingListLine.update({
+        where: { id: line.id },
+        data: { shopifyLoadedQtys: nextLoadedQtys },
+      });
+    }
+
     return null;
   }
 
@@ -1106,6 +1165,8 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
 }
 
 type ShopifyVariantInfo = { id: string; title: string; sku: string | null; availableInventory: number | null };
+type ShopifyInventoryVariantInfo = ShopifyVariantInfo & { inventoryItemId: string | null };
+type ShopifyInventoryChange = { size: string; qty: number; inventoryItemId: string };
 
 async function getShopifyProductVariants(shop: string, productId: string): Promise<ShopifyVariantInfo[]> {
   const session = await prisma.session.findFirst({
@@ -1158,6 +1219,103 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
 function matchingVariantForSize(variants: ShopifyVariantInfo[], size: string) {
   const normalizedSize = size.trim().toLowerCase();
   return variants.find((variant) => variant.title.trim().toLowerCase() === normalizedSize) ?? null;
+}
+
+async function shopifyGraphql<T>(
+  shop: string,
+  accessToken: string,
+  query: string,
+  variables?: Record<string, unknown>,
+): Promise<T | null> {
+  try {
+    const response = await fetch(`https://${shop}/admin/api/2025-10/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": accessToken,
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (!response.ok) return null;
+    return await response.json() as T;
+  } catch {
+    return null;
+  }
+}
+
+async function getShopifyInventoryVariants(shop: string, productId: string): Promise<ShopifyInventoryVariantInfo[]> {
+  const session = await prisma.session.findFirst({
+    where: { shop, accessToken: { not: "" } },
+    orderBy: { isOnline: "asc" },
+  });
+  if (!session) return [];
+
+  const graphqlQuery = `
+    query ProductInventoryVariants($id: ID!) {
+      product(id: $id) {
+        variants(first: 100) {
+          nodes {
+            id
+            title
+            sku
+            inventoryQuantity
+            inventoryItem { id }
+          }
+        }
+      }
+    }
+  `;
+  const json = await shopifyGraphql<any>(session.shop, session.accessToken, graphqlQuery, { id: productId });
+
+  return (json?.data?.product?.variants?.nodes ?? [])
+    .map((variant: any) => ({
+      id: String(variant.id ?? ""),
+      title: String(variant.title ?? ""),
+      sku: variant.sku ? String(variant.sku) : null,
+      availableInventory: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null,
+      inventoryItemId: variant.inventoryItem?.id ? String(variant.inventoryItem.id) : null,
+    }))
+    .filter((variant: ShopifyInventoryVariantInfo) => variant.id && variant.title);
+}
+
+async function getPrimaryShopifyLocationId(shop: string, accessToken: string) {
+  const json = await shopifyGraphql<any>(shop, accessToken, `
+    query PrimaryInventoryLocation {
+      locations(first: 10) {
+        nodes { id isActive }
+      }
+    }
+  `);
+  const locations = json?.data?.locations?.nodes ?? [];
+  return (locations.find((location: any) => location.isActive) ?? locations[0])?.id ?? null;
+}
+
+async function addShopifyInventory(shop: string, accessToken: string, changes: ShopifyInventoryChange[]) {
+  const locationId = await getPrimaryShopifyLocationId(shop, accessToken);
+  if (!locationId || !changes.length) return [];
+
+  const json = await shopifyGraphql<any>(shop, accessToken, `
+    mutation AddPackingListInventory($input: InventoryAdjustQuantitiesInput!) {
+      inventoryAdjustQuantities(input: $input) {
+        userErrors { field message }
+        inventoryAdjustmentGroup { id }
+      }
+    }
+  `, {
+    input: {
+      name: "available",
+      reason: "correction",
+      changes: changes.map((change) => ({
+        delta: change.qty,
+        inventoryItemId: change.inventoryItemId,
+        locationId,
+      })),
+    },
+  });
+
+  const userErrors = json?.data?.inventoryAdjustQuantities?.userErrors ?? [];
+  if (userErrors.length || !json?.data?.inventoryAdjustQuantities?.inventoryAdjustmentGroup) return [];
+  return changes.map((change) => change.size);
 }
 
 async function enrichOrdersWithShopifyVariants<T extends {
@@ -1421,7 +1579,7 @@ export default function PortalDashboard() {
     <div style={s.appShell}>
       <aside style={{ ...s.sidebar, ...(sidebarCollapsed ? s.sidebarCollapsed : {}) }}>
         <div style={sidebarCollapsed ? s.sidebarTopCollapsed : s.sidebarTop}>
-          {!sidebarCollapsed && <div style={s.sidebarTitle}>Supplier Portal</div>}
+          {!sidebarCollapsed && <div style={s.sidebarTitle}>Production Portal</div>}
           <button
             type="button"
             onClick={() => setSidebarCollapsed((current) => !current)}
@@ -1601,7 +1759,7 @@ function PortalLogin({ users }: { users: PortalUser[] }) {
     <div style={s.loginShell}>
       <form method="post" style={s.loginCard}>
         <input type="hidden" name="intent" value="portal_login" />
-        <h1 style={s.loginTitle}>Supplier Portal</h1>
+        <h1 style={s.loginTitle}>Production Portal</h1>
         <p style={s.loginText}>Select your name to enter the portal.</p>
         <select name="userId" required style={s.loginSelect}>
           <option value="">Select your name</option>
@@ -2093,6 +2251,7 @@ function PackingListDetail({
   const fetcher = useFetcher();
   const columnWidthsFetcher = useFetcher();
   const [packingColumnWidths, setPackingColumnWidths] = useState<Record<string, number>>(savedPackingColumnWidths);
+  const [skipWords, setSkipWords] = useState("");
   const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
   const packingTableWidth = PACKING_COLUMNS.reduce((sum, column) => sum + packingWidthFor(column.id), 0);
 
@@ -2197,6 +2356,30 @@ function PackingListDetail({
           <div style={s.packingTotalPill}>
             Total quantity <strong>{packingListTotal(packingList)}</strong>
           </div>
+          <fetcher.Form
+            method="post"
+            style={s.loadInventoryForm}
+            onSubmit={(event) => {
+              const ok = window.confirm("Add these packing list quantities to current Shopify stock?");
+              if (!ok) event.preventDefault();
+            }}
+          >
+            <input type="hidden" name="intent" value="load_packing_inventory" />
+            <input type="hidden" name="packingId" value={packingList.id} />
+            <label style={s.filterLabel}>
+              Skip words
+              <input
+                name="skipWords"
+                value={skipWords}
+                onChange={(event) => setSkipWords(event.currentTarget.value)}
+                placeholder="acacia, sample, fabric"
+                style={s.packingInput}
+              />
+            </label>
+            <button type="submit" style={s.loginButton} disabled={fetcher.state !== "idle"}>
+              {fetcher.state === "idle" ? "Load inventory on Shopify" : "Loading..."}
+            </button>
+          </fetcher.Form>
         </div>
       </div>
 
@@ -2266,6 +2449,7 @@ function PackingListLineRow({
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
+  const shopifyLoadedQtys = normalizeQtys(line.shopifyLoadedQtys);
   const total = packingTotal(qtys);
   const price = line.priceRupees ?? 0;
   const value = total * price;
@@ -2286,7 +2470,14 @@ function PackingListLineRow({
       </td>
       <td style={s.td}><PackingSkuCell lineId={line.id} value={line.sku ?? ""} /></td>
       {PACKING_SIZES.map((size) => (
-        <td key={size} style={{ ...s.td, textAlign: "center" }}>
+        <td
+          key={size}
+          style={{
+            ...s.td,
+            textAlign: "center",
+            ...(qtys[size] > 0 && shopifyLoadedQtys[size] === qtys[size] ? s.loadedInventoryCell : {}),
+          }}
+        >
           <input
             type="text"
             inputMode="numeric"
@@ -3747,6 +3938,16 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 800,
   },
   packingActions: { display: "flex", gap: 8 },
+  loadInventoryForm: {
+    display: "flex",
+    alignItems: "flex-end",
+    flexWrap: "wrap",
+    gap: 10,
+    padding: 8,
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+    background: "#f8fafc",
+  },
   productSearchPanel: {
     background: "#fff",
     border: "1px solid #cbd5e1",
@@ -3935,8 +4136,8 @@ const s: Record<string, React.CSSProperties> = {
     transition: "background 120ms ease, box-shadow 120ms ease",
   },
   clickableOverviewRowHover: {
-    background: "#f8fafc",
-    boxShadow: "inset 4px 0 0 #111827",
+    background: "#eaf3ff",
+    boxShadow: "inset 5px 0 0 #2563eb, 0 8px 18px rgba(37,99,235,0.12)",
   },
   empty: { background: "#fff", borderRadius: 12, padding: 40, textAlign: "center", color: "#6b7280" },
   tableWrap: {
@@ -4181,6 +4382,10 @@ const s: Record<string, React.CSSProperties> = {
     outline: "none",
     background: "transparent",
     boxSizing: "border-box",
+  },
+  loadedInventoryCell: {
+    background: "#dcfce7",
+    boxShadow: "inset 0 0 0 9999px rgba(34,197,94,0.08)",
   },
   qtyInputActive: { color: "#111827" },
   qtyInputZero: { color: "#d1d5db" },

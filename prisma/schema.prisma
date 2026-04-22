@@ -124,6 +124,7 @@ model PackingListLine {
   sku             String?
   isCustom        Boolean     @default(false)
   qtys            Json        @default("{}")
+  shopifyLoadedQtys Json      @default("{}")
   priceRupees     Float?
   weight          Float?
   notes           String?
