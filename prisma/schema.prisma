@@ -82,6 +82,22 @@ model PortalSetting {
   updatedAt DateTime @updatedAt
 }
 
+model PortalMessage {
+  id           Int       @id @default(autoincrement())
+  userId       String
+  userName     String
+  orderId      Int
+  field        String
+  fromName     String?
+  productTitle String?
+  body         String
+  readAt       DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([userId, readAt, createdAt])
+  @@index([orderId, field])
+}
+
 model PackingList {
   id                       Int               @id @default(autoincrement())
   title                    String

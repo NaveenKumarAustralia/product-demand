@@ -515,13 +515,9 @@ function ProductOrderBlock() {
             {submitting ? "Saving..." : "Add to existing order"}
           </Button>
         )}
-        {orders.length < ORDER_LIMIT ? (
-          <Button variant={order ? "secondary" : "primary"} disabled={!hasProductGroup || submitting} onPress={() => handleSubmit("new")}>
-            {submitting ? "Saving..." : "Create new order"}
-          </Button>
-        ) : (
-          <Text>Maximum 2 open orders. Add to existing order.</Text>
-        )}
+        <Button variant={order ? "secondary" : "primary"} disabled={!hasProductGroup || submitting} onPress={() => handleSubmit("new")}>
+          {submitting ? "Saving..." : "Create new order"}
+        </Button>
         <Button variant="tertiary" onPress={() => { setShowForm(false); setFormError(null); }}>Cancel</Button>
       </InlineStack>
     </BlockStack>

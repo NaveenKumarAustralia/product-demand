@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
+import { syncOrderNoteMessages } from "../portal-messages.server";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -182,18 +183,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return updatedOrder;
       });
 
+      await syncOrderNoteMessages({
+        orderId: existingOrder.id,
+        field: "notes",
+        text: nextNotes,
+        fromName: "Shopify block",
+      });
+
       return Response.json({ success: true, order }, { headers: CORS });
-    }
-
-    const openOrderCount = await prisma.supplierOrder.count({
-      where: { shop, productId, status: "open" },
-    });
-
-    if (openOrderCount >= 2) {
-      return Response.json(
-        { error: "This product already has 2 open orders. Add to an existing order instead." },
-        { status: 400, headers: CORS },
-      );
     }
 
     const order = await prisma.supplierOrder.create({
@@ -224,6 +221,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           : undefined,
       },
       select: { id: true, poNumber: true, totalQty: true },
+    });
+
+    await syncOrderNoteMessages({
+      orderId: order.id,
+      field: "notes",
+      text: notes,
+      fromName: "Shopify block",
     });
 
     return Response.json({ success: true, order }, { headers: CORS });

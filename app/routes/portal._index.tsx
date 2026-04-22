@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useSearchParams } from "react-router";
 import prisma from "../db.server";
+import { syncOrderNoteMessages } from "../portal-messages.server";
 import { unauthenticated } from "../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -14,6 +15,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const selectedStatus = url.searchParams.get("status") ?? "";
   const selectedPriority = url.searchParams.get("priority") ?? "";
   const searchTitle = url.searchParams.get("q") ?? "";
+  const messageOrderId = Number(url.searchParams.get("messageOrderId") ?? 0) || null;
   const packingId = Number(url.searchParams.get("packingId") ?? 0) || null;
   const productSearch = url.searchParams.get("productSearch") ?? "";
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
@@ -68,6 +70,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
     .filter((order) => !selectedPriority || order.priority === selectedPriority)
     .filter((order) => !searchTitle || order.productTitle.toLowerCase().includes(searchTitle.toLowerCase()))
+    .filter((order) => !messageOrderId || order.id === messageOrderId)
     .sort((a, b) => {
       if (sortBy === "titleAsc") return a.productTitle.localeCompare(b.productTitle);
       if (sortBy === "titleDesc") return b.productTitle.localeCompare(a.productTitle);
@@ -79,6 +82,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     : null;
   const productResults = page === "packing" && selectedPackingList && productSearch.trim().length >= 2
     ? await searchShopifyProducts(productSearch)
+    : [];
+  const messages = currentUser
+    ? await prisma.portalMessage.findMany({
+        where: { userId: currentUser.id, readAt: null },
+        orderBy: { createdAt: "desc" },
+        take: 25,
+      })
     : [];
 
   // Collect all unique size names across all orders, sorted logically
@@ -116,6 +126,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     users,
     currentUser,
     activeUsers,
+    messages,
+    messageOrderId,
     loginBlocked: loginRequired && users.length > 0 && !currentUser,
   };
 };
@@ -383,7 +395,54 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "delete_order") {
+    await prisma.portalMessage.deleteMany({ where: { orderId } });
     await prisma.supplierOrder.delete({ where: { id: orderId } });
+    return null;
+  }
+
+  if (intent === "duplicate_order") {
+    const order = await prisma.supplierOrder.findUnique({
+      where: { id: orderId },
+      include: { lines: { orderBy: { id: "asc" } } },
+    });
+    if (!order) return null;
+
+    await prisma.supplierOrder.create({
+      data: {
+        shop: order.shop,
+        poNumber: order.poNumber,
+        supplier: order.supplier,
+        productId: order.productId,
+        productTitle: order.productTitle,
+        productType: order.productType,
+        status: "open",
+        supplierStatus: order.supplierStatus,
+        priority: order.priority,
+        productImageUrl: order.productImageUrl,
+        eta: order.eta,
+        totalQty: 0,
+        lines: {
+          create: order.lines.map((line) => ({
+            variantId: line.variantId,
+            variantTitle: line.variantTitle,
+            sku: line.sku,
+            qtyOrdered: 0,
+            costPrice: line.costPrice,
+          })),
+        },
+      },
+    });
+    return null;
+  }
+
+  if (intent === "mark_message_read") {
+    const messageId = Number(form.get("messageId"));
+    if (messageId && currentUser) {
+      await prisma.portalMessage.updateMany({
+        where: { id: messageId, userId: currentUser.id },
+        data: { readAt: new Date() },
+      });
+    }
     return null;
   }
 
@@ -471,6 +530,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (Object.keys(updates).length) {
     await prisma.supplierOrder.update({ where: { id: orderId }, data: updates });
+    if (intent === "update_factory_notes" || intent === "update_notes") {
+      await syncOrderNoteMessages({
+        orderId,
+        field: intent === "update_factory_notes" ? "factory_notes" : "notes",
+        text: String(form.get("value") ?? ""),
+        fromName: currentUser?.name ?? null,
+      });
+    }
   }
   return null;
 };
@@ -605,7 +672,7 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   notes: 150,
   priority: 160,
   eta: 145,
-  delete: 82,
+  delete: 104,
 };
 
 type ColumnDef = { id: string; label: string; center?: boolean };
@@ -831,6 +898,7 @@ function normalizeColumnWidths(value: unknown): Record<string, number> {
 // ─── Main component ───────────────────────────────────────────────────────────
 
 type Order = Awaited<ReturnType<typeof loader>>["orders"][number];
+type PortalMessageItem = Awaited<ReturnType<typeof loader>>["messages"][number];
 
 export default function PortalDashboard() {
   const {
@@ -856,6 +924,8 @@ export default function PortalDashboard() {
     users,
     currentUser,
     activeUsers,
+    messages,
+    messageOrderId,
     loginBlocked,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -875,7 +945,7 @@ export default function PortalDashboard() {
     { id: "notes", label: "Notes" },
     { id: "priority", label: "Priority" },
     { id: "eta", label: "ETA" },
-    { id: "delete", label: "Delete", center: true },
+    { id: "delete", label: "Actions", center: true },
   ];
 
   const widthFor = (columnId: string) => columnWidths[columnId] ?? defaultColumnWidth(columnId);
@@ -1017,9 +1087,9 @@ export default function PortalDashboard() {
           <div>
             <h1 style={s.pageTitle}>{activePageTitle}</h1>
           </div>
-          {page === "restock" && (
-            <div style={s.headerControls}>
-              <div style={s.utilityBar}>
+          <div style={s.headerControls}>
+            <div style={s.utilityBar}>
+              {page === "restock" && (
                 <label style={s.filterLabel}>
                   Search
                   <input
@@ -1030,13 +1100,16 @@ export default function PortalDashboard() {
                     placeholder="Product title"
                   />
                 </label>
-                <div style={s.activeUsers} title="Currently active">
-                  <span style={s.activeUsersLabel}>Active</span>
-                  {activeUsers.length ? activeUsers.map((user) => (
-                    <span key={user.id} style={s.activeUserBadge} title={user.name}>{user.initials}</span>
-                  )) : <span style={s.activeUserEmpty}>No active users</span>}
-                </div>
+              )}
+              <MessagesMenu messages={messages} />
+              <div style={s.activeUsers} title="Currently active">
+                <span style={s.activeUsersLabel}>Active</span>
+                {activeUsers.length ? activeUsers.map((user) => (
+                  <span key={user.id} style={s.activeUserBadge} title={user.name}>{user.initials}</span>
+                )) : <span style={s.activeUserEmpty}>No active users</span>}
               </div>
+            </div>
+            {page === "restock" && (
               <div style={s.filters}>
                 <label style={s.filterLabel}>
                   Product group
@@ -1079,8 +1152,8 @@ export default function PortalDashboard() {
                   </select>
                 </label>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </header>
 
         {page === "settings" ? (
@@ -1102,7 +1175,7 @@ export default function PortalDashboard() {
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : orders.length === 0 ? (
-          <div style={s.empty}>No open orders at the moment.</div>
+          <div style={s.empty}>{messageOrderId ? "That message is for an order that is no longer open." : "No open orders at the moment."}</div>
         ) : (
           <div style={s.tableWrap}>
             <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleGridKeyDown}>
@@ -1152,6 +1225,48 @@ function PortalLogin({ users }: { users: PortalUser[] }) {
         </select>
         <button type="submit" style={s.loginButton}>Enter portal</button>
       </form>
+    </div>
+  );
+}
+
+function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
+  const [open, setOpen] = useState(false);
+  const fetcher = useFetcher();
+
+  return (
+    <div style={s.messagesWrap}>
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        style={messages.length ? s.messagesButtonActive : s.messagesButton}
+        title="Messages"
+      >
+        Bell {messages.length ? `(${messages.length})` : ""}
+      </button>
+      {open && (
+        <div style={s.messagesPopover}>
+          <div style={s.messagesHeader}>Messages</div>
+          {messages.length ? messages.map((message) => (
+            <div key={message.id} style={s.messageItem}>
+              <a
+                href={`/portal?messageOrderId=${message.orderId}#order-${message.orderId}`}
+                style={s.messageLink}
+              >
+                <strong>{message.productTitle || `Order #${message.orderId}`}</strong>
+                <span>{message.field === "factory_notes" ? "Factory notes" : "Notes"}</span>
+                <span style={s.messageBody}>{message.body}</span>
+              </a>
+              <fetcher.Form method="post">
+                <input type="hidden" name="intent" value="mark_message_read" />
+                <input type="hidden" name="messageId" value={message.id} />
+                <button type="submit" style={s.messageReadButton}>Done</button>
+              </fetcher.Form>
+            </div>
+          )) : (
+            <div style={s.messageEmpty}>No messages for you.</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1853,7 +1968,7 @@ function OrderRow({ order, rowIndex, sizes }: { order: Order; rowIndex: number; 
   const deleteCol = totalCol + 5;
 
   return (
-    <tr style={s.row}>
+    <tr id={`order-${order.id}`} style={s.row}>
       {/* Factory notes */}
       <Td rowIndex={rowIndex} colIndex={0}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} /></Td>
 
@@ -1897,8 +2012,8 @@ function OrderRow({ order, rowIndex, sizes }: { order: Order; rowIndex: number; 
       {/* ETA */}
       <Td rowIndex={rowIndex} colIndex={etaCol}><EtaCell orderId={order.id} value={etaValue} /></Td>
 
-      {/* Delete */}
-      <Td rowIndex={rowIndex} colIndex={deleteCol} center><DeleteCell orderId={order.id} /></Td>
+      {/* Actions */}
+      <Td rowIndex={rowIndex} colIndex={deleteCol} center><OrderActionsCell orderId={order.id} /></Td>
     </tr>
   );
 }
@@ -2029,7 +2144,7 @@ function QtyCell({ orderId, size, value }: { orderId: number; size: string; valu
   );
 }
 
-function DeleteCell({ orderId }: { orderId: number }) {
+function OrderActionsCell({ orderId }: { orderId: number }) {
   const fetcher = useFetcher();
   const confirmedRef = useRef(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -2047,52 +2162,59 @@ function DeleteCell({ orderId }: { orderId: number }) {
   };
 
   return (
-    <fetcher.Form
-      method="post"
-      onSubmit={(e) => {
-        if (confirmedRef.current || shouldSkipConfirm()) {
-          confirmedRef.current = false;
-          return;
-        }
+    <div style={s.rowActions}>
+      <fetcher.Form method="post">
+        <input type="hidden" name="intent" value="duplicate_order" />
+        <input type="hidden" name="orderId" value={orderId} />
+        <button type="submit" style={s.smallButton}>Duplicate</button>
+      </fetcher.Form>
+      <fetcher.Form
+        method="post"
+        onSubmit={(e) => {
+          if (confirmedRef.current || shouldSkipConfirm()) {
+            confirmedRef.current = false;
+            return;
+          }
 
-        e.preventDefault();
-        setConfirmOpen(true);
-      }}
-    >
-      <input type="hidden" name="intent" value="delete_order" />
-      <input type="hidden" name="orderId" value={orderId} />
-      <button type="submit" style={s.deleteButton}>Delete</button>
-      {confirmOpen && (
-        <div style={s.deleteConfirm}>
-          <div style={s.deleteConfirmCard}>
-            <div style={s.deleteConfirmTitle}>Delete order?</div>
-            <div style={s.deleteConfirmText}>Are you sure you want to delete this order?</div>
-            <div style={s.deleteConfirmActions}>
-              <button
-                type="submit"
-                style={{ ...s.deleteConfirmButton, ...s.deleteConfirmDanger }}
-                onClick={() => { confirmedRef.current = true; }}
-              >
-                Yes, delete
-              </button>
-              <button type="button" style={s.deleteConfirmButton} onClick={() => setConfirmOpen(false)}>
-                No
-              </button>
-              <button
-                type="submit"
-                style={s.deleteConfirmButton}
-                onClick={() => {
-                  skipConfirmForToday();
-                  confirmedRef.current = true;
-                }}
-              >
-                Don’t ask me again for a day
-              </button>
+          e.preventDefault();
+          setConfirmOpen(true);
+        }}
+      >
+        <input type="hidden" name="intent" value="delete_order" />
+        <input type="hidden" name="orderId" value={orderId} />
+        <button type="submit" style={s.deleteButton}>Delete</button>
+        {confirmOpen && (
+          <div style={s.deleteConfirm}>
+            <div style={s.deleteConfirmCard}>
+              <div style={s.deleteConfirmTitle}>Delete order?</div>
+              <div style={s.deleteConfirmText}>Are you sure you want to delete this order?</div>
+              <div style={s.deleteConfirmActions}>
+                <button
+                  type="submit"
+                  style={{ ...s.deleteConfirmButton, ...s.deleteConfirmDanger }}
+                  onClick={() => { confirmedRef.current = true; }}
+                >
+                  Yes, delete
+                </button>
+                <button type="button" style={s.deleteConfirmButton} onClick={() => setConfirmOpen(false)}>
+                  No
+                </button>
+                <button
+                  type="submit"
+                  style={s.deleteConfirmButton}
+                  onClick={() => {
+                    skipConfirmForToday();
+                    confirmedRef.current = true;
+                  }}
+                >
+                  Don’t ask me again for a day
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
-    </fetcher.Form>
+        )}
+      </fetcher.Form>
+    </div>
   );
 }
 
@@ -2136,6 +2258,17 @@ function Td({
       data-grid-row={rowIndex}
       data-grid-col={colIndex}
       tabIndex={0}
+      onFocus={(event) => {
+        if (event.target !== event.currentTarget) return;
+        const focusTarget = event.currentTarget.querySelector<HTMLElement>(FOCUSABLE_CELL_SELECTOR);
+        if (!focusTarget) return;
+        window.setTimeout(() => {
+          focusTarget.focus();
+          if (focusTarget instanceof HTMLInputElement || focusTarget instanceof HTMLTextAreaElement) {
+            focusTarget.select();
+          }
+        }, 0);
+      }}
       style={{ ...s.td, textAlign: center ? "center" : "left" }}
     >
       {children}
@@ -2296,6 +2429,76 @@ const s: Record<string, React.CSSProperties> = {
     letterSpacing: "0.04em",
   },
   activeUserEmpty: { color: "#6b7280", fontSize: 12, fontWeight: 700 },
+  messagesWrap: { position: "relative" },
+  messagesButton: {
+    border: "1px solid #d1d5db",
+    borderRadius: 8,
+    padding: "7px 10px",
+    background: "#fff",
+    color: "#374151",
+    fontSize: 12,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  messagesButtonActive: {
+    border: "1px solid #f97316",
+    borderRadius: 8,
+    padding: "7px 10px",
+    background: "#fff7ed",
+    color: "#9a3412",
+    fontSize: 12,
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  messagesPopover: {
+    position: "absolute",
+    top: 38,
+    right: 0,
+    width: 360,
+    maxHeight: 420,
+    overflow: "auto",
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    boxShadow: "0 18px 40px rgba(15,23,42,0.24)",
+    zIndex: 200,
+    padding: 8,
+  },
+  messagesHeader: { padding: "8px 10px", fontSize: 13, fontWeight: 900, color: "#111827" },
+  messageItem: {
+    display: "grid",
+    gridTemplateColumns: "1fr auto",
+    gap: 8,
+    alignItems: "start",
+    padding: 8,
+    borderTop: "1px solid #e5e7eb",
+  },
+  messageLink: {
+    display: "grid",
+    gap: 3,
+    color: "#111827",
+    textDecoration: "none",
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  messageBody: {
+    color: "#6b7280",
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
+  messageReadButton: {
+    border: "1px solid #d1d5db",
+    borderRadius: 6,
+    padding: "5px 7px",
+    background: "#fff",
+    color: "#374151",
+    fontSize: 11,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  messageEmpty: { padding: 14, color: "#6b7280", fontSize: 12, fontWeight: 700 },
   loginShell: {
     minHeight: "100vh",
     background: "linear-gradient(135deg, #f8fafc 0%, #e5edf6 100%)",

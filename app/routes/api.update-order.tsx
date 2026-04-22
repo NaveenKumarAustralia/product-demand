@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
+import { syncOrderNoteMessages } from "../portal-messages.server";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -116,6 +117,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         notes: true,
       },
     });
+
+    if (notes !== undefined) {
+      await syncOrderNoteMessages({
+        orderId: id,
+        field: "notes",
+        text: notes,
+        fromName: "Shopify block",
+      });
+    }
 
     return Response.json({
       success: true,
