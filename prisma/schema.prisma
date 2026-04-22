@@ -90,6 +90,7 @@ model PackingList {
   expectedLeaveFactoryDate DateTime?
   status                   String            @default("still_packing")
   notes                    String?
+  hiddenAt                 DateTime?
   createdAt                DateTime          @default(now())
   updatedAt                DateTime          @updatedAt
   lines                    PackingListLine[]

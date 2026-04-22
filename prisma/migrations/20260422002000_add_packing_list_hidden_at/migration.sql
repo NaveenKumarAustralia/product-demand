@@ -1,0 +1,2 @@
+ALTER TABLE "PackingList"
+ADD COLUMN "hiddenAt" TIMESTAMP(3);

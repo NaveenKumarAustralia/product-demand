@@ -252,6 +252,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "set_packing_list_hidden") {
+    const packingId = Number(form.get("packingId"));
+    const hidden = String(form.get("hidden") ?? "") === "true";
+    if (packingId) {
+      await prisma.packingList.update({
+        where: { id: packingId },
+        data: { hiddenAt: hidden ? new Date() : null },
+      });
+    }
+    return null;
+  }
+
   if (intent === "add_custom_packing_line") {
     const packingId = Number(form.get("packingId"));
     const maxLine = await prisma.packingListLine.findFirst({
@@ -1280,16 +1292,22 @@ function PackingListsOverview({
   packingLists: PackingListWithLines[];
   fetcher: ReturnType<typeof useFetcher>;
 }) {
+  const [searchParams] = useSearchParams();
+  const [hoveredListId, setHoveredListId] = useState<number | null>(null);
+  const showHidden = searchParams.get("showHidden") === "true";
+  const visibleLists = packingLists.filter((list) => !list.hiddenAt);
+  const hiddenLists = packingLists.filter((list) => list.hiddenAt);
+  const rows = showHidden ? hiddenLists : visibleLists;
+
   return (
     <div style={s.packingOverview}>
       <section style={s.packingOverviewCreate}>
         <div>
           <h2 style={s.settingsTitle}>Create packing list</h2>
-          <p style={s.settingsHint}>Create one shipment, then open it to add products and box quantities.</p>
+          <p style={s.settingsHint}>Create one packing list, then open it to add products and box quantities.</p>
         </div>
         <fetcher.Form method="post" style={s.packingCreateForm}>
           <input type="hidden" name="intent" value="create_packing_list" />
-          <input name="title" placeholder="Shipment name" style={s.packingInput} />
           <input name="invoiceNumber" placeholder="Invoice number" style={s.packingInput} />
           <input name="expectedLeaveFactoryDate" placeholder="Leave factory dd/mm/yy" style={s.packingInput} />
           <button type="submit" style={s.loginButton}>New packing list</button>
@@ -1297,32 +1315,62 @@ function PackingListsOverview({
       </section>
 
       <section style={s.packingOverviewTableWrap}>
+        <div style={s.packingOverviewBar}>
+          <strong>{showHidden ? "Hidden packing lists" : "Packing lists"}</strong>
+          <a href={`/portal?page=packing${showHidden ? "" : "&showHidden=true"}`} style={s.secondaryButton}>
+            {showHidden ? "Show active lists" : `Show hidden lists (${hiddenLists.length})`}
+          </a>
+        </div>
         <table style={{ ...s.table, width: "100%" }}>
           <thead>
             <tr style={s.headerRow}>
-              {["Packing list", "Invoice", "Total qty", "Leave factory", "Status", "Created", "Open"].map((heading) => (
-                <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Open" ? "center" : "left" }}>
+              {["Invoice", "Total qty", "Leave factory", "Status", showHidden ? "Show" : "Hide"].map((heading) => (
+                <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Hide" || heading === "Show" ? "center" : "left" }}>
                   <span style={s.thContent}>{heading}</span>
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {packingLists.length ? packingLists.map((list) => (
-              <tr key={list.id} style={s.row}>
-                <td style={s.td}><strong style={s.productName}>{list.title}</strong></td>
-                <td style={s.td}>{list.invoiceNumber || "—"}</td>
+            {rows.length ? rows.map((list) => (
+              <tr
+                key={list.id}
+                style={{
+                  ...s.clickableOverviewRow,
+                  ...(hoveredListId === list.id ? s.clickableOverviewRowHover : null),
+                }}
+                onClick={() => {
+                  window.location.href = `/portal?page=packing&packingId=${list.id}`;
+                }}
+                onMouseEnter={() => setHoveredListId(list.id)}
+                onMouseLeave={() => setHoveredListId(null)}
+              >
+                <td style={s.td}>
+                  <strong style={s.productName}>{list.invoiceNumber || `Packing list #${list.id}`}</strong>
+                </td>
                 <td style={{ ...s.td, textAlign: "center" }}><span style={s.total}>{packingListTotal(list)}</span></td>
                 <td style={s.td}>{formatPortalDate(list.expectedLeaveFactoryDate ?? list.shipmentDate) || "—"}</td>
                 <td style={s.td}>{labelForPackingStatus(list.status)}</td>
-                <td style={s.td}>{formatPortalDate(list.createdAt)}</td>
                 <td style={{ ...s.td, textAlign: "center" }}>
-                  <a href={`/portal?page=packing&packingId=${list.id}`} style={s.smallLinkButton}>Open</a>
+                  <fetcher.Form
+                    method="post"
+                    onClick={(event) => event.stopPropagation()}
+                    style={{ display: "inline-block" }}
+                  >
+                    <input type="hidden" name="intent" value="set_packing_list_hidden" />
+                    <input type="hidden" name="packingId" value={list.id} />
+                    <input type="hidden" name="hidden" value={showHidden ? "false" : "true"} />
+                    <button type="submit" style={showHidden ? s.smallButton : s.hideListButton}>
+                      {showHidden ? "Show" : "Hide list"}
+                    </button>
+                  </fetcher.Form>
                 </td>
               </tr>
             )) : (
               <tr style={s.row}>
-                <td colSpan={7} style={{ ...s.td, textAlign: "center", padding: 40 }}>No packing lists yet.</td>
+                <td colSpan={5} style={{ ...s.td, textAlign: "center", padding: 40 }}>
+                  {showHidden ? "No hidden packing lists." : "No packing lists yet."}
+                </td>
               </tr>
             )}
           </tbody>
@@ -2390,6 +2438,15 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #cbd5e1",
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
   },
+  packingOverviewBar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    padding: 12,
+    color: "#111827",
+    borderBottom: "1px solid #cbd5e1",
+  },
   packingToolbar: {
     background: "#fff",
     border: "1px solid #cbd5e1",
@@ -2628,6 +2685,25 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 11,
     fontWeight: 800,
     cursor: "pointer",
+  },
+  hideListButton: {
+    border: "1px solid #fed7aa",
+    borderRadius: 6,
+    padding: "5px 7px",
+    background: "#fff7ed",
+    color: "#9a3412",
+    fontSize: 11,
+    fontWeight: 800,
+    cursor: "pointer",
+  },
+  clickableOverviewRow: {
+    background: "#fff",
+    cursor: "pointer",
+    transition: "background 120ms ease, box-shadow 120ms ease",
+  },
+  clickableOverviewRowHover: {
+    background: "#f8fafc",
+    boxShadow: "inset 4px 0 0 #111827",
   },
   empty: { background: "#fff", borderRadius: 12, padding: 40, textAlign: "center", color: "#6b7280" },
   tableWrap: {
