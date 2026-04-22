@@ -1,5 +1,6 @@
 import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
+import { normalizePortalMessageUsers, PORTAL_USERS_KEY } from "../portal-messages.server";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -71,28 +72,37 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   try {
-    const orders = await prisma.supplierOrder.findMany({
-      where: { shop, productId, status: "open" },
-      select: {
-        id: true,
-        supplier: true,
-        totalQty: true,
-        productType: true,
-        eta: true,
-        status: true,
-        supplierStatus: true,
-        priority: true,
-        notes: true,
-        lines: {
-          select: {
-            variantId: true,
-            qtyOrdered: true,
+    const [orders, usersSetting] = await Promise.all([
+      prisma.supplierOrder.findMany({
+        where: { shop, productId, status: "open" },
+        select: {
+          id: true,
+          supplier: true,
+          totalQty: true,
+          productType: true,
+          eta: true,
+          status: true,
+          supplierStatus: true,
+          priority: true,
+          notes: true,
+          lines: {
+            select: {
+              variantId: true,
+              qtyOrdered: true,
+            },
           },
         },
-      },
-      orderBy: { createdAt: "desc" },
-      take: 2,
-    });
+        orderBy: { createdAt: "desc" },
+        take: 2,
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: PORTAL_USERS_KEY },
+        select: { value: true },
+      }),
+    ]);
+    const staffNames = normalizePortalMessageUsers(usersSetting?.value)
+      .filter((user) => user.active !== false)
+      .map((user) => user.name);
 
     const latestOrder = orders[0] ?? null;
     const formattedOrders = orders.map((order) => ({
@@ -119,6 +129,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             }
           : null,
         orders: formattedOrders,
+        staffNames,
       },
       { headers: CORS },
     );

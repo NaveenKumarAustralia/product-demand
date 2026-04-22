@@ -79,6 +79,19 @@ function isRealProductGroup(value?: string | null) {
   );
 }
 
+function currentTagQuery(value: string) {
+  const match = value.match(/(^|\s)@([a-z0-9._-]*)$/i);
+  return match ? match[2].toLowerCase() : null;
+}
+
+function insertStaffTag(value: string, name: string) {
+  const tag = `@${name.trim().split(/\s+/)[0]}`;
+  if (/(^|\s)@[a-z0-9._-]*$/i.test(value)) {
+    return value.replace(/(^|\s)@[a-z0-9._-]*$/i, (_match, prefix) => `${prefix}${tag} `);
+  }
+  return `${value}${value.endsWith(" ") || !value ? "" : " "}${tag} `;
+}
+
 function labelFor(options: Array<{ value: string; label: string }>, value?: string | null) {
   return options.find((option) => option.value === value)?.label ?? "On Order";
 }
@@ -161,6 +174,7 @@ function ProductOrderBlock() {
   const [savingProductGroup, setSavingProductGroup] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
+  const [staffNames, setStaffNames] = useState<string[]>([]);
   const [orderPriority, setOrderPriority] = useState("");
   const [orderProductGroup, setOrderProductGroup] = useState(PRODUCT_GROUP_PLACEHOLDER_VALUE);
   const [customProductGroup, setCustomProductGroup] = useState("");
@@ -199,6 +213,7 @@ function ProductOrderBlock() {
     const json = await res.json();
     if (!res.ok) throw new Error(json.error ?? "Could not load order status");
     applyOrderStatus(json.order ?? null, json.orders ?? []);
+    setStaffNames(Array.isArray(json.staffNames) ? json.staffNames : []);
   }, [applyOrderStatus, auth]);
 
   useEffect(() => {
@@ -415,6 +430,12 @@ function ProductOrderBlock() {
     ? normalizeProductGroup(customProductGroup)
     : normalizeProductGroup(orderProductGroup);
   const hasProductGroup = isRealProductGroup(selectedProductGroup);
+  const tagQuery = currentTagQuery(notes);
+  const staffSuggestions = tagQuery == null
+    ? []
+    : staffNames
+        .filter((name) => name.toLowerCase().includes(tagQuery))
+        .slice(0, 5);
 
   return (
     <BlockStack gap="small">
@@ -457,6 +478,18 @@ function ProductOrderBlock() {
         value={notes}
         onChange={setNotes}
       />
+      {staffSuggestions.length > 0 && (
+        <BlockStack gap="small">
+          <Text>Tag staff</Text>
+          <InlineStack gap="small">
+            {staffSuggestions.map((name) => (
+              <Button key={name} variant="tertiary" onPress={() => setNotes((current) => insertStaffTag(current, name))}>
+                @{name}
+              </Button>
+            ))}
+          </InlineStack>
+        </BlockStack>
+      )}
       <Divider />
 
       {/* Header */}

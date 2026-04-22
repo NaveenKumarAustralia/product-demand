@@ -1199,7 +1199,7 @@ export default function PortalDashboard() {
               </thead>
               <tbody>
                 {orders.map((order, rowIndex) => (
-                  <OrderRow key={order.id} order={order} rowIndex={rowIndex} sizes={sizes} />
+                  <OrderRow key={order.id} order={order} rowIndex={rowIndex} sizes={sizes} users={users} />
                 ))}
               </tbody>
             </table>
@@ -1952,7 +1952,17 @@ function FabricImageCell({ lineId, value }: { lineId: number; value: string }) {
 
 // ─── Row ─────────────────────────────────────────────────────────────────────
 
-function OrderRow({ order, rowIndex, sizes }: { order: Order; rowIndex: number; sizes: string[] }) {
+function OrderRow({
+  order,
+  rowIndex,
+  sizes,
+  users,
+}: {
+  order: Order;
+  rowIndex: number;
+  sizes: string[];
+  users: PortalUser[];
+}) {
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
     return acc;
@@ -1970,7 +1980,7 @@ function OrderRow({ order, rowIndex, sizes }: { order: Order; rowIndex: number; 
   return (
     <tr id={`order-${order.id}`} style={s.row}>
       {/* Factory notes */}
-      <Td rowIndex={rowIndex} colIndex={0}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} /></Td>
+      <Td rowIndex={rowIndex} colIndex={0} overflowVisible><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
       {/* Order date */}
       <Td rowIndex={rowIndex} colIndex={1} center><span style={s.dateText}>{orderDate}</span></Td>
@@ -2004,7 +2014,7 @@ function OrderRow({ order, rowIndex, sizes }: { order: Order; rowIndex: number; 
       <Td rowIndex={rowIndex} colIndex={statusCol}><StatusCell orderId={order.id} value={order.supplierStatus} /></Td>
 
       {/* Notes (from order) */}
-      <Td rowIndex={rowIndex} colIndex={notesCol}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} /></Td>
+      <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
 
       {/* Priority */}
       <Td rowIndex={rowIndex} colIndex={priorityCol}><PriorityCell orderId={order.id} value={order.priority ?? ""} /></Td>
@@ -2081,20 +2091,77 @@ function PriorityCell({ orderId, value }: { orderId: number; value: string }) {
   );
 }
 
-function NotesCell({ orderId, field, value }: { orderId: number; field: string; value: string }) {
+function currentTagQuery(value: string) {
+  const match = value.match(/(^|\s)@([a-z0-9._-]*)$/i);
+  return match ? match[2].toLowerCase() : null;
+}
+
+function insertStaffTag(value: string, name: string) {
+  const tag = `@${name.trim().split(/\s+/)[0]}`;
+  if (/(^|\s)@[a-z0-9._-]*$/i.test(value)) {
+    return value.replace(/(^|\s)@[a-z0-9._-]*$/i, (match, prefix) => `${prefix}${tag} `);
+  }
+  return `${value}${value.endsWith(" ") || !value ? "" : " "}${tag} `;
+}
+
+function NotesCell({
+  orderId,
+  field,
+  value,
+  users,
+}: {
+  orderId: number;
+  field: string;
+  value: string;
+  users: PortalUser[];
+}) {
   const fetcher = useFetcher();
+  const [text, setText] = useState(value);
+  const [focused, setFocused] = useState(false);
+  const tagQuery = currentTagQuery(text);
+  const suggestions = tagQuery == null
+    ? []
+    : users
+        .filter((user) => user.active)
+        .filter((user) => user.name.toLowerCase().includes(tagQuery))
+        .slice(0, 5);
+
   return (
-    <textarea
-      defaultValue={value}
-      onBlur={(e) => submitPortalCell(fetcher, {
-        intent: `update_${field}`,
-        orderId,
-        value: e.currentTarget.value,
-      })}
-      rows={2}
-      style={s.textarea}
-      placeholder="Add note…"
-    />
+    <div style={s.noteTagWrap}>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.currentTarget.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={(e) => {
+          window.setTimeout(() => setFocused(false), 120);
+          submitPortalCell(fetcher, {
+            intent: `update_${field}`,
+            orderId,
+            value: e.currentTarget.value,
+          });
+        }}
+        rows={2}
+        style={s.textarea}
+        placeholder="Add note… use @name"
+      />
+      {focused && suggestions.length > 0 && (
+        <div style={s.tagSuggestions}>
+          {suggestions.map((user) => (
+            <button
+              key={user.id}
+              type="button"
+              style={s.tagSuggestionButton}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                setText((current) => insertStaffTag(current, user.name));
+              }}
+            >
+              @{user.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2247,11 +2314,13 @@ function Td({
   center,
   rowIndex,
   colIndex,
+  overflowVisible,
 }: {
   children: React.ReactNode;
   center?: boolean;
   rowIndex: number;
   colIndex: number;
+  overflowVisible?: boolean;
 }) {
   return (
     <td
@@ -2269,7 +2338,7 @@ function Td({
           }
         }, 0);
       }}
-      style={{ ...s.td, textAlign: center ? "center" : "left" }}
+      style={{ ...s.td, textAlign: center ? "center" : "left", ...(overflowVisible ? { overflow: "visible" } : {}) }}
     >
       {children}
     </td>
@@ -2999,6 +3068,32 @@ const s: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
     outline: "none",
     color: "#374151",
+  },
+  noteTagWrap: { position: "relative" },
+  tagSuggestions: {
+    position: "absolute",
+    left: 0,
+    top: "calc(100% + 4px)",
+    minWidth: 180,
+    display: "grid",
+    gap: 4,
+    padding: 6,
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 8,
+    boxShadow: "0 14px 30px rgba(15,23,42,0.2)",
+    zIndex: 180,
+  },
+  tagSuggestionButton: {
+    border: 0,
+    borderRadius: 6,
+    padding: "7px 8px",
+    background: "#f8fafc",
+    color: "#111827",
+    fontSize: 12,
+    fontWeight: 800,
+    textAlign: "left",
+    cursor: "pointer",
   },
   dateInput: {
     border: "1px solid #b6c0cc",
