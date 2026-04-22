@@ -1533,9 +1533,10 @@ function PackingProductNameCell({
   const displayValue = line.isCustom && line.productTitle === "Custom item" ? "" : line.productTitle;
   const [value, setValue] = useState(displayValue);
   const [isFocused, setIsFocused] = useState(false);
+  const [isProductSelected, setIsProductSelected] = useState(false);
   const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
   const [canPortalDropdown, setCanPortalDropdown] = useState(false);
-  const canSearch = isFocused || isActiveSearch;
+  const canSearch = !isProductSelected && (isFocused || isActiveSearch);
   const shouldShowResults = canSearch && value.trim().length >= 2;
   const dropdownHeight = value.trim() !== productSearch || !productResults.length
     ? 48
@@ -1547,6 +1548,7 @@ function PackingProductNameCell({
 
   useEffect(() => {
     setValue(displayValue);
+    setIsProductSelected(false);
   }, [displayValue, line.id]);
 
   useEffect(() => {
@@ -1581,6 +1583,10 @@ function PackingProductNameCell({
 
   const applyProduct = (product: ShopifySearchProduct) => {
     setValue(product.title);
+    setIsFocused(false);
+    setIsProductSelected(true);
+    setDropdownRect(null);
+    inputRef.current?.blur();
     submitPortalCell(fetcher, {
       intent: "apply_product_to_packing_line",
       lineId: line.id,
@@ -1597,12 +1603,14 @@ function PackingProductNameCell({
         value={value}
         onFocus={() => {
           setIsFocused(true);
+          setIsProductSelected(false);
           if (value.trim().length >= 2) {
             updateParams({ productSearch: value.trim(), packingSearchLineId: String(line.id) });
           }
         }}
         onChange={(event) => setValue(event.currentTarget.value)}
         onBlur={(event) => {
+          if (isProductSelected) return;
           setIsFocused(false);
           submitPortalCell(fetcher, {
             intent: "update_packing_line",
