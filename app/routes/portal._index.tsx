@@ -1422,6 +1422,39 @@ function normalizeColumnWidths(value: unknown): Record<string, number> {
   );
 }
 
+function handleTableGridKeyDown(event: React.KeyboardEvent<HTMLTableElement>) {
+  if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+
+  const currentCell = (event.target as HTMLElement).closest<HTMLElement>("[data-grid-row][data-grid-col]");
+  if (!currentCell) return;
+
+  const row = Number(currentCell.dataset.gridRow);
+  const col = Number(currentCell.dataset.gridCol);
+  const next = {
+    ArrowUp: [row - 1, col],
+    ArrowDown: [row + 1, col],
+    ArrowLeft: [row, col - 1],
+    ArrowRight: [row, col + 1],
+  }[event.key]!;
+  const [nextRow, nextCol] = next;
+  const nextCell = event.currentTarget.querySelector<HTMLElement>(
+    `[data-grid-row="${nextRow}"][data-grid-col="${nextCol}"]`,
+  );
+
+  if (!nextCell) return;
+
+  event.preventDefault();
+  const focusTarget = nextCell.querySelector<HTMLElement>(FOCUSABLE_CELL_SELECTOR) ?? nextCell;
+  focusTarget.focus();
+
+  if (focusTarget instanceof HTMLInputElement) {
+    focusTarget.select();
+  } else if (focusTarget instanceof HTMLTextAreaElement) {
+    focusTarget.select();
+  }
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 type Order = Awaited<ReturnType<typeof loader>>["orders"][number];
@@ -1540,39 +1573,6 @@ export default function PortalDashboard() {
 
     document.addEventListener("mousemove", handleMove);
     document.addEventListener("mouseup", handleUp);
-  };
-
-  const handleGridKeyDown = (event: React.KeyboardEvent<HTMLTableElement>) => {
-    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
-    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-
-    const currentCell = (event.target as HTMLElement).closest<HTMLElement>("[data-grid-row][data-grid-col]");
-    if (!currentCell) return;
-
-    const row = Number(currentCell.dataset.gridRow);
-    const col = Number(currentCell.dataset.gridCol);
-    const next = {
-      ArrowUp: [row - 1, col],
-      ArrowDown: [row + 1, col],
-      ArrowLeft: [row, col - 1],
-      ArrowRight: [row, col + 1],
-    }[event.key]!;
-    const [nextRow, nextCol] = next;
-    const nextCell = event.currentTarget.querySelector<HTMLElement>(
-      `[data-grid-row="${nextRow}"][data-grid-col="${nextCol}"]`,
-    );
-
-    if (!nextCell) return;
-
-    event.preventDefault();
-    const focusTarget = nextCell.querySelector<HTMLElement>(FOCUSABLE_CELL_SELECTOR) ?? nextCell;
-    focusTarget.focus();
-
-    if (focusTarget instanceof HTMLInputElement) {
-      focusTarget.select();
-    } else if (focusTarget instanceof HTMLTextAreaElement) {
-      focusTarget.select();
-    }
   };
 
   return (
@@ -1707,7 +1707,7 @@ export default function PortalDashboard() {
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : (
           <div style={s.tableWrap}>
-            <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleGridKeyDown}>
+            <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleTableGridKeyDown}>
               <colgroup>
                 {columns.map((column) => (
                   <col key={column.id} style={{ width: widthFor(column.id) }} />
@@ -2384,7 +2384,7 @@ function PackingListDetail({
       </div>
 
       <div style={s.packingTableWrap}>
-        <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }}>
+        <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
           <colgroup>
             {PACKING_COLUMNS.map((column) => (
               <col key={column.id} style={{ width: packingWidthFor(column.id) }} />
@@ -2404,10 +2404,11 @@ function PackingListDetail({
             </tr>
           </thead>
           <tbody>
-            {packingList.lines.map((line) => (
+            {packingList.lines.map((line, rowIndex) => (
               <PackingListLineRow
                 key={line.id}
                 line={line}
+                rowIndex={rowIndex}
                 activeSearchLineId={packingSearchLineId}
                 productSearch={productSearch}
                 productResults={productResults}
@@ -2436,12 +2437,14 @@ function PackingListDetail({
 
 function PackingListLineRow({
   line,
+  rowIndex,
   activeSearchLineId,
   productSearch,
   productResults,
   updateParams,
 }: {
   line: PackingListWithLines["lines"][number];
+  rowIndex: number;
   activeSearchLineId: number | null;
   productSearch: string;
   productResults: ShopifySearchProduct[];
@@ -2456,10 +2459,10 @@ function PackingListLineRow({
 
   return (
     <tr style={s.row}>
-      <td style={s.td}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></td>
-      <td style={{ ...s.td, textAlign: "center" }}>{line.productImageUrl ? <img src={line.productImageUrl} alt="" style={s.packingThumb} /> : <div style={s.noImg}>—</div>}</td>
-      <td style={{ ...s.td, textAlign: "center" }}><FabricImageCell lineId={line.id} value={line.fabricImageData ?? ""} /></td>
-      <td style={{ ...s.td, ...s.dropdownTd }}>
+      <PackingTd rowIndex={rowIndex} colIndex={0}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={1} center>{line.productImageUrl ? <img src={line.productImageUrl} alt="" style={s.packingThumb} /> : <div style={s.noImg}>—</div>}</PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={2} center><FabricImageCell lineId={line.id} value={line.fabricImageData ?? ""} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={3} overflowVisible>
         <PackingProductNameCell
           line={line}
           isActiveSearch={activeSearchLineId === line.id}
@@ -2467,14 +2470,15 @@ function PackingListLineRow({
           productResults={productResults}
           updateParams={updateParams}
         />
-      </td>
-      <td style={s.td}><PackingSkuCell lineId={line.id} value={line.sku ?? ""} /></td>
-      {PACKING_SIZES.map((size) => (
-        <td
+      </PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={4}><PackingSkuCell lineId={line.id} value={line.sku ?? ""} /></PackingTd>
+      {PACKING_SIZES.map((size, sizeIndex) => (
+        <PackingTd
           key={size}
+          rowIndex={rowIndex}
+          colIndex={5 + sizeIndex}
+          center
           style={{
-            ...s.td,
-            textAlign: "center",
             ...(qtys[size] > 0 && shopifyLoadedQtys[size] === qtys[size] ? s.loadedInventoryCell : {}),
           }}
         >
@@ -2491,18 +2495,18 @@ function PackingListLineRow({
             })}
             style={s.qtyInput}
           />
-        </td>
+        </PackingTd>
       ))}
-      <td style={{ ...s.td, textAlign: "center" }}><span style={s.total}>{total}</span></td>
-      <td style={{ ...s.td, textAlign: "center" }}><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></td>
-      <td style={{ ...s.td, textAlign: "center" }}><span style={s.total}>{value ? Math.round(value) : ""}</span></td>
-      <td style={{ ...s.td, textAlign: "center" }}><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></td>
-      <td style={{ ...s.td, textAlign: "center" }}>
+      <PackingTd rowIndex={rowIndex} colIndex={15} center><span style={s.total}>{total}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={16} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={17} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={18} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={19} center>
         <div style={s.rowActions}>
           <button type="button" style={s.smallButton} onClick={() => submitPortalCell(fetcher, { intent: "duplicate_packing_line", lineId: line.id })}>Duplicate</button>
           <button type="button" style={s.removeUserButton} onClick={() => submitPortalCell(fetcher, { intent: "delete_packing_line", lineId: line.id })}>Delete</button>
         </div>
-      </td>
+      </PackingTd>
     </tr>
   );
 }
@@ -3393,6 +3397,49 @@ function Td({
         }, 0);
       }}
       style={{ ...s.td, textAlign: center ? "center" : "left", ...(overflowVisible ? { overflow: "visible" } : {}) }}
+    >
+      {children}
+    </td>
+  );
+}
+
+function PackingTd({
+  children,
+  center,
+  rowIndex,
+  colIndex,
+  overflowVisible,
+  style,
+}: {
+  children: React.ReactNode;
+  center?: boolean;
+  rowIndex: number;
+  colIndex: number;
+  overflowVisible?: boolean;
+  style?: React.CSSProperties;
+}) {
+  return (
+    <td
+      data-grid-row={rowIndex}
+      data-grid-col={colIndex}
+      tabIndex={0}
+      onFocus={(event) => {
+        if (event.target !== event.currentTarget) return;
+        const focusTarget = event.currentTarget.querySelector<HTMLElement>(FOCUSABLE_CELL_SELECTOR);
+        if (!focusTarget) return;
+        window.setTimeout(() => {
+          focusTarget.focus();
+          if (focusTarget instanceof HTMLInputElement || focusTarget instanceof HTMLTextAreaElement) {
+            focusTarget.select();
+          }
+        }, 0);
+      }}
+      style={{
+        ...s.td,
+        textAlign: center ? "center" : "left",
+        ...(overflowVisible ? { overflow: "visible" } : {}),
+        ...style,
+      }}
     >
       {children}
     </td>
