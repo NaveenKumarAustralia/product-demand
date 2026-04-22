@@ -76,7 +76,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     });
   const selectedPackingList = packingId
     ? packingLists.find((list) => list.id === packingId) ?? null
-    : packingLists[0] ?? null;
+    : null;
   const productResults = page === "packing" && selectedPackingList && productSearch.trim().length >= 2
     ? await searchShopifyProducts(productSearch)
     : [];
@@ -202,11 +202,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "create_packing_list") {
     const title = String(form.get("title") ?? "").trim() || `Shipment ${formatPortalDate(new Date())}`;
-    const shipmentDate = parsePortalDate(String(form.get("shipmentDate") ?? ""));
+    const invoiceNumber = String(form.get("invoiceNumber") ?? "").trim();
+    const expectedLeaveFactoryDate = parsePortalDate(String(form.get("expectedLeaveFactoryDate") ?? ""));
     const packingList = await prisma.packingList.create({
       data: {
         title,
-        shipmentDate,
+        invoiceNumber: invoiceNumber || null,
+        shipmentDate: expectedLeaveFactoryDate,
+        expectedLeaveFactoryDate,
+        status: "still_packing",
         lines: {
           create: Array.from({ length: DEFAULT_PACKING_ROWS }, (_, index) => ({
             productTitle: "",
@@ -228,10 +232,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const value = String(form.get("value") ?? "");
     const data: Record<string, unknown> = {};
     if (field === "title") data.title = value.trim() || "Untitled shipment";
-    if (field === "status") data.status = value || "draft";
+    if (field === "invoiceNumber") data.invoiceNumber = value.trim() || null;
+    if (field === "status") data.status = value || "still_packing";
     if (field === "shipmentDate") {
       const parsedDate = value ? parsePortalDate(value) : null;
       if (value && !parsedDate) return null;
+      data.shipmentDate = parsedDate;
+    }
+    if (field === "expectedLeaveFactoryDate") {
+      const parsedDate = value ? parsePortalDate(value) : null;
+      if (value && !parsedDate) return null;
+      data.expectedLeaveFactoryDate = parsedDate;
       data.shipmentDate = parsedDate;
     }
     if (field === "notes") data.notes = value || null;
@@ -481,13 +492,10 @@ const PRIORITY_OPTIONS = [
   { value: "cancelled", label: "Cancelled", bg: "#d97706", color: "#fff" },
 ];
 const PACKING_STATUS_OPTIONS = [
-  { value: "draft", label: "Draft" },
-  { value: "sent_to_supplier", label: "Sent to supplier" },
-  { value: "confirmed", label: "Confirmed" },
-  { value: "in_shipment", label: "In shipment" },
+  { value: "still_packing", label: "Still packing" },
+  { value: "on_the_way", label: "On the way" },
   { value: "arrived", label: "Arrived" },
-  { value: "checked", label: "Checked" },
-  { value: "completed", label: "Completed" },
+  { value: "loaded", label: "Loaded" },
 ];
 const PACKING_SIZES = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
 const DEFAULT_PACKING_ROWS = 5;
@@ -689,6 +697,11 @@ function normalizeQtys(value: unknown): Record<string, number> {
 
 function packingTotal(qtys: Record<string, number>) {
   return Object.values(qtys).reduce((sum, qty) => sum + qty, 0);
+}
+
+function packingListTotal(list: PackingListWithLines | null) {
+  if (!list) return 0;
+  return list.lines.reduce((sum, line) => sum + packingTotal(normalizeQtys(line.qtys)), 0);
 }
 
 async function searchShopifyProducts(query: string): Promise<ShopifySearchProduct[]> {
@@ -1242,42 +1255,10 @@ function PackingListsPanel({
 
   return (
     <div style={s.packingLayout}>
-      <div style={s.packingToolbar}>
-        <label style={s.filterLabel}>
-          Packing list
-          <select
-            value={selectedPackingList?.id ?? ""}
-            onChange={(event) => {
-              updateParams({
-                packingId: event.currentTarget.value,
-                productSearch: "",
-                packingSearchLineId: "",
-              });
-            }}
-            style={s.packingSelect}
-          >
-            {packingLists.length ? packingLists.map((list) => (
-              <option key={list.id} value={list.id}>
-                {list.title} · {formatPortalDate(list.shipmentDate)} · {labelForPackingStatus(list.status)}
-              </option>
-            )) : (
-              <option value="">No packing lists yet</option>
-            )}
-          </select>
-        </label>
-
-        <fetcher.Form method="post" style={s.packingCreateForm}>
-          <input type="hidden" name="intent" value="create_packing_list" />
-          <input name="title" placeholder="Shipment name" style={s.packingInput} />
-          <input name="shipmentDate" placeholder="dd/mm/yy" style={s.packingInput} />
-          <button type="submit" style={s.loginButton}>New packing list</button>
-        </fetcher.Form>
-      </div>
-
-      <section style={s.packingDetail}>
-        {!selectedPackingList ? (
-          <div style={s.empty}>Create a packing list to get started.</div>
-        ) : (
+      {!selectedPackingList ? (
+        <PackingListsOverview packingLists={packingLists} fetcher={fetcher} />
+      ) : (
+        <section style={s.packingDetail}>
           <PackingListDetail
             packingList={selectedPackingList}
             savedPackingColumnWidths={savedPackingColumnWidths}
@@ -1286,7 +1267,66 @@ function PackingListsPanel({
             productResults={productResults}
             updateParams={updateParams}
           />
-        )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function PackingListsOverview({
+  packingLists,
+  fetcher,
+}: {
+  packingLists: PackingListWithLines[];
+  fetcher: ReturnType<typeof useFetcher>;
+}) {
+  return (
+    <div style={s.packingOverview}>
+      <section style={s.packingOverviewCreate}>
+        <div>
+          <h2 style={s.settingsTitle}>Create packing list</h2>
+          <p style={s.settingsHint}>Create one shipment, then open it to add products and box quantities.</p>
+        </div>
+        <fetcher.Form method="post" style={s.packingCreateForm}>
+          <input type="hidden" name="intent" value="create_packing_list" />
+          <input name="title" placeholder="Shipment name" style={s.packingInput} />
+          <input name="invoiceNumber" placeholder="Invoice number" style={s.packingInput} />
+          <input name="expectedLeaveFactoryDate" placeholder="Leave factory dd/mm/yy" style={s.packingInput} />
+          <button type="submit" style={s.loginButton}>New packing list</button>
+        </fetcher.Form>
+      </section>
+
+      <section style={s.packingOverviewTableWrap}>
+        <table style={{ ...s.table, width: "100%" }}>
+          <thead>
+            <tr style={s.headerRow}>
+              {["Packing list", "Invoice", "Total qty", "Leave factory", "Status", "Created", "Open"].map((heading) => (
+                <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Open" ? "center" : "left" }}>
+                  <span style={s.thContent}>{heading}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {packingLists.length ? packingLists.map((list) => (
+              <tr key={list.id} style={s.row}>
+                <td style={s.td}><strong style={s.productName}>{list.title}</strong></td>
+                <td style={s.td}>{list.invoiceNumber || "—"}</td>
+                <td style={{ ...s.td, textAlign: "center" }}><span style={s.total}>{packingListTotal(list)}</span></td>
+                <td style={s.td}>{formatPortalDate(list.expectedLeaveFactoryDate ?? list.shipmentDate) || "—"}</td>
+                <td style={s.td}>{labelForPackingStatus(list.status)}</td>
+                <td style={s.td}>{formatPortalDate(list.createdAt)}</td>
+                <td style={{ ...s.td, textAlign: "center" }}>
+                  <a href={`/portal?page=packing&packingId=${list.id}`} style={s.smallLinkButton}>Open</a>
+                </td>
+              </tr>
+            )) : (
+              <tr style={s.row}>
+                <td colSpan={7} style={{ ...s.td, textAlign: "center", padding: 40 }}>No packing lists yet.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </section>
     </div>
   );
@@ -1351,6 +1391,7 @@ function PackingListDetail({
   return (
     <div style={s.packingDetailInner}>
       <div style={s.packingTop}>
+        <a href="/portal?page=packing" style={s.secondaryButton}>Back to packing lists</a>
         <div style={s.packingMeta}>
           <label style={s.filterLabel}>
             Shipment
@@ -1366,13 +1407,27 @@ function PackingListDetail({
             />
           </label>
           <label style={s.filterLabel}>
-            Date
+            Invoice number
             <input
-              defaultValue={formatPortalDate(packingList.shipmentDate)}
+              defaultValue={packingList.invoiceNumber ?? ""}
               onBlur={(event) => submitPortalCell(fetcher, {
                 intent: "update_packing_list",
                 packingId: packingList.id,
-                field: "shipmentDate",
+                field: "invoiceNumber",
+                value: event.currentTarget.value,
+              })}
+              placeholder="Invoice number"
+              style={s.packingInput}
+            />
+          </label>
+          <label style={s.filterLabel}>
+            Leave factory
+            <input
+              defaultValue={formatPortalDate(packingList.expectedLeaveFactoryDate ?? packingList.shipmentDate)}
+              onBlur={(event) => submitPortalCell(fetcher, {
+                intent: "update_packing_list",
+                packingId: packingList.id,
+                field: "expectedLeaveFactoryDate",
                 value: event.currentTarget.value,
               })}
               placeholder="dd/mm/yy"
@@ -1396,6 +1451,9 @@ function PackingListDetail({
               ))}
             </select>
           </label>
+          <div style={s.packingTotalPill}>
+            Total quantity <strong>{packingListTotal(packingList)}</strong>
+          </div>
         </div>
       </div>
 
@@ -2268,6 +2326,7 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 800,
     cursor: "pointer",
+    textDecoration: "none",
   },
   userList: { display: "grid", gap: 8, marginTop: 14 },
   userRow: {
@@ -2312,6 +2371,24 @@ const s: Record<string, React.CSSProperties> = {
     display: "grid",
     gridTemplateColumns: "minmax(0, 1fr)",
     gap: 10,
+  },
+  packingOverview: { display: "grid", gap: 14 },
+  packingOverviewCreate: {
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "space-between",
+    gap: 16,
+    flexWrap: "wrap",
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    padding: 14,
+  },
+  packingOverviewTableWrap: {
+    overflow: "auto",
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
   },
   packingToolbar: {
     background: "#fff",
@@ -2369,6 +2446,16 @@ const s: Record<string, React.CSSProperties> = {
     padding: 12,
   },
   packingMeta: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10 },
+  packingTotalPill: {
+    alignSelf: "flex-end",
+    border: "1px solid #cbd5e1",
+    borderRadius: 999,
+    padding: "8px 12px",
+    background: "#f8fafc",
+    color: "#374151",
+    fontSize: 13,
+    fontWeight: 800,
+  },
   packingActions: { display: "flex", gap: 8 },
   productSearchPanel: {
     background: "#fff",
@@ -2521,6 +2608,17 @@ const s: Record<string, React.CSSProperties> = {
   productCellResultText: { display: "grid", gap: 2, fontSize: 12, lineHeight: 1.25 },
   productCellResultEmpty: { padding: 10, fontSize: 12, fontWeight: 700, color: "#6b7280" },
   rowActions: { display: "grid", gap: 6 },
+  smallLinkButton: {
+    display: "inline-block",
+    border: "1px solid #d1d5db",
+    borderRadius: 6,
+    padding: "5px 9px",
+    background: "#fff",
+    color: "#111827",
+    fontSize: 11,
+    fontWeight: 800,
+    textDecoration: "none",
+  },
   smallButton: {
     border: "1px solid #d1d5db",
     borderRadius: 6,

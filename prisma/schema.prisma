@@ -83,14 +83,16 @@ model PortalSetting {
 }
 
 model PackingList {
-  id           Int               @id @default(autoincrement())
-  title        String
-  shipmentDate DateTime?
-  status       String            @default("draft")
-  notes        String?
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
-  lines        PackingListLine[]
+  id                       Int               @id @default(autoincrement())
+  title                    String
+  invoiceNumber            String?
+  shipmentDate             DateTime?
+  expectedLeaveFactoryDate DateTime?
+  status                   String            @default("still_packing")
+  notes                    String?
+  createdAt                DateTime          @default(now())
+  updatedAt                DateTime          @updatedAt
+  lines                    PackingListLine[]
 }
 
 model PackingListLine {
