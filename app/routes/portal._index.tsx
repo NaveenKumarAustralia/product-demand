@@ -412,6 +412,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       include: { lines: { orderBy: { id: "asc" } } },
     });
     if (!order) return null;
+    const shopifyVariants = await getShopifyProductVariants(order.shop, order.productId);
+    const linesByVariantId = new Map(order.lines.map((line) => [line.variantId, line]));
+    const linesToCreate = shopifyVariants.length
+      ? shopifyVariants.map((variant) => {
+          const sourceLine = linesByVariantId.get(variant.id);
+          return {
+            variantId: variant.id,
+            variantTitle: variant.title,
+            sku: variant.sku ?? sourceLine?.sku ?? null,
+            qtyOrdered: 0,
+            costPrice: sourceLine?.costPrice ?? null,
+          };
+        })
+      : order.lines.map((line) => ({
+          variantId: line.variantId,
+          variantTitle: line.variantTitle,
+          sku: line.sku,
+          qtyOrdered: 0,
+          costPrice: line.costPrice,
+        }));
 
     await prisma.supplierOrder.create({
       data: {
@@ -427,15 +447,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         productImageUrl: order.productImageUrl,
         eta: order.eta,
         totalQty: 0,
-        lines: {
-          create: order.lines.map((line) => ({
-            variantId: line.variantId,
-            variantTitle: line.variantTitle,
-            sku: line.sku,
-            qtyOrdered: 0,
-            costPrice: line.costPrice,
-          })),
-        },
+        lines: { create: linesToCreate },
       },
     });
     return null;
@@ -515,26 +527,46 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "update_qty") {
     const size = String(form.get("size") ?? "");
     const qtyOrdered = Math.max(0, Number(form.get("value") ?? 0) || 0);
+    const existingLines = await prisma.orderLine.findMany({
+      where: { orderId, variantTitle: size },
+      orderBy: { id: "asc" },
+      select: { id: true },
+    });
+    const missingLineOrder = existingLines.length
+      ? null
+      : await prisma.supplierOrder.findUnique({
+          where: { id: orderId },
+          select: { shop: true, productId: true },
+        });
+    const missingVariant = missingLineOrder
+      ? matchingVariantForSize(await getShopifyProductVariants(missingLineOrder.shop, missingLineOrder.productId), size)
+      : null;
 
     await prisma.$transaction(async (tx) => {
-      const lines = await tx.orderLine.findMany({
-        where: { orderId, variantTitle: size },
-        orderBy: { id: "asc" },
-        select: { id: true },
-      });
+      const lines = existingLines;
 
-      if (!lines.length) return;
-
-      await tx.orderLine.update({
-        where: { id: lines[0].id },
-        data: { qtyOrdered },
-      });
-
-      if (lines.length > 1) {
-        await tx.orderLine.updateMany({
-          where: { id: { in: lines.slice(1).map((line) => line.id) } },
-          data: { qtyOrdered: 0 },
+      if (!lines.length) {
+        await tx.orderLine.create({
+          data: {
+            orderId,
+            variantId: missingVariant?.id ?? `${orderId}:${size}`,
+            variantTitle: missingVariant?.title ?? size,
+            sku: missingVariant?.sku ?? null,
+            qtyOrdered,
+          },
         });
+      } else {
+        await tx.orderLine.update({
+          where: { id: lines[0].id },
+          data: { qtyOrdered },
+        });
+
+        if (lines.length > 1) {
+          await tx.orderLine.updateMany({
+            where: { id: { in: lines.slice(1).map((line) => line.id) } },
+            data: { qtyOrdered: 0 },
+          });
+        }
       }
 
       const allLines = await tx.orderLine.findMany({
@@ -968,6 +1000,60 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
     if (products.length) return products;
     return (await directFetch(null)).filter(matchesLocally).slice(0, 8);
   }
+}
+
+type ShopifyVariantInfo = { id: string; title: string; sku: string | null };
+
+async function getShopifyProductVariants(shop: string, productId: string): Promise<ShopifyVariantInfo[]> {
+  const session = await prisma.session.findFirst({
+    where: { shop, accessToken: { not: "" } },
+    orderBy: { isOnline: "asc" },
+  });
+  if (!session) return [];
+
+  const graphqlQuery = `
+    query ProductVariants($id: ID!) {
+      product(id: $id) {
+        variants(first: 100) {
+          nodes { id title sku }
+        }
+      }
+    }
+  `;
+  const mapVariants = (json: any): ShopifyVariantInfo[] =>
+    (json.data?.product?.variants?.nodes ?? [])
+      .map((variant: any) => ({
+        id: String(variant.id ?? ""),
+        title: String(variant.title ?? ""),
+        sku: variant.sku ? String(variant.sku) : null,
+      }))
+      .filter((variant: ShopifyVariantInfo) => variant.id && variant.title);
+
+  try {
+    const { admin } = await unauthenticated.admin(session.shop);
+    const response = await admin.graphql(graphqlQuery, { variables: { id: productId } });
+    return mapVariants(await response.json());
+  } catch {
+    try {
+      const response = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": session.accessToken,
+        },
+        body: JSON.stringify({ query: graphqlQuery, variables: { id: productId } }),
+      });
+      if (!response.ok) return [];
+      return mapVariants(await response.json());
+    } catch {
+      return [];
+    }
+  }
+}
+
+function matchingVariantForSize(variants: ShopifyVariantInfo[], size: string) {
+  const normalizedSize = size.trim().toLowerCase();
+  return variants.find((variant) => variant.title.trim().toLowerCase() === normalizedSize) ?? null;
 }
 
 function sizeColumnId(size: string) {
