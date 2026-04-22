@@ -41,13 +41,13 @@ const STATUS_OPTIONS = [
   { value: "on_order", label: "On Order" },
   { value: "on_production", label: "On Production" },
   { value: "in_shipment", label: "In Shipment" },
+  { value: "packed", label: "Packed" },
   { value: "arrived", label: "Arrived" },
   { value: "arrived_loaded", label: "Arrived and Loaded" },
   { value: "cancelled", label: "Cancelled" },
   { value: "ready_to_send", label: "Ready To Send" },
 ];
 const PRIORITY_OPTIONS = [
-  { value: "", label: "— Priority —" },
   { value: "low", label: "LOW" },
   { value: "high", label: "HIGH" },
   { value: "urgent", label: "URGENT" },
@@ -93,7 +93,7 @@ function insertStaffTag(value: string, name: string) {
 }
 
 function labelFor(options: Array<{ value: string; label: string }>, value?: string | null) {
-  return options.find((option) => option.value === value)?.label ?? "On Order";
+  return options.find((option) => option.value === value)?.label ?? value ?? "On Order";
 }
 
 function formatShortDate(value?: string | null) {
@@ -175,6 +175,8 @@ function ProductOrderBlock() {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
   const [staffNames, setStaffNames] = useState<string[]>([]);
+  const [statusOptions, setStatusOptions] = useState(STATUS_OPTIONS);
+  const [priorityOptions, setPriorityOptions] = useState(PRIORITY_OPTIONS);
   const [orderPriority, setOrderPriority] = useState("");
   const [orderProductGroup, setOrderProductGroup] = useState(PRODUCT_GROUP_PLACEHOLDER_VALUE);
   const [customProductGroup, setCustomProductGroup] = useState("");
@@ -214,6 +216,8 @@ function ProductOrderBlock() {
     if (!res.ok) throw new Error(json.error ?? "Could not load order status");
     applyOrderStatus(json.order ?? null, json.orders ?? []);
     setStaffNames(Array.isArray(json.staffNames) ? json.staffNames : []);
+    setStatusOptions(Array.isArray(json.statusOptions) ? json.statusOptions : STATUS_OPTIONS);
+    setPriorityOptions(Array.isArray(json.priorityOptions) ? json.priorityOptions : PRIORITY_OPTIONS);
   }, [applyOrderStatus, auth]);
 
   useEffect(() => {
@@ -448,7 +452,7 @@ function ProductOrderBlock() {
           <Select
             label={savingPriority ? "Priority saving..." : "Priority"}
             value={orderPriority}
-            options={PRIORITY_OPTIONS}
+            options={[{ value: "", label: "— Priority —" }, ...priorityOptions]}
             onChange={updatePriority}
           />
         </Box>
@@ -501,7 +505,7 @@ function ProductOrderBlock() {
             <BlockStack gap="none">
               <Text>ETA</Text>
               <Text fontWeight="bold">{formatShortDate(item.eta)}</Text>
-              <Text>{labelFor(STATUS_OPTIONS, item.supplierStatus)}</Text>
+              <Text>{labelFor(statusOptions, item.supplierStatus)}</Text>
             </BlockStack>
           </Col>
         ))}

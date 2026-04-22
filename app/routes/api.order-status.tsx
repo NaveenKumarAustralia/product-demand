@@ -10,10 +10,60 @@ const CORS = {
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
 };
+const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
+const DEFAULT_STATUS_OPTIONS = [
+  { value: "on_order", label: "On Order" },
+  { value: "on_production", label: "On Production" },
+  { value: "in_shipment", label: "In Shipment" },
+  { value: "packed", label: "Packed" },
+  { value: "arrived", label: "Arrived" },
+  { value: "arrived_loaded", label: "Arrived and Loaded" },
+  { value: "cancelled", label: "Cancelled" },
+  { value: "ready_to_send", label: "Ready To Send" },
+];
+const DEFAULT_PRIORITY_OPTIONS = [
+  { value: "low", label: "LOW" },
+  { value: "high", label: "HIGH" },
+  { value: "urgent", label: "URGENT" },
+  { value: "cancelled", label: "Cancelled" },
+];
 
 function normalizeProductGroup(value?: string | null) {
   const trimmed = value?.trim() ?? "";
   return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
+}
+
+function normalizeOptions(value: unknown, defaults: Array<{ value: string; label: string }>) {
+  const usingDefaults = !Array.isArray(value);
+  const items = usingDefaults ? defaults : value;
+  const seen = new Set<string>();
+  const normalized = items
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const option = item as Record<string, unknown>;
+      const optionValue = String(option.value ?? "").trim();
+      const label = String(option.label ?? "").trim();
+      if (!optionValue || !label || seen.has(optionValue)) return null;
+      seen.add(optionValue);
+      return { value: optionValue, label };
+    })
+    .filter(Boolean) as Array<{ value: string; label: string }>;
+  if (usingDefaults) {
+    for (const defaultOption of defaults) {
+      if (!seen.has(defaultOption.value)) normalized.push(defaultOption);
+    }
+  }
+  return normalized;
+}
+
+function normalizeRestockSettings(value: unknown) {
+  const settings = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    statusOptions: normalizeOptions(settings.statusOptions, DEFAULT_STATUS_OPTIONS),
+    priorityOptions: normalizeOptions(settings.priorityOptions, DEFAULT_PRIORITY_OPTIONS),
+  };
 }
 
 /**
@@ -72,7 +122,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   try {
-    const [orders, usersSetting] = await Promise.all([
+    const [orders, usersSetting, restockSettingsSetting] = await Promise.all([
       prisma.supplierOrder.findMany({
         where: { shop, productId, status: "open" },
         select: {
@@ -99,7 +149,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         where: { key: PORTAL_USERS_KEY },
         select: { value: true },
       }),
+      prisma.portalSetting.findUnique({
+        where: { key: RESTOCK_SETTINGS_KEY },
+        select: { value: true },
+      }),
     ]);
+    const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
     const staffNames = normalizePortalMessageUsers(usersSetting?.value)
       .filter((user) => user.active !== false)
       .map((user) => user.name);
@@ -130,6 +185,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           : null,
         orders: formattedOrders,
         staffNames,
+        statusOptions: restockSettings.statusOptions,
+        priorityOptions: restockSettings.priorityOptions,
       },
       { headers: CORS },
     );

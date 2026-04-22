@@ -20,7 +20,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productSearch = url.searchParams.get("productSearch") ?? "";
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, restockSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -32,6 +32,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
     prisma.portalSetting.findUnique({
       where: { key: PACKING_COLUMN_WIDTHS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: RESTOCK_SETTINGS_KEY },
       select: { value: true },
     }),
     prisma.portalSetting.findUnique({
@@ -52,6 +56,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
   ]);
   const users = normalizePortalUsers(usersSetting?.value);
+  const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
   const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
   const currentUser = getCurrentPortalUser(request, users);
   const activeUsers = await recordAndGetActiveUsers(currentUser, users, activeUsersSetting?.value);
@@ -62,9 +67,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productGroups = Array.from(new Set(normalizedOrders.map((order) => order.productType).filter(Boolean) as string[]))
     .sort((a, b) => a.localeCompare(b));
   const statusFilters = Array.from(new Set(normalizedOrders.map((order) => order.supplierStatus).filter(Boolean)))
-    .sort((a, b) => labelForStatus(a).localeCompare(labelForStatus(b)));
+    .sort((a, b) => labelForOption(restockSettings.statusOptions, a).localeCompare(labelForOption(restockSettings.statusOptions, b)));
   const priorityFilters = Array.from(new Set(normalizedOrders.map((order) => order.priority).filter(Boolean) as string[]))
-    .sort((a, b) => labelForPriority(a).localeCompare(labelForPriority(b)));
+    .sort((a, b) => labelForOption(restockSettings.priorityOptions, a).localeCompare(labelForOption(restockSettings.priorityOptions, b)));
   const orders = normalizedOrders
     .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
     .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
@@ -117,6 +122,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
     packingColumnWidths: normalizeColumnWidths(packingColumnWidthsSetting?.value),
+    restockSettings,
     packingLists,
     selectedPackingList,
     productSearch,
@@ -478,6 +484,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_restock_settings") {
+    let settings: RestockSettings;
+    try {
+      settings = normalizeRestockSettings(JSON.parse(String(form.get("value") ?? "{}")));
+    } catch {
+      return null;
+    }
+
+    await prisma.portalSetting.upsert({
+      where: { key: RESTOCK_SETTINGS_KEY },
+      create: { key: RESTOCK_SETTINGS_KEY, value: settings },
+      update: { value: settings },
+    });
+    return null;
+  }
+
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
   if (intent === "update_product_type")  updates.productType = normalizeProductGroup(String(form.get("value") ?? "")) || null;
@@ -544,27 +566,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const STATUS_OPTIONS = [
+const DEFAULT_STATUS_OPTIONS = [
   { value: "on_order",       label: "On Order" },
   { value: "on_production",  label: "On Production" },
   { value: "in_shipment",    label: "In Shipment" },
+  { value: "packed",         label: "Packed" },
   { value: "arrived",        label: "Arrived" },
   { value: "arrived_loaded", label: "Arrived and Loaded" },
   { value: "cancelled",      label: "Cancelled" },
   { value: "ready_to_send",  label: "Ready To Send" },
 ];
 
-const STATUS_COLORS: Record<string, string> = {
-  on_order:       "#fef9c3",
-  on_production:  "#dbeafe",
-  in_shipment:    "#dcfce7",
-  arrived:        "#bbf7d0",
-  arrived_loaded: "#4ade80",
-  cancelled:      "#fee2e2",
-  ready_to_send:  "#ede9fe",
+const DEFAULT_STATUS_COLORS: Record<string, { bg: string; color: string }> = {
+  on_order:       { bg: "#fef9c3", color: "#374151" },
+  on_production:  { bg: "#dbeafe", color: "#374151" },
+  in_shipment:    { bg: "#dcfce7", color: "#374151" },
+  packed:         { bg: "#fed7aa", color: "#7c2d12" },
+  arrived:        { bg: "#bbf7d0", color: "#14532d" },
+  arrived_loaded: { bg: "#4ade80", color: "#052e16" },
+  cancelled:      { bg: "#fee2e2", color: "#991b1b" },
+  ready_to_send:  { bg: "#ede9fe", color: "#4c1d95" },
 };
 
-const PRIORITY_OPTIONS = [
+const DEFAULT_PRIORITY_OPTIONS = [
   { value: "low",       label: "LOW",       bg: "#3b82f6", color: "#fff" },
   { value: "high",      label: "HIGH",      bg: "#7c3aed", color: "#fff" },
   { value: "urgent",    label: "URGENT",    bg: "#dc2626", color: "#fff" },
@@ -633,12 +657,8 @@ function parsePortalDate(value: string) {
   return valid ? date : null;
 }
 
-function labelForStatus(value: string) {
-  return STATUS_OPTIONS.find((option) => option.value === value)?.label ?? value;
-}
-
-function labelForPriority(value: string) {
-  return PRIORITY_OPTIONS.find((option) => option.value === value)?.label ?? value;
+function labelForOption(options: RestockOption[], value: string) {
+  return options.find((option) => option.value === value)?.label ?? value;
 }
 
 function labelForPackingStatus(value: string) {
@@ -647,6 +667,7 @@ function labelForPackingStatus(value: string) {
 
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
+const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
 const PORTAL_USERS_KEY = "supplier-portal-users-v1";
@@ -678,6 +699,13 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
 type ColumnDef = { id: string; label: string; center?: boolean };
 type PortalUser = { id: string; name: string; admin: boolean; active: boolean };
 type ActivePortalUser = PortalUser & { initials: string; lastSeen: number };
+type RestockOption = { value: string; label: string; bg: string; color: string };
+type RestockSettings = {
+  statusOptions: RestockOption[];
+  priorityOptions: RestockOption[];
+  quantityFontSize: number;
+  quantityFontColor: string;
+};
 type ShopifySearchProduct = {
   id: string;
   title: string;
@@ -707,6 +735,75 @@ function normalizePortalUsers(value: unknown): PortalUser[] {
 
 function normalizeBooleanSetting(value: unknown) {
   return value === true;
+}
+
+function slugForOption(label: string) {
+  return label
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeHexColor(value: unknown, fallback: string) {
+  const color = String(value ?? "").trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
+}
+
+function normalizeRestockOptions(
+  value: unknown,
+  defaults: Array<{ value: string; label: string; bg?: string; color?: string }>,
+  defaultColors?: Record<string, { bg: string; color: string }>,
+): RestockOption[] {
+  const usingDefaults = !Array.isArray(value);
+  const rawItems = usingDefaults ? defaults : value;
+  const seen = new Set<string>();
+  const items = rawItems
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const option = item as Record<string, unknown>;
+      const label = String(option.label ?? "").trim();
+      const value = slugForOption(String(option.value ?? label));
+      if (!label || !value || seen.has(value)) return null;
+      seen.add(value);
+      const fallback = (defaultColors?.[value] ?? defaults.find((defaultOption) => defaultOption.value === value) ?? {}) as { bg?: string; color?: string };
+      return {
+        value,
+        label,
+        bg: normalizeHexColor(option.bg, fallback.bg ?? "#f3f4f6"),
+        color: normalizeHexColor(option.color, fallback.color ?? "#374151"),
+      };
+    })
+    .filter(Boolean) as RestockOption[];
+
+  if (usingDefaults) {
+    for (const defaultOption of defaults) {
+      if (seen.has(defaultOption.value)) continue;
+      const fallback = defaultColors?.[defaultOption.value] ?? defaultOption;
+      items.push({
+        value: defaultOption.value,
+        label: defaultOption.label,
+        bg: normalizeHexColor(defaultOption.bg, fallback.bg ?? "#f3f4f6"),
+        color: normalizeHexColor(defaultOption.color, fallback.color ?? "#374151"),
+      });
+    }
+  }
+
+  return items.length ? items : normalizeRestockOptions(defaults, defaults, defaultColors);
+}
+
+function normalizeRestockSettings(value: unknown): RestockSettings {
+  const settings = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const quantityFontSize = Math.min(32, Math.max(10, Number(settings.quantityFontSize) || 13));
+
+  return {
+    statusOptions: normalizeRestockOptions(settings.statusOptions, DEFAULT_STATUS_OPTIONS, DEFAULT_STATUS_COLORS),
+    priorityOptions: normalizeRestockOptions(settings.priorityOptions, DEFAULT_PRIORITY_OPTIONS),
+    quantityFontSize,
+    quantityFontColor: normalizeHexColor(settings.quantityFontColor, "#111827"),
+  };
 }
 
 function getCookieValue(request: Request, key: string) {
@@ -915,6 +1012,7 @@ export default function PortalDashboard() {
     page,
     columnWidths: savedColumnWidths,
     packingColumnWidths,
+    restockSettings,
     packingLists,
     selectedPackingList,
     productSearch,
@@ -1138,7 +1236,7 @@ export default function PortalDashboard() {
                   <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
                     <option value="">All statuses</option>
                     {statusFilters.map((status) => (
-                      <option key={status} value={status}>{labelForStatus(status)}</option>
+                      <option key={status} value={status}>{labelForOption(restockSettings.statusOptions, status)}</option>
                     ))}
                   </select>
                 </label>
@@ -1147,7 +1245,7 @@ export default function PortalDashboard() {
                   <select value={selectedPriority} onChange={(event) => updateParams({ priority: event.currentTarget.value })} style={s.productTypeFilter}>
                     <option value="">All priorities</option>
                     {priorityFilters.map((priority) => (
-                      <option key={priority} value={priority}>{labelForPriority(priority)}</option>
+                      <option key={priority} value={priority}>{labelForOption(restockSettings.priorityOptions, priority)}</option>
                     ))}
                   </select>
                 </label>
@@ -1161,6 +1259,7 @@ export default function PortalDashboard() {
             users={users}
             currentUser={currentUser}
             loginRequired={loginRequired}
+            restockSettings={restockSettings}
           />
         ) : page === "packing" ? (
           <PackingListsPanel
@@ -1199,7 +1298,7 @@ export default function PortalDashboard() {
               </thead>
               <tbody>
                 {orders.map((order, rowIndex) => (
-                  <OrderRow key={order.id} order={order} rowIndex={rowIndex} sizes={sizes} users={users} />
+                  <OrderRow key={order.id} order={order} rowIndex={rowIndex} sizes={sizes} users={users} restockSettings={restockSettings} />
                 ))}
               </tbody>
             </table>
@@ -1241,7 +1340,7 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
         style={messages.length ? s.messagesButtonActive : s.messagesButton}
         title="Messages"
       >
-        Bell {messages.length ? `(${messages.length})` : ""}
+        Message icon {messages.length ? `(${messages.length})` : ""}
       </button>
       {open && (
         <div style={s.messagesPopover}>
@@ -1275,13 +1374,55 @@ function SettingsPanel({
   users,
   currentUser,
   loginRequired,
+  restockSettings,
 }: {
   users: PortalUser[];
   currentUser: PortalUser | null;
   loginRequired: boolean;
+  restockSettings: RestockSettings;
 }) {
   const settingsFetcher = useFetcher();
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
+  const [restockDraft, setRestockDraft] = useState<RestockSettings>(restockSettings);
+  const updateRestockOption = (kind: "statusOptions" | "priorityOptions", index: number, patch: Partial<RestockOption>) => {
+    setRestockDraft((current) => ({
+      ...current,
+      [kind]: current[kind].map((option, optionIndex) => {
+        if (optionIndex !== index) return option;
+        const label = patch.label ?? option.label;
+        return {
+          ...option,
+          ...patch,
+          label,
+          value: patch.label && option.value.startsWith("new_") ? slugForOption(patch.label) || option.value : option.value,
+        };
+      }),
+    }));
+  };
+  const addRestockOption = (kind: "statusOptions" | "priorityOptions") => {
+    setRestockDraft((current) => ({
+      ...current,
+      [kind]: [
+        ...current[kind],
+        {
+          value: `new_${Date.now()}`,
+          label: "New option",
+          bg: kind === "statusOptions" ? "#f3f4f6" : "#111827",
+          color: kind === "statusOptions" ? "#374151" : "#ffffff",
+        },
+      ],
+    }));
+  };
+  const removeRestockOption = (kind: "statusOptions" | "priorityOptions", index: number) => {
+    setRestockDraft((current) => ({
+      ...current,
+      [kind]: current[kind].filter((_, optionIndex) => optionIndex !== index),
+    }));
+  };
+  const saveRestockSettings = () => submitPortalCell(settingsFetcher, {
+    intent: "update_restock_settings",
+    value: JSON.stringify(restockDraft),
+  });
 
   return (
     <div style={s.settingsPanel}>
@@ -1355,6 +1496,139 @@ function SettingsPanel({
           </settingsFetcher.Form>
         )}
       </section>
+
+      <section style={s.settingsCard}>
+        <div style={s.settingsHeader}>
+          <div>
+            <h2 style={s.settingsTitle}>Existing Product Restock Settings</h2>
+            <p style={s.settingsHint}>Edit dropdown options and table number styling for the restock page.</p>
+          </div>
+          <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveRestockSettings}>
+            Save restock settings
+          </button>
+        </div>
+
+        {!canManageUsers && (
+          <div style={s.settingsWarning}>Only an admin user can change restock settings.</div>
+        )}
+
+        <div style={s.settingsGrid}>
+          <RestockOptionsEditor
+            title="Status options"
+            options={restockDraft.statusOptions}
+            disabled={!canManageUsers}
+            onChange={(index, patch) => updateRestockOption("statusOptions", index, patch)}
+            onAdd={() => addRestockOption("statusOptions")}
+            onRemove={(index) => removeRestockOption("statusOptions", index)}
+          />
+          <RestockOptionsEditor
+            title="Priority options"
+            options={restockDraft.priorityOptions}
+            disabled={!canManageUsers}
+            onChange={(index, patch) => updateRestockOption("priorityOptions", index, patch)}
+            onAdd={() => addRestockOption("priorityOptions")}
+            onRemove={(index) => removeRestockOption("priorityOptions", index)}
+          />
+        </div>
+
+        <div style={s.settingsSubCard}>
+          <h3 style={s.settingsSubTitle}>Quantity numbers</h3>
+          <div style={s.settingsInlineFields}>
+            <label style={s.settingsFieldLabel}>
+              Font size
+              <input
+                type="number"
+                min={10}
+                max={32}
+                value={restockDraft.quantityFontSize}
+                disabled={!canManageUsers}
+                onChange={(event) => setRestockDraft((current) => ({
+                  ...current,
+                  quantityFontSize: Number(event.currentTarget.value) || current.quantityFontSize,
+                }))}
+                style={s.settingsSmallInput}
+              />
+            </label>
+            <label style={s.settingsFieldLabel}>
+              Font colour
+              <input
+                type="color"
+                value={restockDraft.quantityFontColor}
+                disabled={!canManageUsers}
+                onChange={(event) => setRestockDraft((current) => ({
+                  ...current,
+                  quantityFontColor: event.currentTarget.value,
+                }))}
+                style={s.colorInput}
+              />
+            </label>
+            <span style={{ ...s.qtyPreview, fontSize: restockDraft.quantityFontSize, color: restockDraft.quantityFontColor }}>
+              25
+            </span>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RestockOptionsEditor({
+  title,
+  options,
+  disabled,
+  onChange,
+  onAdd,
+  onRemove,
+}: {
+  title: string;
+  options: RestockOption[];
+  disabled: boolean;
+  onChange: (index: number, patch: Partial<RestockOption>) => void;
+  onAdd: () => void;
+  onRemove: (index: number) => void;
+}) {
+  return (
+    <div style={s.settingsSubCard}>
+      <div style={s.settingsSubHeader}>
+        <h3 style={s.settingsSubTitle}>{title}</h3>
+        <button type="button" disabled={disabled} style={s.smallButton} onClick={onAdd}>Add option</button>
+      </div>
+      <div style={s.optionRows}>
+        {options.map((option, index) => (
+          <div key={`${option.value}-${index}`} style={s.optionRow}>
+            <input
+              value={option.label}
+              disabled={disabled}
+              onChange={(event) => onChange(index, { label: event.currentTarget.value })}
+              style={s.optionLabelInput}
+            />
+            <label style={s.colorLabel}>
+              BG
+              <input
+                type="color"
+                value={option.bg}
+                disabled={disabled}
+                onChange={(event) => onChange(index, { bg: event.currentTarget.value })}
+                style={s.colorInput}
+              />
+            </label>
+            <label style={s.colorLabel}>
+              Text
+              <input
+                type="color"
+                value={option.color}
+                disabled={disabled}
+                onChange={(event) => onChange(index, { color: event.currentTarget.value })}
+                style={s.colorInput}
+              />
+            </label>
+            <span style={{ ...s.optionPreview, background: option.bg, color: option.color }}>{option.label || "Option"}</span>
+            <button type="button" disabled={disabled || options.length <= 1} style={s.removeUserButton} onClick={() => onRemove(index)}>
+              Remove
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1957,11 +2231,13 @@ function OrderRow({
   rowIndex,
   sizes,
   users,
+  restockSettings,
 }: {
   order: Order;
   rowIndex: number;
   sizes: string[];
   users: PortalUser[];
+  restockSettings: RestockSettings;
 }) {
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
@@ -2003,7 +2279,7 @@ function OrderRow({
       {/* Size columns */}
       {sizes.map((sz, sizeIndex) => (
         <Td key={sz} rowIndex={rowIndex} colIndex={5 + sizeIndex} center>
-          <QtyCell orderId={order.id} size={sz} value={qtyBySize[sz] ?? 0} />
+          <QtyCell orderId={order.id} size={sz} value={qtyBySize[sz] ?? 0} restockSettings={restockSettings} />
         </Td>
       ))}
 
@@ -2011,13 +2287,13 @@ function OrderRow({
       <Td rowIndex={rowIndex} colIndex={totalCol} center><span style={s.total}>{order.totalQty}</span></Td>
 
       {/* Status */}
-      <Td rowIndex={rowIndex} colIndex={statusCol}><StatusCell orderId={order.id} value={order.supplierStatus} /></Td>
+      <Td rowIndex={rowIndex} colIndex={statusCol}><StatusCell orderId={order.id} value={order.supplierStatus} options={restockSettings.statusOptions} /></Td>
 
       {/* Notes (from order) */}
       <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
 
       {/* Priority */}
-      <Td rowIndex={rowIndex} colIndex={priorityCol}><PriorityCell orderId={order.id} value={order.priority ?? ""} /></Td>
+      <Td rowIndex={rowIndex} colIndex={priorityCol}><PriorityCell orderId={order.id} value={order.priority ?? ""} options={restockSettings.priorityOptions} /></Td>
 
       {/* ETA */}
       <Td rowIndex={rowIndex} colIndex={etaCol}><EtaCell orderId={order.id} value={etaValue} /></Td>
@@ -2041,10 +2317,10 @@ function submitPortalCell(
   fetcher.submit(formData, { method: "post" });
 }
 
-function StatusCell({ orderId, value }: { orderId: number; value: string }) {
+function StatusCell({ orderId, value, options }: { orderId: number; value: string; options: RestockOption[] }) {
   const fetcher = useFetcher();
   const current = fetcher.formData ? String(fetcher.formData.get("value")) : value;
-  const bg = STATUS_COLORS[current] ?? "#f3f4f6";
+  const option = options.find((item) => item.value === current);
 
   return (
     <select
@@ -2054,19 +2330,19 @@ function StatusCell({ orderId, value }: { orderId: number; value: string }) {
         orderId,
         value: e.currentTarget.value,
       })}
-      style={{ ...s.select, background: bg }}
+      style={{ ...s.select, background: option?.bg ?? "#f3f4f6", color: option?.color ?? "#374151" }}
     >
-      {STATUS_OPTIONS.map((o) => (
+      {options.map((o) => (
         <option key={o.value} value={o.value}>{o.label}</option>
       ))}
     </select>
   );
 }
 
-function PriorityCell({ orderId, value }: { orderId: number; value: string }) {
+function PriorityCell({ orderId, value, options }: { orderId: number; value: string; options: RestockOption[] }) {
   const fetcher = useFetcher();
   const current = fetcher.formData ? String(fetcher.formData.get("value")) : value;
-  const opt = PRIORITY_OPTIONS.find((o) => o.value === current);
+  const opt = options.find((o) => o.value === current);
 
   return (
     <select
@@ -2084,7 +2360,7 @@ function PriorityCell({ orderId, value }: { orderId: number; value: string }) {
       }}
     >
       <option value="">— Priority —</option>
-      {PRIORITY_OPTIONS.map((o) => (
+      {options.map((o) => (
         <option key={o.value} value={o.value}>{o.label}</option>
       ))}
     </select>
@@ -2182,7 +2458,7 @@ function EtaCell({ orderId, value }: { orderId: number; value: string }) {
   );
 }
 
-function QtyCell({ orderId, size, value }: { orderId: number; size: string; value: number }) {
+function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; size: string; value: number; restockSettings: RestockSettings }) {
   const fetcher = useFetcher();
   const current = fetcher.formData ? String(fetcher.formData.get("value")) : String(value);
   const numericCurrent = Number(current) || 0;
@@ -2206,6 +2482,8 @@ function QtyCell({ orderId, size, value }: { orderId: number; size: string; valu
       style={{
         ...s.qtyInput,
         ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
+        fontSize: restockSettings.quantityFontSize,
+        ...(numericCurrent > 0 ? { color: restockSettings.quantityFontColor } : {}),
       }}
     />
   );
@@ -2636,6 +2914,68 @@ const s: Record<string, React.CSSProperties> = {
     color: "#92400e",
     fontSize: 13,
     fontWeight: 700,
+  },
+  settingsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+    gap: 14,
+    marginTop: 16,
+  },
+  settingsSubCard: {
+    display: "grid",
+    gap: 10,
+    padding: 12,
+    border: "1px solid #e5e7eb",
+    borderRadius: 10,
+    background: "#f8fafc",
+    marginTop: 14,
+  },
+  settingsSubHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  settingsSubTitle: { margin: 0, fontSize: 14, color: "#111827" },
+  optionRows: { display: "grid", gap: 8 },
+  optionRow: {
+    display: "grid",
+    gridTemplateColumns: "minmax(140px, 1fr) auto auto auto auto",
+    gap: 8,
+    alignItems: "center",
+  },
+  optionLabelInput: {
+    border: "1px solid #cbd5e1",
+    borderRadius: 7,
+    padding: "8px 9px",
+    fontSize: 13,
+    fontWeight: 700,
+    minWidth: 0,
+  },
+  colorLabel: { display: "flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 800, color: "#4b5563" },
+  colorInput: { width: 36, height: 32, padding: 1, border: "1px solid #cbd5e1", borderRadius: 6, background: "#fff" },
+  optionPreview: {
+    borderRadius: 999,
+    padding: "6px 9px",
+    fontSize: 11,
+    fontWeight: 900,
+    whiteSpace: "nowrap",
+  },
+  settingsInlineFields: { display: "flex", alignItems: "end", flexWrap: "wrap", gap: 12 },
+  settingsFieldLabel: { display: "grid", gap: 5, fontSize: 12, fontWeight: 800, color: "#4b5563" },
+  settingsSmallInput: {
+    border: "1px solid #cbd5e1",
+    borderRadius: 7,
+    padding: "8px 9px",
+    width: 90,
+    fontSize: 13,
+    fontWeight: 700,
+  },
+  qtyPreview: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 50,
+    minHeight: 34,
+    borderRadius: 8,
+    border: "1px solid #cbd5e1",
+    background: "#fff",
+    fontWeight: 900,
   },
   secondaryButton: {
     border: "1px solid #d1d5db",
