@@ -21,7 +21,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const restockProductSearch = url.searchParams.get("restockProductSearch") ?? "";
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, restockSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, restockSettingsSetting, universalSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -37,6 +37,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
     prisma.portalSetting.findUnique({
       where: { key: RESTOCK_SETTINGS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: UNIVERSAL_SETTINGS_KEY },
       select: { value: true },
     }),
     prisma.portalSetting.findUnique({
@@ -58,6 +62,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   ]);
   const users = normalizePortalUsers(usersSetting?.value);
   const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
+  const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
   const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
   const currentUser = getCurrentPortalUser(request, users);
   const activeUsers = await recordAndGetActiveUsers(currentUser, users, activeUsersSetting?.value);
@@ -133,6 +138,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
     packingColumnWidths: normalizeColumnWidths(packingColumnWidthsSetting?.value),
     restockSettings,
+    universalSettings,
     packingLists,
     selectedPackingList,
     productSearch,
@@ -654,6 +660,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_universal_settings") {
+    let settings: UniversalSettings;
+    try {
+      settings = normalizeUniversalSettings(JSON.parse(String(form.get("value") ?? "{}")));
+    } catch {
+      return null;
+    }
+
+    await prisma.portalSetting.upsert({
+      where: { key: UNIVERSAL_SETTINGS_KEY },
+      create: { key: UNIVERSAL_SETTINGS_KEY, value: settings },
+      update: { value: settings },
+    });
+    return null;
+  }
+
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
   if (intent === "update_product_type")  updates.productType = normalizeProductGroup(String(form.get("value") ?? "")) || null;
@@ -847,6 +869,7 @@ function labelForPackingStatus(value: string) {
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
 const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
+const UNIVERSAL_SETTINGS_KEY = "production-portal-universal-settings-v1";
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
 const PORTAL_USERS_KEY = "supplier-portal-users-v1";
@@ -885,6 +908,14 @@ type RestockSettings = {
   quantityFontSize: number;
   quantityFontColor: string;
   inventoryArrowColor: string;
+};
+type UniversalSettings = {
+  primaryButtonBg: string;
+  primaryButtonColor: string;
+  tableTextSize: number;
+  tableTextColor: string;
+  headingTextSize: number;
+  headingTextColor: string;
 };
 type ShopifySearchProduct = {
   id: string;
@@ -986,6 +1017,21 @@ function normalizeRestockSettings(value: unknown): RestockSettings {
     quantityFontSize,
     quantityFontColor: normalizeHexColor(settings.quantityFontColor, "#111827"),
     inventoryArrowColor: normalizeHexColor(settings.inventoryArrowColor, "#4b5563"),
+  };
+}
+
+function normalizeUniversalSettings(value: unknown): UniversalSettings {
+  const settings = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+
+  return {
+    primaryButtonBg: normalizeHexColor(settings.primaryButtonBg, "#111827"),
+    primaryButtonColor: normalizeHexColor(settings.primaryButtonColor, "#ffffff"),
+    tableTextSize: Math.min(20, Math.max(10, Number(settings.tableTextSize) || 13)),
+    tableTextColor: normalizeHexColor(settings.tableTextColor, "#374151"),
+    headingTextSize: Math.min(34, Math.max(14, Number(settings.headingTextSize) || 24)),
+    headingTextColor: normalizeHexColor(settings.headingTextColor, "#111827"),
   };
 }
 
@@ -1476,6 +1522,7 @@ export default function PortalDashboard() {
     columnWidths: savedColumnWidths,
     packingColumnWidths,
     restockSettings,
+    universalSettings,
     packingLists,
     selectedPackingList,
     productSearch,
@@ -1576,7 +1623,17 @@ export default function PortalDashboard() {
   };
 
   return (
-    <div style={s.appShell}>
+    <div
+      style={{
+        ...s.appShell,
+        "--portal-primary-button-bg": universalSettings.primaryButtonBg,
+        "--portal-primary-button-color": universalSettings.primaryButtonColor,
+        "--portal-table-font-size": `${universalSettings.tableTextSize}px`,
+        "--portal-table-text-color": universalSettings.tableTextColor,
+        "--portal-heading-font-size": `${universalSettings.headingTextSize}px`,
+        "--portal-heading-text-color": universalSettings.headingTextColor,
+      } as React.CSSProperties}
+    >
       <aside style={{ ...s.sidebar, ...(sidebarCollapsed ? s.sidebarCollapsed : {}) }}>
         <div style={sidebarCollapsed ? s.sidebarTopCollapsed : s.sidebarTop}>
           {!sidebarCollapsed && <div style={s.sidebarTitle}>Production Portal</div>}
@@ -1692,6 +1749,7 @@ export default function PortalDashboard() {
             currentUser={currentUser}
             loginRequired={loginRequired}
             restockSettings={restockSettings}
+            universalSettings={universalSettings}
           />
         ) : page === "packing" ? (
           <PackingListsPanel
@@ -1825,15 +1883,18 @@ function SettingsPanel({
   currentUser,
   loginRequired,
   restockSettings,
+  universalSettings,
 }: {
   users: PortalUser[];
   currentUser: PortalUser | null;
   loginRequired: boolean;
   restockSettings: RestockSettings;
+  universalSettings: UniversalSettings;
 }) {
   const settingsFetcher = useFetcher();
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
   const [restockDraft, setRestockDraft] = useState<RestockSettings>(restockSettings);
+  const [universalDraft, setUniversalDraft] = useState<UniversalSettings>(universalSettings);
   const updateRestockOption = (kind: "statusOptions" | "priorityOptions", index: number, patch: Partial<RestockOption>) => {
     setRestockDraft((current) => ({
       ...current,
@@ -1872,6 +1933,10 @@ function SettingsPanel({
   const saveRestockSettings = () => submitPortalCell(settingsFetcher, {
     intent: "update_restock_settings",
     value: JSON.stringify(restockDraft),
+  });
+  const saveUniversalSettings = () => submitPortalCell(settingsFetcher, {
+    intent: "update_universal_settings",
+    value: JSON.stringify(universalDraft),
   });
 
   return (
@@ -1945,6 +2010,131 @@ function SettingsPanel({
             <button type="submit" style={s.loginButton}>Add user</button>
           </settingsFetcher.Form>
         )}
+      </section>
+
+      <section style={s.settingsCard}>
+        <div style={s.settingsHeader}>
+          <div>
+            <h2 style={s.settingsTitle}>Universal Settings</h2>
+            <p style={s.settingsHint}>Shared button, table text, and heading styling across restock and packing pages.</p>
+          </div>
+          <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveUniversalSettings}>
+            Save universal settings
+          </button>
+        </div>
+
+        {!canManageUsers && (
+          <div style={s.settingsWarning}>Only an admin user can change universal settings.</div>
+        )}
+
+        <div style={s.settingsSubCard}>
+          <h3 style={s.settingsSubTitle}>Buttons</h3>
+          <div style={s.settingsInlineFields}>
+            <label style={s.settingsFieldLabel}>
+              Button colour
+              <input
+                type="color"
+                value={universalDraft.primaryButtonBg}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  primaryButtonBg: event.currentTarget.value,
+                }))}
+                style={s.colorInput}
+              />
+            </label>
+            <label style={s.settingsFieldLabel}>
+              Button text
+              <input
+                type="color"
+                value={universalDraft.primaryButtonColor}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  primaryButtonColor: event.currentTarget.value,
+                }))}
+                style={s.colorInput}
+              />
+            </label>
+            <span style={{ ...s.buttonPreview, background: universalDraft.primaryButtonBg, color: universalDraft.primaryButtonColor }}>
+              Button
+            </span>
+          </div>
+        </div>
+
+        <div style={s.settingsSubCard}>
+          <h3 style={s.settingsSubTitle}>Table text</h3>
+          <div style={s.settingsInlineFields}>
+            <label style={s.settingsFieldLabel}>
+              Text size
+              <input
+                type="number"
+                min={10}
+                max={20}
+                value={universalDraft.tableTextSize}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  tableTextSize: Number(event.currentTarget.value) || current.tableTextSize,
+                }))}
+                style={s.settingsSmallInput}
+              />
+            </label>
+            <label style={s.settingsFieldLabel}>
+              Text colour
+              <input
+                type="color"
+                value={universalDraft.tableTextColor}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  tableTextColor: event.currentTarget.value,
+                }))}
+                style={s.colorInput}
+              />
+            </label>
+            <span style={{ ...s.qtyPreview, fontSize: universalDraft.tableTextSize, color: universalDraft.tableTextColor }}>
+              Table text
+            </span>
+          </div>
+        </div>
+
+        <div style={s.settingsSubCard}>
+          <h3 style={s.settingsSubTitle}>Headings</h3>
+          <div style={s.settingsInlineFields}>
+            <label style={s.settingsFieldLabel}>
+              Heading size
+              <input
+                type="number"
+                min={14}
+                max={34}
+                value={universalDraft.headingTextSize}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  headingTextSize: Number(event.currentTarget.value) || current.headingTextSize,
+                }))}
+                style={s.settingsSmallInput}
+              />
+            </label>
+            <label style={s.settingsFieldLabel}>
+              Heading colour
+              <input
+                type="color"
+                value={universalDraft.headingTextColor}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  headingTextColor: event.currentTarget.value,
+                }))}
+                style={s.colorInput}
+              />
+            </label>
+            <span style={{ ...s.headingPreview, fontSize: universalDraft.headingTextSize, color: universalDraft.headingTextColor }}>
+              Heading
+            </span>
+          </div>
+        </div>
       </section>
 
       <section style={s.settingsCard}>
@@ -2293,21 +2483,8 @@ function PackingListDetail({
   return (
     <div style={s.packingDetailInner}>
       <div style={s.packingTop}>
-        <a href="/portal?page=packing" style={s.secondaryButton}>Back to packing lists</a>
+        <a href="/portal?page=packing" style={s.secondaryButton}>Back</a>
         <div style={s.packingMeta}>
-          <label style={s.filterLabel}>
-            Shipment
-            <input
-              defaultValue={packingList.title}
-              onBlur={(event) => submitPortalCell(fetcher, {
-                intent: "update_packing_list",
-                packingId: packingList.id,
-                field: "title",
-                value: event.currentTarget.value,
-              })}
-              style={s.packingInput}
-            />
-          </label>
           <label style={s.filterLabel}>
             Invoice number
             <input
@@ -2321,37 +2498,6 @@ function PackingListDetail({
               placeholder="Invoice number"
               style={s.packingInput}
             />
-          </label>
-          <label style={s.filterLabel}>
-            Leave factory
-            <input
-              defaultValue={formatPortalDate(packingList.expectedLeaveFactoryDate ?? packingList.shipmentDate)}
-              onBlur={(event) => submitPortalCell(fetcher, {
-                intent: "update_packing_list",
-                packingId: packingList.id,
-                field: "expectedLeaveFactoryDate",
-                value: event.currentTarget.value,
-              })}
-              placeholder="dd/mm/yy"
-              style={s.packingInput}
-            />
-          </label>
-          <label style={s.filterLabel}>
-            Status
-            <select
-              value={packingList.status}
-              onChange={(event) => submitPortalCell(fetcher, {
-                intent: "update_packing_list",
-                packingId: packingList.id,
-                field: "status",
-                value: event.currentTarget.value,
-              })}
-              style={s.productTypeFilter}
-            >
-              {PACKING_STATUS_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>{option.label}</option>
-              ))}
-            </select>
           </label>
           <div style={s.packingTotalPill}>
             Total quantity <strong>{packingListTotal(packingList)}</strong>
@@ -3539,7 +3685,7 @@ const s: Record<string, React.CSSProperties> = {
     gap: 16,
     marginBottom: 18,
   },
-  pageTitle: { margin: 0, fontSize: 24, color: "#111827", lineHeight: 1.2 },
+  pageTitle: { margin: 0, fontSize: "var(--portal-heading-font-size)", color: "var(--portal-heading-text-color)", lineHeight: 1.2 },
   headerControls: {
     display: "flex",
     flexDirection: "column",
@@ -3592,8 +3738,8 @@ const s: Record<string, React.CSSProperties> = {
     width: 32,
     height: 32,
     borderRadius: 8,
-    background: "#111827",
-    color: "#fff",
+    background: "var(--portal-primary-button-bg)",
+    color: "var(--portal-primary-button-color)",
     fontSize: 12,
     fontWeight: 800,
     letterSpacing: "0.04em",
@@ -3724,11 +3870,11 @@ const s: Record<string, React.CSSProperties> = {
     background: "#fff",
   },
   loginButton: {
-    border: "1px solid #111827",
+    border: "1px solid var(--portal-primary-button-bg)",
     borderRadius: 8,
     padding: "10px 14px",
-    background: "#111827",
-    color: "#fff",
+    background: "var(--portal-primary-button-bg)",
+    color: "var(--portal-primary-button-color)",
     fontSize: 14,
     fontWeight: 800,
     cursor: "pointer",
@@ -3742,7 +3888,7 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
   },
   settingsHeader: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
-  settingsTitle: { margin: 0, fontSize: 18, color: "#111827" },
+  settingsTitle: { margin: 0, fontSize: 18, color: "var(--portal-heading-text-color)" },
   settingsHint: { margin: "6px 0 0", color: "#6b7280", fontSize: 13, fontWeight: 600 },
   switchRow: {
     display: "flex",
@@ -3823,6 +3969,24 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #cbd5e1",
     background: "#fff",
     fontWeight: 900,
+  },
+  buttonPreview: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 82,
+    minHeight: 34,
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 900,
+    boxShadow: "inset 0 1px 0 rgba(255,255,255,0.18)",
+  },
+  headingPreview: {
+    display: "inline-flex",
+    alignItems: "center",
+    minHeight: 34,
+    fontWeight: 900,
+    lineHeight: 1.1,
   },
   inventoryArrowPreview: {
     display: "inline-flex",
@@ -4197,7 +4361,7 @@ const s: Record<string, React.CSSProperties> = {
   table: {
     borderCollapse: "separate",
     borderSpacing: 0,
-    fontSize: 13,
+    fontSize: "var(--portal-table-font-size)",
     minWidth: 900,
     tableLayout: "fixed",
   },
@@ -4205,10 +4369,10 @@ const s: Record<string, React.CSSProperties> = {
   th: {
     padding: "8px 10px",
     fontWeight: 700,
-    fontSize: 11,
+    fontSize: "calc(var(--portal-table-font-size) - 2px)",
     textTransform: "uppercase",
     letterSpacing: "0.05em",
-    color: "#4b5563",
+    color: "var(--portal-heading-text-color)",
     border: "1px solid #cbd5e1",
     whiteSpace: "nowrap",
     background: "#eef2f7",
@@ -4234,7 +4398,7 @@ const s: Record<string, React.CSSProperties> = {
   td: {
     padding: "8px 10px",
     verticalAlign: "middle",
-    color: "#374151",
+    color: "var(--portal-table-text-color)",
     border: "1px solid #d1d5db",
     background: "#fff",
     overflow: "hidden",
