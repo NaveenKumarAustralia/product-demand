@@ -18,6 +18,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const messageOrderId = Number(url.searchParams.get("messageOrderId") ?? 0) || null;
   const packingId = Number(url.searchParams.get("packingId") ?? 0) || null;
   const productSearch = url.searchParams.get("productSearch") ?? "";
+  const restockProductSearch = url.searchParams.get("restockProductSearch") ?? "";
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, restockSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
@@ -91,6 +92,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productResults = page === "packing" && selectedPackingList && productSearch.trim().length >= 2
     ? await searchShopifyProducts(productSearch)
     : [];
+  const restockProductResults = page === "restock" && restockProductSearch.trim().length >= 2
+    ? await searchShopifyProducts(restockProductSearch)
+    : [];
   const messages = currentUser
     ? await prisma.portalMessage.findMany({
         where: { userId: currentUser.id, readAt: null },
@@ -101,7 +105,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","S/M","M","M/L","L","L/XL","XL","2XL","3XL","4XL","ONE SIZE"];
-  const allSizes = [...new Set(orders.flatMap((o) => o.lines.map((l) => l.variantTitle)))];
+  const allSizes = [...new Set([
+    ...orders.flatMap((o) => o.lines.map((l) => l.variantTitle)),
+    ...restockProductResults.flatMap((product) => product.variants.map((variant) => variant.title)),
+  ])];
   allSizes.sort((a, b) => {
     const ai = sizeOrder.indexOf(a.toUpperCase());
     const bi = sizeOrder.indexOf(b.toUpperCase());
@@ -129,8 +136,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     packingLists,
     selectedPackingList,
     productSearch,
+    restockProductSearch,
     packingSearchLineId,
     productResults,
+    restockProductResults,
     loginRequired,
     users,
     currentUser,
@@ -456,6 +465,77 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "create_restock_order_from_portal") {
+    let product: ShopifySearchProduct;
+    let qtys: Record<string, number>;
+    try {
+      product = JSON.parse(String(form.get("product") ?? "{}")) as ShopifySearchProduct;
+      qtys = normalizeQtys(JSON.parse(String(form.get("qtys") ?? "{}")));
+    } catch {
+      return null;
+    }
+
+    if (!product?.id || !product.title) return null;
+    const fallbackSession = product.shop
+      ? null
+      : await prisma.session.findFirst({
+          where: { accessToken: { not: "" } },
+          orderBy: { isOnline: "asc" },
+        });
+    const shop = product.shop ?? fallbackSession?.shop ?? "";
+    if (!shop) return null;
+    const variants = product.variants?.length
+      ? product.variants
+      : shop
+        ? await getShopifyProductVariants(shop, product.id)
+        : [];
+    if (!variants.length) return null;
+
+    const totalQty = variants.reduce((sum, variant) => sum + (qtys[variant.title] ?? 0), 0);
+    if (totalQty <= 0) return null;
+
+    const etaRaw = String(form.get("eta") ?? "");
+    const eta = etaRaw ? parsePortalDate(etaRaw) : null;
+    if (etaRaw && !eta) return null;
+
+    const notes = String(form.get("notes") ?? "").trim();
+    const createdOrder = await prisma.supplierOrder.create({
+      data: {
+        shop,
+        poNumber: null,
+        supplier: "Portal",
+        productId: product.id,
+        productTitle: product.title,
+        productType: normalizeProductGroup(String(form.get("productType") ?? "")) || null,
+        status: "open",
+        supplierStatus: String(form.get("supplierStatus") ?? "") || "on_order",
+        priority: String(form.get("priority") ?? "") || null,
+        productImageUrl: product.imageUrl,
+        eta,
+        notes: notes || null,
+        totalQty,
+        lines: {
+          create: variants.map((variant) => ({
+            variantId: variant.id,
+            variantTitle: variant.title,
+            sku: variant.sku,
+            qtyOrdered: qtys[variant.title] ?? 0,
+          })),
+        },
+      },
+    });
+
+    if (notes) {
+      await syncOrderNoteMessages({
+        orderId: createdOrder.id,
+        field: "notes",
+        text: notes,
+        fromName: currentUser?.name ?? null,
+      });
+    }
+    return null;
+  }
+
   if (intent === "mark_message_read") {
     const messageId = Number(form.get("messageId"));
     if (messageId && currentUser) {
@@ -748,10 +828,12 @@ type RestockSettings = {
 };
 type ShopifySearchProduct = {
   id: string;
+  shop?: string;
   title: string;
   imageUrl: string | null;
   skus: string[];
   sizes: string[];
+  variants: ShopifyVariantInfo[];
 };
 
 function normalizePortalUsers(value: unknown): PortalUser[] {
@@ -944,6 +1026,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
             variants(first: 50) {
               edges {
                 node {
+                  id
                   title
                   sku
                 }
@@ -959,10 +1042,18 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
     const variants = edge.node.variants.edges.map((variantEdge: any) => variantEdge.node);
     return {
       id: edge.node.id,
+      shop: session.shop,
       title: edge.node.title,
       imageUrl: edge.node.featuredImage?.url ?? null,
       skus: variants.map((variant: any) => variant.sku).filter(Boolean),
       sizes: Array.from(new Set(variants.map((variant: any) => variant.title).filter(Boolean))),
+      variants: variants
+        .map((variant: any) => ({
+          id: String(variant.id ?? ""),
+          title: String(variant.title ?? ""),
+          sku: variant.sku ? String(variant.sku) : null,
+        }))
+        .filter((variant: ShopifyVariantInfo) => variant.id && variant.title),
     };
   });
 
@@ -1189,8 +1280,10 @@ export default function PortalDashboard() {
     packingLists,
     selectedPackingList,
     productSearch,
+    restockProductSearch,
     packingSearchLineId,
     productResults,
+    restockProductResults,
     loginRequired,
     users,
     currentUser,
@@ -1446,8 +1539,6 @@ export default function PortalDashboard() {
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
-        ) : orders.length === 0 ? (
-          <div style={s.empty}>{messageOrderId ? "That message is for an order that is no longer open." : "No open orders at the moment."}</div>
         ) : (
           <div style={s.tableWrap}>
             <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleGridKeyDown}>
@@ -1470,9 +1561,24 @@ export default function PortalDashboard() {
                 </tr>
               </thead>
               <tbody>
+                <AddRestockOrderRow
+                  sizes={sizes}
+                  productGroups={productGroups}
+                  productSearch={restockProductSearch}
+                  productResults={restockProductResults}
+                  updateParams={updateParams}
+                  restockSettings={restockSettings}
+                />
                 {orders.map((order, rowIndex) => (
-                  <OrderRow key={order.id} order={order} rowIndex={rowIndex} sizes={sizes} users={users} restockSettings={restockSettings} />
+                  <OrderRow key={order.id} order={order} rowIndex={rowIndex + 1} sizes={sizes} users={users} restockSettings={restockSettings} />
                 ))}
+                {orders.length === 0 && (
+                  <tr style={s.row}>
+                    <td colSpan={columns.length} style={{ ...s.td, textAlign: "center", color: "#6b7280", fontWeight: 700 }}>
+                      {messageOrderId ? "That message is for an order that is no longer open." : "No open orders yet. Use the first row to add one."}
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -1512,8 +1618,13 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
         onClick={() => setOpen((current) => !current)}
         style={messages.length ? s.messagesButtonActive : s.messagesButton}
         title="Messages"
+        aria-label={messages.length ? `${messages.length} unread messages` : "Messages"}
       >
-        Message icon {messages.length ? `(${messages.length})` : ""}
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M4 5.75C4 4.78 4.78 4 5.75 4h12.5C19.22 4 20 4.78 20 5.75v8.5c0 .97-.78 1.75-1.75 1.75H9.4L5.2 19.15A.75.75 0 0 1 4 18.55V5.75Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+          <path d="M7.5 8.5h9M7.5 12h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+        {messages.length > 0 && <span style={s.messageCount}>{messages.length}</span>}
       </button>
       {open && (
         <div style={s.messagesPopover}>
@@ -2397,7 +2508,244 @@ function FabricImageCell({ lineId, value }: { lineId: number; value: string }) {
   );
 }
 
-// ─── Row ─────────────────────────────────────────────────────────────────────
+// ─── Rows ────────────────────────────────────────────────────────────────────
+
+function AddRestockOrderRow({
+  sizes,
+  productGroups,
+  productSearch,
+  productResults,
+  updateParams,
+  restockSettings,
+}: {
+  sizes: string[];
+  productGroups: string[];
+  productSearch: string;
+  productResults: ShopifySearchProduct[];
+  updateParams: (updates: Record<string, string>) => void;
+  restockSettings: RestockSettings;
+}) {
+  const fetcher = useFetcher();
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [searchValue, setSearchValue] = useState("");
+  const [selectedProduct, setSelectedProduct] = useState<ShopifySearchProduct | null>(null);
+  const [qtys, setQtys] = useState<Record<string, string>>({});
+  const [productGroup, setProductGroup] = useState("");
+  const [status, setStatus] = useState(restockSettings.statusOptions[0]?.value ?? "on_order");
+  const [priority, setPriority] = useState("");
+  const [notes, setNotes] = useState("");
+  const [eta, setEta] = useState("");
+  const [focused, setFocused] = useState(false);
+  const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
+  const [canPortalDropdown, setCanPortalDropdown] = useState(false);
+  const productVariantsBySize = new Map((selectedProduct?.variants ?? []).map((variant) => [variant.title, variant]));
+  const totalQty = Object.values(qtys).reduce((sum, value) => sum + (Number(value) || 0), 0);
+  const totalCol = 5 + sizes.length;
+  const statusCol = totalCol + 1;
+  const notesCol = totalCol + 2;
+  const priorityCol = totalCol + 3;
+  const etaCol = totalCol + 4;
+  const actionCol = totalCol + 5;
+  const shouldShowResults = !selectedProduct && focused && searchValue.trim().length >= 2;
+  const dropdownHeight = searchValue.trim() !== productSearch || !productResults.length
+    ? 48
+    : Math.min(320, productResults.length * 62 + 12);
+
+  const updateDropdownRect = () => {
+    if (!inputRef.current) return;
+    setDropdownRect(inputRef.current.getBoundingClientRect());
+  };
+
+  useEffect(() => {
+    setCanPortalDropdown(true);
+  }, []);
+
+  useEffect(() => {
+    if (!shouldShowResults) {
+      setDropdownRect(null);
+      return;
+    }
+    updateDropdownRect();
+    window.addEventListener("resize", updateDropdownRect);
+    window.addEventListener("scroll", updateDropdownRect, true);
+    return () => {
+      window.removeEventListener("resize", updateDropdownRect);
+      window.removeEventListener("scroll", updateDropdownRect, true);
+    };
+  }, [shouldShowResults, searchValue]);
+
+  useEffect(() => {
+    if (!focused || selectedProduct) return;
+    const timer = window.setTimeout(() => {
+      const trimmed = searchValue.trim();
+      updateParams({ restockProductSearch: trimmed.length >= 2 ? trimmed : "" });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [focused, selectedProduct, searchValue]);
+
+  const selectProduct = (product: ShopifySearchProduct) => {
+    setSelectedProduct(product);
+    setSearchValue(product.title);
+    setFocused(false);
+    setDropdownRect(null);
+    setQtys(Object.fromEntries(product.variants.map((variant) => [variant.title, ""])));
+    updateParams({ restockProductSearch: product.title });
+  };
+
+  const clearProduct = () => {
+    setSelectedProduct(null);
+    setSearchValue("");
+    setQtys({});
+    updateParams({ restockProductSearch: "" });
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+  };
+
+  const submitOrder = () => {
+    if (!selectedProduct || totalQty <= 0) return;
+    const formData = new FormData();
+    formData.set("intent", "create_restock_order_from_portal");
+    formData.set("product", JSON.stringify(selectedProduct));
+    formData.set("qtys", JSON.stringify(qtys));
+    formData.set("productType", productGroup);
+    formData.set("supplierStatus", status);
+    formData.set("priority", priority);
+    formData.set("notes", notes);
+    formData.set("eta", eta);
+    fetcher.submit(formData, { method: "post" });
+    setSelectedProduct(null);
+    setSearchValue("");
+    setQtys({});
+    setNotes("");
+    setEta("");
+    setPriority("");
+    updateParams({ restockProductSearch: "" });
+  };
+
+  return (
+    <tr style={{ ...s.row, ...s.addOrderRow }}>
+      <Td rowIndex={0} colIndex={0}>
+        <select value={productGroup} onChange={(event) => setProductGroup(event.currentTarget.value)} style={s.addOrderSelect}>
+          <option value="">Product group</option>
+          {productGroups.map((group) => (
+            <option key={group} value={group}>{group}</option>
+          ))}
+        </select>
+      </Td>
+      <Td rowIndex={0} colIndex={1} center><span style={s.addOrderHint}>New order</span></Td>
+      <Td rowIndex={0} colIndex={2} center>
+        {selectedProduct?.imageUrl ? <img src={selectedProduct.imageUrl} alt="" style={s.thumb} /> : <div style={s.noImg}>—</div>}
+      </Td>
+      <Td rowIndex={0} colIndex={3} overflowVisible>
+        <div style={s.productCellSearch}>
+          {selectedProduct ? (
+            <div style={s.selectedRestockProduct}>
+              <span>{selectedProduct.title}</span>
+              <button type="button" style={s.clearProductButton} onClick={clearProduct} aria-label="Clear selected product">×</button>
+            </div>
+          ) : (
+            <input
+              ref={inputRef}
+              type="search"
+              value={searchValue}
+              onFocus={() => setFocused(true)}
+              onChange={(event) => setSearchValue(event.currentTarget.value)}
+              onBlur={() => window.setTimeout(() => setFocused(false), 140)}
+              placeholder="Search product to add"
+              style={s.restockSearchInput}
+            />
+          )}
+          {shouldShowResults && canPortalDropdown && dropdownRect && createPortal(
+            <div
+              style={{
+                ...s.productCellResults,
+                top: dropdownRect.bottom + 8,
+                left: dropdownRect.left,
+                width: Math.max(dropdownRect.width, 460),
+                height: dropdownHeight,
+              }}
+            >
+              {searchValue.trim() !== productSearch ? (
+                <div style={s.productCellResultEmpty}>Searching...</div>
+              ) : productResults.length ? productResults.map((product) => (
+                <button
+                  key={product.id}
+                  type="button"
+                  style={s.productCellResult}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => selectProduct(product)}
+                >
+                  {product.imageUrl ? <img src={product.imageUrl} alt="" style={s.productCellResultImage} /> : <span style={s.productCellNoImage}>—</span>}
+                  <span style={s.productCellResultText}>
+                    <strong>{product.title}</strong>
+                    <span>{product.skus.slice(0, 3).join(", ") || "No SKU"}</span>
+                  </span>
+                </button>
+              )) : (
+                <div style={s.productCellResultEmpty}>No products found.</div>
+              )}
+            </div>,
+            document.body,
+          )}
+        </div>
+      </Td>
+      <Td rowIndex={0} colIndex={4}><span style={s.sku}>{selectedProduct?.skus?.join("\n") || "—"}</span></Td>
+      {sizes.map((size, sizeIndex) => {
+        const variant = productVariantsBySize.get(size);
+        return (
+          <Td key={size} rowIndex={0} colIndex={5 + sizeIndex} center>
+            {selectedProduct && variant ? (
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={qtys[size] ?? ""}
+                onChange={(event) => {
+                  const value = event.currentTarget.value.replace(/\D/g, "");
+                  setQtys((current) => ({ ...current, [size]: value }));
+                }}
+                style={s.qtyInput}
+              />
+            ) : (
+              <span style={s.qtyZero}>—</span>
+            )}
+          </Td>
+        );
+      })}
+      <Td rowIndex={0} colIndex={totalCol} center><span style={s.total}>{totalQty}</span></Td>
+      <Td rowIndex={0} colIndex={statusCol}>
+        <select value={status} onChange={(event) => setStatus(event.currentTarget.value)} style={s.select}>
+          {restockSettings.statusOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </Td>
+      <Td rowIndex={0} colIndex={notesCol}>
+        <textarea value={notes} onChange={(event) => setNotes(event.currentTarget.value)} rows={2} placeholder="Notes" style={s.textarea} />
+      </Td>
+      <Td rowIndex={0} colIndex={priorityCol}>
+        <select value={priority} onChange={(event) => setPriority(event.currentTarget.value)} style={s.select}>
+          <option value="">— Priority —</option>
+          {restockSettings.priorityOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </Td>
+      <Td rowIndex={0} colIndex={etaCol}>
+        <input value={eta} onChange={(event) => setEta(event.currentTarget.value)} style={s.dateInput} placeholder="dd/mm/yy" />
+      </Td>
+      <Td rowIndex={0} colIndex={actionCol} center>
+        <button
+          type="button"
+          style={{ ...s.smallButton, ...(selectedProduct && totalQty > 0 ? s.addOrderButtonReady : {}) }}
+          disabled={!selectedProduct || totalQty <= 0}
+          onClick={submitOrder}
+        >
+          Add order
+        </button>
+      </Td>
+    </tr>
+  );
+}
 
 function OrderRow({
   order,
@@ -2951,24 +3299,48 @@ const s: Record<string, React.CSSProperties> = {
   activeUserEmpty: { color: "#6b7280", fontSize: 12, fontWeight: 700 },
   messagesWrap: { position: "relative" },
   messagesButton: {
+    position: "relative",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
     border: "1px solid #d1d5db",
     borderRadius: 8,
-    padding: "7px 10px",
+    padding: 7,
     background: "#fff",
     color: "#374151",
-    fontSize: 12,
-    fontWeight: 800,
+    width: 34,
+    height: 34,
     cursor: "pointer",
   },
   messagesButtonActive: {
+    position: "relative",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
     border: "1px solid #f97316",
     borderRadius: 8,
-    padding: "7px 10px",
+    padding: 7,
     background: "#fff7ed",
     color: "#9a3412",
-    fontSize: 12,
-    fontWeight: 900,
+    width: 34,
+    height: 34,
     cursor: "pointer",
+  },
+  messageCount: {
+    position: "absolute",
+    top: -6,
+    right: -6,
+    minWidth: 17,
+    height: 17,
+    padding: "0 4px",
+    borderRadius: 999,
+    background: "#ef4444",
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: 900,
+    lineHeight: "17px",
+    textAlign: "center",
+    boxShadow: "0 0 0 2px #fff",
   },
   messagesPopover: {
     position: "absolute",
@@ -3534,6 +3906,7 @@ const s: Record<string, React.CSSProperties> = {
     touchAction: "none",
   },
   row: { background: "#fff" },
+  addOrderRow: { background: "#f8fafc" },
   td: {
     padding: "8px 10px",
     verticalAlign: "middle",
@@ -3555,6 +3928,56 @@ const s: Record<string, React.CSSProperties> = {
   noImg: { color: "#d1d5db", textAlign: "center" },
   productName: { fontWeight: 600, color: "#111827", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 },
   sku: { fontFamily: "monospace", fontSize: 11, color: "#6b7280", whiteSpace: "pre-line" },
+  addOrderHint: { color: "#6b7280", fontWeight: 800, fontSize: 12 },
+  addOrderSelect: {
+    border: "1px solid #b6c0cc",
+    borderRadius: 6,
+    padding: "6px 8px",
+    width: "100%",
+    background: "#fff",
+    color: "#374151",
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  restockSearchInput: {
+    width: "100%",
+    border: "1px solid #b6c0cc",
+    borderRadius: 7,
+    padding: "8px 10px",
+    background: "#fff",
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: 700,
+    outline: "none",
+    boxSizing: "border-box",
+  },
+  selectedRestockProduct: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    color: "#111827",
+    fontWeight: 800,
+    lineHeight: 1.3,
+  },
+  clearProductButton: {
+    border: 0,
+    borderRadius: 999,
+    width: 22,
+    height: 22,
+    background: "#6b7280",
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: 900,
+    lineHeight: "20px",
+    cursor: "pointer",
+    flex: "0 0 auto",
+  },
+  addOrderButtonReady: {
+    background: "#111827",
+    borderColor: "#111827",
+    color: "#fff",
+  },
   qty: { fontWeight: 700, color: "#111827" },
   qtyZero: { color: "#d1d5db" },
   dateText: { color: "#374151", fontWeight: 600, whiteSpace: "nowrap" },
