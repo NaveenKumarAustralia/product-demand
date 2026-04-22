@@ -2345,6 +2345,7 @@ function PackingListsOverview({
 }) {
   const [searchParams] = useSearchParams();
   const [hoveredListId, setHoveredListId] = useState<number | null>(null);
+  const [deleteWarningList, setDeleteWarningList] = useState<PackingListWithLines | null>(null);
   const showHidden = searchParams.get("showHidden") === "true";
   const visibleLists = packingLists.filter((list) => !list.hiddenAt);
   const hiddenLists = packingLists.filter((list) => list.hiddenAt);
@@ -2409,19 +2410,9 @@ function PackingListsOverview({
                           {showHidden ? "Show" : "Hide"}
                         </button>
                       </fetcher.Form>
-                      <fetcher.Form
-                        method="post"
-                        onSubmit={(event) => {
-                          event.stopPropagation();
-                          if (!window.confirm("Are you sure you want to delete this packing list?")) {
-                            event.preventDefault();
-                          }
-                        }}
-                      >
-                        <input type="hidden" name="intent" value="delete_packing_list" />
-                        <input type="hidden" name="packingId" value={list.id} />
-                        <button type="submit" style={s.removeUserButton}>Delete</button>
-                      </fetcher.Form>
+                      <button type="button" style={s.removeUserButton} onClick={() => setDeleteWarningList(list)}>
+                        Delete
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -2436,6 +2427,34 @@ function PackingListsOverview({
           </tbody>
         </table>
       </section>
+      {deleteWarningList ? (
+        <div style={s.deleteConfirm} onClick={() => setDeleteWarningList(null)}>
+          <div style={s.deleteConfirmCard} onClick={(event) => event.stopPropagation()}>
+            <div style={s.deleteConfirmTitle}>Delete packing list?</div>
+            <div style={s.deleteConfirmText}>
+              Are you sure you want to delete this list? You can also hide it from the list instead.
+            </div>
+            <div style={s.deleteConfirmActions}>
+              <fetcher.Form method="post" onSubmit={() => setDeleteWarningList(null)}>
+                <input type="hidden" name="intent" value="set_packing_list_hidden" />
+                <input type="hidden" name="packingId" value={deleteWarningList.id} />
+                <input type="hidden" name="hidden" value="true" />
+                <button type="submit" style={s.hideListButton}>Hide</button>
+              </fetcher.Form>
+              <fetcher.Form method="post" onSubmit={() => setDeleteWarningList(null)}>
+                <input type="hidden" name="intent" value="delete_packing_list" />
+                <input type="hidden" name="packingId" value={deleteWarningList.id} />
+                <button type="submit" style={{ ...s.deleteConfirmButton, ...s.deleteConfirmDanger }}>
+                  Delete
+                </button>
+              </fetcher.Form>
+              <button type="button" style={s.deleteConfirmButton} onClick={() => setDeleteWarningList(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
