@@ -1029,6 +1029,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
                   id
                   title
                   sku
+                  inventoryQuantity
                 }
               }
             }
@@ -1052,6 +1053,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
           id: String(variant.id ?? ""),
           title: String(variant.title ?? ""),
           sku: variant.sku ? String(variant.sku) : null,
+          availableInventory: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null,
         }))
         .filter((variant: ShopifyVariantInfo) => variant.id && variant.title),
     };
@@ -1101,7 +1103,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
   }
 }
 
-type ShopifyVariantInfo = { id: string; title: string; sku: string | null };
+type ShopifyVariantInfo = { id: string; title: string; sku: string | null; availableInventory: number | null };
 
 async function getShopifyProductVariants(shop: string, productId: string): Promise<ShopifyVariantInfo[]> {
   const session = await prisma.session.findFirst({
@@ -1114,7 +1116,7 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
     query ProductVariants($id: ID!) {
       product(id: $id) {
         variants(first: 100) {
-          nodes { id title sku }
+          nodes { id title sku inventoryQuantity }
         }
       }
     }
@@ -1125,6 +1127,7 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
         id: String(variant.id ?? ""),
         title: String(variant.title ?? ""),
         sku: variant.sku ? String(variant.sku) : null,
+        availableInventory: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null,
       }))
       .filter((variant: ShopifyVariantInfo) => variant.id && variant.title);
 
@@ -1170,6 +1173,7 @@ async function enrichOrdersWithShopifyVariants<T extends {
     qtyReceived: number;
     costPrice: number | null;
     createdAt: Date;
+    availableInventory?: number | null;
   }>;
 }>(orders: T[]): Promise<T[]> {
   const variantEntries = await Promise.all(
@@ -1187,13 +1191,13 @@ async function enrichOrdersWithShopifyVariants<T extends {
     const linesByVariantId = new Map(order.lines.map((line) => [line.variantId, line]));
     const linesByTitle = new Map(order.lines.map((line) => [line.variantTitle.trim().toLowerCase(), line]));
     const usedLineIds = new Set<number>();
-    const nextLines: T["lines"] = [];
+    const nextLines: Array<T["lines"][number]> = [];
 
     for (const variant of variants) {
       const exactLine = linesByVariantId.get(variant.id);
       if (exactLine) {
         usedLineIds.add(exactLine.id);
-        nextLines.push(exactLine);
+        nextLines.push({ ...exactLine, availableInventory: variant.availableInventory });
         continue;
       }
       const titleMatch = linesByTitle.get(variant.title.trim().toLowerCase());
@@ -1205,6 +1209,7 @@ async function enrichOrdersWithShopifyVariants<T extends {
           variantId: variant.id,
           variantTitle: variant.title,
           sku: variant.sku ?? titleMatch.sku,
+          availableInventory: variant.availableInventory,
         });
         continue;
       }
@@ -1219,6 +1224,7 @@ async function enrichOrdersWithShopifyVariants<T extends {
         qtyReceived: 0,
         costPrice: null,
         createdAt: order.createdAt,
+        availableInventory: variant.availableInventory,
       });
     }
 
@@ -2760,13 +2766,20 @@ function OrderRow({
   users: PortalUser[];
   restockSettings: RestockSettings;
 }) {
+  const [inventoryOpen, setInventoryOpen] = useState(false);
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
+    return acc;
+  }, {});
+  const inventoryBySize = order.lines.reduce<Record<string, number | null>>((acc, line) => {
+    const availableInventory = "availableInventory" in line ? line.availableInventory : null;
+    acc[line.variantTitle] = Number.isFinite(Number(availableInventory)) ? Number(availableInventory) : null;
     return acc;
   }, {});
   const allSkus = order.lines.map((l) => l.sku).filter(Boolean).join("\n");
   const etaValue = formatPortalDate(order.eta);
   const orderDate = formatPortalDate(order.createdAt);
+  const inventoryTotal = sizes.reduce((sum, size) => sum + (inventoryBySize[size] ?? 0), 0);
   const totalCol = 5 + sizes.length;
   const statusCol = totalCol + 1;
   const notesCol = totalCol + 2;
@@ -2775,53 +2788,88 @@ function OrderRow({
   const deleteCol = totalCol + 5;
 
   return (
-    <tr id={`order-${order.id}`} style={s.row}>
-      {/* Factory notes */}
-      <Td rowIndex={rowIndex} colIndex={0} overflowVisible><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
+    <>
+      <tr id={`order-${order.id}`} style={s.row}>
+        {/* Factory notes */}
+        <Td rowIndex={rowIndex} colIndex={0} overflowVisible><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
-      {/* Order date */}
-      <Td rowIndex={rowIndex} colIndex={1} center><span style={s.dateText}>{orderDate}</span></Td>
+        {/* Order date */}
+        <Td rowIndex={rowIndex} colIndex={1} center><span style={s.dateText}>{orderDate}</span></Td>
 
-      {/* Picture */}
-      <Td rowIndex={rowIndex} colIndex={2} center>
-        <div style={s.imageCell}>
-          {order.productImageUrl
-            ? <img src={order.productImageUrl} alt="" style={s.thumb} />
-            : <div style={s.noImg}>—</div>}
-        </div>
-      </Td>
-
-      {/* Name */}
-      <Td rowIndex={rowIndex} colIndex={3}><span style={s.productName}>{order.productTitle}</span></Td>
-
-      {/* SKU */}
-      <Td rowIndex={rowIndex} colIndex={4}><span style={s.sku}>{allSkus || "—"}</span></Td>
-
-      {/* Size columns */}
-      {sizes.map((sz, sizeIndex) => (
-        <Td key={sz} rowIndex={rowIndex} colIndex={5 + sizeIndex} center>
-          <QtyCell orderId={order.id} size={sz} value={qtyBySize[sz] ?? 0} restockSettings={restockSettings} />
+        {/* Picture */}
+        <Td rowIndex={rowIndex} colIndex={2} center>
+          <div style={s.imageCell}>
+            {order.productImageUrl
+              ? <img src={order.productImageUrl} alt="" style={s.thumb} />
+              : <div style={s.noImg}>—</div>}
+          </div>
         </Td>
-      ))}
 
-      {/* Total */}
-      <Td rowIndex={rowIndex} colIndex={totalCol} center><span style={s.total}>{order.totalQty}</span></Td>
+        {/* Name */}
+        <Td rowIndex={rowIndex} colIndex={3}><span style={s.productName}>{order.productTitle}</span></Td>
 
-      {/* Status */}
-      <Td rowIndex={rowIndex} colIndex={statusCol}><StatusCell orderId={order.id} value={order.supplierStatus} options={restockSettings.statusOptions} /></Td>
+        {/* SKU */}
+        <Td rowIndex={rowIndex} colIndex={4} overflowVisible>
+          <div style={s.skuCellWithToggle}>
+            <span style={s.sku}>{allSkus || "—"}</span>
+            <button
+              type="button"
+              onClick={() => setInventoryOpen((current) => !current)}
+              style={s.inventoryToggle}
+              aria-label={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
+              title={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
+            >
+              {inventoryOpen ? "▲" : "▼"}
+            </button>
+          </div>
+        </Td>
 
-      {/* Notes (from order) */}
-      <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
+        {/* Size columns */}
+        {sizes.map((sz, sizeIndex) => (
+          <Td key={sz} rowIndex={rowIndex} colIndex={5 + sizeIndex} center>
+            <QtyCell orderId={order.id} size={sz} value={qtyBySize[sz] ?? 0} restockSettings={restockSettings} />
+          </Td>
+        ))}
 
-      {/* Priority */}
-      <Td rowIndex={rowIndex} colIndex={priorityCol}><PriorityCell orderId={order.id} value={order.priority ?? ""} options={restockSettings.priorityOptions} /></Td>
+        {/* Total */}
+        <Td rowIndex={rowIndex} colIndex={totalCol} center><span style={s.total}>{order.totalQty}</span></Td>
 
-      {/* ETA */}
-      <Td rowIndex={rowIndex} colIndex={etaCol}><EtaCell orderId={order.id} value={etaValue} /></Td>
+        {/* Status */}
+        <Td rowIndex={rowIndex} colIndex={statusCol}><StatusCell orderId={order.id} value={order.supplierStatus} options={restockSettings.statusOptions} /></Td>
 
-      {/* Actions */}
-      <Td rowIndex={rowIndex} colIndex={deleteCol} center><OrderActionsCell orderId={order.id} /></Td>
-    </tr>
+        {/* Notes (from order) */}
+        <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
+
+        {/* Priority */}
+        <Td rowIndex={rowIndex} colIndex={priorityCol}><PriorityCell orderId={order.id} value={order.priority ?? ""} options={restockSettings.priorityOptions} /></Td>
+
+        {/* ETA */}
+        <Td rowIndex={rowIndex} colIndex={etaCol}><EtaCell orderId={order.id} value={etaValue} /></Td>
+
+        {/* Actions */}
+        <Td rowIndex={rowIndex} colIndex={deleteCol} center><OrderActionsCell orderId={order.id} /></Td>
+      </tr>
+      {inventoryOpen && (
+        <tr style={s.inventoryRow}>
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryLabelCell}>Shopify</td>
+          {sizes.map((size) => (
+            <td key={size} style={{ ...s.td, ...s.inventoryQtyCell }}>
+              {inventoryBySize[size] == null ? "—" : inventoryBySize[size]}
+            </td>
+          ))}
+          <td style={{ ...s.td, ...s.inventoryQtyCell }}><span style={s.total}>{inventoryTotal}</span></td>
+          <td style={{ ...s.td, ...s.inventoryStatusCell }}>Available</td>
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+        </tr>
+      )}
+    </>
   );
 }
 
@@ -3928,6 +3976,59 @@ const s: Record<string, React.CSSProperties> = {
   noImg: { color: "#d1d5db", textAlign: "center" },
   productName: { fontWeight: 600, color: "#111827", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 },
   sku: { fontFamily: "monospace", fontSize: 11, color: "#6b7280", whiteSpace: "pre-line" },
+  skuCellWithToggle: {
+    position: "relative",
+    minHeight: 72,
+    display: "flex",
+    alignItems: "center",
+  },
+  inventoryToggle: {
+    position: "absolute",
+    right: -25,
+    bottom: -23,
+    width: 42,
+    height: 42,
+    borderRadius: 999,
+    border: "1px solid #cbd5e1",
+    background: "#111827",
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: 900,
+    lineHeight: "40px",
+    textAlign: "center",
+    cursor: "pointer",
+    zIndex: 35,
+    boxShadow: "0 10px 22px rgba(15,23,42,0.22), inset 0 1px 0 rgba(255,255,255,0.12)",
+  },
+  inventoryRow: { background: "#f8fafc" },
+  inventoryBlankCell: {
+    padding: "8px 10px",
+    verticalAlign: "middle",
+    border: "1px solid #d1d5db",
+    background: "#f8fafc",
+  },
+  inventoryLabelCell: {
+    padding: "8px 10px",
+    verticalAlign: "middle",
+    border: "1px solid #d1d5db",
+    background: "#f8fafc",
+    color: "#374151",
+    fontSize: 13,
+    fontWeight: 900,
+  },
+  inventoryQtyCell: {
+    background: "#f8fafc",
+    color: "#374151",
+    fontSize: 13,
+    fontWeight: 900,
+    textAlign: "center",
+  },
+  inventoryStatusCell: {
+    background: "#f8fafc",
+    color: "#374151",
+    fontSize: 13,
+    fontWeight: 800,
+  },
   addOrderHint: { color: "#6b7280", fontWeight: 800, fontSize: 12 },
   addOrderSelect: {
     border: "1px solid #b6c0cc",
