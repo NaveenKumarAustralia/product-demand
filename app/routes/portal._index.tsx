@@ -2345,14 +2345,8 @@ function PackingListsOverview({
   return (
     <div style={s.packingOverview}>
       <section style={s.packingOverviewCreate}>
-        <div>
-          <h2 style={s.settingsTitle}>Create packing list</h2>
-          <p style={s.settingsHint}>Create one packing list, then open it to add products and box quantities.</p>
-        </div>
         <fetcher.Form method="post" style={s.packingCreateForm}>
           <input type="hidden" name="intent" value="create_packing_list" />
-          <input name="invoiceNumber" placeholder="Invoice number" style={s.packingInput} />
-          <input name="expectedLeaveFactoryDate" placeholder="Leave factory dd/mm/yy" style={s.packingInput} />
           <button type="submit" style={s.loginButton}>New packing list</button>
         </fetcher.Form>
       </section>
@@ -2375,41 +2369,45 @@ function PackingListsOverview({
             </tr>
           </thead>
           <tbody>
-            {rows.length ? rows.map((list) => (
-              <tr
-                key={list.id}
-                style={{
-                  ...s.clickableOverviewRow,
-                  ...(hoveredListId === list.id ? s.clickableOverviewRowHover : null),
-                }}
-                onClick={() => {
-                  window.location.href = `/portal?page=packing&packingId=${list.id}`;
-                }}
-                onMouseEnter={() => setHoveredListId(list.id)}
-                onMouseLeave={() => setHoveredListId(null)}
-              >
-                <td style={s.td}>
-                  <strong style={s.productName}>{list.invoiceNumber || `Packing list #${list.id}`}</strong>
-                </td>
-                <td style={{ ...s.td, textAlign: "center" }}><span style={s.total}>{packingListTotal(list)}</span></td>
-                <td style={s.td}>{formatPortalDate(list.expectedLeaveFactoryDate ?? list.shipmentDate) || "—"}</td>
-                <td style={s.td}>{labelForPackingStatus(list.status)}</td>
-                <td style={{ ...s.td, textAlign: "center" }}>
-                  <fetcher.Form
-                    method="post"
-                    onClick={(event) => event.stopPropagation()}
-                    style={{ display: "inline-block" }}
-                  >
-                    <input type="hidden" name="intent" value="set_packing_list_hidden" />
-                    <input type="hidden" name="packingId" value={list.id} />
-                    <input type="hidden" name="hidden" value={showHidden ? "false" : "true"} />
-                    <button type="submit" style={showHidden ? s.smallButton : s.hideListButton}>
-                      {showHidden ? "Show" : "Hide list"}
-                    </button>
-                  </fetcher.Form>
-                </td>
-              </tr>
-            )) : (
+            {rows.length ? rows.map((list) => {
+              const isHovered = hoveredListId === list.id;
+              const cellStyle = {
+                ...s.td,
+                ...(isHovered ? s.clickableOverviewCellHover : {}),
+              };
+              return (
+                <tr
+                  key={list.id}
+                  style={s.clickableOverviewRow}
+                  onClick={() => {
+                    window.location.href = `/portal?page=packing&packingId=${list.id}`;
+                  }}
+                  onMouseEnter={() => setHoveredListId(list.id)}
+                  onMouseLeave={() => setHoveredListId(null)}
+                >
+                  <td style={cellStyle}>
+                    <strong style={s.productName}>{list.invoiceNumber || `Packing list #${list.id}`}</strong>
+                  </td>
+                  <td style={{ ...cellStyle, textAlign: "center" }}><span style={s.total}>{packingListTotal(list)}</span></td>
+                  <td style={cellStyle}>{formatPortalDate(list.expectedLeaveFactoryDate ?? list.shipmentDate) || "—"}</td>
+                  <td style={cellStyle}>{labelForPackingStatus(list.status)}</td>
+                  <td style={{ ...cellStyle, textAlign: "center" }}>
+                    <fetcher.Form
+                      method="post"
+                      onClick={(event) => event.stopPropagation()}
+                      style={{ display: "inline-block" }}
+                    >
+                      <input type="hidden" name="intent" value="set_packing_list_hidden" />
+                      <input type="hidden" name="packingId" value={list.id} />
+                      <input type="hidden" name="hidden" value={showHidden ? "false" : "true"} />
+                      <button type="submit" style={showHidden ? s.smallButton : s.hideListButton}>
+                        {showHidden ? "Show" : "Hide list"}
+                      </button>
+                    </fetcher.Form>
+                  </td>
+                </tr>
+              );
+            }) : (
               <tr style={s.row}>
                 <td colSpan={5} style={{ ...s.td, textAlign: "center", padding: 40 }}>
                   {showHidden ? "No hidden packing lists." : "No packing lists yet."}
@@ -4058,14 +4056,12 @@ const s: Record<string, React.CSSProperties> = {
   packingOverview: { display: "grid", gap: 14 },
   packingOverviewCreate: {
     display: "flex",
-    alignItems: "flex-end",
-    justifyContent: "space-between",
-    gap: 16,
-    flexWrap: "wrap",
+    alignItems: "center",
+    justifyContent: "flex-end",
     background: "#fff",
     border: "1px solid #cbd5e1",
     borderRadius: 12,
-    padding: 14,
+    padding: 12,
   },
   packingOverviewTableWrap: {
     overflow: "auto",
@@ -4092,7 +4088,7 @@ const s: Record<string, React.CSSProperties> = {
     flexWrap: "wrap",
     gap: 12,
   },
-  packingCreateForm: { display: "flex", alignItems: "flex-end", flexWrap: "wrap", gap: 8 },
+  packingCreateForm: { display: "flex", alignItems: "center", justifyContent: "flex-end" },
   packingInput: {
     border: "1px solid #b6c0cc",
     borderRadius: 7,
@@ -4373,13 +4369,12 @@ const s: Record<string, React.CSSProperties> = {
     cursor: "pointer",
   },
   clickableOverviewRow: {
-    background: "#fff",
     cursor: "pointer",
-    transition: "background 120ms ease, box-shadow 120ms ease",
+    transition: "box-shadow 120ms ease",
   },
-  clickableOverviewRowHover: {
+  clickableOverviewCellHover: {
     background: "#eaf3ff",
-    boxShadow: "inset 5px 0 0 #2563eb, 0 8px 18px rgba(37,99,235,0.12)",
+    boxShadow: "inset 0 0 0 9999px rgba(37,99,235,0.05)",
   },
   empty: { background: "#fff", borderRadius: 12, padding: 40, textAlign: "center", color: "#6b7280" },
   tableWrap: {
