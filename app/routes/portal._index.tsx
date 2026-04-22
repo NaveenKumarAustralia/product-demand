@@ -2483,10 +2483,10 @@ function PackingListDetail({
   return (
     <div style={s.packingDetailInner}>
       <div style={s.packingTop}>
-        <a href="/portal?page=packing" style={s.secondaryButton}>Back</a>
-        <div style={s.packingMeta}>
-          <label style={s.filterLabel}>
-            Invoice number
+        <div style={s.packingTopLeft}>
+          <a href="/portal?page=packing" style={{ ...s.secondaryButton, ...s.packingBackButton }}>Back</a>
+          <label style={s.packingToolbarLabel}>
+            <span>Invoice number</span>
             <input
               defaultValue={packingList.invoiceNumber ?? ""}
               onBlur={(event) => submitPortalCell(fetcher, {
@@ -2496,37 +2496,37 @@ function PackingListDetail({
                 value: event.currentTarget.value,
               })}
               placeholder="Invoice number"
-              style={s.packingInput}
+              style={{ ...s.packingInput, ...s.invoiceInput }}
             />
           </label>
           <div style={s.packingTotalPill}>
             Total quantity <strong>{packingListTotal(packingList)}</strong>
           </div>
-          <fetcher.Form
-            method="post"
-            style={s.loadInventoryForm}
-            onSubmit={(event) => {
-              const ok = window.confirm("Add these packing list quantities to current Shopify stock?");
-              if (!ok) event.preventDefault();
-            }}
-          >
-            <input type="hidden" name="intent" value="load_packing_inventory" />
-            <input type="hidden" name="packingId" value={packingList.id} />
-            <label style={s.filterLabel}>
-              Skip words
-              <input
-                name="skipWords"
-                value={skipWords}
-                onChange={(event) => setSkipWords(event.currentTarget.value)}
-                placeholder="acacia, sample, fabric"
-                style={s.packingInput}
-              />
-            </label>
-            <button type="submit" style={s.loginButton} disabled={fetcher.state !== "idle"}>
-              {fetcher.state === "idle" ? "Load inventory on Shopify" : "Loading..."}
-            </button>
-          </fetcher.Form>
         </div>
+        <fetcher.Form
+          method="post"
+          style={s.loadInventoryForm}
+          onSubmit={(event) => {
+            const ok = window.confirm("Add these packing list quantities to current Shopify stock?");
+            if (!ok) event.preventDefault();
+          }}
+        >
+          <input type="hidden" name="intent" value="load_packing_inventory" />
+          <input type="hidden" name="packingId" value={packingList.id} />
+          <label style={s.packingToolbarLabel}>
+            <span>Skip words</span>
+            <input
+              name="skipWords"
+              value={skipWords}
+              onChange={(event) => setSkipWords(event.currentTarget.value)}
+              placeholder="acacia, sample, fabric"
+              style={{ ...s.packingInput, ...s.skipWordsInput }}
+            />
+          </label>
+          <button type="submit" style={{ ...s.loginButton, ...s.loadInventoryButton }} disabled={fetcher.state !== "idle"}>
+            {fetcher.state === "idle" ? "Load inventory on Shopify" : "Loading..."}
+          </button>
+        </fetcher.Form>
       </div>
 
       <div style={s.packingTableWrap}>
@@ -4129,35 +4129,66 @@ const s: Record<string, React.CSSProperties> = {
   packingTop: {
     display: "flex",
     justifyContent: "space-between",
-    alignItems: "flex-end",
-    gap: 12,
+    alignItems: "center",
+    gap: 16,
     flexWrap: "wrap",
     background: "#fff",
     border: "1px solid #cbd5e1",
     borderRadius: 12,
-    padding: 12,
+    padding: "12px 14px",
+  },
+  packingTopLeft: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 12,
+    minWidth: 0,
   },
   packingMeta: { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 10 },
+  packingToolbarLabel: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    color: "#374151",
+    fontSize: 13,
+    fontWeight: 800,
+    whiteSpace: "nowrap",
+  },
+  packingBackButton: {
+    minHeight: 42,
+    display: "inline-flex",
+    alignItems: "center",
+  },
+  invoiceInput: { width: 240 },
+  skipWordsInput: { width: 250 },
   packingTotalPill: {
-    alignSelf: "flex-end",
     border: "1px solid #cbd5e1",
     borderRadius: 999,
-    padding: "8px 12px",
+    padding: "10px 14px",
     background: "#f8fafc",
     color: "#374151",
     fontSize: 13,
     fontWeight: 800,
+    minHeight: 42,
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
   },
   packingActions: { display: "flex", gap: 8 },
   loadInventoryForm: {
     display: "flex",
-    alignItems: "flex-end",
+    alignItems: "center",
     flexWrap: "wrap",
-    gap: 10,
-    padding: 8,
+    gap: 12,
+    padding: "8px 10px",
     border: "1px solid #dbe3ee",
     borderRadius: 10,
     background: "#f8fafc",
+    marginLeft: "auto",
+  },
+  loadInventoryButton: {
+    minHeight: 42,
+    whiteSpace: "nowrap",
   },
   productSearchPanel: {
     background: "#fff",
