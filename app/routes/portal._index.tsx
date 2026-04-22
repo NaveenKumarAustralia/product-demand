@@ -300,6 +300,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "delete_packing_list") {
+    const packingId = Number(form.get("packingId"));
+    if (packingId) {
+      await prisma.packingList.deleteMany({ where: { id: packingId } });
+    }
+    return null;
+  }
+
   if (intent === "add_custom_packing_line") {
     const packingId = Number(form.get("packingId"));
     const maxLine = await prisma.packingListLine.findFirst({
@@ -2361,8 +2369,8 @@ function PackingListsOverview({
         <table style={{ ...s.table, width: "100%" }}>
           <thead>
             <tr style={s.headerRow}>
-              {["Invoice", "Total qty", "Leave factory", "Status", showHidden ? "Show" : "Hide"].map((heading) => (
-                <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Hide" || heading === "Show" ? "center" : "left" }}>
+              {["Invoice", "Total qty", "Leave factory", "Status", "Actions"].map((heading) => (
+                <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Actions" ? "center" : "left" }}>
                   <span style={s.thContent}>{heading}</span>
                 </th>
               ))}
@@ -2392,18 +2400,29 @@ function PackingListsOverview({
                   <td style={cellStyle}>{formatPortalDate(list.expectedLeaveFactoryDate ?? list.shipmentDate) || "—"}</td>
                   <td style={cellStyle}>{labelForPackingStatus(list.status)}</td>
                   <td style={{ ...cellStyle, textAlign: "center" }}>
-                    <fetcher.Form
-                      method="post"
-                      onClick={(event) => event.stopPropagation()}
-                      style={{ display: "inline-block" }}
-                    >
-                      <input type="hidden" name="intent" value="set_packing_list_hidden" />
-                      <input type="hidden" name="packingId" value={list.id} />
-                      <input type="hidden" name="hidden" value={showHidden ? "false" : "true"} />
-                      <button type="submit" style={showHidden ? s.smallButton : s.hideListButton}>
-                        {showHidden ? "Show" : "Hide list"}
-                      </button>
-                    </fetcher.Form>
+                    <div style={s.packingListActions} onClick={(event) => event.stopPropagation()}>
+                      <fetcher.Form method="post">
+                        <input type="hidden" name="intent" value="set_packing_list_hidden" />
+                        <input type="hidden" name="packingId" value={list.id} />
+                        <input type="hidden" name="hidden" value={showHidden ? "false" : "true"} />
+                        <button type="submit" style={showHidden ? s.smallButton : s.hideListButton}>
+                          {showHidden ? "Show" : "Hide"}
+                        </button>
+                      </fetcher.Form>
+                      <fetcher.Form
+                        method="post"
+                        onSubmit={(event) => {
+                          event.stopPropagation();
+                          if (!window.confirm("Are you sure you want to delete this packing list?")) {
+                            event.preventDefault();
+                          }
+                        }}
+                      >
+                        <input type="hidden" name="intent" value="delete_packing_list" />
+                        <input type="hidden" name="packingId" value={list.id} />
+                        <button type="submit" style={s.removeUserButton}>Delete</button>
+                      </fetcher.Form>
+                    </div>
                   </td>
                 </tr>
               );
@@ -4367,6 +4386,13 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 11,
     fontWeight: 800,
     cursor: "pointer",
+  },
+  packingListActions: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    flexWrap: "wrap",
   },
   clickableOverviewRow: {
     cursor: "pointer",
