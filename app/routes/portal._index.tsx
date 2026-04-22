@@ -825,6 +825,7 @@ type RestockSettings = {
   priorityOptions: RestockOption[];
   quantityFontSize: number;
   quantityFontColor: string;
+  inventoryArrowColor: string;
 };
 type ShopifySearchProduct = {
   id: string;
@@ -925,6 +926,7 @@ function normalizeRestockSettings(value: unknown): RestockSettings {
     priorityOptions: normalizeRestockOptions(settings.priorityOptions, DEFAULT_PRIORITY_OPTIONS),
     quantityFontSize,
     quantityFontColor: normalizeHexColor(settings.quantityFontColor, "#111827"),
+    inventoryArrowColor: normalizeHexColor(settings.inventoryArrowColor, "#4b5563"),
   };
 }
 
@@ -1852,9 +1854,23 @@ function SettingsPanel({
                 style={s.colorInput}
               />
             </label>
+            <label style={s.settingsFieldLabel}>
+              Inventory arrow colour
+              <input
+                type="color"
+                value={restockDraft.inventoryArrowColor}
+                disabled={!canManageUsers}
+                onChange={(event) => setRestockDraft((current) => ({
+                  ...current,
+                  inventoryArrowColor: event.currentTarget.value,
+                }))}
+                style={s.colorInput}
+              />
+            </label>
             <span style={{ ...s.qtyPreview, fontSize: restockDraft.quantityFontSize, color: restockDraft.quantityFontColor }}>
               25
             </span>
+            <span style={{ ...s.inventoryArrowPreview, color: restockDraft.inventoryArrowColor }}>▼</span>
           </div>
         </div>
       </section>
@@ -2815,7 +2831,7 @@ function OrderRow({
             <button
               type="button"
               onClick={() => setInventoryOpen((current) => !current)}
-              style={s.inventoryToggle}
+              style={{ ...s.inventoryToggle, color: restockSettings.inventoryArrowColor }}
               aria-label={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
               title={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
             >
@@ -3570,6 +3586,18 @@ const s: Record<string, React.CSSProperties> = {
     background: "#fff",
     fontWeight: 900,
   },
+  inventoryArrowPreview: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 34,
+    height: 34,
+    borderRadius: 8,
+    border: "1px solid #cbd5e1",
+    background: "#fff",
+    fontSize: 14,
+    fontWeight: 900,
+  },
   secondaryButton: {
     border: "1px solid #d1d5db",
     borderRadius: 8,
@@ -3984,21 +4012,20 @@ const s: Record<string, React.CSSProperties> = {
   },
   inventoryToggle: {
     position: "absolute",
-    right: -25,
-    bottom: -23,
-    width: 42,
-    height: 42,
-    borderRadius: 999,
-    border: "1px solid #cbd5e1",
-    background: "#111827",
-    color: "#fff",
-    fontSize: 13,
+    right: 0,
+    bottom: 0,
+    width: 18,
+    height: 18,
+    borderRadius: 3,
+    border: 0,
+    background: "transparent",
+    fontSize: 10,
     fontWeight: 900,
-    lineHeight: "40px",
+    lineHeight: "18px",
     textAlign: "center",
     cursor: "pointer",
     zIndex: 35,
-    boxShadow: "0 10px 22px rgba(15,23,42,0.22), inset 0 1px 0 rgba(255,255,255,0.12)",
+    padding: 0,
   },
   inventoryRow: { background: "#f8fafc" },
   inventoryBlankCell: {
