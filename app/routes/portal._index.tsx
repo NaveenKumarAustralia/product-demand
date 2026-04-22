@@ -2551,7 +2551,7 @@ const s: Record<string, React.CSSProperties> = {
     background: "#eef2f7",
     position: "sticky",
     top: 0,
-    zIndex: 5,
+    zIndex: 50,
     overflow: "hidden",
     textOverflow: "ellipsis",
   },
@@ -2576,9 +2576,7 @@ const s: Record<string, React.CSSProperties> = {
     overflow: "hidden",
   },
   dropdownTd: {
-    overflow: "visible",
     position: "relative",
-    zIndex: 30,
   },
   imageCell: {
     display: "flex",
