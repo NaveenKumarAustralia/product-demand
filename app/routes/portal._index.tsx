@@ -70,7 +70,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .sort((a, b) => labelForOption(restockSettings.statusOptions, a).localeCompare(labelForOption(restockSettings.statusOptions, b)));
   const priorityFilters = Array.from(new Set(normalizedOrders.map((order) => order.priority).filter(Boolean) as string[]))
     .sort((a, b) => labelForOption(restockSettings.priorityOptions, a).localeCompare(labelForOption(restockSettings.priorityOptions, b)));
-  const orders = normalizedOrders
+  const filteredOrders = normalizedOrders
     .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
     .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
     .filter((order) => !selectedPriority || order.priority === selectedPriority)
@@ -82,6 +82,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (sortBy === "orderDateAsc") return a.createdAt.getTime() - b.createdAt.getTime();
       return b.createdAt.getTime() - a.createdAt.getTime();
     });
+  const orders = page === "restock"
+    ? await enrichOrdersWithShopifyVariants(filteredOrders)
+    : filteredOrders;
   const selectedPackingList = packingId
     ? packingLists.find((list) => list.id === packingId) ?? null
     : null;
@@ -527,20 +530,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "update_qty") {
     const size = String(form.get("size") ?? "");
     const qtyOrdered = Math.max(0, Number(form.get("value") ?? 0) || 0);
+    const orderForVariant = await prisma.supplierOrder.findUnique({
+      where: { id: orderId },
+      select: { shop: true, productId: true },
+    });
+    const matchingVariant = orderForVariant
+      ? matchingVariantForSize(await getShopifyProductVariants(orderForVariant.shop, orderForVariant.productId), size)
+      : null;
     const existingLines = await prisma.orderLine.findMany({
       where: { orderId, variantTitle: size },
       orderBy: { id: "asc" },
-      select: { id: true },
+      select: { id: true, variantId: true },
     });
-    const missingLineOrder = existingLines.length
-      ? null
-      : await prisma.supplierOrder.findUnique({
-          where: { id: orderId },
-          select: { shop: true, productId: true },
-        });
-    const missingVariant = missingLineOrder
-      ? matchingVariantForSize(await getShopifyProductVariants(missingLineOrder.shop, missingLineOrder.productId), size)
-      : null;
 
     await prisma.$transaction(async (tx) => {
       const lines = existingLines;
@@ -549,16 +550,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         await tx.orderLine.create({
           data: {
             orderId,
-            variantId: missingVariant?.id ?? `${orderId}:${size}`,
-            variantTitle: missingVariant?.title ?? size,
-            sku: missingVariant?.sku ?? null,
+            variantId: matchingVariant?.id ?? `${orderId}:${size}`,
+            variantTitle: matchingVariant?.title ?? size,
+            sku: matchingVariant?.sku ?? null,
             qtyOrdered,
           },
         });
       } else {
         await tx.orderLine.update({
           where: { id: lines[0].id },
-          data: { qtyOrdered },
+          data: {
+            qtyOrdered,
+            ...(matchingVariant ? {
+              variantId: matchingVariant.id,
+              variantTitle: matchingVariant.title,
+              sku: matchingVariant.sku,
+            } : {}),
+          },
         });
 
         if (lines.length > 1) {
@@ -1054,6 +1062,85 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
 function matchingVariantForSize(variants: ShopifyVariantInfo[], size: string) {
   const normalizedSize = size.trim().toLowerCase();
   return variants.find((variant) => variant.title.trim().toLowerCase() === normalizedSize) ?? null;
+}
+
+async function enrichOrdersWithShopifyVariants<T extends {
+  id: number;
+  shop: string;
+  productId: string;
+  createdAt: Date;
+  lines: Array<{
+    id: number;
+    orderId: number;
+    variantId: string;
+    variantTitle: string;
+    sku: string | null;
+    qtyOrdered: number;
+    qtyReceived: number;
+    costPrice: number | null;
+    createdAt: Date;
+  }>;
+}>(orders: T[]): Promise<T[]> {
+  const variantEntries = await Promise.all(
+    Array.from(new Set(orders.map((order) => `${order.shop}|||${order.productId}`))).map(async (key) => {
+      const [shop, productId] = key.split("|||");
+      return [key, await getShopifyProductVariants(shop, productId)] as const;
+    }),
+  );
+  const variantsByProduct = new Map(variantEntries);
+
+  return orders.map((order) => {
+    const variants = variantsByProduct.get(`${order.shop}|||${order.productId}`) ?? [];
+    if (!variants.length) return order;
+
+    const linesByVariantId = new Map(order.lines.map((line) => [line.variantId, line]));
+    const linesByTitle = new Map(order.lines.map((line) => [line.variantTitle.trim().toLowerCase(), line]));
+    const usedLineIds = new Set<number>();
+    const nextLines: T["lines"] = [];
+
+    for (const variant of variants) {
+      const exactLine = linesByVariantId.get(variant.id);
+      if (exactLine) {
+        usedLineIds.add(exactLine.id);
+        nextLines.push(exactLine);
+        continue;
+      }
+      const titleMatch = linesByTitle.get(variant.title.trim().toLowerCase());
+      if (titleMatch) {
+        usedLineIds.add(titleMatch.id);
+        nextLines.push({
+          ...titleMatch,
+          id: -Math.abs(titleMatch.id),
+          variantId: variant.id,
+          variantTitle: variant.title,
+          sku: variant.sku ?? titleMatch.sku,
+        });
+        continue;
+      }
+
+      nextLines.push({
+        id: -Number(`${order.id}${nextLines.length + 1}`),
+        orderId: order.id,
+        variantId: variant.id,
+        variantTitle: variant.title,
+        sku: variant.sku,
+        qtyOrdered: 0,
+        qtyReceived: 0,
+        costPrice: null,
+        createdAt: order.createdAt,
+      });
+    }
+
+    for (const line of order.lines) {
+      if (usedLineIds.has(line.id)) continue;
+      nextLines.push(line);
+    }
+
+    return {
+      ...order,
+      lines: nextLines,
+    };
+  });
 }
 
 function sizeColumnId(size: string) {
