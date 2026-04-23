@@ -262,6 +262,49 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   }
 
+  if (intent === "import_supplier_packing_csv") {
+    const csvFile = form.get("packingCsv");
+    if (!csvFile || typeof csvFile === "string" || typeof csvFile.text !== "function") {
+      return null;
+    }
+    const parsed = parseSupplierPackingCsv(await csvFile.text());
+    const productCache = new Map<string, ShopifySearchProduct | null>();
+    const importedLines = [];
+    for (const [index, line] of parsed.lines.entries()) {
+      const product = await findShopifyProductForSupplierLine(line.styleName, line.colorName, productCache);
+      importedLines.push({
+        boxNumber: line.boxNumber,
+        productId: product?.id ?? null,
+        productTitle: product?.title ?? line.productTitle,
+        productImageUrl: product?.imageUrl ?? null,
+        sku: product?.skus.join("\n") ?? line.supplierCode,
+        isCustom: !product,
+        qtys: line.qtys,
+        sortOrder: index + 1,
+      });
+    }
+    const packingList = await prisma.packingList.create({
+      data: {
+        title: parsed.title,
+        invoiceNumber: parsed.invoiceNumber,
+        shipmentDate: parsed.shipmentDate,
+        expectedLeaveFactoryDate: parsed.shipmentDate,
+        status: "still_packing",
+        lines: {
+          create: importedLines.length ? importedLines : Array.from({ length: DEFAULT_PACKING_ROWS }, (_, index) => ({
+            productTitle: "",
+            isCustom: true,
+            sortOrder: index + 1,
+          })),
+        },
+      },
+    });
+    return new Response(null, {
+      status: 303,
+      headers: { Location: `/portal?page=packing&packingId=${packingList.id}` },
+    });
+  }
+
   if (intent === "update_packing_list") {
     const packingId = Number(form.get("packingId"));
     const field = String(form.get("field") ?? "");
@@ -1117,6 +1160,183 @@ function packingListTotal(list: PackingListWithLines | null) {
   return list.lines.reduce((sum, line) => sum + packingTotal(normalizeQtys(line.qtys)), 0);
 }
 
+type SupplierPackingLine = {
+  boxNumber: string;
+  styleName: string;
+  supplierCode: string;
+  colorName: string;
+  productTitle: string;
+  qtys: Record<string, number>;
+};
+
+function parseCsvRows(text: string) {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === "\"") {
+      if (quoted && next === "\"") {
+        cell += "\"";
+        index += 1;
+      } else {
+        quoted = !quoted;
+      }
+      continue;
+    }
+    if (char === "," && !quoted) {
+      row.push(cell.trim());
+      cell = "";
+      continue;
+    }
+    if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && next === "\n") index += 1;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+
+  row.push(cell.trim());
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+
+function humanizeSupplierColour(value: string) {
+  return value
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeSupplierText(value: string) {
+  return humanizeSupplierColour(value)
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeSupplierSize(value: string) {
+  const normalized = value.trim().toUpperCase().replace(/\s+/g, "").replace(/-/g, "/");
+  const sizeAliases: Record<string, string> = {
+    SM: "S/M",
+    ML: "M/L",
+    LXL: "L/XL",
+    "1XL": "XL",
+    XXL: "2XL",
+    XXXL: "3XL",
+  };
+  return sizeAliases[normalized] ?? normalized;
+}
+
+function parseSupplierDate(value: string) {
+  const match = value.match(/(\d{1,2})\s+([a-z]{3,})\s+(\d{4})/i);
+  if (!match) return null;
+  const months: Record<string, number> = {
+    jan: 0,
+    feb: 1,
+    mar: 2,
+    apr: 3,
+    may: 4,
+    jun: 5,
+    jul: 6,
+    aug: 7,
+    sep: 8,
+    oct: 9,
+    nov: 10,
+    dec: 11,
+  };
+  const month = months[match[2].slice(0, 3).toLowerCase()];
+  if (month === undefined) return null;
+  return new Date(Number(match[3]), month, Number(match[1]));
+}
+
+function parseSupplierPackingCsv(text: string) {
+  const rows = parseCsvRows(text);
+  let currentBox = "";
+  let invoiceNumber: string | null = null;
+  let shipmentDate: Date | null = null;
+  const grouped = new Map<string, SupplierPackingLine>();
+
+  for (const row of rows) {
+    const joined = row.filter(Boolean).join(" ");
+    const invoiceMatch = joined.match(/INV\s*NO\.?\s*(.+?)(?:\s{2,}|$)/i);
+    if (invoiceMatch && !invoiceNumber) invoiceNumber = invoiceMatch[1].replace(/\s+/g, " ").trim();
+    if (/DATE\s*:/i.test(joined) && !shipmentDate) shipmentDate = parseSupplierDate(joined);
+
+    const boxMatch = joined.match(/\bBox\s*NO\.?\s*([A-Za-z0-9-]+)/i);
+    if (boxMatch) {
+      currentBox = boxMatch[1];
+      continue;
+    }
+
+    const styleName = row[1]?.trim() ?? "";
+    const supplierCode = row[2]?.trim() ?? "";
+    const rawSize = row[3]?.trim() ?? "";
+    const rawColor = row[4]?.trim() ?? "";
+    const quantity = Number(row[5] ?? 0);
+    const size = normalizeSupplierSize(rawSize);
+    if (!styleName || !rawColor || !PACKING_SIZES.includes(size) || !Number.isFinite(quantity) || quantity <= 0) continue;
+
+    const colorName = humanizeSupplierColour(rawColor);
+    const key = `${currentBox}::${normalizeSupplierText(styleName)}::${normalizeSupplierText(colorName)}`;
+    const existing = grouped.get(key) ?? {
+      boxNumber: currentBox,
+      styleName,
+      supplierCode,
+      colorName,
+      productTitle: `${styleName} ${colorName}`,
+      qtys: {},
+    };
+    existing.qtys[size] = (existing.qtys[size] ?? 0) + quantity;
+    grouped.set(key, existing);
+  }
+
+  const title = invoiceNumber ? `Packing list ${invoiceNumber}` : `Packing list ${formatPortalDate(new Date())}`;
+  return { title, invoiceNumber, shipmentDate, lines: Array.from(grouped.values()) };
+}
+
+function scoreSupplierProductMatch(product: ShopifySearchProduct, styleName: string, colorName: string) {
+  const title = normalizeSupplierText(product.title);
+  const style = normalizeSupplierText(styleName);
+  const color = normalizeSupplierText(colorName);
+  const styleWords = style.split(" ").filter(Boolean);
+  const colorWords = color.split(" ").filter(Boolean);
+  let score = 0;
+  if (title.includes(style)) score += 4;
+  if (title.includes(color)) score += 4;
+  if (styleWords.every((word) => title.includes(word))) score += 2;
+  if (colorWords.every((word) => title.includes(word))) score += 2;
+  return score;
+}
+
+async function findShopifyProductForSupplierLine(
+  styleName: string,
+  colorName: string,
+  cache: Map<string, ShopifySearchProduct | null>,
+) {
+  const query = `${styleName} ${humanizeSupplierColour(colorName)}`.trim();
+  const cacheKey = normalizeSupplierText(query);
+  if (cache.has(cacheKey)) return cache.get(cacheKey) ?? null;
+
+  const results = await searchShopifyProducts(query);
+  const best = results
+    .map((product) => ({ product, score: scoreSupplierProductMatch(product, styleName, colorName) }))
+    .sort((a, b) => b.score - a.score)[0];
+  const matched = best && best.score >= 6 ? best.product : null;
+  cache.set(cacheKey, matched);
+  return matched;
+}
+
 async function searchShopifyProducts(query: string): Promise<ShopifySearchProduct[]> {
   const trimmedQuery = query.trim();
   if (trimmedQuery.length < 2) return [];
@@ -1270,9 +1490,13 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
   }
 }
 
+function normalizeVariantSizeLabel(value: string) {
+  return value.trim().toLowerCase().replace(/\s+/g, "").replace(/-/g, "/");
+}
+
 function matchingVariantForSize(variants: ShopifyVariantInfo[], size: string) {
-  const normalizedSize = size.trim().toLowerCase();
-  return variants.find((variant) => variant.title.trim().toLowerCase() === normalizedSize) ?? null;
+  const normalizedSize = normalizeVariantSizeLabel(size);
+  return variants.find((variant) => normalizeVariantSizeLabel(variant.title) === normalizedSize) ?? null;
 }
 
 async function shopifyGraphql<T>(
@@ -2357,6 +2581,13 @@ function PackingListsOverview({
         <fetcher.Form method="post" style={s.packingCreateForm}>
           <input type="hidden" name="intent" value="create_packing_list" />
           <button type="submit" style={s.loginButton}>New packing list</button>
+        </fetcher.Form>
+        <fetcher.Form method="post" encType="multipart/form-data" style={s.packingImportForm}>
+          <input type="hidden" name="intent" value="import_supplier_packing_csv" />
+          <input type="file" name="packingCsv" accept=".csv,text/csv" required style={s.fileInput} />
+          <button type="submit" style={s.secondaryButton} disabled={fetcher.state !== "idle"}>
+            Import supplier CSV
+          </button>
         </fetcher.Form>
       </section>
 
@@ -4095,7 +4326,9 @@ const s: Record<string, React.CSSProperties> = {
   packingOverviewCreate: {
     display: "flex",
     alignItems: "center",
+    flexWrap: "wrap",
     justifyContent: "flex-end",
+    gap: 10,
     background: "#fff",
     border: "1px solid #cbd5e1",
     borderRadius: 12,
@@ -4127,6 +4360,16 @@ const s: Record<string, React.CSSProperties> = {
     gap: 12,
   },
   packingCreateForm: { display: "flex", alignItems: "center", justifyContent: "flex-end" },
+  packingImportForm: { display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" },
+  fileInput: {
+    border: "1px solid #b6c0cc",
+    borderRadius: 8,
+    padding: "7px 9px",
+    background: "#fff",
+    color: "#374151",
+    fontSize: 13,
+    fontWeight: 700,
+  },
   packingInput: {
     border: "1px solid #b6c0cc",
     borderRadius: 7,
