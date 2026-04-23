@@ -1160,6 +1160,11 @@ function packingListTotal(list: PackingListWithLines | null) {
   return list.lines.reduce((sum, line) => sum + packingTotal(normalizeQtys(line.qtys)), 0);
 }
 
+function csvCell(value: unknown) {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, "\"\"")}"` : text;
+}
+
 type SupplierPackingLine = {
   boxNumber: string;
   styleName: string;
@@ -2574,6 +2579,7 @@ function PackingListsOverview({
   const visibleLists = packingLists.filter((list) => !list.hiddenAt);
   const hiddenLists = packingLists.filter((list) => list.hiddenAt);
   const rows = showHidden ? hiddenLists : visibleLists;
+  const isImporting = fetcher.state !== "idle" && String(fetcher.formData?.get("intent") ?? "") === "import_supplier_packing_csv";
 
   return (
     <div style={s.packingOverview}>
@@ -2585,8 +2591,8 @@ function PackingListsOverview({
         <fetcher.Form method="post" encType="multipart/form-data" style={s.packingImportForm}>
           <input type="hidden" name="intent" value="import_supplier_packing_csv" />
           <input type="file" name="packingCsv" accept=".csv,text/csv" required style={s.fileInput} />
-          <button type="submit" style={s.secondaryButton} disabled={fetcher.state !== "idle"}>
-            Import supplier CSV
+          <button type="submit" style={isImporting ? { ...s.secondaryButton, ...s.busyButton } : s.secondaryButton} disabled={fetcher.state !== "idle"}>
+            {isImporting ? "Importing..." : "Import supplier CSV"}
           </button>
         </fetcher.Form>
       </section>
@@ -2711,6 +2717,51 @@ function PackingListDetail({
   const [skipWords, setSkipWords] = useState("");
   const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
   const packingTableWidth = PACKING_COLUMNS.reduce((sum, column) => sum + packingWidthFor(column.id), 0);
+  const exportPackingList = () => {
+    const headers = [
+      "Box",
+      "Product image URL",
+      "Fabric image",
+      "Name",
+      "SKU",
+      ...PACKING_SIZES,
+      "Total",
+      "Price rupees",
+      "Value rupees",
+      "Weight",
+    ];
+    const rows = packingList.lines.map((line) => {
+      const qtys = normalizeQtys(line.qtys);
+      const total = packingTotal(qtys);
+      const price = line.priceRupees ?? 0;
+      return [
+        line.boxNumber ?? "",
+        line.productImageUrl ?? "",
+        line.fabricImageData ? "Image added" : "",
+        line.productTitle,
+        line.sku ?? "",
+        ...PACKING_SIZES.map((size) => qtys[size] || ""),
+        total || "",
+        line.priceRupees ?? "",
+        total && price ? Math.round(total * price) : "",
+        line.weight ?? "",
+      ];
+    });
+    const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const fileName = `${packingList.invoiceNumber || packingList.title || `packing-list-${packingList.id}`}`
+      .replace(/[^a-z0-9-]+/gi, "-")
+      .replace(/^-+|-+$/g, "")
+      .toLowerCase() || `packing-list-${packingList.id}`;
+    link.href = url;
+    link.download = `${fileName}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
 
   useEffect(() => {
     setPackingColumnWidths(savedPackingColumnWidths);
@@ -2752,6 +2803,7 @@ function PackingListDetail({
       <div style={s.packingTop}>
         <div style={s.packingTopLeft}>
           <a href="/portal?page=packing" style={{ ...s.secondaryButton, ...s.packingBackButton }}>Back</a>
+          <button type="button" style={s.secondaryButton} onClick={exportPackingList}>Export packing list</button>
           <label style={s.packingToolbarLabel}>
             <span>Invoice number</span>
             <input
@@ -4277,6 +4329,10 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 800,
     cursor: "pointer",
     textDecoration: "none",
+  },
+  busyButton: {
+    opacity: 0.7,
+    cursor: "wait",
   },
   userList: { display: "grid", gap: 8, marginTop: 14 },
   userRow: {
