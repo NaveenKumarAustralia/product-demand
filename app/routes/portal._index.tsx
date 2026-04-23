@@ -1160,6 +1160,23 @@ function packingListTotal(list: PackingListWithLines | null) {
   return list.lines.reduce((sum, line) => sum + packingTotal(normalizeQtys(line.qtys)), 0);
 }
 
+function packingLineMatchesSearch(line: PackingListWithLines["lines"][number], search: string) {
+  const qtys = normalizeQtys(line.qtys);
+  const searchable = [
+    line.boxNumber,
+    line.productTitle,
+    line.sku,
+    line.priceRupees,
+    line.weight,
+    packingTotal(qtys),
+    ...Object.entries(qtys).flatMap(([size, qty]) => [size, qty]),
+  ]
+    .filter((value) => value !== null && value !== undefined && value !== "")
+    .join(" ")
+    .toLowerCase();
+  return searchable.includes(search);
+}
+
 function csvCell(value: unknown) {
   const text = String(value ?? "");
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, "\"\"")}"` : text;
@@ -2715,8 +2732,13 @@ function PackingListDetail({
   const columnWidthsFetcher = useFetcher();
   const [packingColumnWidths, setPackingColumnWidths] = useState<Record<string, number>>(savedPackingColumnWidths);
   const [skipWords, setSkipWords] = useState("");
+  const [packingListSearch, setPackingListSearch] = useState("");
   const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
   const packingTableWidth = PACKING_COLUMNS.reduce((sum, column) => sum + packingWidthFor(column.id), 0);
+  const normalizedPackingListSearch = packingListSearch.trim().toLowerCase();
+  const visiblePackingLines = normalizedPackingListSearch
+    ? packingList.lines.filter((line) => packingLineMatchesSearch(line, normalizedPackingListSearch))
+    : packingList.lines;
   const exportPackingList = () => {
     const headers = [
       "Box",
@@ -2848,6 +2870,24 @@ function PackingListDetail({
         </fetcher.Form>
       </div>
 
+      <div style={s.packingSearchBar}>
+        <label style={s.packingToolbarLabel}>
+          <span>Search packing list</span>
+          <input
+            value={packingListSearch}
+            onChange={(event) => setPackingListSearch(event.currentTarget.value)}
+            placeholder="Search title, SKU, box, quantity..."
+            style={{ ...s.packingInput, ...s.packingSearchInput }}
+          />
+        </label>
+        {packingListSearch ? (
+          <button type="button" style={s.smallButton} onClick={() => setPackingListSearch("")}>Clear</button>
+        ) : null}
+        <span style={s.searchCount}>
+          {visiblePackingLines.length} of {packingList.lines.length} rows
+        </span>
+      </div>
+
       <div style={s.packingTableWrap}>
         <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
           <colgroup>
@@ -2869,7 +2909,7 @@ function PackingListDetail({
             </tr>
           </thead>
           <tbody>
-            {packingList.lines.map((line, rowIndex) => (
+            {visiblePackingLines.length ? visiblePackingLines.map((line, rowIndex) => (
               <PackingListLineRow
                 key={line.id}
                 line={line}
@@ -2879,7 +2919,13 @@ function PackingListDetail({
                 productResults={productResults}
                 updateParams={updateParams}
               />
-            ))}
+            )) : (
+              <tr style={s.row}>
+                <td colSpan={PACKING_COLUMNS.length} style={{ ...s.td, textAlign: "center", padding: 40 }}>
+                  No packing list rows match this search.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -4414,6 +4460,23 @@ const s: Record<string, React.CSSProperties> = {
     alignItems: "flex-end",
     flexWrap: "wrap",
     gap: 12,
+  },
+  packingSearchBar: {
+    display: "flex",
+    alignItems: "flex-end",
+    flexWrap: "wrap",
+    gap: 10,
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    padding: "10px 12px",
+  },
+  packingSearchInput: { minWidth: 280 },
+  searchCount: {
+    alignSelf: "center",
+    color: "#6b7280",
+    fontSize: 13,
+    fontWeight: 800,
   },
   packingCreateForm: { display: "flex", alignItems: "center", justifyContent: "flex-end" },
   packingImportForm: { display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" },
