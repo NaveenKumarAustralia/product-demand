@@ -3041,9 +3041,11 @@ function PackingProductNameCell({
   const [value, setValue] = useState(displayValue);
   const [isFocused, setIsFocused] = useState(false);
   const [isProductSelected, setIsProductSelected] = useState(false);
+  const [isChangingProduct, setIsChangingProduct] = useState(false);
   const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
   const [canPortalDropdown, setCanPortalDropdown] = useState(false);
-  const canSearch = !isProductSelected && (isFocused || isActiveSearch);
+  const hasLinkedProduct = Boolean(line.productId);
+  const canSearch = !isProductSelected && (!hasLinkedProduct || isChangingProduct) && (isFocused || isActiveSearch);
   const shouldShowResults = canSearch && value.trim().length >= 2;
   const dropdownHeight = value.trim() !== productSearch || !productResults.length
     ? 48
@@ -3056,6 +3058,7 @@ function PackingProductNameCell({
   useEffect(() => {
     setValue(displayValue);
     setIsProductSelected(false);
+    setIsChangingProduct(false);
   }, [displayValue, line.id]);
 
   useEffect(() => {
@@ -3092,6 +3095,7 @@ function PackingProductNameCell({
     setValue(product.title);
     setIsFocused(false);
     setIsProductSelected(true);
+    setIsChangingProduct(false);
     setDropdownRect(null);
     inputRef.current?.blur();
     submitPortalCell(fetcher, {
@@ -3102,6 +3106,24 @@ function PackingProductNameCell({
     updateParams({ productSearch: "", packingSearchLineId: "" });
   };
 
+  if (hasLinkedProduct && !isChangingProduct) {
+    return (
+      <div style={s.linkedProductCell}>
+        <span style={s.linkedProductTitle}>{displayValue || "Linked product"}</span>
+        <button
+          type="button"
+          style={s.changeProductButton}
+          onClick={() => {
+            setIsChangingProduct(true);
+            window.setTimeout(() => inputRef.current?.focus(), 0);
+          }}
+        >
+          Change
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div style={s.productCellSearch}>
       <input
@@ -3111,6 +3133,7 @@ function PackingProductNameCell({
         onFocus={() => {
           setIsFocused(true);
           setIsProductSelected(false);
+          if (hasLinkedProduct) setIsChangingProduct(true);
           if (value.trim().length >= 2) {
             updateParams({ productSearch: value.trim(), packingSearchLineId: String(line.id) });
           }
@@ -3119,6 +3142,12 @@ function PackingProductNameCell({
         onBlur={(event) => {
           if (isProductSelected) return;
           setIsFocused(false);
+          if (hasLinkedProduct) {
+            setValue(displayValue);
+            setIsChangingProduct(false);
+            updateParams({ productSearch: "", packingSearchLineId: "" });
+            return;
+          }
           submitPortalCell(fetcher, {
             intent: "update_packing_line",
             lineId: line.id,
@@ -4694,6 +4723,31 @@ const s: Record<string, React.CSSProperties> = {
   productCellSearch: {
     position: "relative",
     minWidth: 0,
+  },
+  linkedProductCell: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    width: "100%",
+  },
+  linkedProductTitle: {
+    minWidth: 0,
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: 800,
+    lineHeight: 1.25,
+  },
+  changeProductButton: {
+    flex: "0 0 auto",
+    border: "1px solid #d1d5db",
+    borderRadius: 999,
+    padding: "3px 7px",
+    background: "#fff",
+    color: "#4b5563",
+    fontSize: 11,
+    fontWeight: 800,
+    cursor: "pointer",
   },
   productCellResults: {
     position: "fixed",
