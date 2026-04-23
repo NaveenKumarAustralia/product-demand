@@ -109,7 +109,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     : [];
 
   // Collect all unique size names across all orders, sorted logically
-  const sizeOrder = ["XS","S","S/M","M","M/L","L","L/XL","XL","2XL","3XL","4XL","ONE SIZE"];
+  const sizeOrder = ["XS","S","M","L","XL","2XL","3XL","S-M","M-L","L-XL","S/M","M/L","L/XL","4XL","ONE SIZE"];
   const allSizes = [...new Set([
     ...orders.flatMap((o) => o.lines.map((l) => l.variantTitle)),
     ...restockProductResults.flatMap((product) => product.variants.map((variant) => variant.title)),
