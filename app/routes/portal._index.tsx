@@ -850,7 +850,7 @@ const PACKING_STATUS_OPTIONS = [
   { value: "still_packing", label: "Still packing" },
   { value: "on_the_way", label: "On the way" },
   { value: "arrived", label: "Arrived" },
-  { value: "loaded", label: "Loaded" },
+  { value: "loaded", label: "Inventory loaded" },
 ];
 const PACKING_SIZES = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
 const DEFAULT_PACKING_ROWS = 5;
@@ -2624,7 +2624,7 @@ function PackingListsOverview({
         <table style={{ ...s.table, width: "100%" }}>
           <thead>
             <tr style={s.headerRow}>
-              {["Invoice", "Total qty", "Leave factory", "Status", "Actions"].map((heading) => (
+              {["Invoice", "Total qty", "Estimated arrival", "Status", "Actions"].map((heading) => (
                 <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Actions" ? "center" : "left" }}>
                   <span style={s.thContent}>{heading}</span>
                 </th>
@@ -2839,6 +2839,44 @@ function PackingListDetail({
               placeholder="Invoice number"
               style={{ ...s.packingInput, ...s.invoiceInput }}
             />
+          </label>
+          <label style={s.packingToolbarLabel}>
+            <span>Estimated arrival</span>
+            <input
+              key={String(packingList.expectedLeaveFactoryDate ?? packingList.shipmentDate ?? "")}
+              type="date"
+              defaultValue={(() => {
+                const d = packingList.expectedLeaveFactoryDate ?? packingList.shipmentDate;
+                if (!d) return "";
+                const dt = new Date(d);
+                return isNaN(dt.getTime()) ? "" : dt.toISOString().slice(0, 10);
+              })()}
+              onBlur={(event) => submitPortalCell(fetcher, {
+                intent: "update_packing_list",
+                packingId: packingList.id,
+                field: "expectedLeaveFactoryDate",
+                value: event.currentTarget.value,
+              })}
+              style={{ ...s.packingInput, width: 150 }}
+            />
+          </label>
+          <label style={s.packingToolbarLabel}>
+            <span>Status</span>
+            <select
+              key={packingList.status ?? "still_packing"}
+              defaultValue={packingList.status ?? "still_packing"}
+              onChange={(event) => submitPortalCell(fetcher, {
+                intent: "update_packing_list",
+                packingId: packingList.id,
+                field: "status",
+                value: event.currentTarget.value,
+              })}
+              style={{ ...s.packingInput, width: 160 }}
+            >
+              {PACKING_STATUS_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
           </label>
           <div style={s.packingTotalPill}>
             Total quantity <strong>{packingListTotal(packingList)}</strong>
