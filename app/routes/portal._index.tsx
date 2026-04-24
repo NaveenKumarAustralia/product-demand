@@ -2823,8 +2823,9 @@ function PackingListDetail({
   return (
     <div style={s.packingDetailInner}>
       <div style={s.packingTop}>
-        <div style={s.packingTopLeft}>
-          <a href="/portal?page=packing" style={{ ...s.secondaryButton, ...s.packingBackButton }}>Back</a>
+        {/* Row 1: navigation + core fields */}
+        <div style={s.packingTopRow}>
+          <a href="/portal?page=packing" style={s.secondaryButton}>Back</a>
           <button type="button" style={s.secondaryButton} onClick={exportPackingList}>Export packing list</button>
           <label style={s.packingToolbarLabel}>
             <span>Invoice number</span>
@@ -2878,34 +2879,37 @@ function PackingListDetail({
               ))}
             </select>
           </label>
+        </div>
+        {/* Row 2: load inventory (left) + total quantity (right) */}
+        <div style={s.packingBottomRow}>
+          <fetcher.Form
+            method="post"
+            style={s.loadInventoryForm}
+            onSubmit={(event) => {
+              const ok = window.confirm("Add these packing list quantities to current Shopify stock?");
+              if (!ok) event.preventDefault();
+            }}
+          >
+            <input type="hidden" name="intent" value="load_packing_inventory" />
+            <input type="hidden" name="packingId" value={packingList.id} />
+            <label style={s.packingToolbarLabel}>
+              <span>Skip words</span>
+              <input
+                name="skipWords"
+                value={skipWords}
+                onChange={(event) => setSkipWords(event.currentTarget.value)}
+                placeholder="acacia, sample, fabric"
+                style={{ ...s.packingInput, ...s.skipWordsInput }}
+              />
+            </label>
+            <button type="submit" style={{ ...s.loginButton, ...s.loadInventoryButton }} disabled={fetcher.state !== "idle"}>
+              {fetcher.state === "idle" ? "Load inventory on Shopify" : "Loading..."}
+            </button>
+          </fetcher.Form>
           <div style={s.packingTotalPill}>
             Total quantity <strong>{packingListTotal(packingList)}</strong>
           </div>
         </div>
-        <fetcher.Form
-          method="post"
-          style={s.loadInventoryForm}
-          onSubmit={(event) => {
-            const ok = window.confirm("Add these packing list quantities to current Shopify stock?");
-            if (!ok) event.preventDefault();
-          }}
-        >
-          <input type="hidden" name="intent" value="load_packing_inventory" />
-          <input type="hidden" name="packingId" value={packingList.id} />
-          <label style={s.packingToolbarLabel}>
-            <span>Skip words</span>
-            <input
-              name="skipWords"
-              value={skipWords}
-              onChange={(event) => setSkipWords(event.currentTarget.value)}
-              placeholder="acacia, sample, fabric"
-              style={{ ...s.packingInput, ...s.skipWordsInput }}
-            />
-          </label>
-          <button type="submit" style={{ ...s.loginButton, ...s.loadInventoryButton }} disabled={fetcher.state !== "idle"}>
-            {fetcher.state === "idle" ? "Load inventory on Shopify" : "Loading..."}
-          </button>
-        </fetcher.Form>
       </div>
 
       <div style={s.packingSearchBar}>
@@ -4590,15 +4594,25 @@ const s: Record<string, React.CSSProperties> = {
   packingDetail: { minWidth: 0 },
   packingDetailInner: { display: "grid", gap: 10 },
   packingTop: {
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 16,
-    flexWrap: "wrap",
+    display: "grid",
+    gap: 10,
     background: "#fff",
     border: "1px solid #cbd5e1",
     borderRadius: 12,
     padding: "12px 14px",
+  },
+  packingTopRow: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+  packingBottomRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 10,
   },
   packingTopLeft: {
     display: "flex",
@@ -4617,37 +4631,28 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 800,
     whiteSpace: "nowrap",
   },
-  packingBackButton: {
-    minHeight: 42,
-    display: "inline-flex",
-    alignItems: "center",
-  },
+  packingBackButton: {},
   invoiceInput: { width: 240 },
   skipWordsInput: { width: 250 },
   packingTotalPill: {
-    border: "1px solid #cbd5e1",
-    borderRadius: 999,
-    padding: "10px 14px",
-    background: "#f8fafc",
+    border: "1px solid #d1d5db",
+    borderRadius: 8,
+    padding: "8px 10px",
+    background: "#fff",
     color: "#374151",
     fontSize: 13,
     fontWeight: 800,
-    minHeight: 42,
     display: "inline-flex",
     alignItems: "center",
     gap: 5,
+    whiteSpace: "nowrap",
   },
   packingActions: { display: "flex", gap: 8 },
   loadInventoryForm: {
     display: "flex",
     alignItems: "center",
     flexWrap: "wrap",
-    gap: 12,
-    padding: "8px 10px",
-    border: "1px solid #dbe3ee",
-    borderRadius: 10,
-    background: "#f8fafc",
-    marginLeft: "auto",
+    gap: 10,
   },
   loadInventoryButton: {
     minHeight: 42,
