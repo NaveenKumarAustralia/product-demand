@@ -2800,7 +2800,7 @@ function FabricSheetTable({ sheet }: { sheet: FabricSheetData }) {
 function FabricCell({ value }: { value: string }) {
   const trimmed = value.trim();
   if (!trimmed) return <span style={{ color: "#cbd5e1" }}>—</span>;
-  if (/^https?:\/\/.+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(trimmed)) {
+  if (/^(?:https?:\/\/|\/).+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(trimmed)) {
     return <img src={trimmed} alt="" style={s.fabricSheetImage} />;
   }
   if (/^https?:\/\//i.test(trimmed)) {
