@@ -2901,16 +2901,8 @@ function FabricSheetsPanel({
       <div style={s.fabricIntro}>
         <div>
           <h2 style={s.fabricIntroTitle}>Fabric types</h2>
-          <p style={s.fabricIntroText}>Open a fabric type to view the live rows from the Google Sheet.</p>
+          <p style={s.fabricIntroText}>Open a fabric type to view stock and order rows.</p>
         </div>
-        <a
-          href={`https://docs.google.com/spreadsheets/d/${FABRIC_SHEET_ID}/edit`}
-          target="_blank"
-          rel="noreferrer"
-          style={s.secondaryButton}
-        >
-          Open Google Sheet
-        </a>
       </div>
       <div style={s.fabricGrid}>
         {sheets.map((sheet) => (
