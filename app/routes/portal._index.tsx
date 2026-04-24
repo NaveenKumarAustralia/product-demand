@@ -66,8 +66,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         where: { createdAt: { gte: ninetyDaysAgo } },
         orderBy: { createdAt: "desc" },
         take: 1000,
-      })
-    : [];
+      }).catch(() => [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[])
+    : [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[];
   const users = normalizePortalUsers(usersSetting?.value);
   const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
   const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
@@ -879,17 +879,21 @@ async function logActivity(
   entity: string,
   opts?: { entityId?: string; entityName?: string; field?: string; toValue?: string }
 ) {
-  await prisma.activityLog.create({
-    data: {
-      userName,
-      action,
-      entity,
-      entityId: opts?.entityId ?? null,
-      entityName: opts?.entityName ?? null,
-      field: opts?.field ?? null,
-      toValue: opts?.toValue ?? null,
-    },
-  });
+  try {
+    await prisma.activityLog.create({
+      data: {
+        userName,
+        action,
+        entity,
+        entityId: opts?.entityId ?? null,
+        entityName: opts?.entityName ?? null,
+        field: opts?.field ?? null,
+        toValue: opts?.toValue ?? null,
+      },
+    });
+  } catch {
+    // silently ignore if table not yet migrated
+  }
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -1043,6 +1047,9 @@ type UniversalSettings = {
   tableTextColor: string;
   headingTextSize: number;
   headingTextColor: string;
+  menuBg: string;
+  menuTextColor: string;
+  pageBg: string;
 };
 type ShopifySearchProduct = {
   id: string;
@@ -1159,6 +1166,9 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
     tableTextColor: normalizeHexColor(settings.tableTextColor, "#374151"),
     headingTextSize: Math.min(34, Math.max(14, Number(settings.headingTextSize) || 24)),
     headingTextColor: normalizeHexColor(settings.headingTextColor, "#111827"),
+    menuBg: normalizeHexColor(settings.menuBg, "#111827"),
+    menuTextColor: normalizeHexColor(settings.menuTextColor, "#cbd5e1"),
+    pageBg: normalizeHexColor(settings.pageBg, "#f3f4f6"),
   };
 }
 
@@ -1957,6 +1967,7 @@ export default function PortalDashboard() {
     <div
       style={{
         ...s.appShell,
+        background: universalSettings.pageBg,
         "--portal-primary-button-bg": universalSettings.primaryButtonBg,
         "--portal-primary-button-color": universalSettings.primaryButtonColor,
         "--portal-table-font-size": `${universalSettings.tableTextSize}px`,
@@ -1965,7 +1976,7 @@ export default function PortalDashboard() {
         "--portal-heading-text-color": universalSettings.headingTextColor,
       } as React.CSSProperties}
     >
-      <aside style={{ ...s.sidebar, ...(sidebarCollapsed ? s.sidebarCollapsed : {}) }}>
+      <aside style={{ ...s.sidebar, ...(sidebarCollapsed ? s.sidebarCollapsed : {}), background: universalSettings.menuBg, color: universalSettings.menuTextColor }}>
         <div style={sidebarCollapsed ? s.sidebarTopCollapsed : s.sidebarTop}>
           {!sidebarCollapsed && <div style={s.sidebarTitle}>Production Portal</div>}
           <button
@@ -2466,6 +2477,63 @@ function SettingsPanel({
             </label>
             <span style={{ ...s.headingPreview, fontSize: universalDraft.headingTextSize, color: universalDraft.headingTextColor }}>
               Heading
+            </span>
+          </div>
+        </div>
+
+        <div style={s.settingsSubCard}>
+          <h3 style={s.settingsSubTitle}>Menu colours</h3>
+          <div style={s.settingsInlineFields}>
+            <label style={s.settingsFieldLabel}>
+              Menu background
+              <input
+                type="color"
+                value={universalDraft.menuBg}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  menuBg: event.currentTarget.value,
+                }))}
+                style={s.colorInput}
+              />
+            </label>
+            <label style={s.settingsFieldLabel}>
+              Menu text
+              <input
+                type="color"
+                value={universalDraft.menuTextColor}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  menuTextColor: event.currentTarget.value,
+                }))}
+                style={s.colorInput}
+              />
+            </label>
+            <span style={{ ...s.buttonPreview, background: universalDraft.menuBg, color: universalDraft.menuTextColor }}>
+              Menu
+            </span>
+          </div>
+        </div>
+
+        <div style={s.settingsSubCard}>
+          <h3 style={s.settingsSubTitle}>Page background</h3>
+          <div style={s.settingsInlineFields}>
+            <label style={s.settingsFieldLabel}>
+              Page background colour
+              <input
+                type="color"
+                value={universalDraft.pageBg}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  pageBg: event.currentTarget.value,
+                }))}
+                style={s.colorInput}
+              />
+            </label>
+            <span style={{ ...s.buttonPreview, background: universalDraft.pageBg, color: "#111827", border: "1px solid #e5e7eb" }}>
+              Page
             </span>
           </div>
         </div>
@@ -4196,9 +4264,9 @@ function PackingTd({
 const s: Record<string, React.CSSProperties> = {
   appShell: {
     minHeight: "100vh",
-    background: "#f3f4f6",
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     display: "flex",
+    alignItems: "flex-start",
   },
   sidebar: {
     width: 230,
@@ -4209,7 +4277,10 @@ const s: Record<string, React.CSSProperties> = {
     padding: "18px 14px",
     display: "flex",
     flexDirection: "column",
-    position: "relative",
+    position: "sticky",
+    top: 0,
+    height: "100vh",
+    overflowY: "auto",
     transition: "width 160ms ease, padding 160ms ease",
   },
   sidebarCollapsed: { width: 68, padding: "18px 10px", alignItems: "center" },
@@ -4242,7 +4313,7 @@ const s: Record<string, React.CSSProperties> = {
   iconNav: { display: "flex", flexDirection: "column", gap: 10, alignItems: "center", width: "100%" },
   navItem: {
     display: "block",
-    color: "#cbd5e1",
+    color: "inherit",
     textDecoration: "none",
     borderRadius: 8,
     padding: "10px 12px",
@@ -4251,21 +4322,21 @@ const s: Record<string, React.CSSProperties> = {
   },
   navSubItem: {
     display: "block",
-    color: "#cbd5e1",
+    color: "inherit",
     textDecoration: "none",
     borderRadius: 8,
     padding: "8px 12px 8px 24px",
     fontSize: 12,
     fontWeight: 700,
   },
-  navItemActive: { background: "#fff", color: "#111827" },
+  navItemActive: { background: "rgba(255,255,255,0.15)", color: "#fff" },
   iconNavItem: {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     width: 40,
     height: 40,
-    color: "#cbd5e1",
+    color: "inherit",
     textDecoration: "none",
     borderRadius: 10,
     fontSize: 13,
@@ -4273,10 +4344,10 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(148,163,184,0.18)",
     background: "rgba(15,23,42,0.35)",
   },
-  iconNavItemActive: { background: "#fff", color: "#111827", borderColor: "#fff" },
+  iconNavItemActive: { background: "rgba(255,255,255,0.2)", color: "#fff", borderColor: "rgba(255,255,255,0.4)" },
   settingsLink: { marginTop: "auto" },
   count: { fontSize: 13, color: "#6b7280" },
-  main: { flex: 1, minWidth: 0, padding: "24px 16px" },
+  main: { flex: 1, minWidth: 0, padding: "24px 16px", minHeight: "100vh" },
   pageHeader: {
     display: "flex",
     alignItems: "center",
