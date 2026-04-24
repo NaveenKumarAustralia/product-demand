@@ -23,7 +23,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, restockSettingsSetting, universalSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -43,6 +43,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
     prisma.portalSetting.findUnique({
       where: { key: UNIVERSAL_SETTINGS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: FABRIC_SETTINGS_KEY },
       select: { value: true },
     }),
     prisma.portalSetting.findUnique({
@@ -72,6 +76,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const users = normalizePortalUsers(usersSetting?.value);
   const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
   const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
+  const fabricSettings = normalizeFabricSettings(fabricSettingsSetting?.value);
   const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
   const currentUser = getCurrentPortalUser(request, users);
   const activeUsers = await recordAndGetActiveUsers(currentUser, users, activeUsersSetting?.value);
@@ -129,7 +134,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       })
     : null;
   const fabricSheets = page === "fabric"
-    ? getFabricSheets(fabricCellOverridesSetting?.value, fabricCustomRowsSetting?.value)
+    ? getFabricSheets(fabricCellOverridesSetting?.value, fabricCustomRowsSetting?.value, fabricSettings.tileOrder)
     : [];
 
   // Collect all unique size names across all orders, sorted logically
@@ -171,6 +176,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     packingColumnWidths: normalizeColumnWidths(packingColumnWidthsSetting?.value),
     restockSettings,
     universalSettings,
+    fabricSettings,
     packingLists,
     selectedPackingList,
     productSearch,
@@ -484,6 +490,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (field === "priceRupees") data.priceRupees = value ? Number(value) || 0 : null;
     if (field === "weight") data.weight = value ? Number(value) || 0 : null;
     if (field === "notes") data.notes = value || null;
+    if (field === "productImageUrl") data.productImageUrl = value || null;
     if (field === "fabricImageData") data.fabricImageData = value || null;
     if (lineId && Object.keys(data).length) {
       await prisma.packingListLine.update({ where: { id: lineId }, data });
@@ -795,6 +802,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_fabric_settings") {
+    let settings: FabricSettings;
+    try {
+      settings = normalizeFabricSettings(JSON.parse(String(form.get("value") ?? "{}")));
+    } catch {
+      return null;
+    }
+
+    await prisma.portalSetting.upsert({
+      where: { key: FABRIC_SETTINGS_KEY },
+      create: { key: FABRIC_SETTINGS_KEY, value: settings },
+      update: { value: settings },
+    });
+    return null;
+  }
+
   if (intent === "update_nav_order") {
     try {
       const order = JSON.parse(String(form.get("value") ?? "[]"));
@@ -1062,6 +1085,16 @@ const DEFAULT_PRIORITY_OPTIONS = [
   { value: "urgent",    label: "URGENT",    bg: "#dc2626", color: "#fff" },
   { value: "cancelled", label: "Cancelled", bg: "#d97706", color: "#fff" },
 ];
+const FABRIC_CHIP_COLORS = [
+  { bg: "#dbeafe", color: "#1e3a8a" },
+  { bg: "#dcfce7", color: "#14532d" },
+  { bg: "#fef3c7", color: "#92400e" },
+  { bg: "#ede9fe", color: "#4c1d95" },
+  { bg: "#fee2e2", color: "#991b1b" },
+  { bg: "#ccfbf1", color: "#134e4a" },
+  { bg: "#fce7f3", color: "#831843" },
+  { bg: "#e0f2fe", color: "#075985" },
+];
 const PACKING_STATUS_OPTIONS = [
   { value: "still_packing", label: "Still packing" },
   { value: "on_the_way", label: "On the way" },
@@ -1138,6 +1171,7 @@ const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
 const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
 const UNIVERSAL_SETTINGS_KEY = "production-portal-universal-settings-v1";
 const PORTAL_NAV_ORDER_KEY = "production-portal-nav-order-v1";
+const FABRIC_SETTINGS_KEY = "production-portal-fabric-settings-v1";
 const FABRIC_CELL_OVERRIDES_KEY = "production-portal-fabric-cell-overrides-v1";
 const FABRIC_CUSTOM_ROWS_KEY = "production-portal-fabric-custom-rows-v1";
 const ALL_NAV_ITEMS = [
@@ -1152,7 +1186,7 @@ const ALL_NAV_ITEMS = [
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
 const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct"];
-type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; error?: string };
+type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
 const PORTAL_USERS_KEY = "supplier-portal-users-v1";
@@ -1191,6 +1225,11 @@ type RestockSettings = {
   quantityFontSize: number;
   quantityFontColor: string;
   inventoryArrowColor: string;
+};
+type FabricSettings = {
+  supplierOptions: RestockOption[];
+  fabricTypeOptions: RestockOption[];
+  tileOrder: string[];
 };
 type UniversalSettings = {
   primaryButtonBg: string;
@@ -1307,6 +1346,39 @@ function normalizeRestockSettings(value: unknown): RestockSettings {
   };
 }
 
+function fabricHeaderIndex(headers: string[], pattern: RegExp) {
+  return headers.findIndex((header) => pattern.test(header));
+}
+
+function buildFabricDefaults(pattern: RegExp): RestockOption[] {
+  const labels = new Set<string>();
+  for (const sheet of fabricStockSheets) {
+    const index = fabricHeaderIndex(sheet.headers, pattern);
+    if (index < 0) continue;
+    for (const row of sheet.rows) {
+      const label = String(row[index] ?? "").trim();
+      if (label && label !== "—" && label !== "-") labels.add(label);
+    }
+  }
+  return [...labels].sort((a, b) => a.localeCompare(b)).map((label, index) => {
+    const colors = FABRIC_CHIP_COLORS[index % FABRIC_CHIP_COLORS.length];
+    return { value: slugForOption(label), label, ...colors };
+  });
+}
+
+function normalizeFabricSettings(value: unknown): FabricSettings {
+  const settings = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  return {
+    supplierOptions: normalizeRestockOptions(settings.supplierOptions, buildFabricDefaults(/^supplier$/i)),
+    fabricTypeOptions: normalizeRestockOptions(settings.fabricTypeOptions, buildFabricDefaults(/fabric\s*type/i)),
+    tileOrder: Array.isArray(settings.tileOrder)
+      ? settings.tileOrder.map((item) => String(item)).filter(Boolean)
+      : [],
+  };
+}
+
 function normalizeUniversalSettings(value: unknown): UniversalSettings {
   const settings = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -1366,23 +1438,52 @@ function sumFabricRows(headers: string[], rows: string[][]) {
   return total > 0 ? total : rows.length || null;
 }
 
-function getFabricSheets(overridesValue?: unknown, customRowsValue?: unknown): FabricSheetData[] {
+function sumFabricCost(headers: string[], rows: string[][]) {
+  const costIndex = headers.findIndex((header) => /(cost|price)/i.test(header));
+  const quantityIndex = headers.findIndex((header) => (
+    /(meters?\s+in\s+stock|meters?\s+available|quantity\s+ordered|meters?|stock|available|ordered|qty)/i.test(header) &&
+    !/(date|cost|price|cut)/i.test(header)
+  ));
+  if (costIndex < 0 || quantityIndex < 0) return null;
+  const total = rows.reduce((sum, row) => {
+    const cost = Number(String(row[costIndex] ?? "").replace(/[^0-9.-]/g, "")) || 0;
+    const quantity = Number(String(row[quantityIndex] ?? "").replace(/[^0-9.-]/g, "")) || 0;
+    return sum + (cost * quantity);
+  }, 0);
+  return total > 0 ? total : null;
+}
+
+function orderFabricSheets(sheets: FabricSheetData[], tileOrder: string[] = []) {
+  if (!tileOrder.length) return sheets;
+  const order = new Map(tileOrder.map((gid, index) => [gid, index]));
+  return [...sheets].sort((a, b) => {
+    const ai = order.get(a.gid);
+    const bi = order.get(b.gid);
+    if (ai == null && bi == null) return 0;
+    if (ai == null) return 1;
+    if (bi == null) return -1;
+    return ai - bi;
+  });
+}
+
+function getFabricSheets(overridesValue?: unknown, customRowsValue?: unknown, tileOrder: string[] = []): FabricSheetData[] {
   const overrides = normalizeFabricCellOverrides(overridesValue);
   const customRows = normalizeFabricCustomRows(customRowsValue);
-  return fabricStockSheets.map((sheet) => ({
-    ...sheet,
-    originalRows: [...sheet.rows, ...(customRows[sheet.gid] ?? [])],
-    rows: [...sheet.rows, ...(customRows[sheet.gid] ?? [])].map((row, rowIndex) => (
+  const sheets = fabricStockSheets.map((sheet) => {
+    const originalRows = [...sheet.rows, ...(customRows[sheet.gid] ?? [])];
+    const rows = originalRows.map((row, rowIndex) => (
       row.map((value, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? value)
-    )),
-    rowCount: sheet.rows.length + (customRows[sheet.gid]?.length ?? 0),
-    totalQuantity: sumFabricRows(
-      sheet.headers,
-      [...sheet.rows, ...(customRows[sheet.gid] ?? [])].map((row, rowIndex) => (
-        row.map((value, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? value)
-      )),
-    ),
-  }));
+    ));
+    return {
+      ...sheet,
+      originalRows,
+      rows,
+      rowCount: rows.length,
+      totalQuantity: sumFabricRows(sheet.headers, rows),
+      totalCost: sumFabricCost(sheet.headers, rows),
+    };
+  });
+  return orderFabricSheets(sheets, tileOrder);
 }
 
 function getCookieValue(request: Request, key: string) {
@@ -2096,6 +2197,7 @@ export default function PortalDashboard() {
     packingColumnWidths,
     restockSettings,
     universalSettings,
+    fabricSettings,
     packingLists,
     selectedPackingList,
     productSearch,
@@ -2362,6 +2464,7 @@ export default function PortalDashboard() {
               loginRequired={loginRequired}
               restockSettings={restockSettings}
               universalSettings={universalSettings}
+              fabricSettings={fabricSettings}
             />
             <ActivityLogPanel activityLogs={activityLogs} />
           </div>
@@ -2379,6 +2482,7 @@ export default function PortalDashboard() {
           <FabricSheetsPanel
             sheets={fabricSheets}
             selectedGid={selectedFabricTab}
+            fabricSettings={fabricSettings}
             onSelect={(gid) => updateParams({ fabricTab: gid })}
           />
         ) : page !== "restock" ? (
@@ -2859,14 +2963,25 @@ function CellHistoryMenu({
 function FabricSheetsPanel({
   sheets,
   selectedGid,
+  fabricSettings,
   onSelect,
 }: {
   sheets: FabricSheetData[];
   selectedGid: string;
+  fabricSettings: FabricSettings;
   onSelect: (gid: string) => void;
 }) {
   const fetcher = useFetcher();
   const selectedSheet = sheets.find((sheet) => sheet.gid === selectedGid) ?? null;
+  const [orderedSheets, setOrderedSheets] = useState(sheets);
+  const [dragGid, setDragGid] = useState<string | null>(null);
+  useEffect(() => setOrderedSheets(sheets), [sheets]);
+  const saveTileOrder = (nextSheets: FabricSheetData[]) => {
+    submitPortalCell(fetcher, {
+      intent: "update_fabric_settings",
+      value: JSON.stringify({ ...fabricSettings, tileOrder: nextSheets.map((sheet) => sheet.gid) }),
+    });
+  };
 
   if (selectedSheet) {
     return (
@@ -2879,42 +2994,49 @@ function FabricSheetsPanel({
             <strong>{selectedSheet.name}</strong>
             <span>{selectedSheet.rowCount} rows</span>
             {selectedSheet.totalQuantity != null && <span>{formatFabricNumber(selectedSheet.totalQuantity)} total</span>}
+            {selectedSheet.totalCost != null && <span>{formatCurrency(selectedSheet.totalCost)} fabric cost</span>}
           </div>
-          <button
-            type="button"
-            style={s.secondaryButton}
-            onClick={() => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: selectedSheet.gid })}
-          >
-            Add row
-          </button>
         </div>
-        <FabricSheetTable sheet={selectedSheet} fetcher={fetcher} />
+        <FabricSheetTable sheet={selectedSheet} fetcher={fetcher} fabricSettings={fabricSettings} />
       </div>
     );
   }
 
   return (
     <div style={s.fabricPage}>
-      <div style={s.fabricIntro}>
-        <div>
-          <h2 style={s.fabricIntroTitle}>Fabric types</h2>
-          <p style={s.fabricIntroText}>Open a fabric type to view stock and order rows.</p>
-        </div>
-      </div>
       <div style={s.fabricGrid}>
-        {sheets.map((sheet) => (
+        {orderedSheets.map((sheet) => (
           <button
             key={sheet.gid}
             type="button"
+            draggable
+            onDragStart={() => setDragGid(sheet.gid)}
+            onDragOver={(event) => {
+              event.preventDefault();
+              if (!dragGid || dragGid === sheet.gid) return;
+              const from = orderedSheets.findIndex((item) => item.gid === dragGid);
+              const to = orderedSheets.findIndex((item) => item.gid === sheet.gid);
+              if (from < 0 || to < 0) return;
+              const next = [...orderedSheets];
+              const [moved] = next.splice(from, 1);
+              next.splice(to, 0, moved);
+              setOrderedSheets(next);
+              saveTileOrder(next);
+            }}
+            onDragEnd={() => setDragGid(null)}
             onClick={() => onSelect(sheet.gid)}
-            style={s.fabricCard}
+            style={{ ...s.fabricCard, ...(dragGid === sheet.gid ? s.fabricCardDragging : {}) }}
           >
+            <span style={s.fabricCardHandle}>Drag</span>
             <span style={s.fabricCardTitle}>{sheet.name}</span>
             <span style={s.fabricCardMeta}>
               {sheet.error ? "Unable to load" : `${sheet.rowCount} rows`}
             </span>
             {!sheet.error && sheet.totalQuantity != null && (
               <span style={s.fabricCardQuantity}>{formatFabricNumber(sheet.totalQuantity)} total</span>
+            )}
+            {!sheet.error && sheet.totalCost != null && (
+              <span style={s.fabricCardCost}>{formatCurrency(sheet.totalCost)} fabric cost</span>
             )}
           </button>
         ))}
@@ -2926,9 +3048,11 @@ function FabricSheetsPanel({
 function FabricSheetTable({
   sheet,
   fetcher,
+  fabricSettings,
 }: {
   sheet: FabricSheetData;
   fetcher: ReturnType<typeof useFetcher>;
+  fabricSettings: FabricSettings;
 }) {
   if (sheet.error) {
     return <div style={s.empty}>Unable to load {sheet.name}: {sheet.error}</div>;
@@ -2938,35 +3062,47 @@ function FabricSheetTable({
   }
 
   return (
-    <div style={s.fabricTableWrap}>
-      <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
-        <thead>
-          <tr>
-            {sheet.headers.map((header, index) => (
-              <th key={`${header}-${index}`} style={s.fabricTh}>{header}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {sheet.rows.map((row, rowIndex) => (
-            <tr key={rowIndex} style={s.row}>
-              {sheet.headers.map((_, colIndex) => (
-                <FabricTd key={colIndex} rowIndex={rowIndex} colIndex={colIndex}>
-                  <FabricCell
-                    gid={sheet.gid}
-                    rowIndex={rowIndex}
-                    colIndex={colIndex}
-                    value={row[colIndex] ?? ""}
-                    originalValue={sheet.originalRows?.[rowIndex]?.[colIndex] ?? ""}
-                    header={sheet.headers[colIndex] ?? ""}
-                    fetcher={fetcher}
-                  />
-                </FabricTd>
+    <div style={s.fabricTableShell}>
+      <div style={s.fabricTableWrap}>
+        <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
+          <thead>
+            <tr>
+              {sheet.headers.map((header, index) => (
+                <th key={`${header}-${index}`} style={s.fabricTh}>{header}</th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {sheet.rows.map((row, rowIndex) => (
+              <tr key={rowIndex} style={s.row}>
+                {sheet.headers.map((_, colIndex) => (
+                  <FabricTd key={colIndex} rowIndex={rowIndex} colIndex={colIndex}>
+                    <FabricCell
+                      gid={sheet.gid}
+                      rowIndex={rowIndex}
+                      colIndex={colIndex}
+                      value={row[colIndex] ?? ""}
+                      originalValue={sheet.originalRows?.[rowIndex]?.[colIndex] ?? ""}
+                      header={sheet.headers[colIndex] ?? ""}
+                      fetcher={fetcher}
+                      fabricSettings={fabricSettings}
+                    />
+                  </FabricTd>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={s.fabricTableFooter}>
+        <button
+          type="button"
+          style={s.loginButton}
+          onClick={() => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: sheet.gid })}
+        >
+          Add row
+        </button>
+      </div>
     </div>
   );
 }
@@ -3015,6 +3151,7 @@ function FabricCell({
   originalValue,
   header,
   fetcher,
+  fabricSettings,
 }: {
   gid: string;
   rowIndex: number;
@@ -3023,15 +3160,21 @@ function FabricCell({
   originalValue: string;
   header: string;
   fetcher: ReturnType<typeof useFetcher>;
+  fabricSettings: FabricSettings;
 }) {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   const trimmed = draft.trim();
   const imageValue = isFabricImageValue(trimmed);
-  const dataImageValue = /^data:image\//i.test(trimmed);
-  const imageColumn = /picture|fabric|image/i.test(header) || imageValue || isFabricImageValue(originalValue);
-  const multiline = draft.includes("\n") || draft.length > 34 || imageValue;
+  const normalizedHeader = header.trim().toLowerCase();
+  const imageColumn = /picture|image/i.test(header) || normalizedHeader === "fabric" || imageValue || isFabricImageValue(originalValue);
+  const chipOptions = /^supplier$/i.test(header)
+    ? fabricSettings.supplierOptions
+    : /fabric\s*type/i.test(header)
+      ? fabricSettings.fabricTypeOptions
+      : null;
+  const chipOption = chipOptions?.find((option) => option.label === draft || option.value === slugForOption(draft));
+  const multiline = draft.includes("\n") || draft.length > 34;
   const save = (nextValue: string) => {
     if (nextValue === value) return;
     submitPortalCell(fetcher, {
@@ -3052,58 +3195,112 @@ function FabricCell({
     formData.set("image", file);
     fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
   };
+
+  if (imageColumn) {
+    return (
+      <div style={s.fabricImageEditCell}>
+        <div
+          tabIndex={0}
+          style={s.fabricImageDrop}
+          onPaste={(event) => {
+            const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
+            if (file) uploadImage(file);
+          }}
+          title="Paste or upload image"
+        >
+          {imageValue ? <img src={trimmed} alt="" style={s.fabricSheetImage} /> : <span>Paste image</span>}
+          <input
+            type="file"
+            accept="image/*"
+            style={s.hiddenFileInput}
+            onChange={(event) => {
+              uploadImage(event.currentTarget.files?.[0] ?? null);
+              event.currentTarget.value = "";
+            }}
+          />
+        </div>
+        {originalValue && originalValue !== draft && (
+          <button
+            type="button"
+            style={s.fabricMiniButton}
+            onClick={() => {
+              setDraft(originalValue);
+              save(originalValue);
+            }}
+          >
+            Restore
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (chipOptions) {
+    const options = chipOptions.some((option) => option.label === draft || option.value === slugForOption(draft))
+      ? chipOptions
+      : draft
+        ? [...chipOptions, { value: slugForOption(draft) || draft, label: draft, bg: "#f3f4f6", color: "#374151" }]
+        : chipOptions;
+    return (
+      <select
+        value={draft}
+        onChange={(event) => {
+          setDraft(event.currentTarget.value);
+          save(event.currentTarget.value);
+        }}
+        style={{
+          ...s.fabricChipSelect,
+          background: chipOption?.bg ?? "#f3f4f6",
+          color: chipOption?.color ?? "#374151",
+        }}
+      >
+        <option value="">—</option>
+        {options.map((option) => (
+          <option key={option.value} value={option.label}>{option.label}</option>
+        ))}
+      </select>
+    );
+  }
+
   const common = {
-    value: dataImageValue ? "Uploaded image" : draft,
+    value: draft,
     onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(event.currentTarget.value),
-    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      if (!dataImageValue) save(event.currentTarget.value);
-    },
+    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => save(event.currentTarget.value),
     style: multiline ? s.fabricCellTextarea : s.fabricCellInput,
     placeholder: "—",
-    readOnly: dataImageValue,
   };
 
   return (
-    <div style={imageValue ? s.fabricImageEditCell : undefined}>
-      {imageValue && <img src={trimmed} alt="" style={s.fabricSheetImage} />}
-      {multiline ? <textarea rows={imageValue ? 2 : 3} {...common} /> : <input type="text" {...common} />}
-      {(imageColumn || (originalValue && originalValue !== draft)) && (
+    <>
+      {multiline ? <textarea rows={3} {...common} /> : <input type="text" {...common} />}
+      {originalValue && originalValue !== draft && (
         <div style={s.fabricCellActions}>
-          {imageColumn && (
-            <button type="button" style={s.fabricMiniButton} onClick={() => fileInputRef.current?.click()}>
-              Upload image
-            </button>
-          )}
-          {originalValue && originalValue !== draft && (
-            <button
-              type="button"
-              style={s.fabricMiniButton}
-              onClick={() => {
-                setDraft(originalValue);
-                save(originalValue);
-              }}
-            >
-              Restore
-            </button>
-          )}
+          <button
+            type="button"
+            style={s.fabricMiniButton}
+            onClick={() => {
+              setDraft(originalValue);
+              save(originalValue);
+            }}
+          >
+            Restore
+          </button>
         </div>
       )}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        style={{ display: "none" }}
-        onChange={(event) => {
-          uploadImage(event.currentTarget.files?.[0] ?? null);
-          event.currentTarget.value = "";
-        }}
-      />
-    </div>
+    </>
   );
 }
 
 function formatFabricNumber(value: number) {
   return Number(value).toLocaleString("en-AU", { maximumFractionDigits: 1 });
+}
+
+function formatCurrency(value: number) {
+  return Number(value).toLocaleString("en-AU", {
+    style: "currency",
+    currency: "INR",
+    maximumFractionDigits: 0,
+  });
 }
 
 // ─── Nav Order Section ────────────────────────────────────────────────────────
@@ -3179,17 +3376,20 @@ function SettingsPanel({
   loginRequired,
   restockSettings,
   universalSettings,
+  fabricSettings,
 }: {
   users: PortalUser[];
   currentUser: PortalUser | null;
   loginRequired: boolean;
   restockSettings: RestockSettings;
   universalSettings: UniversalSettings;
+  fabricSettings: FabricSettings;
 }) {
   const settingsFetcher = useFetcher();
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
   const [restockDraft, setRestockDraft] = useState<RestockSettings>(restockSettings);
   const [universalDraft, setUniversalDraft] = useState<UniversalSettings>(universalSettings);
+  const [fabricDraft, setFabricDraft] = useState<FabricSettings>(fabricSettings);
   const updateRestockOption = (kind: "statusOptions" | "priorityOptions", index: number, patch: Partial<RestockOption>) => {
     setRestockDraft((current) => ({
       ...current,
@@ -3225,6 +3425,41 @@ function SettingsPanel({
       [kind]: current[kind].filter((_, optionIndex) => optionIndex !== index),
     }));
   };
+  const updateFabricOption = (kind: "supplierOptions" | "fabricTypeOptions", index: number, patch: Partial<RestockOption>) => {
+    setFabricDraft((current) => ({
+      ...current,
+      [kind]: current[kind].map((option, optionIndex) => {
+        if (optionIndex !== index) return option;
+        const label = patch.label ?? option.label;
+        return {
+          ...option,
+          ...patch,
+          label,
+          value: patch.label && option.value.startsWith("new_") ? slugForOption(patch.label) || option.value : option.value,
+        };
+      }),
+    }));
+  };
+  const addFabricOption = (kind: "supplierOptions" | "fabricTypeOptions") => {
+    setFabricDraft((current) => ({
+      ...current,
+      [kind]: [
+        ...current[kind],
+        {
+          value: `new_${Date.now()}`,
+          label: "New option",
+          bg: "#f3f4f6",
+          color: "#374151",
+        },
+      ],
+    }));
+  };
+  const removeFabricOption = (kind: "supplierOptions" | "fabricTypeOptions", index: number) => {
+    setFabricDraft((current) => ({
+      ...current,
+      [kind]: current[kind].filter((_, optionIndex) => optionIndex !== index),
+    }));
+  };
   const saveRestockSettings = () => submitPortalCell(settingsFetcher, {
     intent: "update_restock_settings",
     value: JSON.stringify(restockDraft),
@@ -3232,6 +3467,10 @@ function SettingsPanel({
   const saveUniversalSettings = () => submitPortalCell(settingsFetcher, {
     intent: "update_universal_settings",
     value: JSON.stringify(universalDraft),
+  });
+  const saveFabricSettings = () => submitPortalCell(settingsFetcher, {
+    intent: "update_fabric_settings",
+    value: JSON.stringify(fabricDraft),
   });
 
   return (
@@ -3480,6 +3719,41 @@ function SettingsPanel({
       </section>
 
       <NavOrderSection canManageUsers={canManageUsers} settingsFetcher={settingsFetcher} />
+
+      <section style={s.settingsCard}>
+        <div style={s.settingsHeader}>
+          <div>
+            <h2 style={s.settingsTitle}>Fabric in Stock Settings</h2>
+            <p style={s.settingsHint}>Edit supplier and fabric type chips used on the fabric pages.</p>
+          </div>
+          <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveFabricSettings}>
+            Save fabric settings
+          </button>
+        </div>
+
+        {!canManageUsers && (
+          <div style={s.settingsWarning}>Only an admin user can change fabric settings.</div>
+        )}
+
+        <div style={s.settingsGrid}>
+          <RestockOptionsEditor
+            title="Supplier chips"
+            options={fabricDraft.supplierOptions}
+            disabled={!canManageUsers}
+            onChange={(index, patch) => updateFabricOption("supplierOptions", index, patch)}
+            onAdd={() => addFabricOption("supplierOptions")}
+            onRemove={(index) => removeFabricOption("supplierOptions", index)}
+          />
+          <RestockOptionsEditor
+            title="Fabric type chips"
+            options={fabricDraft.fabricTypeOptions}
+            disabled={!canManageUsers}
+            onChange={(index, patch) => updateFabricOption("fabricTypeOptions", index, patch)}
+            onAdd={() => addFabricOption("fabricTypeOptions")}
+            onRemove={(index) => removeFabricOption("fabricTypeOptions", index)}
+          />
+        </div>
+      </section>
 
       <section style={s.settingsCard}>
         <div style={s.settingsHeader}>
@@ -4164,8 +4438,8 @@ function PackingListLineRow({
   return (
     <tr style={s.row}>
       <PackingTd rowIndex={rowIndex} colIndex={0}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={1} center>{line.productImageUrl ? <img src={line.productImageUrl} alt="" style={s.packingThumb} /> : <div style={s.noImg}>—</div>}</PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={2} center><FabricImageCell lineId={line.id} value={line.fabricImageData ?? ""} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={1} center><PackingImageCell lineId={line.id} field="productImageUrl" value={line.productImageUrl ?? ""} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={2} center><PackingImageCell lineId={line.id} field="fabricImageData" value={line.fabricImageData ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={3} overflowVisible>
         <PackingProductNameCell
           line={line}
@@ -4421,7 +4695,7 @@ function PackingSkuCell({ lineId, value }: { lineId: number; value: string }) {
   );
 }
 
-function FabricImageCell({ lineId, value }: { lineId: number; value: string }) {
+function PackingImageCell({ lineId, field, value }: { lineId: number; field: "productImageUrl" | "fabricImageData"; value: string }) {
   const fetcher = useFetcher();
 
   const saveFile = (file: File) => {
@@ -4429,7 +4703,7 @@ function FabricImageCell({ lineId, value }: { lineId: number; value: string }) {
     reader.onload = () => submitPortalCell(fetcher, {
       intent: "update_packing_line",
       lineId,
-      field: "fabricImageData",
+      field,
       value: String(reader.result ?? ""),
     });
     reader.readAsDataURL(file);
@@ -4443,7 +4717,7 @@ function FabricImageCell({ lineId, value }: { lineId: number; value: string }) {
         const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
         if (file) saveFile(file);
       }}
-      title="Paste or upload fabric image"
+      title="Paste or upload image"
     >
       {value ? <img src={value} alt="" style={s.fabricThumb} /> : <span>Paste image</span>}
       <input
@@ -6210,6 +6484,7 @@ const s: Record<string, React.CSSProperties> = {
     gap: 12,
   },
   fabricCard: {
+    position: "relative",
     minHeight: 112,
     border: "1px solid #dbe3ee",
     borderRadius: 10,
@@ -6219,9 +6494,21 @@ const s: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     boxShadow: "0 1px 2px rgba(15,23,42,0.06)",
   },
-  fabricCardTitle: { display: "block", color: "#111827", fontSize: 15, fontWeight: 800, lineHeight: 1.25 },
+  fabricCardDragging: { opacity: 0.62, boxShadow: "0 10px 26px rgba(15,23,42,0.16)" },
+  fabricCardHandle: {
+    position: "absolute",
+    top: 10,
+    right: 12,
+    color: "#94a3b8",
+    fontSize: 10,
+    fontWeight: 800,
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+  },
+  fabricCardTitle: { display: "block", color: "var(--portal-heading-text-color, #111827)", fontSize: 15, fontWeight: 800, lineHeight: 1.25, paddingRight: 38 },
   fabricCardMeta: { display: "block", marginTop: 12, color: "#6b7280", fontSize: 12, fontWeight: 700 },
   fabricCardQuantity: { display: "block", marginTop: 4, color: "#008060", fontSize: 13, fontWeight: 800 },
+  fabricCardCost: { display: "block", marginTop: 4, color: "var(--portal-table-text-color, #374151)", fontSize: 13, fontWeight: 800 },
   fabricToolbar: {
     display: "flex",
     alignItems: "center",
@@ -6233,6 +6520,10 @@ const s: Record<string, React.CSSProperties> = {
     borderRadius: 10,
   },
   fabricToolbarMeta: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", color: "#6b7280", fontSize: 13, fontWeight: 700 },
+  fabricTableShell: {
+    display: "grid",
+    gap: 10,
+  },
   fabricTableWrap: {
     maxHeight: "calc(100vh - 170px)",
     overflow: "auto",
@@ -6249,7 +6540,7 @@ const s: Record<string, React.CSSProperties> = {
     textAlign: "left",
     background: "#eef2f7",
     border: "1px solid #cbd5e1",
-    color: "#111827",
+    color: "var(--portal-heading-text-color, #111827)",
     fontSize: 11,
     fontWeight: 800,
     textTransform: "uppercase",
@@ -6261,9 +6552,10 @@ const s: Record<string, React.CSSProperties> = {
     borderRight: "1px solid #e5e7eb",
     borderBottom: "1px solid #e5e7eb",
     verticalAlign: "top",
-    color: "#1f2937",
+    color: "var(--portal-table-text-color, #1f2937)",
     fontWeight: 600,
     minWidth: 120,
+    fontSize: "var(--portal-table-font-size, 13px)",
   },
   fabricCellInput: {
     width: "100%",
@@ -6272,7 +6564,7 @@ const s: Record<string, React.CSSProperties> = {
     outline: "none",
     padding: "9px 10px",
     background: "transparent",
-    color: "#1f2937",
+    color: "var(--portal-table-text-color, #1f2937)",
     font: "inherit",
     fontWeight: 700,
   },
@@ -6284,7 +6576,7 @@ const s: Record<string, React.CSSProperties> = {
     resize: "vertical",
     padding: "9px 10px",
     background: "transparent",
-    color: "#1f2937",
+    color: "var(--portal-table-text-color, #1f2937)",
     font: "inherit",
     fontWeight: 700,
     lineHeight: 1.35,
@@ -6292,8 +6584,25 @@ const s: Record<string, React.CSSProperties> = {
   fabricImageEditCell: {
     display: "grid",
     gap: 6,
-    justifyItems: "start",
+    justifyItems: "center",
     padding: "8px 10px",
+  },
+  fabricTableFooter: {
+    display: "flex",
+    justifyContent: "flex-start",
+    padding: "0 0 4px",
+  },
+  fabricChipSelect: {
+    width: "calc(100% - 20px)",
+    minHeight: 34,
+    margin: 10,
+    border: "1px solid rgba(15,23,42,0.12)",
+    borderRadius: 999,
+    padding: "6px 28px 6px 10px",
+    outline: "none",
+    fontSize: "var(--portal-table-font-size, 13px)",
+    fontWeight: 900,
+    cursor: "pointer",
   },
   fabricCellActions: {
     display: "flex",
@@ -6311,7 +6620,7 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 800,
     cursor: "pointer",
   },
-  fabricSheetImage: { width: 96, height: 96, objectFit: "cover", borderRadius: 6, border: "1px solid #e5e7eb" },
+  fabricSheetImage: { width: 120, height: 120, objectFit: "cover", borderRadius: 6, border: "1px solid #e5e7eb" },
   fabricLink: { color: "#2563eb", fontWeight: 800, textDecoration: "none" },
   tableWrap: {
     maxHeight: "calc(100vh - 118px)",
