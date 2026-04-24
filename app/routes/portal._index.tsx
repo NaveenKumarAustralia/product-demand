@@ -2268,47 +2268,66 @@ function ColorPickerInput({
 }) {
   const safeHex = /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : "#000000";
   const [open, setOpen] = useState(false);
+  const [panelPos, setPanelPos] = useState({ top: 0, left: 0 });
   const [hsv, setHsv] = useState(() => _hexToHsv(safeHex));
   const [hexText, setHexText] = useState(safeHex.slice(1));
-  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const gradRef = useRef<HTMLDivElement>(null);
   const hueRef = useRef<HTMLDivElement>(null);
   const dragging = useRef<"grad" | "hue" | null>(null);
   const hsvRef = useRef(hsv);
   hsvRef.current = hsv;
 
+  // Position the portal panel below the trigger
+  const openPanel = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (disabled) return;
+    if (!open && triggerRef.current) {
+      const r = triggerRef.current.getBoundingClientRect();
+      const panelH = 340;
+      const top = r.bottom + 6 + panelH > window.innerHeight ? r.top - panelH - 6 : r.bottom + 6;
+      setPanelPos({ top, left: Math.min(r.left, window.innerWidth - 308) });
+    }
+    setOpen((o) => !o);
+  };
+
+  // Close on outside click (checks both trigger and panel)
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => {
-      if (!containerRef.current?.contains(e.target as Node)) setOpen(false);
+      if (
+        !triggerRef.current?.contains(e.target as Node) &&
+        !panelRef.current?.contains(e.target as Node)
+      ) setOpen(false);
     };
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
 
+  // Drag handling for gradient and hue sliders
   useEffect(() => {
-    const applyGrad = (e: MouseEvent) => {
-      if (dragging.current !== "grad" || !gradRef.current) return;
-      const rect = gradRef.current.getBoundingClientRect();
-      const ns = Math.round(Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)));
-      const nv = Math.round(Math.max(0, Math.min(100, (1 - (e.clientY - rect.top) / rect.height) * 100)));
-      const next = { ...hsvRef.current, s: ns, v: nv };
-      setHsv(next);
-      const hex = _hsvToHex(next.h, next.s, next.v);
-      setHexText(hex.slice(1));
-      onChange(hex);
+    const move = (e: MouseEvent) => {
+      if (dragging.current === "grad" && gradRef.current) {
+        const rect = gradRef.current.getBoundingClientRect();
+        const ns = Math.round(Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)));
+        const nv = Math.round(Math.max(0, Math.min(100, (1 - (e.clientY - rect.top) / rect.height) * 100)));
+        const next = { ...hsvRef.current, s: ns, v: nv };
+        setHsv(next);
+        const hex = _hsvToHex(next.h, next.s, next.v);
+        setHexText(hex.slice(1));
+        onChange(hex);
+      } else if (dragging.current === "hue" && hueRef.current) {
+        const rect = hueRef.current.getBoundingClientRect();
+        const nh = Math.round(Math.max(0, Math.min(360, ((e.clientY - rect.top) / rect.height) * 360)));
+        const next = { ...hsvRef.current, h: nh };
+        setHsv(next);
+        const hex = _hsvToHex(next.h, next.s, next.v);
+        setHexText(hex.slice(1));
+        onChange(hex);
+      }
     };
-    const applyHue = (e: MouseEvent) => {
-      if (dragging.current !== "hue" || !hueRef.current) return;
-      const rect = hueRef.current.getBoundingClientRect();
-      const nh = Math.round(Math.max(0, Math.min(360, ((e.clientY - rect.top) / rect.height) * 360)));
-      const next = { ...hsvRef.current, h: nh };
-      setHsv(next);
-      const hex = _hsvToHex(next.h, next.s, next.v);
-      setHexText(hex.slice(1));
-      onChange(hex);
-    };
-    const move = (e: MouseEvent) => { applyGrad(e); applyHue(e); };
     const up = () => { dragging.current = null; };
     document.addEventListener("mousemove", move);
     document.addEventListener("mouseup", up);
@@ -2323,26 +2342,21 @@ function ColorPickerInput({
     const ns = Math.round(Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)));
     const nv = Math.round(Math.max(0, Math.min(100, (1 - (e.clientY - rect.top) / rect.height) * 100)));
     const next = { ...hsv, s: ns, v: nv };
-    setHsv(next);
-    const hex = _hsvToHex(next.h, next.s, next.v);
-    setHexText(hex.slice(1));
-    onChange(hex);
+    setHsv(next); onChange(_hsvToHex(next.h, next.s, next.v));
+    setHexText(_hsvToHex(next.h, next.s, next.v).slice(1));
   };
   const pickHue = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const nh = Math.round(Math.max(0, Math.min(360, ((e.clientY - rect.top) / rect.height) * 360)));
     const next = { ...hsv, h: nh };
-    setHsv(next);
-    const hex = _hsvToHex(next.h, next.s, next.v);
-    setHexText(hex.slice(1));
-    onChange(hex);
+    setHsv(next); onChange(_hsvToHex(next.h, next.s, next.v));
+    setHexText(_hsvToHex(next.h, next.s, next.v).slice(1));
   };
   const commitHex = () => {
     const clean = hexText.replace("#", "").toLowerCase();
     if (/^[0-9a-f]{6}$/.test(clean)) {
       const hex = "#" + clean;
-      const next = _hexToHsv(hex);
-      setHsv(next);
+      setHsv(_hexToHsv(hex));
       onChange(hex);
       if (!_pickerRecentColors.includes(hex)) {
         _pickerRecentColors.unshift(hex);
@@ -2350,19 +2364,93 @@ function ColorPickerInput({
       }
     }
   };
-  const pickRecent = (col: string) => {
-    const next = _hexToHsv(col);
-    setHsv(next);
-    setHexText(col.slice(1));
-    onChange(col);
-  };
+
+  const panel = open ? (
+    <div
+      ref={panelRef}
+      style={{
+        position: "fixed", top: panelPos.top, left: panelPos.left, zIndex: 99999,
+        background: "#fff", borderRadius: 14,
+        boxShadow: "0 8px 32px rgba(0,0,0,0.22)", border: "1px solid #e5e7eb",
+        padding: 12, width: 296,
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <div
+          ref={gradRef}
+          style={{
+            flex: 1, height: 200, borderRadius: 8, position: "relative", cursor: "crosshair",
+            background: `linear-gradient(to bottom, transparent, #000), linear-gradient(to right, #fff, ${hueHex})`,
+            userSelect: "none",
+          }}
+          onMouseDown={(e) => { dragging.current = "grad"; pickGrad(e); }}
+        >
+          <div style={{
+            position: "absolute", left: `${hsv.s}%`, top: `${100 - hsv.v}%`,
+            width: 14, height: 14, borderRadius: "50%",
+            border: "2px solid #fff", boxShadow: "0 0 0 1.5px rgba(0,0,0,0.35)",
+            transform: "translate(-50%,-50%)", pointerEvents: "none",
+          }} />
+        </div>
+        <div
+          ref={hueRef}
+          style={{
+            width: 18, height: 200, borderRadius: 999, position: "relative",
+            cursor: "ns-resize", flexShrink: 0, userSelect: "none",
+            background: "linear-gradient(to bottom,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)",
+          }}
+          onMouseDown={(e) => { dragging.current = "hue"; pickHue(e); }}
+        >
+          <div style={{
+            position: "absolute", left: "50%", top: `${(hsv.h / 360) * 100}%`,
+            width: 24, height: 8, borderRadius: 999, background: hueHex,
+            border: "2px solid #fff", boxShadow: "0 0 0 1.5px rgba(0,0,0,0.35)",
+            transform: "translate(-50%,-50%)", pointerEvents: "none",
+          }} />
+        </div>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <div style={{ width: 34, height: 34, borderRadius: 8, background: currentHex, border: "1px solid rgba(0,0,0,0.12)", flexShrink: 0 }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, border: "2px solid #2563eb", borderRadius: 8, padding: "6px 10px" }}>
+          <span style={{ color: "#6b7280", fontSize: 13, fontWeight: 700 }}>#</span>
+          <input
+            value={hexText.toUpperCase()}
+            maxLength={6}
+            onChange={(e) => setHexText(e.target.value.replace("#", ""))}
+            onBlur={commitHex}
+            onKeyDown={(e) => e.key === "Enter" && commitHex()}
+            style={{ border: "none", outline: "none", fontSize: 13, fontWeight: 700, width: "100%", background: "transparent" }}
+          />
+        </div>
+      </div>
+
+      {_pickerRecentColors.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", marginBottom: 6 }}>▸ Recently used</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+            {_pickerRecentColors.map((col) => (
+              <button key={col} type="button" title={col}
+                onClick={() => { setHsv(_hexToHsv(col)); setHexText(col.slice(1)); onChange(col); }}
+                style={{
+                  width: 28, height: 28, borderRadius: 6, background: col, cursor: "pointer",
+                  border: col === currentHex ? "2px solid #2563eb" : "1px solid rgba(0,0,0,0.12)",
+                }} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null;
 
   return (
-    <div ref={containerRef} style={{ position: "relative", display: "inline-block" }}>
+    <div style={{ display: "inline-block" }}>
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
-        onClick={() => !disabled && setOpen((o) => !o)}
+        onClick={openPanel}
         style={{
           display: "inline-flex", alignItems: "center", gap: 8,
           padding: "5px 10px 5px 6px",
@@ -2381,79 +2469,7 @@ function ColorPickerInput({
           <path d="M2 14h3l8-8-3-3-8 8v3zm13-11l-2-2-1.5 1.5 2 2L15 3z" fill="currentColor" />
         </svg>
       </button>
-
-      {open && (
-        <div style={{
-          position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 1000,
-          background: "#fff", borderRadius: 14,
-          boxShadow: "0 8px 32px rgba(0,0,0,0.18)", border: "1px solid #e5e7eb",
-          padding: 12, width: 292,
-        }}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-            <div
-              ref={gradRef}
-              style={{
-                flex: 1, height: 200, borderRadius: 8, position: "relative", cursor: "crosshair",
-                background: `linear-gradient(to bottom, transparent, #000), linear-gradient(to right, #fff, ${hueHex})`,
-                userSelect: "none",
-              }}
-              onMouseDown={(e) => { dragging.current = "grad"; pickGrad(e); }}
-            >
-              <div style={{
-                position: "absolute", left: `${hsv.s}%`, top: `${100 - hsv.v}%`,
-                width: 14, height: 14, borderRadius: "50%",
-                border: "2px solid #fff", boxShadow: "0 0 0 1.5px rgba(0,0,0,0.35)",
-                transform: "translate(-50%, -50%)", pointerEvents: "none",
-              }} />
-            </div>
-            <div
-              ref={hueRef}
-              style={{
-                width: 18, height: 200, borderRadius: 999, position: "relative",
-                cursor: "pointer", flexShrink: 0, userSelect: "none",
-                background: "linear-gradient(to bottom,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)",
-              }}
-              onMouseDown={(e) => { dragging.current = "hue"; pickHue(e); }}
-            >
-              <div style={{
-                position: "absolute", left: "50%", top: `${(hsv.h / 360) * 100}%`,
-                width: 24, height: 8, borderRadius: 999, background: hueHex,
-                border: "2px solid #fff", boxShadow: "0 0 0 1.5px rgba(0,0,0,0.35)",
-                transform: "translate(-50%, -50%)", pointerEvents: "none",
-              }} />
-            </div>
-          </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-            <div style={{ width: 34, height: 34, borderRadius: 8, background: currentHex, border: "1px solid rgba(0,0,0,0.12)", flexShrink: 0 }} />
-            <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, border: "2px solid #2563eb", borderRadius: 8, padding: "6px 10px" }}>
-              <span style={{ color: "#6b7280", fontSize: 13, fontWeight: 700 }}>#</span>
-              <input
-                value={hexText.toUpperCase()}
-                maxLength={6}
-                onChange={(e) => setHexText(e.target.value.replace("#", ""))}
-                onBlur={commitHex}
-                onKeyDown={(e) => e.key === "Enter" && commitHex()}
-                style={{ border: "none", outline: "none", fontSize: 13, fontWeight: 700, width: "100%", background: "transparent" }}
-              />
-            </div>
-          </div>
-
-          {_pickerRecentColors.length > 0 && (
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", marginBottom: 6 }}>▸ Currently used</div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                {_pickerRecentColors.map((col) => (
-                  <button key={col} type="button" title={col} onClick={() => pickRecent(col)} style={{
-                    width: 28, height: 28, borderRadius: 6, background: col, cursor: "pointer",
-                    border: col === currentHex ? "2px solid #2563eb" : "1px solid rgba(0,0,0,0.12)",
-                  }} />
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {typeof document !== "undefined" && createPortal(panel, document.body)}
     </div>
   );
 }
