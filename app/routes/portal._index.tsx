@@ -116,7 +116,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         take: 25,
       })
     : [];
-  const fabricSheets = page === "fabric" ? getFabricSheets() : [];
+  const fabricCellOverridesSetting = page === "fabric"
+    ? await prisma.portalSetting.findUnique({
+        where: { key: FABRIC_CELL_OVERRIDES_KEY },
+        select: { value: true },
+      })
+    : null;
+  const fabricSheets = page === "fabric" ? getFabricSheets(fabricCellOverridesSetting?.value) : [];
 
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","M","L","XL","2XL","3XL","S-M","M-L","L-XL","S/M","M/L","L/XL","4XL","ONE SIZE"];
@@ -795,6 +801,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_fabric_cell") {
+    const gid = String(form.get("gid") ?? "");
+    const rowIndex = Number(form.get("rowIndex"));
+    const colIndex = Number(form.get("colIndex"));
+    const value = String(form.get("value") ?? "");
+    if (!gid || !Number.isInteger(rowIndex) || !Number.isInteger(colIndex) || rowIndex < 0 || colIndex < 0) {
+      return null;
+    }
+
+    const setting = await prisma.portalSetting.findUnique({
+      where: { key: FABRIC_CELL_OVERRIDES_KEY },
+      select: { value: true },
+    });
+    const overrides = normalizeFabricCellOverrides(setting?.value);
+    const key = fabricCellKey(gid, rowIndex, colIndex);
+    overrides[key] = value;
+
+    await prisma.portalSetting.upsert({
+      where: { key: FABRIC_CELL_OVERRIDES_KEY },
+      create: { key: FABRIC_CELL_OVERRIDES_KEY, value: overrides },
+      update: { value: overrides },
+    });
+    return null;
+  }
+
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
   if (intent === "update_product_type")  updates.productType = normalizeProductGroup(String(form.get("value") ?? "")) || null;
@@ -1043,6 +1074,7 @@ const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
 const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
 const UNIVERSAL_SETTINGS_KEY = "production-portal-universal-settings-v1";
 const PORTAL_NAV_ORDER_KEY = "production-portal-nav-order-v1";
+const FABRIC_CELL_OVERRIDES_KEY = "production-portal-fabric-cell-overrides-v1";
 const ALL_NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", href: "/portal?page=dashboard" },
   { id: "restock", label: "Existing Products Restock", href: "/portal" },
@@ -1229,8 +1261,26 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
   };
 }
 
-function getFabricSheets(): FabricSheetData[] {
-  return fabricStockSheets;
+function fabricCellKey(gid: string, rowIndex: number, colIndex: number) {
+  return `${gid}:${rowIndex}:${colIndex}`;
+}
+
+function normalizeFabricCellOverrides(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, cellValue]) => /^\S+:\d+:\d+$/.test(key) && typeof cellValue === "string"),
+  ) as Record<string, string>;
+}
+
+function getFabricSheets(overridesValue?: unknown): FabricSheetData[] {
+  const overrides = normalizeFabricCellOverrides(overridesValue);
+  return fabricStockSheets.map((sheet) => ({
+    ...sheet,
+    rows: sheet.rows.map((row, rowIndex) => (
+      row.map((value, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? value)
+    )),
+  }));
 }
 
 function getCookieValue(request: Request, key: string) {
@@ -2713,6 +2763,7 @@ function FabricSheetsPanel({
   selectedGid: string;
   onSelect: (gid: string) => void;
 }) {
+  const fetcher = useFetcher();
   const selectedSheet = sheets.find((sheet) => sheet.gid === selectedGid) ?? null;
 
   if (selectedSheet) {
@@ -2728,7 +2779,7 @@ function FabricSheetsPanel({
             {selectedSheet.totalQuantity != null && <span>{formatFabricNumber(selectedSheet.totalQuantity)} total</span>}
           </div>
         </div>
-        <FabricSheetTable sheet={selectedSheet} />
+        <FabricSheetTable sheet={selectedSheet} fetcher={fetcher} />
       </div>
     );
   }
@@ -2763,7 +2814,13 @@ function FabricSheetsPanel({
   );
 }
 
-function FabricSheetTable({ sheet }: { sheet: FabricSheetData }) {
+function FabricSheetTable({
+  sheet,
+  fetcher,
+}: {
+  sheet: FabricSheetData;
+  fetcher: ReturnType<typeof useFetcher>;
+}) {
   if (sheet.error) {
     return <div style={s.empty}>Unable to load {sheet.name}: {sheet.error}</div>;
   }
@@ -2773,7 +2830,7 @@ function FabricSheetTable({ sheet }: { sheet: FabricSheetData }) {
 
   return (
     <div style={s.fabricTableWrap}>
-      <table style={s.fabricTable}>
+      <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
         <thead>
           <tr>
             {sheet.headers.map((header, index) => (
@@ -2785,9 +2842,15 @@ function FabricSheetTable({ sheet }: { sheet: FabricSheetData }) {
           {sheet.rows.map((row, rowIndex) => (
             <tr key={rowIndex} style={s.row}>
               {sheet.headers.map((_, colIndex) => (
-                <td key={colIndex} style={s.fabricTd}>
-                  <FabricCell value={row[colIndex] ?? ""} />
-                </td>
+                <FabricTd key={colIndex} rowIndex={rowIndex} colIndex={colIndex}>
+                  <FabricCell
+                    gid={sheet.gid}
+                    rowIndex={rowIndex}
+                    colIndex={colIndex}
+                    value={row[colIndex] ?? ""}
+                    fetcher={fetcher}
+                  />
+                </FabricTd>
               ))}
             </tr>
           ))}
@@ -2797,16 +2860,84 @@ function FabricSheetTable({ sheet }: { sheet: FabricSheetData }) {
   );
 }
 
-function FabricCell({ value }: { value: string }) {
-  const trimmed = value.trim();
-  if (!trimmed) return <span style={{ color: "#cbd5e1" }}>—</span>;
-  if (/^(?:https?:\/\/|\/).+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(trimmed)) {
-    return <img src={trimmed} alt="" style={s.fabricSheetImage} />;
-  }
-  if (/^https?:\/\//i.test(trimmed)) {
-    return <a href={trimmed} target="_blank" rel="noreferrer" style={s.fabricLink}>Open</a>;
-  }
-  return <span>{trimmed}</span>;
+function FabricTd({
+  children,
+  rowIndex,
+  colIndex,
+}: {
+  children: React.ReactNode;
+  rowIndex: number;
+  colIndex: number;
+}) {
+  return (
+    <td
+      data-grid-row={rowIndex}
+      data-grid-col={colIndex}
+      tabIndex={0}
+      onFocus={(event) => {
+        if (event.target !== event.currentTarget) return;
+        const focusTarget = event.currentTarget.querySelector<HTMLElement>(FOCUSABLE_CELL_SELECTOR);
+        if (!focusTarget) return;
+        window.setTimeout(() => {
+          focusTarget.focus();
+          if (focusTarget instanceof HTMLInputElement || focusTarget instanceof HTMLTextAreaElement) {
+            focusTarget.select();
+          }
+        }, 0);
+      }}
+      style={s.fabricTd}
+    >
+      {children}
+    </td>
+  );
+}
+
+function isFabricImageValue(value: string) {
+  return /^(?:https?:\/\/|\/).+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(value.trim());
+}
+
+function FabricCell({
+  gid,
+  rowIndex,
+  colIndex,
+  value,
+  fetcher,
+}: {
+  gid: string;
+  rowIndex: number;
+  colIndex: number;
+  value: string;
+  fetcher: ReturnType<typeof useFetcher>;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const trimmed = draft.trim();
+  const imageValue = isFabricImageValue(trimmed);
+  const multiline = draft.includes("\n") || draft.length > 34 || imageValue;
+  const save = (nextValue: string) => {
+    if (nextValue === value) return;
+    submitPortalCell(fetcher, {
+      intent: "update_fabric_cell",
+      gid,
+      rowIndex,
+      colIndex,
+      value: nextValue,
+    });
+  };
+  const common = {
+    value: draft,
+    onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(event.currentTarget.value),
+    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => save(event.currentTarget.value),
+    style: multiline ? s.fabricCellTextarea : s.fabricCellInput,
+    placeholder: "—",
+  };
+
+  return (
+    <div style={imageValue ? s.fabricImageEditCell : undefined}>
+      {imageValue && <img src={trimmed} alt="" style={s.fabricSheetImage} />}
+      {multiline ? <textarea rows={imageValue ? 2 : 3} {...common} /> : <input type="text" {...common} />}
+    </div>
+  );
 }
 
 function formatFabricNumber(value: number) {
@@ -5964,16 +6095,45 @@ const s: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap",
   },
   fabricTd: {
-    padding: "9px 10px",
+    padding: 0,
     borderRight: "1px solid #e5e7eb",
     borderBottom: "1px solid #e5e7eb",
     verticalAlign: "top",
     color: "#1f2937",
     fontWeight: 600,
-    whiteSpace: "pre-wrap",
     minWidth: 120,
   },
-  fabricSheetImage: { width: 76, height: 76, objectFit: "cover", borderRadius: 6, border: "1px solid #e5e7eb" },
+  fabricCellInput: {
+    width: "100%",
+    minHeight: 96,
+    border: "none",
+    outline: "none",
+    padding: "9px 10px",
+    background: "transparent",
+    color: "#1f2937",
+    font: "inherit",
+    fontWeight: 700,
+  },
+  fabricCellTextarea: {
+    width: "100%",
+    minHeight: 96,
+    border: "none",
+    outline: "none",
+    resize: "vertical",
+    padding: "9px 10px",
+    background: "transparent",
+    color: "#1f2937",
+    font: "inherit",
+    fontWeight: 700,
+    lineHeight: 1.35,
+  },
+  fabricImageEditCell: {
+    display: "grid",
+    gap: 6,
+    justifyItems: "start",
+    padding: "8px 10px",
+  },
+  fabricSheetImage: { width: 96, height: 96, objectFit: "cover", borderRadius: 6, border: "1px solid #e5e7eb" },
   fabricLink: { color: "#2563eb", fontWeight: 800, textDecoration: "none" },
   tableWrap: {
     maxHeight: "calc(100vh - 118px)",
