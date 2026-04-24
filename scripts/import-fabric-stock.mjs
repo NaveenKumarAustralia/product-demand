@@ -261,11 +261,57 @@ function parseRows(sheetPath, sharedStrings, imageAnchors, sheetSlug, imageUrls)
   return { headers: normalizedHeaders, rows: normalizedRows };
 }
 
-function headerPreset(kind, currentHeaders) {
+function isNumericCell(value) {
+  return /^-?\d+(?:\.\d+)?$/.test(String(value ?? "").replace(/,/g, "").trim());
+}
+
+function normalizeParsedSheet(kind, normalizedName, parsed) {
+  if (
+    kind === "simple-stock"
+    && parsed.headers[0] === "A"
+    && /^fabric$/i.test(parsed.headers[1] ?? "")
+  ) {
+    return {
+      headers: parsed.headers.slice(1),
+      rows: parsed.rows.map((row) => row.slice(1)),
+    };
+  }
+
+  if (kind === "random") {
+    const headers = [
+      "Supplier", "Fabric Type", "Fabric", "Name", "Collection", "Price",
+      "Quantity", "Notes", "Received / Date", "Supplier / Source", "Products",
+      "K", "L", "M",
+    ].slice(0, Math.max(parsed.headers.length, 11));
+    const rows = parsed.rows.map((row) => {
+      const hasCollection = row[4] && !isNumericCell(row[4]) && isNumericCell(row[5]);
+      if (hasCollection) return row;
+      return [
+        row[0] ?? "",
+        row[1] ?? "",
+        row[2] ?? "",
+        row[3] ?? "",
+        "",
+        ...row.slice(4),
+      ];
+    });
+    return { headers, rows };
+  }
+
+  return parsed;
+}
+
+function headerPreset(kind, currentHeaders, normalizedName = "") {
   if (kind === "order") {
     return [
       "Supplier", "Fabric Type", "Picture", "Planned Release Date", "Name",
       "Quantity Ordered", "Quantity Received", "Order Date", "Status", "ETA",
+    ].slice(0, currentHeaders.length);
+  }
+  if (normalizedName === "4x40 printed" || normalizedName === "40x40 printed") {
+    return [
+      "Supplier", "Fabric Type", "Fabric", "Name", "Collection", "Cost per Meter",
+      "Meters in Stock", "Cut Pieces", "Received / Date", "Products", "Notes", "K",
     ].slice(0, currentHeaders.length);
   }
   if (kind === "stock") {
@@ -279,6 +325,9 @@ function headerPreset(kind, currentHeaders) {
       "Fabric", "Name", "Price", "Meters Available", "Additional Quantity",
       "Meters Received", "Products", "Notes", "Supplier",
     ].slice(0, currentHeaders.length);
+  }
+  if (kind === "random") {
+    return currentHeaders;
   }
   return currentHeaders;
 }
@@ -332,10 +381,11 @@ const imageUrls = new Map();
 const sheets = parseWorkbookSheets().map((sheet) => {
   const normalizedName = keyName(sheet.name);
   const sheetSlug = slug(sheet.name);
-  const parsed = parseRows(sheet.worksheetPath, sharedStrings, parseImageAnchors(sheet.worksheetPath), sheetSlug, imageUrls);
+  const rawParsed = parseRows(sheet.worksheetPath, sharedStrings, parseImageAnchors(sheet.worksheetPath), sheetSlug, imageUrls);
   const name = displayNameByName.get(normalizedName) ?? cleanName(sheet.name);
   const kind = kindByName.get(normalizedName) ?? "stock";
-  const headers = headerPreset(kind, parsed.headers);
+  const parsed = normalizeParsedSheet(kind, normalizedName, rawParsed);
+  const headers = headerPreset(kind, parsed.headers, normalizedName);
   return {
     gid: sheetIdByName.get(normalizedName) ?? sheetSlug,
     name,
