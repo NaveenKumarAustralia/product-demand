@@ -2221,6 +2221,243 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
   );
 }
 
+// ─── Custom Colour Picker ────────────────────────────────────────────────────
+
+const _pickerRecentColors: string[] = [];
+
+function _hexToHsv(hex: string) {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  const v = max;
+  const sv = max === 0 ? 0 : d / max;
+  let h = 0;
+  if (d !== 0) {
+    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (max === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+  }
+  return { h: h * 360, s: sv * 100, v: v * 100 };
+}
+
+function _hsvToHex(h: number, s: number, v: number) {
+  h /= 360; s /= 100; v /= 100;
+  const i = Math.floor(h * 6), f = h * 6 - i;
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  let r = 0, g = 0, b = 0;
+  switch (i % 6) {
+    case 0: r = v; g = t; b = p; break;
+    case 1: r = q; g = v; b = p; break;
+    case 2: r = p; g = v; b = t; break;
+    case 3: r = p; g = q; b = v; break;
+    case 4: r = t; g = p; b = v; break;
+    case 5: r = v; g = p; b = q; break;
+  }
+  return "#" + [r, g, b].map((n) => Math.round(Math.max(0, Math.min(255, n * 255))).toString(16).padStart(2, "0")).join("");
+}
+
+function ColorPickerInput({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  disabled?: boolean;
+  onChange: (hex: string) => void;
+}) {
+  const safeHex = /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : "#000000";
+  const [open, setOpen] = useState(false);
+  const [hsv, setHsv] = useState(() => _hexToHsv(safeHex));
+  const [hexText, setHexText] = useState(safeHex.slice(1));
+  const containerRef = useRef<HTMLDivElement>(null);
+  const gradRef = useRef<HTMLDivElement>(null);
+  const hueRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef<"grad" | "hue" | null>(null);
+  const hsvRef = useRef(hsv);
+  hsvRef.current = hsv;
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!containerRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  useEffect(() => {
+    const applyGrad = (e: MouseEvent) => {
+      if (dragging.current !== "grad" || !gradRef.current) return;
+      const rect = gradRef.current.getBoundingClientRect();
+      const ns = Math.round(Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)));
+      const nv = Math.round(Math.max(0, Math.min(100, (1 - (e.clientY - rect.top) / rect.height) * 100)));
+      const next = { ...hsvRef.current, s: ns, v: nv };
+      setHsv(next);
+      const hex = _hsvToHex(next.h, next.s, next.v);
+      setHexText(hex.slice(1));
+      onChange(hex);
+    };
+    const applyHue = (e: MouseEvent) => {
+      if (dragging.current !== "hue" || !hueRef.current) return;
+      const rect = hueRef.current.getBoundingClientRect();
+      const nh = Math.round(Math.max(0, Math.min(360, ((e.clientY - rect.top) / rect.height) * 360)));
+      const next = { ...hsvRef.current, h: nh };
+      setHsv(next);
+      const hex = _hsvToHex(next.h, next.s, next.v);
+      setHexText(hex.slice(1));
+      onChange(hex);
+    };
+    const move = (e: MouseEvent) => { applyGrad(e); applyHue(e); };
+    const up = () => { dragging.current = null; };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+    return () => { document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); };
+  }, [onChange]);
+
+  const currentHex = _hsvToHex(hsv.h, hsv.s, hsv.v);
+  const hueHex = _hsvToHex(hsv.h, 100, 100);
+
+  const pickGrad = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ns = Math.round(Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)));
+    const nv = Math.round(Math.max(0, Math.min(100, (1 - (e.clientY - rect.top) / rect.height) * 100)));
+    const next = { ...hsv, s: ns, v: nv };
+    setHsv(next);
+    const hex = _hsvToHex(next.h, next.s, next.v);
+    setHexText(hex.slice(1));
+    onChange(hex);
+  };
+  const pickHue = (e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const nh = Math.round(Math.max(0, Math.min(360, ((e.clientY - rect.top) / rect.height) * 360)));
+    const next = { ...hsv, h: nh };
+    setHsv(next);
+    const hex = _hsvToHex(next.h, next.s, next.v);
+    setHexText(hex.slice(1));
+    onChange(hex);
+  };
+  const commitHex = () => {
+    const clean = hexText.replace("#", "").toLowerCase();
+    if (/^[0-9a-f]{6}$/.test(clean)) {
+      const hex = "#" + clean;
+      const next = _hexToHsv(hex);
+      setHsv(next);
+      onChange(hex);
+      if (!_pickerRecentColors.includes(hex)) {
+        _pickerRecentColors.unshift(hex);
+        if (_pickerRecentColors.length > 10) _pickerRecentColors.pop();
+      }
+    }
+  };
+  const pickRecent = (col: string) => {
+    const next = _hexToHsv(col);
+    setHsv(next);
+    setHexText(col.slice(1));
+    onChange(col);
+  };
+
+  return (
+    <div ref={containerRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => !disabled && setOpen((o) => !o)}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 8,
+          padding: "5px 10px 5px 6px",
+          border: "1px solid #d1d5db", borderRadius: 999,
+          background: "#f9fafb", cursor: disabled ? "not-allowed" : "pointer",
+          opacity: disabled ? 0.5 : 1, fontSize: 13, fontWeight: 700, color: "#111827",
+          minWidth: 130,
+        }}
+      >
+        <span style={{
+          width: 22, height: 22, borderRadius: "50%", background: safeHex, flexShrink: 0,
+          border: "2px solid rgba(0,0,0,0.15)", boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+        }} />
+        <span>#{hexText.toUpperCase()}</span>
+        <svg width="13" height="13" viewBox="0 0 16 16" style={{ marginLeft: "auto", opacity: 0.45 }}>
+          <path d="M2 14h3l8-8-3-3-8 8v3zm13-11l-2-2-1.5 1.5 2 2L15 3z" fill="currentColor" />
+        </svg>
+      </button>
+
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 1000,
+          background: "#fff", borderRadius: 14,
+          boxShadow: "0 8px 32px rgba(0,0,0,0.18)", border: "1px solid #e5e7eb",
+          padding: 12, width: 292,
+        }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <div
+              ref={gradRef}
+              style={{
+                flex: 1, height: 200, borderRadius: 8, position: "relative", cursor: "crosshair",
+                background: `linear-gradient(to bottom, transparent, #000), linear-gradient(to right, #fff, ${hueHex})`,
+                userSelect: "none",
+              }}
+              onMouseDown={(e) => { dragging.current = "grad"; pickGrad(e); }}
+            >
+              <div style={{
+                position: "absolute", left: `${hsv.s}%`, top: `${100 - hsv.v}%`,
+                width: 14, height: 14, borderRadius: "50%",
+                border: "2px solid #fff", boxShadow: "0 0 0 1.5px rgba(0,0,0,0.35)",
+                transform: "translate(-50%, -50%)", pointerEvents: "none",
+              }} />
+            </div>
+            <div
+              ref={hueRef}
+              style={{
+                width: 18, height: 200, borderRadius: 999, position: "relative",
+                cursor: "pointer", flexShrink: 0, userSelect: "none",
+                background: "linear-gradient(to bottom,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)",
+              }}
+              onMouseDown={(e) => { dragging.current = "hue"; pickHue(e); }}
+            >
+              <div style={{
+                position: "absolute", left: "50%", top: `${(hsv.h / 360) * 100}%`,
+                width: 24, height: 8, borderRadius: 999, background: hueHex,
+                border: "2px solid #fff", boxShadow: "0 0 0 1.5px rgba(0,0,0,0.35)",
+                transform: "translate(-50%, -50%)", pointerEvents: "none",
+              }} />
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <div style={{ width: 34, height: 34, borderRadius: 8, background: currentHex, border: "1px solid rgba(0,0,0,0.12)", flexShrink: 0 }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 4, flex: 1, border: "2px solid #2563eb", borderRadius: 8, padding: "6px 10px" }}>
+              <span style={{ color: "#6b7280", fontSize: 13, fontWeight: 700 }}>#</span>
+              <input
+                value={hexText.toUpperCase()}
+                maxLength={6}
+                onChange={(e) => setHexText(e.target.value.replace("#", ""))}
+                onBlur={commitHex}
+                onKeyDown={(e) => e.key === "Enter" && commitHex()}
+                style={{ border: "none", outline: "none", fontSize: 13, fontWeight: 700, width: "100%", background: "transparent" }}
+              />
+            </div>
+          </div>
+
+          {_pickerRecentColors.length > 0 && (
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", marginBottom: 6 }}>▸ Currently used</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                {_pickerRecentColors.map((col) => (
+                  <button key={col} type="button" title={col} onClick={() => pickRecent(col)} style={{
+                    width: 28, height: 28, borderRadius: 6, background: col, cursor: "pointer",
+                    border: col === currentHex ? "2px solid #2563eb" : "1px solid rgba(0,0,0,0.12)",
+                  }} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsPanel({
   users,
   currentUser,
@@ -2375,29 +2612,13 @@ function SettingsPanel({
           <div style={s.settingsInlineFields}>
             <label style={s.settingsFieldLabel}>
               Button colour
-              <input
-                type="color"
-                value={universalDraft.primaryButtonBg}
-                disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  primaryButtonBg: event.currentTarget.value,
-                }))}
-                style={s.colorInput}
-              />
+              <ColorPickerInput value={universalDraft.primaryButtonBg} disabled={!canManageUsers}
+                onChange={(hex) => setUniversalDraft((c) => ({ ...c, primaryButtonBg: hex }))} />
             </label>
             <label style={s.settingsFieldLabel}>
               Button text
-              <input
-                type="color"
-                value={universalDraft.primaryButtonColor}
-                disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  primaryButtonColor: event.currentTarget.value,
-                }))}
-                style={s.colorInput}
-              />
+              <ColorPickerInput value={universalDraft.primaryButtonColor} disabled={!canManageUsers}
+                onChange={(hex) => setUniversalDraft((c) => ({ ...c, primaryButtonColor: hex }))} />
             </label>
             <span style={{ ...s.buttonPreview, background: universalDraft.primaryButtonBg, color: universalDraft.primaryButtonColor }}>
               Button
@@ -2425,16 +2646,8 @@ function SettingsPanel({
             </label>
             <label style={s.settingsFieldLabel}>
               Text colour
-              <input
-                type="color"
-                value={universalDraft.tableTextColor}
-                disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  tableTextColor: event.currentTarget.value,
-                }))}
-                style={s.colorInput}
-              />
+              <ColorPickerInput value={universalDraft.tableTextColor} disabled={!canManageUsers}
+                onChange={(hex) => setUniversalDraft((c) => ({ ...c, tableTextColor: hex }))} />
             </label>
             <span style={{ ...s.qtyPreview, fontSize: universalDraft.tableTextSize, color: universalDraft.tableTextColor }}>
               Table text
@@ -2462,16 +2675,8 @@ function SettingsPanel({
             </label>
             <label style={s.settingsFieldLabel}>
               Heading colour
-              <input
-                type="color"
-                value={universalDraft.headingTextColor}
-                disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  headingTextColor: event.currentTarget.value,
-                }))}
-                style={s.colorInput}
-              />
+              <ColorPickerInput value={universalDraft.headingTextColor} disabled={!canManageUsers}
+                onChange={(hex) => setUniversalDraft((c) => ({ ...c, headingTextColor: hex }))} />
             </label>
             <span style={{ ...s.headingPreview, fontSize: universalDraft.headingTextSize, color: universalDraft.headingTextColor }}>
               Heading
@@ -2484,29 +2689,13 @@ function SettingsPanel({
           <div style={s.settingsInlineFields}>
             <label style={s.settingsFieldLabel}>
               Menu background
-              <input
-                type="color"
-                value={universalDraft.menuBg}
-                disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  menuBg: event.currentTarget.value,
-                }))}
-                style={s.colorInput}
-              />
+              <ColorPickerInput value={universalDraft.menuBg} disabled={!canManageUsers}
+                onChange={(hex) => setUniversalDraft((c) => ({ ...c, menuBg: hex }))} />
             </label>
             <label style={s.settingsFieldLabel}>
               Menu text
-              <input
-                type="color"
-                value={universalDraft.menuTextColor}
-                disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  menuTextColor: event.currentTarget.value,
-                }))}
-                style={s.colorInput}
-              />
+              <ColorPickerInput value={universalDraft.menuTextColor} disabled={!canManageUsers}
+                onChange={(hex) => setUniversalDraft((c) => ({ ...c, menuTextColor: hex }))} />
             </label>
             <span style={{ ...s.buttonPreview, background: universalDraft.menuBg, color: universalDraft.menuTextColor }}>
               Menu
@@ -2519,16 +2708,8 @@ function SettingsPanel({
           <div style={s.settingsInlineFields}>
             <label style={s.settingsFieldLabel}>
               Page background colour
-              <input
-                type="color"
-                value={universalDraft.pageBg}
-                disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  pageBg: event.currentTarget.value,
-                }))}
-                style={s.colorInput}
-              />
+              <ColorPickerInput value={universalDraft.pageBg} disabled={!canManageUsers}
+                onChange={(hex) => setUniversalDraft((c) => ({ ...c, pageBg: hex }))} />
             </label>
             <span style={{ ...s.buttonPreview, background: universalDraft.pageBg, color: "#111827", border: "1px solid #e5e7eb" }}>
               Page
@@ -2591,29 +2772,13 @@ function SettingsPanel({
             </label>
             <label style={s.settingsFieldLabel}>
               Font colour
-              <input
-                type="color"
-                value={restockDraft.quantityFontColor}
-                disabled={!canManageUsers}
-                onChange={(event) => setRestockDraft((current) => ({
-                  ...current,
-                  quantityFontColor: event.currentTarget.value,
-                }))}
-                style={s.colorInput}
-              />
+              <ColorPickerInput value={restockDraft.quantityFontColor} disabled={!canManageUsers}
+                onChange={(hex) => setRestockDraft((c) => ({ ...c, quantityFontColor: hex }))} />
             </label>
             <label style={s.settingsFieldLabel}>
               Inventory arrow colour
-              <input
-                type="color"
-                value={restockDraft.inventoryArrowColor}
-                disabled={!canManageUsers}
-                onChange={(event) => setRestockDraft((current) => ({
-                  ...current,
-                  inventoryArrowColor: event.currentTarget.value,
-                }))}
-                style={s.colorInput}
-              />
+              <ColorPickerInput value={restockDraft.inventoryArrowColor} disabled={!canManageUsers}
+                onChange={(hex) => setRestockDraft((c) => ({ ...c, inventoryArrowColor: hex }))} />
             </label>
             <span style={{ ...s.qtyPreview, fontSize: restockDraft.quantityFontSize, color: restockDraft.quantityFontColor }}>
               25
@@ -2657,26 +2822,10 @@ function RestockOptionsEditor({
               onChange={(event) => onChange(index, { label: event.currentTarget.value })}
               style={s.optionLabelInput}
             />
-            <label style={s.colorLabel}>
-              BG
-              <input
-                type="color"
-                value={option.bg}
-                disabled={disabled}
-                onChange={(event) => onChange(index, { bg: event.currentTarget.value })}
-                style={s.colorInput}
-              />
-            </label>
-            <label style={s.colorLabel}>
-              Text
-              <input
-                type="color"
-                value={option.color}
-                disabled={disabled}
-                onChange={(event) => onChange(index, { color: event.currentTarget.value })}
-                style={s.colorInput}
-              />
-            </label>
+            <ColorPickerInput value={option.bg} disabled={disabled}
+              onChange={(hex) => onChange(index, { bg: hex })} />
+            <ColorPickerInput value={option.color} disabled={disabled}
+              onChange={(hex) => onChange(index, { color: hex })} />
             <span style={{ ...s.optionPreview, background: option.bg, color: option.color }}>{option.label || "Option"}</span>
             <button type="button" disabled={disabled || options.length <= 1} style={s.removeUserButton} onClick={() => onRemove(index)}>
               Remove
