@@ -2086,14 +2086,16 @@ export default function PortalDashboard() {
         </header>
 
         {page === "settings" ? (
-          <SettingsPanel
-            users={users}
-            currentUser={currentUser}
-            loginRequired={loginRequired}
-            restockSettings={restockSettings}
-            universalSettings={universalSettings}
-            activityLogs={activityLogs}
-          />
+          <div style={{ display: "grid", gap: 16 }}>
+            <SettingsPanel
+              users={users}
+              currentUser={currentUser}
+              loginRequired={loginRequired}
+              restockSettings={restockSettings}
+              universalSettings={universalSettings}
+            />
+            <ActivityLogPanel activityLogs={activityLogs} />
+          </div>
         ) : page === "packing" ? (
           <PackingListsPanel
             packingLists={packingLists}
@@ -2227,14 +2229,12 @@ function SettingsPanel({
   loginRequired,
   restockSettings,
   universalSettings,
-  activityLogs,
 }: {
   users: PortalUser[];
   currentUser: PortalUser | null;
   loginRequired: boolean;
   restockSettings: RestockSettings;
   universalSettings: UniversalSettings;
-  activityLogs: { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date | string }[];
 }) {
   const settingsFetcher = useFetcher();
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
@@ -2625,7 +2625,6 @@ function SettingsPanel({
         </div>
       </section>
 
-      <ActivityLogPanel activityLogs={activityLogs} />
     </div>
   );
 }
@@ -2697,8 +2696,9 @@ function ActivityLogPanel({
   activityLogs: { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date | string }[];
 }) {
   const [expandedDate, setExpandedDate] = useState<string | null>(null);
+  const safeLog = Array.isArray(activityLogs) ? activityLogs : [];
 
-  const grouped = activityLogs.reduce<Record<string, typeof activityLogs>>((acc, log) => {
+  const grouped = safeLog.reduce<Record<string, typeof safeLog>>((acc, log) => {
     const dateKey = new Date(log.createdAt).toLocaleDateString("en-AU", {
       day: "2-digit", month: "short", year: "numeric",
     });
@@ -4580,7 +4580,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   settingsGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))",
+    gridTemplateColumns: "1fr 1fr",
     gap: 14,
     marginTop: 16,
   },
@@ -4597,18 +4597,19 @@ const s: Record<string, React.CSSProperties> = {
   settingsSubTitle: { margin: 0, fontSize: 14, color: "#111827" },
   optionRows: { display: "grid", gap: 8 },
   optionRow: {
-    display: "grid",
-    gridTemplateColumns: "minmax(200px, 1fr) auto auto auto auto",
-    gap: 8,
+    display: "flex",
     alignItems: "center",
+    gap: 8,
+    overflow: "hidden",
   },
   optionLabelInput: {
+    flex: 1,
+    minWidth: 0,
     border: "1px solid #cbd5e1",
     borderRadius: 7,
     padding: "8px 9px",
     fontSize: 13,
     fontWeight: 700,
-    minWidth: 0,
   },
   colorLabel: { display: "flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 800, color: "#4b5563" },
   colorInput: { width: 36, height: 32, padding: 1, border: "1px solid #cbd5e1", borderRadius: 6, background: "#fff" },
