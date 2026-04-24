@@ -928,9 +928,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const originalRows = [...sourceSheet.rows, ...(customRows[sourceSheet.gid] ?? [])];
       const row = originalRows[rowIndex]?.map((value, colIndex) => overrides[fabricCellKey(sourceSheet.gid, rowIndex, colIndex)] ?? value);
       if (!row) return null;
-      const sourceHeaderMap = new Map(sourceSheet.headers.map((header, index) => [normalizeFabricHeader(header), index]));
+      const sourceHeaderMap = new Map<string, number>();
+      for (const [index, header] of sourceSheet.headers.entries()) {
+        sourceHeaderMap.set(normalizeFabricHeader(header), index);
+        const role = fabricHeaderRole(header);
+        if (!sourceHeaderMap.has(role)) sourceHeaderMap.set(role, index);
+      }
       const movedRow = targetSheet.headers.map((header) => {
-        const sourceIndex = sourceHeaderMap.get(normalizeFabricHeader(header));
+        const sourceIndex = sourceHeaderMap.get(normalizeFabricHeader(header)) ?? sourceHeaderMap.get(fabricHeaderRole(header));
         return sourceIndex == null ? "" : row[sourceIndex] ?? "";
       });
       customRows[targetSheet.gid] = [...(customRows[targetSheet.gid] ?? []), movedRow];
@@ -1488,12 +1493,42 @@ function normalizeFabricHeader(header: string) {
   return header.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
+function fabricHeaderRole(header: string) {
+  const normalized = header.trim().toLowerCase();
+  if (/picture|image/.test(normalized) || normalized === "fabric" || normalized === "print") return "image";
+  if (/supplier/.test(normalized)) return "supplier";
+  if (/fabric\s*type|^type$/.test(normalized)) return "fabricType";
+  if (/name/.test(normalized)) return "name";
+  if (/planned.*date|date\s*ordered|order\s*date/.test(normalized)) return "date";
+  if (/(quantity\s*ordered|meters?\s*in\s*stock|meters?\s*available|^meters?$|^qty$)/.test(normalized)) return "quantity";
+  if (/quantity\s*received/.test(normalized)) return "received";
+  if (/status/.test(normalized)) return "status";
+  if (/eta/.test(normalized)) return "eta";
+  if (/cost|price/.test(normalized)) return "cost";
+  return normalizeFabricHeader(header);
+}
+
 function isHiddenFabricSheet(name: string) {
   return HIDDEN_FABRIC_SHEET_NAMES.has(normalizeFabricName(name));
 }
 
 function isFabricTotalsExcluded(name: string) {
   return FABRIC_TOTAL_EXCLUDED_NAMES.has(normalizeFabricName(name));
+}
+
+function shouldRestoreLostPeacockRow(gid: string, rowIndex: number) {
+  return gid === "1829736341" && (rowIndex === 1 || rowIndex === 2);
+}
+
+function isBrokenMovedOnOrderRow(sheet: FabricStockSheet, row: string[], rowIndex: number) {
+  if (sheet.gid !== "759049382" || rowIndex < sheet.rows.length) return false;
+  const pictureIndex = sheet.headers.findIndex((header) => fabricHeaderRole(header) === "image");
+  const quantityIndex = sheet.headers.findIndex((header) => fabricHeaderRole(header) === "quantity");
+  const supplierIndex = sheet.headers.findIndex((header) => fabricHeaderRole(header) === "supplier");
+  const fabricTypeIndex = sheet.headers.findIndex((header) => fabricHeaderRole(header) === "fabricType");
+  const hasSupplierAndType = Boolean(row[supplierIndex]?.trim()) && Boolean(row[fabricTypeIndex]?.trim());
+  const missingMovedFields = !row[pictureIndex]?.trim() && !row[quantityIndex]?.trim();
+  return hasSupplierAndType && missingMovedFields && row.slice(2).every((cell) => !String(cell ?? "").trim());
 }
 
 function normalizeFabricCellOverrides(value: unknown): Record<string, string> {
@@ -1590,7 +1625,8 @@ function getFabricSheets(overridesValue?: unknown, customRowsValue?: unknown, de
     const originalRows = [...sheet.rows, ...(customRows[sheet.gid] ?? [])];
     const rowEntries = originalRows
       .map((row, rowIndex) => ({ row, rowIndex }))
-      .filter(({ rowIndex }) => !deletedRows[fabricRowKey(sheet.gid, rowIndex)]);
+      .filter(({ row, rowIndex }) => !isBrokenMovedOnOrderRow(sheet, row, rowIndex))
+      .filter(({ rowIndex }) => !deletedRows[fabricRowKey(sheet.gid, rowIndex)] || shouldRestoreLostPeacockRow(sheet.gid, rowIndex));
     const rows = rowEntries.map(({ row, rowIndex }) => (
       row.map((value, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? value)
     ));
@@ -3111,6 +3147,7 @@ function FabricSheetsPanel({
   const totalQuantity = totalSheets.reduce((sum, sheet) => sum + (sheet.totalQuantity ?? 0), 0);
   const totalCostInr = totalSheets.reduce((sum, sheet) => sum + (sheet.totalCost ?? 0), 0);
   const totalCostAud = inrToAudRate && totalCostInr ? totalCostInr * inrToAudRate : null;
+  const [showTotalsHelp, setShowTotalsHelp] = useState(false);
 
   if (selectedSheet) {
     return (
@@ -3134,6 +3171,21 @@ function FabricSheetsPanel({
   return (
     <div style={s.fabricPage}>
       <div style={s.fabricTotalsBar}>
+        <span
+          style={s.fabricTotalsHelp}
+          onMouseEnter={() => setShowTotalsHelp(true)}
+          onMouseLeave={() => setShowTotalsHelp(false)}
+          onFocus={() => setShowTotalsHelp(true)}
+          onBlur={() => setShowTotalsHelp(false)}
+          tabIndex={0}
+        >
+          !
+          {showTotalsHelp && (
+            <span style={s.fabricTotalsHelpBubble}>
+              Totals do not include On Order, Fabric on Order, New Fabric on Order, Random Fabric Bits and Bobs, or Fabric Samples under consideration.
+            </span>
+          )}
+        </span>
         <span style={s.fabricTotalsItem}>
           <strong>{formatFabricNumber(totalQuantity)}</strong>
           <span>Total fabric</span>
@@ -3317,6 +3369,7 @@ function FabricCell({
   fabricSettings: FabricSettings;
 }) {
   const [draft, setDraft] = useState(value);
+  const [imageHover, setImageHover] = useState(false);
   useEffect(() => setDraft(value), [value]);
   const trimmed = draft.trim();
   const imageValue = isFabricImageValue(trimmed);
@@ -3356,6 +3409,10 @@ function FabricCell({
         <div
           tabIndex={0}
           style={s.fabricImageDrop}
+          onMouseEnter={() => setImageHover(true)}
+          onMouseLeave={() => setImageHover(false)}
+          onFocus={() => setImageHover(true)}
+          onBlur={() => setImageHover(false)}
           onPaste={(event) => {
             const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
             if (file) uploadImage(file);
@@ -3363,6 +3420,20 @@ function FabricCell({
           title="Paste or upload image"
         >
           {imageValue ? <img src={trimmed} alt="" style={s.fabricSheetImage} /> : <span>Paste image</span>}
+          {imageValue && (
+            <button
+              type="button"
+              style={{ ...s.imageDeleteOverlay, ...(imageHover ? s.imageDeleteOverlayVisible : {}) }}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setDraft("");
+                save("");
+              }}
+            >
+              Delete
+            </button>
+          )}
           <input
             type="file"
             accept="image/*"
@@ -3383,18 +3454,6 @@ function FabricCell({
             }}
           >
             Restore
-          </button>
-        )}
-        {imageValue && (
-          <button
-            type="button"
-            style={s.fabricMiniButton}
-            onClick={() => {
-              setDraft("");
-              save("");
-            }}
-          >
-            Delete image
           </button>
         )}
       </div>
@@ -4931,6 +4990,7 @@ function PackingSkuCell({ lineId, value }: { lineId: number; value: string }) {
 
 function PackingImageCell({ lineId, field, value }: { lineId: number; field: "productImageUrl" | "fabricImageData"; value: string }) {
   const fetcher = useFetcher();
+  const [imageHover, setImageHover] = useState(false);
 
   const saveFile = (file: File) => {
     const reader = new FileReader();
@@ -4954,6 +5014,10 @@ function PackingImageCell({ lineId, field, value }: { lineId: number; field: "pr
       <div
         tabIndex={0}
         style={s.fabricImageDrop}
+        onMouseEnter={() => setImageHover(true)}
+        onMouseLeave={() => setImageHover(false)}
+        onFocus={() => setImageHover(true)}
+        onBlur={() => setImageHover(false)}
         onPaste={(event) => {
           const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
           if (file) saveFile(file);
@@ -4961,6 +5025,19 @@ function PackingImageCell({ lineId, field, value }: { lineId: number; field: "pr
         title="Paste or upload image"
       >
         {value ? <img src={value} alt="" style={s.fabricThumb} /> : <span>Paste image</span>}
+        {value && (
+          <button
+            type="button"
+            style={{ ...s.imageDeleteOverlay, ...(imageHover ? s.imageDeleteOverlayVisible : {}) }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              clearImage();
+            }}
+          >
+            Delete
+          </button>
+        )}
         <input
           type="file"
           accept="image/*"
@@ -4972,11 +5049,6 @@ function PackingImageCell({ lineId, field, value }: { lineId: number; field: "pr
           }}
         />
       </div>
-      {value && (
-        <button type="button" style={s.fabricMiniButton} onClick={clearImage}>
-          Delete image
-        </button>
-      )}
     </div>
   );
 }
@@ -6531,13 +6603,15 @@ const s: Record<string, React.CSSProperties> = {
     padding: "0 0 4px",
   },
   packingThumb: { width: 108, height: 144, objectFit: "cover", borderRadius: 3 },
-  fabricThumb: { width: 120, height: 120, objectFit: "cover", borderRadius: 3 },
+  fabricThumb: { width: "100%", height: "100%", objectFit: "cover", borderRadius: 3 },
   fabricImageDrop: {
     position: "relative",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    minHeight: 120,
+    width: 128,
+    height: 172,
+    minHeight: 172,
     border: "1px dashed #94a3b8",
     borderRadius: 6,
     color: "#64748b",
@@ -6552,6 +6626,7 @@ const s: Record<string, React.CSSProperties> = {
     inset: 0,
     opacity: 0,
     cursor: "pointer",
+    zIndex: 1,
   },
   packingCellInput: {
     width: "100%",
@@ -6736,6 +6811,39 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: "var(--portal-table-font-size, 13px)",
     fontWeight: 800,
   },
+  fabricTotalsHelp: {
+    position: "relative",
+    width: 24,
+    height: 24,
+    borderRadius: "50%",
+    border: "1px solid #cbd5e1",
+    background: "#f8fafc",
+    color: "#374151",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: 13,
+    fontWeight: 900,
+    cursor: "help",
+    alignSelf: "center",
+    flex: "0 0 auto",
+  },
+  fabricTotalsHelpBubble: {
+    position: "absolute",
+    top: 30,
+    left: 0,
+    zIndex: 50,
+    width: 290,
+    padding: "10px 12px",
+    borderRadius: 8,
+    border: "1px solid #cbd5e1",
+    background: "#111827",
+    color: "#fff",
+    fontSize: 12,
+    lineHeight: 1.35,
+    fontWeight: 700,
+    boxShadow: "0 12px 28px rgba(15,23,42,0.22)",
+  },
   fabricIntro: {
     display: "flex",
     alignItems: "center",
@@ -6906,7 +7014,26 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 800,
     cursor: "pointer",
   },
-  fabricSheetImage: { width: 120, height: 120, objectFit: "cover", borderRadius: 6, border: "1px solid #e5e7eb" },
+  fabricSheetImage: { width: "100%", height: "100%", objectFit: "cover", borderRadius: 6, border: "1px solid #e5e7eb" },
+  imageDeleteOverlay: {
+    position: "absolute",
+    right: 8,
+    top: 8,
+    zIndex: 3,
+    border: "1px solid rgba(255,255,255,0.7)",
+    borderRadius: 999,
+    padding: "4px 8px",
+    background: "rgba(17,24,39,0.88)",
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: 900,
+    cursor: "pointer",
+    opacity: 0,
+    transition: "opacity 120ms ease",
+  },
+  imageDeleteOverlayVisible: {
+    opacity: 1,
+  },
   packingImageCell: {
     display: "grid",
     gap: 6,
