@@ -3136,6 +3136,7 @@ function FabricSheetsPanel({
   const selectedSheet = sheets.find((sheet) => sheet.gid === selectedGid) ?? null;
   const [orderedSheets, setOrderedSheets] = useState(sheets);
   const [dragGid, setDragGid] = useState<string | null>(null);
+  const [fabricNameSearch, setFabricNameSearch] = useState("");
   useEffect(() => setOrderedSheets(sheets), [sheets]);
   const saveTileOrder = (nextSheets: FabricSheetData[]) => {
     submitPortalCell(fetcher, {
@@ -3153,9 +3154,21 @@ function FabricSheetsPanel({
     return (
       <div style={s.fabricPage}>
         <div style={s.fabricToolbar}>
-          <button type="button" onClick={() => onSelect("")} style={s.secondaryButton}>
-            Back to fabric types
-          </button>
+          <div style={s.fabricToolbarLeft}>
+            <button type="button" onClick={() => onSelect("")} style={s.secondaryButton}>
+              Back to fabric types
+            </button>
+            <label style={s.fabricSearchLabel}>
+              Search fabric name
+              <input
+                type="search"
+                value={fabricNameSearch}
+                onChange={(event) => setFabricNameSearch(event.currentTarget.value)}
+                placeholder="Search by name"
+                style={s.fabricSearchInput}
+              />
+            </label>
+          </div>
           <div style={s.fabricToolbarMeta}>
             <strong>{selectedSheet.name}</strong>
             <span>{selectedSheet.rowCount} rows</span>
@@ -3163,7 +3176,13 @@ function FabricSheetsPanel({
             {selectedSheet.totalCost != null && <span>{formatCurrency(selectedSheet.totalCost)} fabric cost</span>}
           </div>
         </div>
-        <FabricSheetTable sheet={selectedSheet} sheets={sheets} fetcher={fetcher} fabricSettings={fabricSettings} />
+        <FabricSheetTable
+          sheet={selectedSheet}
+          sheets={sheets}
+          fetcher={fetcher}
+          fabricSettings={fabricSettings}
+          nameSearch={fabricNameSearch}
+        />
       </div>
     );
   }
@@ -3245,11 +3264,13 @@ function FabricSheetTable({
   sheets,
   fetcher,
   fabricSettings,
+  nameSearch,
 }: {
   sheet: FabricSheetData;
   sheets: FabricSheetData[];
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
+  nameSearch: string;
 }) {
   if (sheet.error) {
     return <div style={s.empty}>Unable to load {sheet.name}: {sheet.error}</div>;
@@ -3257,6 +3278,12 @@ function FabricSheetTable({
   if (!sheet.rows.length) {
     return <div style={s.empty}>No rows found for {sheet.name}.</div>;
   }
+
+  const nameIndex = sheet.headers.findIndex((header) => /^name$/i.test(header.trim()));
+  const searchText = nameSearch.trim().toLowerCase();
+  const displayRows = sheet.rows
+    .map((row, rowIndex) => ({ row, rowIndex, sourceRowIndex: sheet.rowKeys?.[rowIndex] ?? rowIndex }))
+    .filter(({ row }) => !searchText || (nameIndex >= 0 && String(row[nameIndex] ?? "").toLowerCase().includes(searchText)));
 
   return (
     <div style={s.fabricTableShell}>
@@ -3271,32 +3298,39 @@ function FabricSheetTable({
             </tr>
           </thead>
           <tbody>
-            {sheet.rows.map((row, rowIndex) => (
+            {displayRows.map(({ row, rowIndex, sourceRowIndex }, displayRowIndex) => (
               <tr key={rowIndex} style={s.row}>
                 {sheet.headers.map((_, colIndex) => (
-                  <FabricTd key={colIndex} rowIndex={rowIndex} colIndex={colIndex}>
+                  <FabricTd key={colIndex} rowIndex={displayRowIndex} colIndex={colIndex}>
                     <FabricCell
                       gid={sheet.gid}
-                      rowIndex={sheet.rowKeys?.[rowIndex] ?? rowIndex}
+                      rowIndex={sourceRowIndex}
                       colIndex={colIndex}
                       value={row[colIndex] ?? ""}
-                      originalValue={sheet.originalRows?.[sheet.rowKeys?.[rowIndex] ?? rowIndex]?.[colIndex] ?? ""}
+                      originalValue={sheet.originalRows?.[sourceRowIndex]?.[colIndex] ?? ""}
                       header={sheet.headers[colIndex] ?? ""}
                       fetcher={fetcher}
                       fabricSettings={fabricSettings}
                     />
                   </FabricTd>
                 ))}
-                <FabricTd rowIndex={rowIndex} colIndex={sheet.headers.length}>
+                <FabricTd rowIndex={displayRowIndex} colIndex={sheet.headers.length}>
                   <FabricRowActions
                     gid={sheet.gid}
-                    rowIndex={sheet.rowKeys?.[rowIndex] ?? rowIndex}
+                    rowIndex={sourceRowIndex}
                     sheets={sheets}
                     fetcher={fetcher}
                   />
                 </FabricTd>
               </tr>
             ))}
+            {!displayRows.length && (
+              <tr>
+                <td colSpan={sheet.headers.length + 1} style={{ ...s.fabricTd, padding: 24, textAlign: "center" }}>
+                  No fabric names match this search.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -3349,6 +3383,13 @@ function isFabricImageValue(value: string) {
   return /^data:image\//i.test(value.trim()) || /^(?:https?:\/\/|\/).+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(value.trim());
 }
 
+function isNumericFabricCell(header: string, value: string) {
+  const normalizedHeader = header.trim().toLowerCase();
+  if (/cost|price|meter|quantity|received|products|^k$|^l$|additional/.test(normalizedHeader)) return true;
+  const trimmed = value.trim();
+  return Boolean(trimmed) && /^[-₹$]?\d[\d,]*(?:\.\d+)?$/.test(trimmed);
+}
+
 function FabricCell({
   gid,
   rowIndex,
@@ -3382,6 +3423,7 @@ function FabricCell({
       : null;
   const chipOption = chipOptions?.find((option) => option.label === draft || option.value === slugForOption(draft));
   const multiline = draft.includes("\n") || draft.length > 34;
+  const centerValue = isNumericFabricCell(header, draft);
   const save = (nextValue: string) => {
     if (nextValue === value) return;
     submitPortalCell(fetcher, {
@@ -3491,7 +3533,10 @@ function FabricCell({
     value: draft,
     onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(event.currentTarget.value),
     onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => save(event.currentTarget.value),
-    style: multiline ? s.fabricCellTextarea : s.fabricCellInput,
+    style: {
+      ...(multiline ? s.fabricCellTextarea : s.fabricCellInput),
+      ...(centerValue ? s.fabricNumberCellInput : {}),
+    },
     placeholder: "—",
   };
 
@@ -6898,6 +6943,31 @@ const s: Record<string, React.CSSProperties> = {
     borderRadius: 10,
   },
   fabricToolbarMeta: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", color: "#6b7280", fontSize: 13, fontWeight: 700 },
+  fabricToolbarLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    flexWrap: "wrap",
+  },
+  fabricSearchLabel: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    color: "#6b7280",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+  fabricSearchInput: {
+    width: 220,
+    border: "1px solid #cbd5e1",
+    borderRadius: 8,
+    padding: "8px 10px",
+    background: "#fff",
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: 700,
+    outline: "none",
+  },
   fabricTableShell: {
     display: "grid",
     gap: 10,
@@ -6958,6 +7028,9 @@ const s: Record<string, React.CSSProperties> = {
     font: "inherit",
     fontWeight: 700,
     lineHeight: 1.35,
+  },
+  fabricNumberCellInput: {
+    textAlign: "center",
   },
   fabricImageEditCell: {
     display: "grid",

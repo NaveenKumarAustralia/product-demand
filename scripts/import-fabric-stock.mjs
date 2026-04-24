@@ -192,11 +192,13 @@ function parseRows(sheetPath, sharedStrings, imageAnchors, sheetSlug, imageUrls)
     const rowNumber = Number(attr(rowMatch[1], "r"));
     if (!Number.isFinite(rowNumber)) continue;
     const row = [];
-    for (const cellMatch of rowMatch[2].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
-      const ref = attr(cellMatch[1], "r");
+    for (const cellMatch of rowMatch[2].matchAll(/<c\b([^>]*)\/>|<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const cellAttrs = cellMatch[1] ?? cellMatch[2] ?? "";
+      const cellBody = cellMatch[3] ?? "";
+      const ref = attr(cellAttrs, "r");
       const index = columnIndex(ref);
-      const type = attr(cellMatch[1], "t");
-      const rawValue = cellMatch[2].match(/<v>([\s\S]*?)<\/v>/)?.[1] ?? "";
+      const type = attr(cellAttrs, "t");
+      const rawValue = cellBody.match(/<v>([\s\S]*?)<\/v>/)?.[1] ?? "";
       if (!rawValue) {
         row[index] = "";
       } else if (type === "s") {
@@ -217,7 +219,14 @@ function parseRows(sheetPath, sharedStrings, imageAnchors, sheetSlug, imageUrls)
     const outputName = `${sourceBase}.jpg`;
     imageUrls.set(mediaPath, `/fabric-stock/images/${outputName}`);
     const row = rows.get(rowNumber) ?? [];
-    row[col] = `/fabric-stock/images/${outputName}`;
+    const imageCell = `/fabric-stock/images/${outputName}`;
+    if (String(row[col] ?? "").trim()) {
+      const nearbyEmptyCol = [col - 1, col + 1, col - 2, col + 2]
+        .find((candidate) => candidate >= 0 && !String(row[candidate] ?? "").trim());
+      row[nearbyEmptyCol ?? col] = imageCell;
+    } else {
+      row[col] = imageCell;
+    }
     rows.set(rowNumber, row);
   }
 
