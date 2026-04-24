@@ -21,7 +21,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const restockProductSearch = url.searchParams.get("restockProductSearch") ?? "";
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, restockSettingsSetting, universalSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists] = await Promise.all([
+  const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, restockSettingsSetting, universalSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -59,15 +60,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       orderBy: { createdAt: "desc" },
       include: { lines: { orderBy: [{ boxNumber: "asc" }, { sortOrder: "asc" }, { id: "asc" }] } },
     }),
+    prisma.portalSetting.findUnique({ where: { key: PORTAL_NAV_ORDER_KEY }, select: { value: true } }),
   ]);
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-  const activityLogs = page === "settings"
-    ? await prisma.activityLog.findMany({
-        where: { createdAt: { gte: ninetyDaysAgo } },
-        orderBy: { createdAt: "desc" },
-        take: 1000,
-      }).catch(() => [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[])
-    : [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[];
+  const activityLogs = await prisma.activityLog.findMany({
+      where: { createdAt: { gte: ninetyDaysAgo } },
+      orderBy: { createdAt: "desc" },
+      take: 1000,
+    }).catch(() => [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[]);
   const users = normalizePortalUsers(usersSetting?.value);
   const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
   const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
@@ -115,6 +115,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         take: 25,
       })
     : [];
+  const fabricSheets = page === "fabric"
+    ? await fetchFabricSheets(selectedFabricTab)
+    : [];
 
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","M","L","XL","2XL","3XL","S-M","M-L","L-XL","S/M","M/L","L/XL","4XL","ONE SIZE"];
@@ -130,6 +133,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     if (bi === -1) return -1;
     return ai - bi;
   });
+
+  const rawNavOrder = Array.isArray(navOrderSetting?.value) ? navOrderSetting.value as string[] : DEFAULT_NAV_ORDER;
+  const navOrder = DEFAULT_NAV_ORDER.map((id) => id as NavItemId)
+    .sort((a, b) => {
+      const ai = rawNavOrder.indexOf(a);
+      const bi = rawNavOrder.indexOf(b);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
 
   return {
     orders,
@@ -162,6 +173,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     messageOrderId,
     loginBlocked: loginRequired && users.length > 0 && !currentUser,
     activityLogs,
+    navOrder,
+    fabricSheets,
+    selectedFabricTab,
   };
 };
 
@@ -468,13 +482,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const lineId = Number(form.get("lineId"));
     const size = String(form.get("size") ?? "");
     const value = Math.max(0, Number(form.get("value") ?? 0) || 0);
-    const line = await prisma.packingListLine.findUnique({ where: { id: lineId }, select: { qtys: true, shopifyLoadedQtys: true } });
+    const line = await prisma.packingListLine.findUnique({ where: { id: lineId }, select: { qtys: true, shopifyLoadedQtys: true, productTitle: true } });
     if (!line || !size) return null;
     const qtys = normalizeQtys(line.qtys);
     const shopifyLoadedQtys = normalizeQtys(line.shopifyLoadedQtys);
+    const previousQty = qtys[size] ?? 0;
     qtys[size] = value;
     delete shopifyLoadedQtys[size];
     await prisma.packingListLine.update({ where: { id: lineId }, data: { qtys, shopifyLoadedQtys } });
+    if (value !== previousQty) {
+      await logActivity(currentUser?.name ?? "Unknown", "Updated", "Packing List Line", {
+        entityId: String(lineId),
+        entityName: line.productTitle || `Line #${lineId}`,
+        field: `Qty (${size})`,
+        toValue: String(value),
+      });
+    }
     return null;
   }
 
@@ -630,17 +653,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!product?.id || !product.title) return null;
     const fallbackSession = product.shop
       ? null
-      : await prisma.session.findFirst({
-          where: { accessToken: { not: "" } },
-          orderBy: { isOnline: "asc" },
-        });
+      : await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } });
     const shop = product.shop ?? fallbackSession?.shop ?? "";
     if (!shop) return null;
+
     const variants = product.variants?.length
       ? product.variants
-      : shop
-        ? await getShopifyProductVariants(shop, product.id)
-        : [];
+      : shop ? await getShopifyProductVariants(shop, product.id) : [];
     if (!variants.length) return null;
 
     const totalQty = variants.reduce((sum, variant) => sum + (qtys[variant.title] ?? 0), 0);
@@ -763,6 +782,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_nav_order") {
+    try {
+      const order = JSON.parse(String(form.get("value") ?? "[]"));
+      if (Array.isArray(order)) {
+        await prisma.portalSetting.upsert({
+          where: { key: PORTAL_NAV_ORDER_KEY },
+          create: { key: PORTAL_NAV_ORDER_KEY, value: order },
+          update: { value: order },
+        });
+      }
+    } catch { /* ignore */ }
+    return null;
+  }
+
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
   if (intent === "update_product_type")  updates.productType = normalizeProductGroup(String(form.get("value") ?? "")) || null;
@@ -780,7 +813,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const qtyOrdered = Math.max(0, Number(form.get("value") ?? 0) || 0);
     const orderForVariant = await prisma.supplierOrder.findUnique({
       where: { id: orderId },
-      select: { shop: true, productId: true },
+      select: { shop: true, productId: true, productTitle: true },
     });
     const matchingVariant = orderForVariant
       ? matchingVariantForSize(await getShopifyProductVariants(orderForVariant.shop, orderForVariant.productId), size)
@@ -788,8 +821,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const existingLines = await prisma.orderLine.findMany({
       where: { orderId, variantTitle: size },
       orderBy: { id: "asc" },
-      select: { id: true, variantId: true },
+      select: { id: true, variantId: true, qtyOrdered: true },
     });
+
+    const previousQty = existingLines.length ? existingLines[0].qtyOrdered : 0;
 
     await prisma.$transaction(async (tx) => {
       const lines = existingLines;
@@ -834,6 +869,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         data: { totalQty: allLines.reduce((sum, line) => sum + line.qtyOrdered, 0) },
       });
     });
+
+    if (qtyOrdered !== previousQty) {
+      await logActivity(currentUser?.name ?? "Unknown", "Updated", "Restock Order", {
+        entityId: String(orderId),
+        entityName: orderForVariant?.productTitle ?? `Order #${orderId}`,
+        field: `Qty (${size})`,
+        toValue: String(qtyOrdered),
+      });
+    }
 
     return null;
   }
@@ -999,6 +1043,50 @@ const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
 const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
 const UNIVERSAL_SETTINGS_KEY = "production-portal-universal-settings-v1";
+const PORTAL_NAV_ORDER_KEY = "production-portal-nav-order-v1";
+const ALL_NAV_ITEMS = [
+  { id: "dashboard", label: "Dashboard", href: "/portal?page=dashboard" },
+  { id: "restock", label: "Existing Products Restock", href: "/portal" },
+  { id: "fabric", label: "Fabric in stock", href: "/portal?page=fabric" },
+  { id: "packing", label: "Packing Lists", href: "/portal?page=packing" },
+  { id: "pricelist", label: "Price List", href: "/portal?page=pricelist" },
+  { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
+  { id: "samples", label: "Samples", href: "/portal?page=samples" },
+  { id: "newproduct", label: "New Product Orders", href: "/portal?page=newproduct" },
+] as const;
+type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct"];
+const FABRIC_SHEET_ID = "1FavnxWwRsEcMDWm3v7_FdMWeeX93adnvpZGr_Tn6wJ4";
+const FABRIC_SHEET_TABS = [
+  { gid: "759049382", name: "On Order", kind: "order" },
+  { gid: "390729206", name: "Fabric Samples under consideration", kind: "order" },
+  { gid: "1829736341", name: "60x60 Printed", kind: "stock" },
+  { gid: "0", name: "40x40 Printed", kind: "stock" },
+  { gid: "128048837", name: "Velvet", kind: "stock" },
+  { gid: "1670965992", name: "Rayon", kind: "stock" },
+  { gid: "1949735348", name: "Thick Cord", kind: "stock" },
+  { gid: "1128806463", name: "New Fabric on Order", kind: "wide-order" },
+  { gid: "2123625779", name: "Gorge (Double Fabric)", kind: "stock" },
+  { gid: "1972131020", name: "Plain 40x40", kind: "stock" },
+  { gid: "362283931", name: "Plain 60x60", kind: "stock" },
+  { gid: "1240512146", name: "Cotton Drill", kind: "simple-stock" },
+  { gid: "2008557105", name: "Thick Self Black", kind: "simple-stock" },
+  { gid: "1939488240", name: "Seersucker", kind: "simple-stock" },
+  { gid: "246387032", name: "Random Fabrics Bits and Bobs", kind: "random" },
+  { gid: "700159838", name: "Voil", kind: "stock" },
+  { gid: "2030572043", name: "Fabric on Order", kind: "wide-order" },
+] as const;
+type FabricSheetTab = typeof FABRIC_SHEET_TABS[number];
+type FabricSheetData = {
+  gid: string;
+  name: string;
+  kind: string;
+  headers: string[];
+  rows: string[][];
+  rowCount: number;
+  totalQuantity: number | null;
+  error?: string;
+};
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
 const PORTAL_USERS_KEY = "supplier-portal-users-v1";
@@ -1048,6 +1136,7 @@ type UniversalSettings = {
   menuBg: string;
   menuTextColor: string;
   pageBg: string;
+  logoUrl: string;
 };
 type ShopifySearchProduct = {
   id: string;
@@ -1167,7 +1256,144 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
     menuBg: normalizeHexColor(settings.menuBg, "#111827"),
     menuTextColor: normalizeHexColor(settings.menuTextColor, "#cbd5e1"),
     pageBg: normalizeHexColor(settings.pageBg, "#f3f4f6"),
+    logoUrl: typeof settings.logoUrl === "string" ? settings.logoUrl : "",
   };
+}
+
+async function fetchFabricSheets(selectedGid: string): Promise<FabricSheetData[]> {
+  const tabs = FABRIC_SHEET_TABS;
+  const selected = selectedGid ? tabs.find((tab) => tab.gid === selectedGid) : null;
+  const tabsToLoad = selected ? tabs : tabs;
+
+  return Promise.all(tabsToLoad.map(fetchFabricSheet));
+}
+
+async function fetchFabricSheet(tab: FabricSheetTab): Promise<FabricSheetData> {
+  const url = `https://docs.google.com/spreadsheets/d/${FABRIC_SHEET_ID}/gviz/tq?tqx=out:json&gid=${encodeURIComponent(tab.gid)}`;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Google Sheets returned ${response.status}`);
+    const payload = parseGoogleVisualizationResponse(await response.text());
+    return normalizeFabricSheet(tab, payload?.table);
+  } catch (error) {
+    return {
+      gid: tab.gid,
+      name: tab.name,
+      kind: tab.kind,
+      headers: [],
+      rows: [],
+      rowCount: 0,
+      totalQuantity: null,
+      error: error instanceof Error ? error.message : "Unable to load sheet",
+    };
+  }
+}
+
+function parseGoogleVisualizationResponse(text: string): any {
+  const jsonText = text
+    .replace(/^\/\*O_o\*\/\s*google\.visualization\.Query\.setResponse\(/, "")
+    .replace(/\);\s*$/, "");
+  return JSON.parse(jsonText);
+}
+
+function normalizeFabricSheet(tab: FabricSheetTab, table: any): FabricSheetData {
+  const rawHeaders = (table?.cols || []).map((col: any, index: number) => cleanFabricHeader(col?.label || columnName(index)));
+  const headers = headerPresetForFabricTab(tab, rawHeaders).slice(0, usefulColumnCount(rawHeaders, table?.rows || []));
+  const rows = (table?.rows || [])
+    .map((row: any) => (row?.c || []).slice(0, headers.length).map(fabricCellValue))
+    .filter((row: string[]) => row.some((value) => value.trim() !== ""));
+  const totalQuantity = sumFabricQuantity(headers, table?.rows || [], rows.length);
+
+  return {
+    gid: tab.gid,
+    name: tab.name,
+    kind: tab.kind,
+    headers,
+    rows,
+    rowCount: rows.length,
+    totalQuantity,
+  };
+}
+
+function headerPresetForFabricTab(tab: FabricSheetTab, rawHeaders: string[]) {
+  if (tab.kind === "order") {
+    return [
+      "Supplier", "Fabric Type", "Picture", "Planned Release Date", "Name",
+      "Quantity Ordered", "Quantity Received", "Order Date", "Status", "ETA",
+    ];
+  }
+  if (tab.kind === "stock") {
+    return [
+      "Supplier", "Fabric Type", "Fabric", "Name", "Cost per Meter", "Meters in Stock",
+      "Cut Pieces", "Received / Date", "Products", "Notes",
+    ];
+  }
+  if (tab.kind === "simple-stock") {
+    return [
+      "Fabric", "Name", "Price", "Meters Available", "Additional Quantity",
+      "Meters Received", "Products", "Notes", "Supplier",
+    ];
+  }
+  return rawHeaders.map((header, index) => header || columnName(index));
+}
+
+function usefulColumnCount(headers: string[], rows: any[]) {
+  let last = headers.findLastIndex((header) => header && !/^[A-Z]+$/.test(header));
+  for (const row of rows) {
+    const cells = row?.c || [];
+    for (let index = cells.length - 1; index >= 0; index -= 1) {
+      if (cells[index]?.v != null && String(cells[index].v).trim() !== "") {
+        last = Math.max(last, index);
+        break;
+      }
+    }
+  }
+  return Math.max(1, Math.min(last + 1, 12));
+}
+
+function fabricCellValue(cell: any) {
+  if (!cell || cell.v == null) return "";
+  if (cell.f != null) return String(cell.f);
+  if (typeof cell.v === "string") {
+    const dateMatch = cell.v.match(/^Date\((\d+),(\d+),(\d+)\)$/);
+    if (dateMatch) {
+      const [, y, m, d] = dateMatch;
+      return new Date(Number(y), Number(m), Number(d)).toLocaleDateString("en-AU", {
+        day: "2-digit",
+        month: "short",
+        year: "numeric",
+      });
+    }
+  }
+  return String(cell.v);
+}
+
+function cleanFabricHeader(value: string) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function columnName(index: number) {
+  let n = index + 1;
+  let out = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+function sumFabricQuantity(headers: string[], rawRows: any[], rowCount: number) {
+  const quantityIndexes = headers
+    .map((header, index) => ({ header: header.toLowerCase(), index }))
+    .filter(({ header }) => /(meter|qty|quantity|ordered|stock|available)/.test(header) && !/(date|cost|price)/.test(header))
+    .map(({ index }) => index);
+  if (!quantityIndexes.length) return rowCount || null;
+  const total = rawRows.reduce((sum: number, row: any) => {
+    const cells = row?.c || [];
+    return sum + quantityIndexes.reduce((cellSum, index) => cellSum + (typeof cells[index]?.v === "number" ? cells[index].v : 0), 0);
+  }, 0);
+  return total > 0 ? total : rowCount || null;
 }
 
 function getCookieValue(request: Request, key: string) {
@@ -1464,13 +1690,14 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
             id
             title
             featuredImage { url }
-            variants(first: 50) {
+            variants(first: 100) {
               edges {
                 node {
                   id
                   title
                   sku
                   inventoryQuantity
+                  selectedOptions { name value }
                 }
               }
             }
@@ -1480,23 +1707,42 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
     }
   `;
 
+  const VALID_SIZES = new Set(["XS", "S", "M", "L", "XL", "2XL", "3XL", "S-M", "M-L", "L-XL"]);
+
   const mapProducts = (json: any) => (json.data?.products?.edges ?? []).map((edge: any) => {
-    const variants = edge.node.variants.edges.map((variantEdge: any) => variantEdge.node);
+    const rawVariants: any[] = edge.node.variants.edges.map((variantEdge: any) => variantEdge.node);
+
+    const seen = new Set<string>();
+    const sizeVariants = rawVariants
+      .map((v: any) => {
+        // Extract each option value and check if it's a valid size
+        const sizeValue: string | null =
+          (v.selectedOptions as { name: string; value: string }[] | undefined)
+            ?.map((o) => o.value)
+            .find((val) => VALID_SIZES.has(val)) ?? null;
+        return { raw: v, sizeValue };
+      })
+      .filter(({ sizeValue }) => {
+        if (!sizeValue || seen.has(sizeValue)) return false;
+        seen.add(sizeValue);
+        return true;
+      })
+      .map(({ raw: v, sizeValue }) => ({
+        id: String(v.id ?? ""),
+        title: sizeValue as string,
+        sku: v.sku ? String(v.sku) : null,
+        availableInventory: Number.isFinite(Number(v.inventoryQuantity)) ? Number(v.inventoryQuantity) : null,
+      }))
+      .filter((v: ShopifyVariantInfo) => v.id && v.title);
+
     return {
       id: edge.node.id,
       shop: session.shop,
       title: edge.node.title,
       imageUrl: edge.node.featuredImage?.url ?? null,
-      skus: variants.map((variant: any) => variant.sku).filter(Boolean),
-      sizes: Array.from(new Set(variants.map((variant: any) => variant.title).filter(Boolean))),
-      variants: variants
-        .map((variant: any) => ({
-          id: String(variant.id ?? ""),
-          title: String(variant.title ?? ""),
-          sku: variant.sku ? String(variant.sku) : null,
-          availableInventory: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null,
-        }))
-        .filter((variant: ShopifyVariantInfo) => variant.id && variant.title),
+      skus: Array.from(new Set(sizeVariants.map((v: ShopifyVariantInfo) => v.sku).filter(Boolean))),
+      sizes: sizeVariants.map((v: ShopifyVariantInfo) => v.title),
+      variants: sizeVariants,
     };
   });
 
@@ -1876,11 +2122,27 @@ export default function PortalDashboard() {
     messageOrderId,
     loginBlocked,
     activityLogs,
+    navOrder,
+    fabricSheets,
+    selectedFabricTab,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
+  const [showAddRow, setShowAddRow] = useState(false);
+  const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
+  const [selectedAddCategory, setSelectedAddCategory] = useState<string | null>(null);
+  const [newCategoryInput, setNewCategoryInput] = useState("");
+  const [showNewCategoryInput, setShowNewCategoryInput] = useState(false);
+  const [historyMenu, setHistoryMenu] = useState<{ x: number; y: number; entity: string; entityId: string; field: string; entityName: string } | null>(null);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { x: number; y: number; entity: string; entityId: string; field: string; entityName: string };
+      setHistoryMenu(detail);
+    };
+    document.addEventListener("show-cell-history", handler);
+    return () => document.removeEventListener("show-cell-history", handler);
+  }, []);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
@@ -1916,15 +2178,16 @@ export default function PortalDashboard() {
     }, 350);
     return () => window.clearTimeout(timer);
   }, [searchTitleInput, searchTitle]);
-  const activePageTitle = page === "dashboard"
-    ? "Dashboard"
-    : page === "fabric"
-      ? "Fabric in stock"
-      : page === "settings"
-        ? "Settings"
-        : page === "packing"
-          ? "Packing Lists"
-        : selectedProductGroup || "Existing Products Restock";
+  const activePageTitle = page === "dashboard" ? "Dashboard"
+    : page === "fabric" ? "Fabric in stock"
+    : page === "settings" ? "Settings"
+    : page === "packing" ? "Packing Lists"
+    : page === "pricelist" ? "Price List"
+    : page === "productinfo" ? "Product Information"
+    : page === "samples" ? "Samples"
+    : page === "newproduct" ? "New Product Orders"
+    : selectedProductGroup || "Existing Products Restock";
+  const orderedNavItems = navOrder.map((id) => ALL_NAV_ITEMS.find((item) => item.id === id)).filter(Boolean) as typeof ALL_NAV_ITEMS[number][];
 
   if (loginBlocked) {
     return <PortalLogin users={users} />;
@@ -1974,39 +2237,24 @@ export default function PortalDashboard() {
         "--portal-heading-text-color": universalSettings.headingTextColor,
       } as React.CSSProperties}
     >
-      <aside style={{ ...s.sidebar, ...(sidebarCollapsed ? s.sidebarCollapsed : {}), background: universalSettings.menuBg, color: universalSettings.menuTextColor }}>
-        <div style={sidebarCollapsed ? s.sidebarTopCollapsed : s.sidebarTop}>
-          {!sidebarCollapsed && <div style={s.sidebarTitle}>Production Portal</div>}
-          <button
-            type="button"
-            onClick={() => setSidebarCollapsed((current) => !current)}
-            style={s.collapseButton}
-            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          >
-            {sidebarCollapsed ? ">" : "<"}
-          </button>
-        </div>
-        {sidebarCollapsed ? (
-          <>
-            <nav style={s.iconNav}>
-              <a title="Dashboard" href="/portal?page=dashboard" style={{ ...s.iconNavItem, ...(page === "dashboard" ? s.iconNavItemActive : {}) }}>D</a>
-              <a title="Existing Products Restock" href="/portal" style={{ ...s.iconNavItem, ...(page === "restock" && !selectedProductGroup ? s.iconNavItemActive : {}) }}>R</a>
-              <a title="Fabric in stock" href="/portal?page=fabric" style={{ ...s.iconNavItem, ...(page === "fabric" ? s.iconNavItemActive : {}) }}>F</a>
-              <a title="Packing Lists" href="/portal?page=packing" style={{ ...s.iconNavItem, ...(page === "packing" ? s.iconNavItemActive : {}) }}>P</a>
-            </nav>
-            <a title="Settings" href="/portal?page=settings" style={{ ...s.iconNavItem, ...(page === "settings" ? s.iconNavItemActive : {}), ...s.settingsLink }}>S</a>
-          </>
-        ) : (
-          <>
-            <nav style={s.nav}>
-              <a href="/portal?page=dashboard" style={{ ...s.navItem, ...(page === "dashboard" ? s.navItemActive : {}) }}>Dashboard</a>
-              <a href="/portal" style={{ ...s.navItem, ...(page === "restock" && !selectedProductGroup ? s.navItemActive : {}) }}>Existing Products Restock</a>
-              <a href="/portal?page=fabric" style={{ ...s.navItem, ...(page === "fabric" ? s.navItemActive : {}) }}>Fabric in stock</a>
-              <a href="/portal?page=packing" style={{ ...s.navItem, ...(page === "packing" ? s.navItemActive : {}) }}>Packing Lists</a>
-            </nav>
-            <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), ...s.settingsLink }}>Settings</a>
-          </>
+      <aside style={{ ...s.sidebar, background: universalSettings.menuBg, color: universalSettings.menuTextColor }}>
+        {universalSettings.logoUrl && (
+          <div style={{ padding: "2px 14px 0" }}>
+            <img src={universalSettings.logoUrl} alt="Logo" style={{ maxWidth: "100%", display: "block", borderRadius: 6 }} />
+          </div>
         )}
+        <div style={{ ...s.sidebarTop, ...(universalSettings.logoUrl ? { marginTop: 14 } : {}) }}>
+          <div style={s.sidebarTitle}>Production Portal</div>
+        </div>
+        <nav style={s.nav}>
+          {orderedNavItems.map((item) => {
+            const isActive = item.id === "restock" ? (page === "restock" && !selectedProductGroup) : page === item.id;
+            return (
+              <a key={item.id} href={item.href} style={{ ...s.navItem, ...(isActive ? s.navItemActive : {}) }}>{item.label}</a>
+            );
+          })}
+        </nav>
+        <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), ...s.settingsLink }}>Settings</a>
       </aside>
 
       <main style={s.main}>
@@ -2017,16 +2265,18 @@ export default function PortalDashboard() {
           <div style={s.headerControls}>
             <div style={s.utilityBar}>
               {page === "restock" && (
-                <label style={s.filterLabel}>
-                  Search
-                  <input
-                    type="search"
-                    value={searchTitleInput}
-                    onChange={(event) => setSearchTitleInput(event.currentTarget.value)}
-                    style={s.searchInput}
-                    placeholder="Product title"
-                  />
-                </label>
+                <>
+                  <label style={s.filterLabel}>
+                    Search
+                    <input
+                      type="search"
+                      value={searchTitleInput}
+                      onChange={(event) => setSearchTitleInput(event.currentTarget.value)}
+                      style={s.searchInput}
+                      placeholder="Product title"
+                    />
+                  </label>
+                </>
               )}
               <MessagesMenu messages={messages} />
               <div style={s.activeUsers} title="Currently active">
@@ -2037,7 +2287,7 @@ export default function PortalDashboard() {
               </div>
             </div>
             {page === "restock" && (
-              <div style={s.filters}>
+              <div style={{ ...s.filters, position: "relative" }}>
                 <label style={s.filterLabel}>
                   Product group
                   <select
@@ -2078,6 +2328,38 @@ export default function PortalDashboard() {
                     ))}
                   </select>
                 </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCategoryDropdown((open) => !open);
+                    setShowNewCategoryInput(false);
+                    setNewCategoryInput("");
+                  }}
+                  style={s.addProductButton}
+                >
+                  + Add product
+                </button>
+                {showCategoryDropdown && (
+                  <CategoryDropdown
+                    productGroups={productGroups}
+                    showNewCategoryInput={showNewCategoryInput}
+                    newCategoryInput={newCategoryInput}
+                    onNewCategoryInput={setNewCategoryInput}
+                    onShowNewCategory={() => setShowNewCategoryInput(true)}
+                    onSelect={(category) => {
+                      setSelectedAddCategory(category);
+                      setShowCategoryDropdown(false);
+                      setShowNewCategoryInput(false);
+                      setNewCategoryInput("");
+                      setShowAddRow(true);
+                    }}
+                    onClose={() => {
+                      setShowCategoryDropdown(false);
+                      setShowNewCategoryInput(false);
+                      setNewCategoryInput("");
+                    }}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -2104,6 +2386,12 @@ export default function PortalDashboard() {
             productResults={productResults}
             updateParams={updateParams}
           />
+        ) : page === "fabric" ? (
+          <FabricSheetsPanel
+            sheets={fabricSheets}
+            selectedGid={selectedFabricTab}
+            onSelect={(gid) => updateParams({ fabricTab: gid })}
+          />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : (
@@ -2127,22 +2415,40 @@ export default function PortalDashboard() {
                   ))}
                 </tr>
               </thead>
-              <tbody>
-                <AddRestockOrderRow
-                  sizes={sizes}
-                  productGroups={productGroups}
-                  productSearch={restockProductSearch}
-                  productResults={restockProductResults}
-                  updateParams={updateParams}
-                  restockSettings={restockSettings}
-                />
+              <tbody
+                onContextMenu={(e) => {
+                  const td = (e.target as HTMLElement).closest<HTMLElement>("[data-history-field]");
+                  if (!td) return;
+                  e.preventDefault();
+                  const entity = td.dataset.historyEntity;
+                  const entityId = td.dataset.historyEntityId;
+                  const field = td.dataset.historyField;
+                  const entityName = td.dataset.historyEntityName ?? "";
+                  if (!entity || !entityId || !field) return;
+                  setHistoryMenu({ x: e.clientX, y: e.clientY, entity, entityId, field, entityName });
+                }}
+              >
+                {showAddRow && (
+                  <AddRestockOrderRow
+                    sizes={sizes}
+                    initialProductGroup={selectedAddCategory ?? ""}
+                    productSearch={restockProductSearch}
+                    productResults={restockProductResults}
+                    updateParams={updateParams}
+                    restockSettings={restockSettings}
+                    onClose={() => {
+                      setShowAddRow(false);
+                      setSelectedAddCategory(null);
+                    }}
+                  />
+                )}
                 {orders.map((order, rowIndex) => (
                   <OrderRow key={order.id} order={order} rowIndex={rowIndex + 1} sizes={sizes} users={users} restockSettings={restockSettings} />
                 ))}
                 {orders.length === 0 && (
                   <tr style={s.row}>
                     <td colSpan={columns.length} style={{ ...s.td, textAlign: "center", color: "#6b7280", fontWeight: 700 }}>
-                      {messageOrderId ? "That message is for an order that is no longer open." : "No open orders yet. Use the first row to add one."}
+                      {messageOrderId ? "That message is for an order that is no longer open." : "No open orders yet. Click \"+ Add product\" to add one."}
                     </td>
                   </tr>
                 )}
@@ -2151,6 +2457,18 @@ export default function PortalDashboard() {
           </div>
         )}
       </main>
+      {historyMenu && typeof document !== "undefined" && (
+        <CellHistoryMenu
+          x={historyMenu.x}
+          y={historyMenu.y}
+          entity={historyMenu.entity}
+          entityId={historyMenu.entityId}
+          field={historyMenu.field}
+          entityName={historyMenu.entityName}
+          activityLogs={activityLogs}
+          onClose={() => setHistoryMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -2474,6 +2792,265 @@ function ColorPickerInput({
   );
 }
 
+// ─── Cell Change History Menu ─────────────────────────────────────────────────
+
+function CellHistoryMenu({
+  x, y, entity, entityId, field, entityName, activityLogs, onClose,
+}: {
+  x: number; y: number;
+  entity: string; entityId: string; field: string; entityName: string;
+  activityLogs: { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date | string }[];
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [onClose]);
+
+  const entries = activityLogs.filter(
+    (log) => log.entity === entity && log.entityId === entityId && log.field === field,
+  );
+
+  const menuW = 320;
+  const menuMaxH = 380;
+  const left = x + menuW > window.innerWidth ? x - menuW : x;
+  const top = y + menuMaxH > window.innerHeight ? Math.max(0, y - menuMaxH) : y;
+
+  const panel = (
+    <div
+      ref={ref}
+      style={{
+        position: "fixed", top, left, zIndex: 99999,
+        background: "#fff", borderRadius: 10,
+        boxShadow: "0 8px 32px rgba(0,0,0,0.22)", border: "1px solid #e5e7eb",
+        width: menuW, maxHeight: menuMaxH, overflowY: "auto",
+      }}
+    >
+      <div style={{ padding: "12px 16px 10px", borderBottom: "1px solid #f3f4f6" }}>
+        <div style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>Change History</div>
+        <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{entityName} — {field}</div>
+      </div>
+      {entries.length === 0 ? (
+        <div style={{ padding: 20, color: "#9ca3af", fontSize: 13, textAlign: "center" }}>
+          No history recorded for this field.
+        </div>
+      ) : (
+        entries.map((log) => (
+          <div key={log.id} style={{ padding: "10px 16px", borderBottom: "1px solid #f9fafb" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+              <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>{log.userName}</span>
+              <span style={{ fontSize: 11, color: "#9ca3af", flexShrink: 0 }}>
+                {new Date(log.createdAt).toLocaleString("en-AU", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+              </span>
+            </div>
+            <div style={{ fontSize: 13, color: "#374151", marginTop: 3 }}>
+              {"→"} {log.toValue || <span style={{ color: "#9ca3af" }}>(cleared)</span>}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+
+  return createPortal(panel, document.body);
+}
+
+// ─── Fabric Sheets ───────────────────────────────────────────────────────────
+
+function FabricSheetsPanel({
+  sheets,
+  selectedGid,
+  onSelect,
+}: {
+  sheets: FabricSheetData[];
+  selectedGid: string;
+  onSelect: (gid: string) => void;
+}) {
+  const selectedSheet = sheets.find((sheet) => sheet.gid === selectedGid) ?? null;
+
+  if (selectedSheet) {
+    return (
+      <div style={s.fabricPage}>
+        <div style={s.fabricToolbar}>
+          <button type="button" onClick={() => onSelect("")} style={s.secondaryButton}>
+            Back to fabric types
+          </button>
+          <div style={s.fabricToolbarMeta}>
+            <strong>{selectedSheet.name}</strong>
+            <span>{selectedSheet.rowCount} rows</span>
+            {selectedSheet.totalQuantity != null && <span>{formatFabricNumber(selectedSheet.totalQuantity)} total</span>}
+          </div>
+        </div>
+        <FabricSheetTable sheet={selectedSheet} />
+      </div>
+    );
+  }
+
+  return (
+    <div style={s.fabricPage}>
+      <div style={s.fabricIntro}>
+        <div>
+          <h2 style={s.fabricIntroTitle}>Fabric types</h2>
+          <p style={s.fabricIntroText}>Open a fabric type to view the live rows from the Google Sheet.</p>
+        </div>
+        <a
+          href={`https://docs.google.com/spreadsheets/d/${FABRIC_SHEET_ID}/edit`}
+          target="_blank"
+          rel="noreferrer"
+          style={s.secondaryButton}
+        >
+          Open Google Sheet
+        </a>
+      </div>
+      <div style={s.fabricGrid}>
+        {sheets.map((sheet) => (
+          <button
+            key={sheet.gid}
+            type="button"
+            onClick={() => onSelect(sheet.gid)}
+            style={s.fabricCard}
+          >
+            <span style={s.fabricCardTitle}>{sheet.name}</span>
+            <span style={s.fabricCardMeta}>
+              {sheet.error ? "Unable to load" : `${sheet.rowCount} rows`}
+            </span>
+            {!sheet.error && sheet.totalQuantity != null && (
+              <span style={s.fabricCardQuantity}>{formatFabricNumber(sheet.totalQuantity)} total</span>
+            )}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FabricSheetTable({ sheet }: { sheet: FabricSheetData }) {
+  if (sheet.error) {
+    return <div style={s.empty}>Unable to load {sheet.name}: {sheet.error}</div>;
+  }
+  if (!sheet.rows.length) {
+    return <div style={s.empty}>No rows found for {sheet.name}.</div>;
+  }
+
+  return (
+    <div style={s.fabricTableWrap}>
+      <table style={s.fabricTable}>
+        <thead>
+          <tr>
+            {sheet.headers.map((header, index) => (
+              <th key={`${header}-${index}`} style={s.fabricTh}>{header}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sheet.rows.map((row, rowIndex) => (
+            <tr key={rowIndex} style={s.row}>
+              {sheet.headers.map((_, colIndex) => (
+                <td key={colIndex} style={s.fabricTd}>
+                  <FabricCell value={row[colIndex] ?? ""} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function FabricCell({ value }: { value: string }) {
+  const trimmed = value.trim();
+  if (!trimmed) return <span style={{ color: "#cbd5e1" }}>—</span>;
+  if (/^https?:\/\/.+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(trimmed)) {
+    return <img src={trimmed} alt="" style={s.fabricSheetImage} />;
+  }
+  if (/^https?:\/\//i.test(trimmed)) {
+    return <a href={trimmed} target="_blank" rel="noreferrer" style={s.fabricLink}>Open</a>;
+  }
+  return <span>{trimmed}</span>;
+}
+
+function formatFabricNumber(value: number) {
+  return Number(value).toLocaleString("en-AU", { maximumFractionDigits: 1 });
+}
+
+// ─── Nav Order Section ────────────────────────────────────────────────────────
+
+function NavOrderSection({ canManageUsers, settingsFetcher }: { canManageUsers: boolean; settingsFetcher: ReturnType<typeof useFetcher> }) {
+  const { navOrder } = useLoaderData<typeof import("./portal._index").loader>();
+  const [order, setOrder] = useState<NavItemId[]>(navOrder);
+  const dragId = useRef<NavItemId | null>(null);
+
+  const saveOrder = () => {
+    const formData = new FormData();
+    formData.set("intent", "update_nav_order");
+    formData.set("value", JSON.stringify(order));
+    settingsFetcher.submit(formData, { method: "post" });
+  };
+
+  return (
+    <section style={s.settingsCard}>
+      <div style={s.settingsHeader}>
+        <div>
+          <h2 style={s.settingsTitle}>Menu Order</h2>
+          <p style={s.settingsHint}>Drag items to reorder the sidebar navigation.</p>
+        </div>
+        <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveOrder}>
+          Save order
+        </button>
+      </div>
+      {!canManageUsers && (
+        <div style={s.settingsWarning}>Only an admin user can change menu order.</div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 12 }}>
+        {order.map((id) => {
+          const item = ALL_NAV_ITEMS.find((n) => n.id === id);
+          if (!item) return null;
+          return (
+            <div
+              key={id}
+              draggable={canManageUsers}
+              onDragStart={() => { dragId.current = id; }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                if (dragId.current === null || dragId.current === id) return;
+                const from = order.indexOf(dragId.current);
+                const to = order.indexOf(id);
+                if (from === -1 || to === -1) return;
+                const next = [...order];
+                next.splice(from, 1);
+                next.splice(to, 0, dragId.current);
+                setOrder(next);
+              }}
+              onDragEnd={() => { dragId.current = null; }}
+              style={{
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "10px 14px", borderRadius: 8,
+                background: "#f8fafc", border: "1px solid #e5e7eb",
+                cursor: canManageUsers ? "grab" : "default",
+                userSelect: "none",
+              }}
+            >
+              <span style={{ color: "#9ca3af", fontSize: 18, lineHeight: 1 }}>⠿</span>
+              <span style={{ fontWeight: 600, fontSize: 13, color: "#111827" }}>{item.label}</span>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function SettingsPanel({
   users,
   currentUser,
@@ -2732,7 +3309,55 @@ function SettingsPanel({
             </span>
           </div>
         </div>
+
+        <div style={s.settingsSubCard}>
+          <h3 style={s.settingsSubTitle}>Logo</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            {universalDraft.logoUrl ? (
+              <img src={universalDraft.logoUrl} alt="Logo preview" style={{ maxHeight: 64, maxWidth: 160, borderRadius: 4, border: "1px solid #e5e7eb", objectFit: "contain", background: "#f9fafb", padding: 4 }} />
+            ) : (
+              <div style={{ width: 160, height: 64, borderRadius: 4, border: "1px dashed #d1d5db", display: "flex", alignItems: "center", justifyContent: "center", color: "#9ca3af", fontSize: 12 }}>
+                No logo
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <label style={{ cursor: canManageUsers ? "pointer" : "default" }}>
+                <input
+                  type="file"
+                  accept="image/*"
+                  disabled={!canManageUsers}
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      setUniversalDraft((c) => ({ ...c, logoUrl: reader.result as string }));
+                    };
+                    reader.readAsDataURL(file);
+                    e.target.value = "";
+                  }}
+                />
+                <span style={{ ...s.loginButton, pointerEvents: canManageUsers ? "auto" : "none", opacity: canManageUsers ? 1 : 0.5 }}>
+                  {universalDraft.logoUrl ? "Replace image" : "Upload image"}
+                </span>
+              </label>
+              {universalDraft.logoUrl && (
+                <button
+                  type="button"
+                  disabled={!canManageUsers}
+                  onClick={() => setUniversalDraft((c) => ({ ...c, logoUrl: "" }))}
+                  style={{ background: "none", border: "none", color: "#d72c0d", cursor: "pointer", fontSize: 12, padding: 0, textAlign: "left" }}
+                >
+                  Remove logo
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       </section>
+
+      <NavOrderSection canManageUsers={canManageUsers} settingsFetcher={settingsFetcher} />
 
       <section style={s.settingsCard}>
         <div style={s.settingsHeader}>
@@ -3042,12 +3667,21 @@ function PackingListsOverview({
                   onMouseEnter={() => setHoveredListId(list.id)}
                   onMouseLeave={() => setHoveredListId(null)}
                 >
-                  <td style={cellStyle}>
+                  <td
+                    style={cellStyle}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List", entityId: String(list.id), field: "Invoice number", entityName: list.invoiceNumber || `Packing list #${list.id}` } })); }}
+                  >
                     <strong style={s.productName}>{list.invoiceNumber || `Packing list #${list.id}`}</strong>
                   </td>
                   <td style={{ ...cellStyle, textAlign: "center" }}><span style={s.total}>{packingListTotal(list)}</span></td>
-                  <td style={cellStyle}>{formatPortalDate(list.expectedLeaveFactoryDate ?? list.shipmentDate) || "—"}</td>
-                  <td style={cellStyle}>{labelForPackingStatus(list.status)}</td>
+                  <td
+                    style={cellStyle}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List", entityId: String(list.id), field: "Estimated arrival", entityName: list.invoiceNumber || `Packing list #${list.id}` } })); }}
+                  >{formatPortalDate(list.expectedLeaveFactoryDate ?? list.shipmentDate) || "—"}</td>
+                  <td
+                    style={cellStyle}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List", entityId: String(list.id), field: "Status", entityName: list.invoiceNumber || `Packing list #${list.id}` } })); }}
+                  >{labelForPackingStatus(list.status)}</td>
                   <td style={{ ...cellStyle, textAlign: "center" }}>
                     <div style={s.packingListActions} onClick={(event) => event.stopPropagation()}>
                       <fetcher.Form method="post">
@@ -3123,6 +3757,7 @@ function PackingListDetail({
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
+  const loadInventoryFetcher = useFetcher();
   const columnWidthsFetcher = useFetcher();
   const [packingColumnWidths, setPackingColumnWidths] = useState<Record<string, number>>(savedPackingColumnWidths);
   const [skipWords, setSkipWords] = useState("");
@@ -3276,7 +3911,7 @@ function PackingListDetail({
         </div>
         {/* Row 2: load inventory (left) + total quantity (right) */}
         <div style={s.packingBottomRow}>
-          <fetcher.Form
+          <loadInventoryFetcher.Form
             method="post"
             style={s.loadInventoryForm}
             onSubmit={(event) => {
@@ -3296,10 +3931,10 @@ function PackingListDetail({
                 style={{ ...s.packingInput, ...s.skipWordsInput }}
               />
             </label>
-            <button type="submit" style={{ ...s.loginButton, ...s.loadInventoryButton }} disabled={fetcher.state !== "idle"}>
-              {fetcher.state === "idle" ? "Load inventory on Shopify" : "Loading..."}
+            <button type="submit" style={{ ...s.loginButton, ...s.loadInventoryButton }} disabled={loadInventoryFetcher.state !== "idle"}>
+              {loadInventoryFetcher.state === "idle" ? "Load inventory on Shopify" : "Loading..."}
             </button>
-          </fetcher.Form>
+          </loadInventoryFetcher.Form>
           <div style={s.packingTotalPill}>
             Total quantity <strong>{packingListTotal(packingList)}</strong>
           </div>
@@ -3428,6 +4063,7 @@ function PackingListLineRow({
           style={{
             ...(qtys[size] > 0 && shopifyLoadedQtys[size] === qtys[size] ? s.loadedInventoryCell : {}),
           }}
+          onContextMenu={(e) => { e.preventDefault(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List Line", entityId: String(line.id), field: `Qty (${size})`, entityName: line.productTitle } })); }}
         >
           <input
             type="text"
@@ -3440,7 +4076,7 @@ function PackingListLineRow({
               size,
               value: event.currentTarget.value,
             })}
-            style={s.qtyInput}
+            style={{ ...s.qtyInput, ...(qtys[size] > 0 && shopifyLoadedQtys[size] === qtys[size] ? { color: "#fff" } : {}) }}
           />
         </PackingTd>
       ))}
@@ -3701,63 +4337,203 @@ function FabricImageCell({ lineId, value }: { lineId: number; value: string }) {
   );
 }
 
+// ─── Category Dropdown ───────────────────────────────────────────────────────
+
+function CategoryDropdown({
+  productGroups,
+  showNewCategoryInput,
+  newCategoryInput,
+  onNewCategoryInput,
+  onShowNewCategory,
+  onSelect,
+  onClose,
+}: {
+  productGroups: string[];
+  showNewCategoryInput: boolean;
+  newCategoryInput: string;
+  onNewCategoryInput: (value: string) => void;
+  onShowNewCategory: () => void;
+  onSelect: (category: string) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: "absolute",
+        top: "calc(100% + 6px)",
+        right: 0,
+        zIndex: 9999,
+        background: "#fff",
+        border: "1px solid #d1d5db",
+        borderRadius: 8,
+        boxShadow: "0 4px 16px rgba(0,0,0,0.13)",
+        minWidth: 220,
+        overflow: "hidden",
+      }}
+    >
+      <div style={{ padding: "8px 0" }}>
+        <div style={{ padding: "4px 12px 6px", fontSize: 11, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 1 }}>
+          Choose category
+        </div>
+        {productGroups.map((group) => (
+          <button
+            key={group}
+            type="button"
+            onClick={() => onSelect(group)}
+            style={{
+              display: "block",
+              width: "100%",
+              textAlign: "left",
+              padding: "8px 14px",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontSize: 13,
+              color: "#111827",
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f3f4f6"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none"; }}
+          >
+            {group}
+          </button>
+        ))}
+        <div style={{ borderTop: "1px solid #e5e7eb", marginTop: 4 }}>
+          {showNewCategoryInput ? (
+            <div style={{ display: "flex", gap: 6, padding: "8px 10px" }}>
+              <input
+                autoFocus
+                type="text"
+                value={newCategoryInput}
+                onChange={(e) => onNewCategoryInput(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && newCategoryInput.trim()) onSelect(newCategoryInput.trim());
+                }}
+                placeholder="New category name"
+                style={{
+                  flex: 1,
+                  border: "1px solid #d1d5db",
+                  borderRadius: 4,
+                  padding: "5px 8px",
+                  fontSize: 13,
+                  outline: "none",
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => { if (newCategoryInput.trim()) onSelect(newCategoryInput.trim()); }}
+                style={{
+                  background: "#008060",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 4,
+                  padding: "5px 10px",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                Add
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={onShowNewCategory}
+              style={{
+                display: "block",
+                width: "100%",
+                textAlign: "left",
+                padding: "8px 14px",
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: 13,
+                color: "#008060",
+                fontWeight: 700,
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f0fdf4"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none"; }}
+            >
+              + Add new category
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Rows ────────────────────────────────────────────────────────────────────
 
 function AddRestockOrderRow({
   sizes,
-  productGroups,
+  initialProductGroup,
   productSearch,
   productResults,
   updateParams,
   restockSettings,
+  onClose,
 }: {
   sizes: string[];
-  productGroups: string[];
+  initialProductGroup?: string;
   productSearch: string;
   productResults: ShopifySearchProduct[];
   updateParams: (updates: Record<string, string>) => void;
   restockSettings: RestockSettings;
+  onClose?: () => void;
 }) {
   const fetcher = useFetcher();
+  const rowRef = useRef<HTMLTableRowElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [searchValue, setSearchValue] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<ShopifySearchProduct | null>(null);
   const [qtys, setQtys] = useState<Record<string, string>>({});
-  const [productGroup, setProductGroup] = useState("");
   const [status, setStatus] = useState(restockSettings.statusOptions[0]?.value ?? "on_order");
   const [priority, setPriority] = useState("");
   const [notes, setNotes] = useState("");
   const [eta, setEta] = useState("");
   const [focused, setFocused] = useState(false);
   const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
-  const [canPortalDropdown, setCanPortalDropdown] = useState(false);
-  const productVariantsBySize = new Map((selectedProduct?.variants ?? []).map((variant) => [variant.title, variant]));
-  const totalQty = Object.values(qtys).reduce((sum, value) => sum + (Number(value) || 0), 0);
+  const [canPortal, setCanPortal] = useState(false);
+
+  const totalQty = Object.values(qtys).reduce((sum, v) => sum + (Number(v) || 0), 0);
   const totalCol = 5 + sizes.length;
   const statusCol = totalCol + 1;
   const notesCol = totalCol + 2;
   const priorityCol = totalCol + 3;
   const etaCol = totalCol + 4;
-  const actionCol = totalCol + 5;
+  const deleteCol = totalCol + 5;
+
   const shouldShowResults = !selectedProduct && focused && searchValue.trim().length >= 2;
   const dropdownHeight = searchValue.trim() !== productSearch || !productResults.length
-    ? 48
-    : Math.min(320, productResults.length * 62 + 12);
+    ? 48 : Math.min(320, productResults.length * 62 + 12);
+
+  const stateRef = useRef({ selectedProduct, qtys, status, priority, notes, eta });
+  useEffect(() => { stateRef.current = { selectedProduct, qtys, status, priority, notes, eta }; });
+
+  useEffect(() => { setCanPortal(true); }, []);
 
   const updateDropdownRect = () => {
-    if (!inputRef.current) return;
-    setDropdownRect(inputRef.current.getBoundingClientRect());
+    if (inputRef.current) setDropdownRect(inputRef.current.getBoundingClientRect());
   };
-
   useEffect(() => {
-    setCanPortalDropdown(true);
-  }, []);
-
-  useEffect(() => {
-    if (!shouldShowResults) {
-      setDropdownRect(null);
-      return;
-    }
+    if (!shouldShowResults) { setDropdownRect(null); return; }
     updateDropdownRect();
     window.addEventListener("resize", updateDropdownRect);
     window.addEventListener("scroll", updateDropdownRect, true);
@@ -3770,19 +4546,52 @@ function AddRestockOrderRow({
   useEffect(() => {
     if (!focused || selectedProduct) return;
     const timer = window.setTimeout(() => {
-      const trimmed = searchValue.trim();
-      updateParams({ restockProductSearch: trimmed.length >= 2 ? trimmed : "" });
+      const t = searchValue.trim();
+      updateParams({ restockProductSearch: t.length >= 2 ? t : "" });
     }, 350);
     return () => window.clearTimeout(timer);
   }, [focused, selectedProduct, searchValue]);
+
+  // Auto-save when clicking outside the row
+  useEffect(() => {
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (rowRef.current?.contains(target)) return;
+      if (target.closest("[data-add-row-portal]")) return;
+      const { selectedProduct: sp, qtys: q, status: st, priority: pr, notes: no, eta: et } = stateRef.current;
+      const total = Object.values(q).reduce((s, v) => s + (Number(v) || 0), 0);
+      if (sp && total > 0) {
+        const fd = new FormData();
+        fd.set("intent", "create_restock_order_from_portal");
+        fd.set("product", JSON.stringify(sp));
+        fd.set("qtys", JSON.stringify(q));
+        fd.set("productType", initialProductGroup ?? "");
+        fd.set("supplierStatus", st);
+        fd.set("priority", pr);
+        fd.set("notes", no);
+        fd.set("eta", et);
+        fetcher.submit(fd, { method: "post" });
+        setSelectedProduct(null);
+        setSearchValue("");
+        setQtys({});
+        setNotes(""); setEta(""); setPriority("");
+        setStatus(restockSettings.statusOptions[0]?.value ?? "on_order");
+        updateParams({ restockProductSearch: "" });
+      } else {
+        onClose?.();
+      }
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    return () => document.removeEventListener("mousedown", handleMouseDown);
+  }, []);
 
   const selectProduct = (product: ShopifySearchProduct) => {
     setSelectedProduct(product);
     setSearchValue(product.title);
     setFocused(false);
     setDropdownRect(null);
-    setQtys(Object.fromEntries(product.variants.map((variant) => [variant.title, ""])));
-    updateParams({ restockProductSearch: product.title });
+    // qtys keyed by size-only variant titles (already filtered by searchShopifyProducts)
+    setQtys(Object.fromEntries(product.variants.map((v) => [v.title, ""])));
   };
 
   const clearProduct = () => {
@@ -3793,148 +4602,100 @@ function AddRestockOrderRow({
     window.setTimeout(() => inputRef.current?.focus(), 0);
   };
 
-  const submitOrder = () => {
-    if (!selectedProduct || totalQty <= 0) return;
-    const formData = new FormData();
-    formData.set("intent", "create_restock_order_from_portal");
-    formData.set("product", JSON.stringify(selectedProduct));
-    formData.set("qtys", JSON.stringify(qtys));
-    formData.set("productType", productGroup);
-    formData.set("supplierStatus", status);
-    formData.set("priority", priority);
-    formData.set("notes", notes);
-    formData.set("eta", eta);
-    fetcher.submit(formData, { method: "post" });
-    setSelectedProduct(null);
-    setSearchValue("");
-    setQtys({});
-    setNotes("");
-    setEta("");
-    setPriority("");
-    updateParams({ restockProductSearch: "" });
-  };
-
   return (
-    <tr style={{ ...s.row, ...s.addOrderRow }}>
+    <tr ref={rowRef} style={{ ...s.row, ...s.addOrderRow, outline: "2px solid #008060", outlineOffset: -1 }}>
       <Td rowIndex={0} colIndex={0}>
-        <select value={productGroup} onChange={(event) => setProductGroup(event.currentTarget.value)} style={s.addOrderSelect}>
-          <option value="">Product group</option>
-          {productGroups.map((group) => (
-            <option key={group} value={group}>{group}</option>
-          ))}
-        </select>
+        {initialProductGroup && <span style={{ fontSize: 11, color: "#6b7280", fontStyle: "italic" }}>{initialProductGroup}</span>}
       </Td>
-      <Td rowIndex={0} colIndex={1} center><span style={s.addOrderHint}>New order</span></Td>
+      <Td rowIndex={0} colIndex={1} center>{null}</Td>
       <Td rowIndex={0} colIndex={2} center>
-        {selectedProduct?.imageUrl ? <img src={selectedProduct.imageUrl} alt="" style={s.thumb} /> : <div style={s.noImg}>—</div>}
+        <div style={s.imageCell}>
+          {selectedProduct?.imageUrl ? <img src={selectedProduct.imageUrl} alt="" style={s.thumb} /> : <div style={s.noImg}>—</div>}
+        </div>
       </Td>
       <Td rowIndex={0} colIndex={3} overflowVisible>
         <div style={s.productCellSearch}>
           {selectedProduct ? (
             <div style={s.selectedRestockProduct}>
-              <span>{selectedProduct.title}</span>
-              <button type="button" style={s.clearProductButton} onClick={clearProduct} aria-label="Clear selected product">×</button>
+              <span style={s.productName}>{selectedProduct.title}</span>
+              <button type="button" style={s.clearProductButton} onClick={clearProduct}>×</button>
             </div>
           ) : (
             <input
               ref={inputRef}
+              autoFocus
               type="search"
               value={searchValue}
               onFocus={() => setFocused(true)}
-              onChange={(event) => setSearchValue(event.currentTarget.value)}
+              onChange={(e) => setSearchValue(e.currentTarget.value)}
               onBlur={() => window.setTimeout(() => setFocused(false), 140)}
-              placeholder="Search product to add"
+              placeholder="Search product…"
               style={s.restockSearchInput}
             />
           )}
-          {shouldShowResults && canPortalDropdown && dropdownRect && createPortal(
-            <div
-              style={{
-                ...s.productCellResults,
-                top: dropdownRect.bottom + 8,
-                left: dropdownRect.left,
-                width: Math.max(dropdownRect.width, 460),
-                height: dropdownHeight,
-              }}
-            >
-              {searchValue.trim() !== productSearch ? (
-                <div style={s.productCellResultEmpty}>Searching...</div>
-              ) : productResults.length ? productResults.map((product) => (
-                <button
-                  key={product.id}
-                  type="button"
-                  style={s.productCellResult}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => selectProduct(product)}
-                >
-                  {product.imageUrl ? <img src={product.imageUrl} alt="" style={s.productCellResultImage} /> : <span style={s.productCellNoImage}>—</span>}
-                  <span style={s.productCellResultText}>
-                    <strong>{product.title}</strong>
-                    <span>{product.skus.slice(0, 3).join(", ") || "No SKU"}</span>
-                  </span>
-                </button>
-              )) : (
-                <div style={s.productCellResultEmpty}>No products found.</div>
-              )}
+          {shouldShowResults && canPortal && dropdownRect && createPortal(
+            <div data-add-row-portal style={{ ...s.productCellResults, top: dropdownRect.bottom + 8, left: dropdownRect.left, width: Math.max(dropdownRect.width, 460), height: dropdownHeight }}>
+              {searchValue.trim() !== productSearch
+                ? <div style={s.productCellResultEmpty}>Searching…</div>
+                : productResults.length
+                  ? productResults.map((p) => (
+                    <button key={p.id} type="button" style={s.productCellResult}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => selectProduct(p)}
+                    >
+                      {p.imageUrl ? <img src={p.imageUrl} alt="" style={s.productCellResultImage} /> : <span style={s.productCellNoImage}>—</span>}
+                      <span style={s.productCellResultText}>
+                        <strong>{p.title}</strong>
+                        <span>{p.skus.slice(0, 3).join(", ") || "No SKU"}</span>
+                      </span>
+                    </button>
+                  ))
+                  : <div style={s.productCellResultEmpty}>No products found.</div>
+              }
             </div>,
             document.body,
           )}
         </div>
       </Td>
-      <Td rowIndex={0} colIndex={4}><span style={s.sku}>{selectedProduct?.skus?.join("\n") || "—"}</span></Td>
-      {sizes.map((size, sizeIndex) => {
-        const variant = productVariantsBySize.get(size);
-        return (
-          <Td key={size} rowIndex={0} colIndex={5 + sizeIndex} center>
-            {selectedProduct && variant ? (
-              <input
-                type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                value={qtys[size] ?? ""}
-                onChange={(event) => {
-                  const value = event.currentTarget.value.replace(/\D/g, "");
-                  setQtys((current) => ({ ...current, [size]: value }));
-                }}
-                style={s.qtyInput}
-              />
-            ) : (
-              <span style={s.qtyZero}>—</span>
-            )}
-          </Td>
-        );
-      })}
-      <Td rowIndex={0} colIndex={totalCol} center><span style={s.total}>{totalQty}</span></Td>
+      <Td rowIndex={0} colIndex={4}>
+        <span style={s.sku}>{selectedProduct?.skus?.join("\n") || "—"}</span>
+      </Td>
+      {sizes.map((size, sizeIndex) => (
+        <Td key={size} rowIndex={0} colIndex={5 + sizeIndex} center>
+          {selectedProduct && size in qtys ? (
+            <input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              value={qtys[size] ?? ""}
+              onChange={(e) => { const v = e.currentTarget.value.replace(/\D/g, ""); setQtys((c) => ({ ...c, [size]: v })); }}
+              style={{ ...s.qtyInput, ...(Number(qtys[size]) > 0 ? s.qtyInputActive : s.qtyInputZero) }}
+            />
+          ) : (
+            <span style={{ color: "#d1d5db" }}>—</span>
+          )}
+        </Td>
+      ))}
+      <Td rowIndex={0} colIndex={totalCol} center><span style={s.total}>{totalQty || 0}</span></Td>
       <Td rowIndex={0} colIndex={statusCol}>
-        <select value={status} onChange={(event) => setStatus(event.currentTarget.value)} style={s.select}>
-          {restockSettings.statusOptions.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
+        <select value={status} onChange={(e) => setStatus(e.currentTarget.value)} style={{ ...s.select, background: restockSettings.statusOptions.find((o) => o.value === status)?.bg ?? "#f3f4f6", color: restockSettings.statusOptions.find((o) => o.value === status)?.color ?? "#374151" }}>
+          {restockSettings.statusOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </Td>
-      <Td rowIndex={0} colIndex={notesCol}>
-        <textarea value={notes} onChange={(event) => setNotes(event.currentTarget.value)} rows={2} placeholder="Notes" style={s.textarea} />
+      <Td rowIndex={0} colIndex={notesCol} overflowVisible>
+        <textarea value={notes} onChange={(e) => setNotes(e.currentTarget.value)} rows={2} placeholder="Notes" style={s.textarea} />
       </Td>
       <Td rowIndex={0} colIndex={priorityCol}>
-        <select value={priority} onChange={(event) => setPriority(event.currentTarget.value)} style={s.select}>
+        <select value={priority} onChange={(e) => setPriority(e.currentTarget.value)} style={s.select}>
           <option value="">— Priority —</option>
-          {restockSettings.priorityOptions.map((option) => (
-            <option key={option.value} value={option.value}>{option.label}</option>
-          ))}
+          {restockSettings.priorityOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </Td>
       <Td rowIndex={0} colIndex={etaCol}>
-        <input value={eta} onChange={(event) => setEta(event.currentTarget.value)} style={s.dateInput} placeholder="dd/mm/yy" />
+        <input value={eta} onChange={(e) => setEta(e.currentTarget.value)} style={s.dateInput} placeholder="dd/mm/yy" />
       </Td>
-      <Td rowIndex={0} colIndex={actionCol} center>
-        <button
-          type="button"
-          style={{ ...s.smallButton, ...(selectedProduct && totalQty > 0 ? s.addOrderButtonReady : {}) }}
-          disabled={!selectedProduct || totalQty <= 0}
-          onClick={submitOrder}
-        >
-          Add order
-        </button>
+      <Td rowIndex={0} colIndex={deleteCol} center>
+        {onClose && <button type="button" onClick={onClose} style={s.deleteButton}>✕</button>}
       </Td>
     </tr>
   );
@@ -3978,13 +4739,13 @@ function OrderRow({
     <>
       <tr id={`order-${order.id}`} style={s.row}>
         {/* Factory notes */}
-        <Td rowIndex={rowIndex} colIndex={0} overflowVisible><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
         {/* Order date */}
         <Td rowIndex={rowIndex} colIndex={1} center><span style={s.dateText}>{orderDate}</span></Td>
 
         {/* Picture */}
-        <Td rowIndex={rowIndex} colIndex={2} center>
+        <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle}>
           <div style={s.imageCell}>
             {order.productImageUrl
               ? <img src={order.productImageUrl} alt="" style={s.thumb} />
@@ -3993,10 +4754,10 @@ function OrderRow({
         </Td>
 
         {/* Name */}
-        <Td rowIndex={rowIndex} colIndex={3}><span style={s.productName}>{order.productTitle}</span></Td>
+        <Td rowIndex={rowIndex} colIndex={3} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle}><span style={s.productName}>{order.productTitle}</span></Td>
 
         {/* SKU */}
-        <Td rowIndex={rowIndex} colIndex={4} overflowVisible>
+        <Td rowIndex={rowIndex} colIndex={4} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="SKU" historyEntityName={order.productTitle}>
           <div style={s.skuCellWithToggle}>
             <span style={s.sku}>{allSkus || "—"}</span>
             <button
@@ -4013,7 +4774,7 @@ function OrderRow({
 
         {/* Size columns */}
         {sizes.map((sz, sizeIndex) => (
-          <Td key={sz} rowIndex={rowIndex} colIndex={5 + sizeIndex} center>
+          <Td key={sz} rowIndex={rowIndex} colIndex={5 + sizeIndex} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField={`Qty (${sz})`} historyEntityName={order.productTitle}>
             <QtyCell orderId={order.id} size={sz} value={qtyBySize[sz] ?? 0} restockSettings={restockSettings} />
           </Td>
         ))}
@@ -4022,16 +4783,16 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={totalCol} center><span style={s.total}>{order.totalQty}</span></Td>
 
         {/* Status */}
-        <Td rowIndex={rowIndex} colIndex={statusCol}><StatusCell orderId={order.id} value={order.supplierStatus} options={restockSettings.statusOptions} /></Td>
+        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} options={restockSettings.statusOptions} /></Td>
 
         {/* Notes (from order) */}
-        <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
 
         {/* Priority */}
-        <Td rowIndex={rowIndex} colIndex={priorityCol}><PriorityCell orderId={order.id} value={order.priority ?? ""} options={restockSettings.priorityOptions} /></Td>
+        <Td rowIndex={rowIndex} colIndex={priorityCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Priority" historyEntityName={order.productTitle}><PriorityCell orderId={order.id} value={order.priority ?? ""} options={restockSettings.priorityOptions} /></Td>
 
         {/* ETA */}
-        <Td rowIndex={rowIndex} colIndex={etaCol}><EtaCell orderId={order.id} value={etaValue} /></Td>
+        <Td rowIndex={rowIndex} colIndex={etaCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="ETA" historyEntityName={order.productTitle}><EtaCell orderId={order.id} value={etaValue} /></Td>
 
         {/* Actions */}
         <Td rowIndex={rowIndex} colIndex={deleteCol} center><OrderActionsCell orderId={order.id} /></Td>
@@ -4349,17 +5110,29 @@ function Td({
   rowIndex,
   colIndex,
   overflowVisible,
+  historyEntity,
+  historyEntityId,
+  historyField,
+  historyEntityName,
 }: {
   children: React.ReactNode;
   center?: boolean;
   rowIndex: number;
   colIndex: number;
   overflowVisible?: boolean;
+  historyEntity?: string;
+  historyEntityId?: string;
+  historyField?: string;
+  historyEntityName?: string;
 }) {
   return (
     <td
       data-grid-row={rowIndex}
       data-grid-col={colIndex}
+      data-history-entity={historyEntity}
+      data-history-entity-id={historyEntityId}
+      data-history-field={historyField}
+      data-history-entity-name={historyEntityName}
       tabIndex={0}
       onFocus={(event) => {
         if (event.target !== event.currentTarget) return;
@@ -4386,6 +5159,7 @@ function PackingTd({
   colIndex,
   overflowVisible,
   style,
+  onContextMenu,
 }: {
   children: React.ReactNode;
   center?: boolean;
@@ -4393,12 +5167,14 @@ function PackingTd({
   colIndex: number;
   overflowVisible?: boolean;
   style?: React.CSSProperties;
+  onContextMenu?: (e: React.MouseEvent<HTMLTableCellElement>) => void;
 }) {
   return (
     <td
       data-grid-row={rowIndex}
       data-grid-col={colIndex}
       tabIndex={0}
+      onContextMenu={onContextMenu}
       onFocus={(event) => {
         if (event.target !== event.currentTarget) return;
         const focusTarget = event.currentTarget.querySelector<HTMLElement>(FOCUSABLE_CELL_SELECTOR);
@@ -4513,10 +5289,10 @@ const s: Record<string, React.CSSProperties> = {
   main: { flex: 1, minWidth: 0, padding: "24px 16px", minHeight: "100vh" },
   pageHeader: {
     display: "flex",
-    alignItems: "center",
+    alignItems: "flex-start",
     justifyContent: "space-between",
     gap: 16,
-    marginBottom: 18,
+    marginBottom: 10,
   },
   pageTitle: { margin: 0, fontSize: "var(--portal-heading-font-size)", color: "var(--portal-heading-text-color)", lineHeight: 1.2 },
   headerControls: {
@@ -4556,6 +5332,17 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 600,
     outline: "none",
+  },
+  addProductButton: {
+    border: "1px solid #008060",
+    borderRadius: 6,
+    padding: "7px 14px",
+    background: "#008060",
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    whiteSpace: "nowrap" as const,
   },
   activeUsers: {
     display: "flex",
@@ -5178,6 +5965,9 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 800,
     lineHeight: 1.25,
+    wordBreak: "break-word" as const,
+    whiteSpace: "normal" as const,
+    overflowWrap: "anywhere" as const,
   },
   changeProductButton: {
     flex: "0 0 auto",
@@ -5279,6 +6069,83 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow: "inset 0 0 0 9999px rgba(37,99,235,0.05)",
   },
   empty: { background: "#fff", borderRadius: 12, padding: 40, textAlign: "center", color: "#6b7280" },
+  fabricPage: { display: "flex", flexDirection: "column", gap: 14 },
+  fabricIntro: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "16px 18px",
+    background: "#fff",
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+  },
+  fabricIntroTitle: { margin: 0, fontSize: 18, fontWeight: 800, color: "#111827" },
+  fabricIntroText: { margin: "4px 0 0", color: "#6b7280", fontSize: 13, fontWeight: 600 },
+  fabricGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+    gap: 12,
+  },
+  fabricCard: {
+    minHeight: 112,
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+    background: "#fff",
+    padding: 16,
+    textAlign: "left",
+    cursor: "pointer",
+    boxShadow: "0 1px 2px rgba(15,23,42,0.06)",
+  },
+  fabricCardTitle: { display: "block", color: "#111827", fontSize: 15, fontWeight: 800, lineHeight: 1.25 },
+  fabricCardMeta: { display: "block", marginTop: 12, color: "#6b7280", fontSize: 12, fontWeight: 700 },
+  fabricCardQuantity: { display: "block", marginTop: 4, color: "#008060", fontSize: 13, fontWeight: 800 },
+  fabricToolbar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "10px 12px",
+    background: "#fff",
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+  },
+  fabricToolbarMeta: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", color: "#6b7280", fontSize: 13, fontWeight: 700 },
+  fabricTableWrap: {
+    maxHeight: "calc(100vh - 170px)",
+    overflow: "auto",
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
+  },
+  fabricTable: { borderCollapse: "separate", borderSpacing: 0, minWidth: 960, width: "100%", fontSize: 13 },
+  fabricTh: {
+    position: "sticky",
+    top: 0,
+    zIndex: 10,
+    padding: "9px 10px",
+    textAlign: "left",
+    background: "#eef2f7",
+    border: "1px solid #cbd5e1",
+    color: "#111827",
+    fontSize: 11,
+    fontWeight: 800,
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+    whiteSpace: "nowrap",
+  },
+  fabricTd: {
+    padding: "9px 10px",
+    borderRight: "1px solid #e5e7eb",
+    borderBottom: "1px solid #e5e7eb",
+    verticalAlign: "top",
+    color: "#1f2937",
+    fontWeight: 600,
+    whiteSpace: "pre-wrap",
+    minWidth: 120,
+  },
+  fabricSheetImage: { width: 76, height: 76, objectFit: "cover", borderRadius: 6, border: "1px solid #e5e7eb" },
+  fabricLink: { color: "#2563eb", fontWeight: 800, textDecoration: "none" },
   tableWrap: {
     maxHeight: "calc(100vh - 118px)",
     overflow: "auto",
@@ -5523,8 +6390,8 @@ const s: Record<string, React.CSSProperties> = {
     boxSizing: "border-box",
   },
   loadedInventoryCell: {
-    background: "#dcfce7",
-    boxShadow: "inset 0 0 0 9999px rgba(34,197,94,0.08)",
+    background: "#92AD9B",
+    color: "#fff",
   },
   qtyInputActive: { color: "#111827" },
   qtyInputZero: { color: "#d1d5db" },
