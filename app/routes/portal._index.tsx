@@ -744,7 +744,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       create: { key: RESTOCK_SETTINGS_KEY, value: settings },
       update: { value: settings },
     });
-    await logActivity(currentUser?.name ?? "Unknown", "Saved", "Settings", { entityName: "Restock settings" });
     return null;
   }
 
@@ -761,7 +760,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       create: { key: UNIVERSAL_SETTINGS_KEY, value: settings },
       update: { value: settings },
     });
-    await logActivity(currentUser?.name ?? "Unknown", "Saved", "Settings", { entityName: "Universal settings" });
     return null;
   }
 
