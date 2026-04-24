@@ -60,6 +60,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       include: { lines: { orderBy: [{ boxNumber: "asc" }, { sortOrder: "asc" }, { id: "asc" }] } },
     }),
   ]);
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  const activityLogs = page === "settings"
+    ? await prisma.activityLog.findMany({
+        where: { createdAt: { gte: ninetyDaysAgo } },
+        orderBy: { createdAt: "desc" },
+        take: 1000,
+      })
+    : [];
   const users = normalizePortalUsers(usersSetting?.value);
   const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
   const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
@@ -153,6 +161,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     messages,
     messageOrderId,
     loginBlocked: loginRequired && users.length > 0 && !currentUser,
+    activityLogs,
   };
 };
 
@@ -256,6 +265,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       },
     });
+    await logActivity(currentUser?.name ?? "Unknown", "Created", "Packing List", {
+      entityId: String(packingList.id),
+      entityName: invoiceNumber || packingList.title,
+    });
     return new Response(null, {
       status: 303,
       headers: { Location: `/portal?page=packing&packingId=${packingList.id}` },
@@ -326,7 +339,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     if (field === "notes") data.notes = value || null;
     if (packingId && Object.keys(data).length) {
+      const existing = await prisma.packingList.findUnique({ where: { id: packingId }, select: { invoiceNumber: true, title: true } });
       await prisma.packingList.update({ where: { id: packingId }, data });
+      const logField = field === "invoiceNumber" ? "Invoice number"
+        : field === "status" ? "Status"
+        : field === "expectedLeaveFactoryDate" ? "Estimated arrival"
+        : field;
+      const logValue = field === "status"
+        ? (PACKING_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value)
+        : field === "expectedLeaveFactoryDate"
+          ? formatPortalDate(parsePortalDate(value))
+          : value;
+      if (logField && logValue) {
+        await logActivity(currentUser?.name ?? "Unknown", "Updated", "Packing List", {
+          entityId: String(packingId),
+          entityName: existing?.invoiceNumber || existing?.title || `#${packingId}`,
+          field: logField,
+          toValue: logValue,
+        });
+      }
     }
     return null;
   }
@@ -346,7 +377,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "delete_packing_list") {
     const packingId = Number(form.get("packingId"));
     if (packingId) {
+      const existing = await prisma.packingList.findUnique({ where: { id: packingId }, select: { invoiceNumber: true, title: true } });
       await prisma.packingList.deleteMany({ where: { id: packingId } });
+      await logActivity(currentUser?.name ?? "Unknown", "Deleted", "Packing List", {
+        entityId: String(packingId),
+        entityName: existing?.invoiceNumber || existing?.title || `#${packingId}`,
+      });
     }
     return null;
   }
@@ -708,6 +744,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       create: { key: RESTOCK_SETTINGS_KEY, value: settings },
       update: { value: settings },
     });
+    await logActivity(currentUser?.name ?? "Unknown", "Saved", "Settings", { entityName: "Restock settings" });
     return null;
   }
 
@@ -724,6 +761,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       create: { key: UNIVERSAL_SETTINGS_KEY, value: settings },
       update: { value: settings },
     });
+    await logActivity(currentUser?.name ?? "Unknown", "Saved", "Settings", { entityName: "Universal settings" });
     return null;
   }
 
@@ -812,9 +850,47 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         fromName: currentUser?.name ?? null,
       });
     }
+    const loggableIntents: Record<string, string> = {
+      update_status: "Status",
+      update_priority: "Priority",
+      update_factory_notes: "Factory notes",
+      update_notes: "Notes",
+      update_eta: "ETA",
+    };
+    const logField = loggableIntents[intent];
+    if (logField && orderId) {
+      const order = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { productTitle: true } });
+      await logActivity(currentUser?.name ?? "Unknown", "Updated", "Restock Order", {
+        entityId: String(orderId),
+        entityName: order?.productTitle ?? `Order #${orderId}`,
+        field: logField,
+        toValue: String(form.get("value") ?? ""),
+      });
+    }
   }
   return null;
 };
+
+// ─── Activity log helper ──────────────────────────────────────────────────────
+
+async function logActivity(
+  userName: string,
+  action: string,
+  entity: string,
+  opts?: { entityId?: string; entityName?: string; field?: string; toValue?: string }
+) {
+  await prisma.activityLog.create({
+    data: {
+      userName,
+      action,
+      entity,
+      entityId: opts?.entityId ?? null,
+      entityName: opts?.entityName ?? null,
+      field: opts?.field ?? null,
+      toValue: opts?.toValue ?? null,
+    },
+  });
+}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1791,6 +1867,7 @@ export default function PortalDashboard() {
     messages,
     messageOrderId,
     loginBlocked,
+    activityLogs,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
@@ -2004,6 +2081,7 @@ export default function PortalDashboard() {
             loginRequired={loginRequired}
             restockSettings={restockSettings}
             universalSettings={universalSettings}
+            activityLogs={activityLogs}
           />
         ) : page === "packing" ? (
           <PackingListsPanel
@@ -2138,12 +2216,14 @@ function SettingsPanel({
   loginRequired,
   restockSettings,
   universalSettings,
+  activityLogs,
 }: {
   users: PortalUser[];
   currentUser: PortalUser | null;
   loginRequired: boolean;
   restockSettings: RestockSettings;
   universalSettings: UniversalSettings;
+  activityLogs: { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date | string }[];
 }) {
   const settingsFetcher = useFetcher();
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
@@ -2476,6 +2556,8 @@ function SettingsPanel({
           </div>
         </div>
       </section>
+
+      <ActivityLogPanel activityLogs={activityLogs} />
     </div>
   );
 }
@@ -2538,6 +2620,87 @@ function RestockOptionsEditor({
         ))}
       </div>
     </div>
+  );
+}
+
+function ActivityLogPanel({
+  activityLogs,
+}: {
+  activityLogs: { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date | string }[];
+}) {
+  const [expandedDate, setExpandedDate] = useState<string | null>(null);
+
+  const grouped = activityLogs.reduce<Record<string, typeof activityLogs>>((acc, log) => {
+    const dateKey = new Date(log.createdAt).toLocaleDateString("en-AU", {
+      day: "2-digit", month: "short", year: "numeric",
+    });
+    if (!acc[dateKey]) acc[dateKey] = [];
+    acc[dateKey].push(log);
+    return acc;
+  }, {});
+
+  const dates = Object.keys(grouped);
+
+  return (
+    <section style={s.settingsCard}>
+      <h2 style={s.settingsTitle}>Change Log</h2>
+      <p style={s.settingsHint}>All changes made in the last 90 days. Click a date to see that day's activity.</p>
+
+      {dates.length === 0 ? (
+        <div style={{ marginTop: 16, color: "#6b7280", fontSize: 13 }}>No changes recorded yet.</div>
+      ) : (
+        <div style={{ marginTop: 14, display: "grid", gap: 8 }}>
+          {dates.map((dateKey) => {
+            const entries = grouped[dateKey];
+            const isOpen = expandedDate === dateKey;
+            return (
+              <div key={dateKey} style={s.logDateBlock}>
+                <button
+                  type="button"
+                  onClick={() => setExpandedDate(isOpen ? null : dateKey)}
+                  style={s.logDateButton}
+                >
+                  <span>{dateKey}</span>
+                  <span style={s.logDateCount}>{entries.length} change{entries.length !== 1 ? "s" : ""}</span>
+                  <span style={{ marginLeft: "auto", fontSize: 12, color: "#6b7280" }}>{isOpen ? "▲" : "▼"}</span>
+                </button>
+
+                {isOpen && (
+                  <div style={s.logEntries}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr>
+                          <th style={s.logTh}>Time</th>
+                          <th style={s.logTh}>User</th>
+                          <th style={s.logTh}>Action</th>
+                          <th style={s.logTh}>Item</th>
+                          <th style={s.logTh}>Field</th>
+                          <th style={s.logTh}>New value</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {entries.map((log, idx) => (
+                          <tr key={log.id} style={{ background: idx % 2 === 0 ? "#fff" : "#f8fafc" }}>
+                            <td style={s.logTd}>
+                              {new Date(log.createdAt).toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit" })}
+                            </td>
+                            <td style={{ ...s.logTd, fontWeight: 700 }}>{log.userName}</td>
+                            <td style={s.logTd}>{log.action}</td>
+                            <td style={s.logTd}>{log.entityName ?? log.entity}</td>
+                            <td style={{ ...s.logTd, color: "#6b7280" }}>{log.field ?? "—"}</td>
+                            <td style={{ ...s.logTd, color: "#111827" }}>{log.toValue ?? "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -4315,7 +4478,7 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 800,
     cursor: "pointer",
   },
-  settingsPanel: { display: "grid", gap: 16, maxWidth: 880 },
+  settingsPanel: { display: "grid", gap: 16, maxWidth: 1140 },
   settingsCard: {
     background: "#fff",
     border: "1px solid #cbd5e1",
@@ -4346,7 +4509,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   settingsGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+    gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))",
     gap: 14,
     marginTop: 16,
   },
@@ -4364,7 +4527,7 @@ const s: Record<string, React.CSSProperties> = {
   optionRows: { display: "grid", gap: 8 },
   optionRow: {
     display: "grid",
-    gridTemplateColumns: "minmax(140px, 1fr) auto auto auto auto",
+    gridTemplateColumns: "minmax(200px, 1fr) auto auto auto auto",
     gap: 8,
     alignItems: "center",
   },
@@ -5192,5 +5355,53 @@ const s: Record<string, React.CSSProperties> = {
     borderColor: "#fca5a5",
     background: "#fee2e2",
     color: "#991b1b",
+  },
+  logDateBlock: {
+    border: "1px solid #e5e7eb",
+    borderRadius: 10,
+    overflow: "hidden",
+  },
+  logDateButton: {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    padding: "10px 14px",
+    background: "#f1f5f9",
+    border: "none",
+    cursor: "pointer",
+    fontSize: 13,
+    fontWeight: 700,
+    color: "#111827",
+    textAlign: "left" as const,
+  },
+  logDateCount: {
+    background: "#e2e8f0",
+    borderRadius: 999,
+    padding: "2px 9px",
+    fontSize: 11,
+    fontWeight: 800,
+    color: "#475569",
+  },
+  logEntries: {
+    overflowX: "auto" as const,
+    background: "#fff",
+  },
+  logTh: {
+    padding: "7px 10px",
+    borderBottom: "2px solid #e5e7eb",
+    textAlign: "left" as const,
+    fontSize: 11,
+    fontWeight: 800,
+    color: "#6b7280",
+    whiteSpace: "nowrap" as const,
+    background: "#f8fafc",
+  },
+  logTd: {
+    padding: "6px 10px",
+    borderBottom: "1px solid #f1f5f9",
+    fontSize: 12,
+    color: "#374151",
+    whiteSpace: "nowrap" as const,
   },
 };
