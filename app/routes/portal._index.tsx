@@ -133,8 +133,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         select: { value: true },
       })
     : null;
+  const fabricDeletedRowsSetting = page === "fabric"
+    ? await prisma.portalSetting.findUnique({
+        where: { key: FABRIC_DELETED_ROWS_KEY },
+        select: { value: true },
+      })
+    : null;
+  const inrToAudRate = page === "fabric" ? await getInrToAudRate() : null;
   const fabricSheets = page === "fabric"
-    ? getFabricSheets(fabricCellOverridesSetting?.value, fabricCustomRowsSetting?.value, fabricSettings.tileOrder)
+    ? getFabricSheets(
+        fabricCellOverridesSetting?.value,
+        fabricCustomRowsSetting?.value,
+        fabricDeletedRowsSetting?.value,
+        fabricSettings.tileOrder,
+      )
     : [];
 
   // Collect all unique size names across all orders, sorted logically
@@ -195,6 +207,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     navOrder,
     fabricSheets,
     selectedFabricTab,
+    inrToAudRate,
   };
 };
 
@@ -893,6 +906,58 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "delete_fabric_row" || intent === "move_fabric_row") {
+    const gid = String(form.get("gid") ?? "");
+    const rowIndex = Number(form.get("rowIndex"));
+    const targetGid = String(form.get("targetGid") ?? "");
+    const sourceSheet = fabricStockSheets.find((item) => item.gid === gid);
+    const targetSheet = fabricStockSheets.find((item) => item.gid === targetGid);
+    if (!sourceSheet || !Number.isInteger(rowIndex) || rowIndex < 0) return null;
+    if (intent === "move_fabric_row" && (!targetSheet || targetSheet.gid === sourceSheet.gid || isHiddenFabricSheet(targetSheet.name))) return null;
+
+    const [customRowsSetting, deletedRowsSetting, overridesSetting] = await Promise.all([
+      prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_ROWS_KEY }, select: { value: true } }),
+      prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_ROWS_KEY }, select: { value: true } }),
+      prisma.portalSetting.findUnique({ where: { key: FABRIC_CELL_OVERRIDES_KEY }, select: { value: true } }),
+    ]);
+    const customRows = normalizeFabricCustomRows(customRowsSetting?.value);
+    const deletedRows = normalizeFabricDeletedRows(deletedRowsSetting?.value);
+    const overrides = normalizeFabricCellOverrides(overridesSetting?.value);
+
+    if (intent === "move_fabric_row" && targetSheet) {
+      const originalRows = [...sourceSheet.rows, ...(customRows[sourceSheet.gid] ?? [])];
+      const row = originalRows[rowIndex]?.map((value, colIndex) => overrides[fabricCellKey(sourceSheet.gid, rowIndex, colIndex)] ?? value);
+      if (!row) return null;
+      const sourceHeaderMap = new Map(sourceSheet.headers.map((header, index) => [normalizeFabricHeader(header), index]));
+      const movedRow = targetSheet.headers.map((header) => {
+        const sourceIndex = sourceHeaderMap.get(normalizeFabricHeader(header));
+        return sourceIndex == null ? "" : row[sourceIndex] ?? "";
+      });
+      customRows[targetSheet.gid] = [...(customRows[targetSheet.gid] ?? []), movedRow];
+    }
+
+    if (rowIndex >= sourceSheet.rows.length) {
+      const customIndex = rowIndex - sourceSheet.rows.length;
+      customRows[sourceSheet.gid] = (customRows[sourceSheet.gid] ?? []).filter((_, index) => index !== customIndex);
+    } else {
+      deletedRows[fabricRowKey(sourceSheet.gid, rowIndex)] = true;
+    }
+
+    await Promise.all([
+      prisma.portalSetting.upsert({
+        where: { key: FABRIC_CUSTOM_ROWS_KEY },
+        create: { key: FABRIC_CUSTOM_ROWS_KEY, value: customRows },
+        update: { value: customRows },
+      }),
+      prisma.portalSetting.upsert({
+        where: { key: FABRIC_DELETED_ROWS_KEY },
+        create: { key: FABRIC_DELETED_ROWS_KEY, value: deletedRows },
+        update: { value: deletedRows },
+      }),
+    ]);
+    return null;
+  }
+
   if (intent === "add_fabric_row") {
     const gid = String(form.get("gid") ?? "");
     const sheet = fabricStockSheets.find((item) => item.gid === gid);
@@ -1174,6 +1239,15 @@ const PORTAL_NAV_ORDER_KEY = "production-portal-nav-order-v1";
 const FABRIC_SETTINGS_KEY = "production-portal-fabric-settings-v1";
 const FABRIC_CELL_OVERRIDES_KEY = "production-portal-fabric-cell-overrides-v1";
 const FABRIC_CUSTOM_ROWS_KEY = "production-portal-fabric-custom-rows-v1";
+const FABRIC_DELETED_ROWS_KEY = "production-portal-fabric-deleted-rows-v1";
+const HIDDEN_FABRIC_SHEET_NAMES = new Set(["new fabric on order", "fabric on order"]);
+const FABRIC_TOTAL_EXCLUDED_NAMES = new Set([
+  "on order",
+  "fabric samples under consideration",
+  "new fabric on order",
+  "random fabric bits and bobs",
+  "fabric on order",
+]);
 const ALL_NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", href: "/portal?page=dashboard" },
   { id: "restock", label: "Existing Products Restock", href: "/portal" },
@@ -1186,7 +1260,7 @@ const ALL_NAV_ITEMS = [
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
 const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct"];
-type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; totalCost?: number | null; error?: string };
+type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
 const PORTAL_USERS_KEY = "supplier-portal-users-v1";
@@ -1402,12 +1476,40 @@ function fabricCellKey(gid: string, rowIndex: number, colIndex: number) {
   return `${gid}:${rowIndex}:${colIndex}`;
 }
 
+function fabricRowKey(gid: string, rowIndex: number) {
+  return `${gid}:${rowIndex}`;
+}
+
+function normalizeFabricName(name: string) {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeFabricHeader(header: string) {
+  return header.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function isHiddenFabricSheet(name: string) {
+  return HIDDEN_FABRIC_SHEET_NAMES.has(normalizeFabricName(name));
+}
+
+function isFabricTotalsExcluded(name: string) {
+  return FABRIC_TOTAL_EXCLUDED_NAMES.has(normalizeFabricName(name));
+}
+
 function normalizeFabricCellOverrides(value: unknown): Record<string, string> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(
     Object.entries(value)
       .filter(([key, cellValue]) => /^\S+:\d+:\d+$/.test(key) && typeof cellValue === "string"),
   ) as Record<string, string>;
+}
+
+function normalizeFabricDeletedRows(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, rowValue]) => /^\S+:\d+$/.test(key) && rowValue === true),
+  ) as Record<string, boolean>;
 }
 
 function normalizeFabricCustomRows(value: unknown): Record<string, string[][]> {
@@ -1466,17 +1568,36 @@ function orderFabricSheets(sheets: FabricSheetData[], tileOrder: string[] = []) 
   });
 }
 
-function getFabricSheets(overridesValue?: unknown, customRowsValue?: unknown, tileOrder: string[] = []): FabricSheetData[] {
+async function getInrToAudRate() {
+  try {
+    const response = await fetch("https://open.er-api.com/v6/latest/INR", {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) return null;
+    const data = await response.json() as { rates?: Record<string, number> };
+    const rate = Number(data.rates?.AUD);
+    return Number.isFinite(rate) && rate > 0 ? rate : null;
+  } catch {
+    return null;
+  }
+}
+
+function getFabricSheets(overridesValue?: unknown, customRowsValue?: unknown, deletedRowsValue?: unknown, tileOrder: string[] = []): FabricSheetData[] {
   const overrides = normalizeFabricCellOverrides(overridesValue);
   const customRows = normalizeFabricCustomRows(customRowsValue);
-  const sheets = fabricStockSheets.map((sheet) => {
+  const deletedRows = normalizeFabricDeletedRows(deletedRowsValue);
+  const sheets = fabricStockSheets.filter((sheet) => !isHiddenFabricSheet(sheet.name)).map((sheet) => {
     const originalRows = [...sheet.rows, ...(customRows[sheet.gid] ?? [])];
-    const rows = originalRows.map((row, rowIndex) => (
+    const rowEntries = originalRows
+      .map((row, rowIndex) => ({ row, rowIndex }))
+      .filter(({ rowIndex }) => !deletedRows[fabricRowKey(sheet.gid, rowIndex)]);
+    const rows = rowEntries.map(({ row, rowIndex }) => (
       row.map((value, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? value)
     ));
     return {
       ...sheet,
       originalRows,
+      rowKeys: rowEntries.map(({ rowIndex }) => rowIndex),
       rows,
       rowCount: rows.length,
       totalQuantity: sumFabricRows(sheet.headers, rows),
@@ -2216,6 +2337,7 @@ export default function PortalDashboard() {
     navOrder,
     fabricSheets,
     selectedFabricTab,
+    inrToAudRate,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
@@ -2483,6 +2605,7 @@ export default function PortalDashboard() {
             sheets={fabricSheets}
             selectedGid={selectedFabricTab}
             fabricSettings={fabricSettings}
+            inrToAudRate={inrToAudRate}
             onSelect={(gid) => updateParams({ fabricTab: gid })}
           />
         ) : page !== "restock" ? (
@@ -2964,11 +3087,13 @@ function FabricSheetsPanel({
   sheets,
   selectedGid,
   fabricSettings,
+  inrToAudRate,
   onSelect,
 }: {
   sheets: FabricSheetData[];
   selectedGid: string;
   fabricSettings: FabricSettings;
+  inrToAudRate: number | null;
   onSelect: (gid: string) => void;
 }) {
   const fetcher = useFetcher();
@@ -2982,6 +3107,10 @@ function FabricSheetsPanel({
       value: JSON.stringify({ ...fabricSettings, tileOrder: nextSheets.map((sheet) => sheet.gid) }),
     });
   };
+  const totalSheets = orderedSheets.filter((sheet) => !isFabricTotalsExcluded(sheet.name));
+  const totalQuantity = totalSheets.reduce((sum, sheet) => sum + (sheet.totalQuantity ?? 0), 0);
+  const totalCostInr = totalSheets.reduce((sum, sheet) => sum + (sheet.totalCost ?? 0), 0);
+  const totalCostAud = inrToAudRate && totalCostInr ? totalCostInr * inrToAudRate : null;
 
   if (selectedSheet) {
     return (
@@ -2997,13 +3126,27 @@ function FabricSheetsPanel({
             {selectedSheet.totalCost != null && <span>{formatCurrency(selectedSheet.totalCost)} fabric cost</span>}
           </div>
         </div>
-        <FabricSheetTable sheet={selectedSheet} fetcher={fetcher} fabricSettings={fabricSettings} />
+        <FabricSheetTable sheet={selectedSheet} sheets={sheets} fetcher={fetcher} fabricSettings={fabricSettings} />
       </div>
     );
   }
 
   return (
     <div style={s.fabricPage}>
+      <div style={s.fabricTotalsBar}>
+        <span style={s.fabricTotalsItem}>
+          <strong>{formatFabricNumber(totalQuantity)}</strong>
+          <span>Total fabric</span>
+        </span>
+        <span style={s.fabricTotalsItem}>
+          <strong>{formatCurrency(totalCostInr)}</strong>
+          <span>Total value</span>
+        </span>
+        <span style={s.fabricTotalsItem}>
+          <strong>{totalCostAud == null ? "—" : formatAudCurrency(totalCostAud)}</strong>
+          <span>AUD value</span>
+        </span>
+      </div>
       <div style={s.fabricGrid}>
         {orderedSheets.map((sheet) => (
           <button
@@ -3047,10 +3190,12 @@ function FabricSheetsPanel({
 
 function FabricSheetTable({
   sheet,
+  sheets,
   fetcher,
   fabricSettings,
 }: {
   sheet: FabricSheetData;
+  sheets: FabricSheetData[];
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
 }) {
@@ -3070,6 +3215,7 @@ function FabricSheetTable({
               {sheet.headers.map((header, index) => (
                 <th key={`${header}-${index}`} style={s.fabricTh}>{header}</th>
               ))}
+              <th style={s.fabricTh}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -3079,16 +3225,24 @@ function FabricSheetTable({
                   <FabricTd key={colIndex} rowIndex={rowIndex} colIndex={colIndex}>
                     <FabricCell
                       gid={sheet.gid}
-                      rowIndex={rowIndex}
+                      rowIndex={sheet.rowKeys?.[rowIndex] ?? rowIndex}
                       colIndex={colIndex}
                       value={row[colIndex] ?? ""}
-                      originalValue={sheet.originalRows?.[rowIndex]?.[colIndex] ?? ""}
+                      originalValue={sheet.originalRows?.[sheet.rowKeys?.[rowIndex] ?? rowIndex]?.[colIndex] ?? ""}
                       header={sheet.headers[colIndex] ?? ""}
                       fetcher={fetcher}
                       fabricSettings={fabricSettings}
                     />
                   </FabricTd>
                 ))}
+                <FabricTd rowIndex={rowIndex} colIndex={sheet.headers.length}>
+                  <FabricRowActions
+                    gid={sheet.gid}
+                    rowIndex={sheet.rowKeys?.[rowIndex] ?? rowIndex}
+                    sheets={sheets}
+                    fetcher={fetcher}
+                  />
+                </FabricTd>
               </tr>
             ))}
           </tbody>
@@ -3218,7 +3372,7 @@ function FabricCell({
               event.currentTarget.value = "";
             }}
           />
-        </div>
+      </div>
         {originalValue && originalValue !== draft && (
           <button
             type="button"
@@ -3229,6 +3383,18 @@ function FabricCell({
             }}
           >
             Restore
+          </button>
+        )}
+        {imageValue && (
+          <button
+            type="button"
+            style={s.fabricMiniButton}
+            onClick={() => {
+              setDraft("");
+              save("");
+            }}
+          >
+            Delete image
           </button>
         )}
       </div>
@@ -3291,6 +3457,64 @@ function FabricCell({
   );
 }
 
+function FabricRowActions({
+  gid,
+  rowIndex,
+  sheets,
+  fetcher,
+}: {
+  gid: string;
+  rowIndex: number;
+  sheets: FabricSheetData[];
+  fetcher: ReturnType<typeof useFetcher>;
+}) {
+  const moveTargets = sheets.filter((sheet) => sheet.gid !== gid);
+  const [targetGid, setTargetGid] = useState(moveTargets[0]?.gid ?? "");
+  useEffect(() => {
+    if (!moveTargets.some((sheet) => sheet.gid === targetGid)) {
+      setTargetGid(moveTargets[0]?.gid ?? "");
+    }
+  }, [moveTargets, targetGid]);
+
+  return (
+    <div style={s.fabricRowActions}>
+      <button
+        type="button"
+        style={s.removeUserButton}
+        onClick={() => submitPortalCell(fetcher, {
+          intent: "delete_fabric_row",
+          gid,
+          rowIndex,
+        })}
+      >
+        Delete row
+      </button>
+      <select
+        value={targetGid}
+        onChange={(event) => setTargetGid(event.currentTarget.value)}
+        style={s.fabricMoveSelect}
+      >
+        {moveTargets.map((sheet) => (
+          <option key={sheet.gid} value={sheet.gid}>{sheet.name}</option>
+        ))}
+      </select>
+      <button
+        type="button"
+        disabled={!targetGid}
+        style={s.smallButton}
+        onClick={() => submitPortalCell(fetcher, {
+          intent: "move_fabric_row",
+          gid,
+          rowIndex,
+          targetGid,
+        })}
+      >
+        Move row
+      </button>
+    </div>
+  );
+}
+
 function formatFabricNumber(value: number) {
   return Number(value).toLocaleString("en-AU", { maximumFractionDigits: 1 });
 }
@@ -3299,7 +3523,17 @@ function formatCurrency(value: number) {
   return Number(value).toLocaleString("en-AU", {
     style: "currency",
     currency: "INR",
+    notation: "compact",
     maximumFractionDigits: 0,
+  });
+}
+
+function formatAudCurrency(value: number) {
+  return Number(value).toLocaleString("en-AU", {
+    style: "currency",
+    currency: "AUD",
+    notation: "compact",
+    maximumFractionDigits: 1,
   });
 }
 
@@ -4708,27 +4942,41 @@ function PackingImageCell({ lineId, field, value }: { lineId: number; field: "pr
     });
     reader.readAsDataURL(file);
   };
+  const clearImage = () => submitPortalCell(fetcher, {
+    intent: "update_packing_line",
+    lineId,
+    field,
+    value: "",
+  });
 
   return (
-    <div
-      tabIndex={0}
-      style={s.fabricImageDrop}
-      onPaste={(event) => {
-        const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
-        if (file) saveFile(file);
-      }}
-      title="Paste or upload image"
-    >
-      {value ? <img src={value} alt="" style={s.fabricThumb} /> : <span>Paste image</span>}
-      <input
-        type="file"
-        accept="image/*"
-        style={s.hiddenFileInput}
-        onChange={(event) => {
-          const file = event.currentTarget.files?.[0];
+    <div style={s.packingImageCell}>
+      <div
+        tabIndex={0}
+        style={s.fabricImageDrop}
+        onPaste={(event) => {
+          const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
           if (file) saveFile(file);
         }}
-      />
+        title="Paste or upload image"
+      >
+        {value ? <img src={value} alt="" style={s.fabricThumb} /> : <span>Paste image</span>}
+        <input
+          type="file"
+          accept="image/*"
+          style={s.hiddenFileInput}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            if (file) saveFile(file);
+            event.currentTarget.value = "";
+          }}
+        />
+      </div>
+      {value && (
+        <button type="button" style={s.fabricMiniButton} onClick={clearImage}>
+          Delete image
+        </button>
+      )}
     </div>
   );
 }
@@ -6466,6 +6714,28 @@ const s: Record<string, React.CSSProperties> = {
   },
   empty: { background: "#fff", borderRadius: 12, padding: 40, textAlign: "center", color: "#6b7280" },
   fabricPage: { display: "flex", flexDirection: "column", gap: 14 },
+  fabricTotalsBar: {
+    display: "flex",
+    alignItems: "stretch",
+    gap: 10,
+    flexWrap: "wrap",
+    padding: "12px",
+    background: "#fff",
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+  },
+  fabricTotalsItem: {
+    minWidth: 170,
+    display: "grid",
+    gap: 2,
+    padding: "10px 12px",
+    border: "1px solid #e5e7eb",
+    borderRadius: 8,
+    background: "#f8fafc",
+    color: "var(--portal-table-text-color, #374151)",
+    fontSize: "var(--portal-table-font-size, 13px)",
+    fontWeight: 800,
+  },
   fabricIntro: {
     display: "flex",
     alignItems: "center",
@@ -6592,6 +6862,22 @@ const s: Record<string, React.CSSProperties> = {
     justifyContent: "flex-start",
     padding: "0 0 4px",
   },
+  fabricRowActions: {
+    minWidth: 170,
+    display: "grid",
+    gap: 7,
+    padding: 8,
+  },
+  fabricMoveSelect: {
+    width: "100%",
+    border: "1px solid #cbd5e1",
+    borderRadius: 6,
+    padding: "5px 7px",
+    background: "#fff",
+    color: "#374151",
+    fontSize: 11,
+    fontWeight: 800,
+  },
   fabricChipSelect: {
     width: "calc(100% - 20px)",
     minHeight: 34,
@@ -6621,6 +6907,12 @@ const s: Record<string, React.CSSProperties> = {
     cursor: "pointer",
   },
   fabricSheetImage: { width: 120, height: 120, objectFit: "cover", borderRadius: 6, border: "1px solid #e5e7eb" },
+  packingImageCell: {
+    display: "grid",
+    gap: 6,
+    justifyItems: "center",
+    width: "100%",
+  },
   fabricLink: { color: "#2563eb", fontWeight: 800, textDecoration: "none" },
   tableWrap: {
     maxHeight: "calc(100vh - 118px)",
