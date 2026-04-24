@@ -122,7 +122,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         select: { value: true },
       })
     : null;
-  const fabricSheets = page === "fabric" ? getFabricSheets(fabricCellOverridesSetting?.value) : [];
+  const fabricCustomRowsSetting = page === "fabric"
+    ? await prisma.portalSetting.findUnique({
+        where: { key: FABRIC_CUSTOM_ROWS_KEY },
+        select: { value: true },
+      })
+    : null;
+  const fabricSheets = page === "fabric"
+    ? getFabricSheets(fabricCellOverridesSetting?.value, fabricCustomRowsSetting?.value)
+    : [];
 
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","M","L","XL","2XL","3XL","S-M","M-L","L-XL","S/M","M/L","L/XL","4XL","ONE SIZE"];
@@ -826,6 +834,62 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "upload_fabric_image") {
+    const gid = String(form.get("gid") ?? "");
+    const rowIndex = Number(form.get("rowIndex"));
+    const colIndex = Number(form.get("colIndex"));
+    const imageFile = form.get("image");
+    if (
+      !gid ||
+      !Number.isInteger(rowIndex) ||
+      !Number.isInteger(colIndex) ||
+      rowIndex < 0 ||
+      colIndex < 0 ||
+      !imageFile ||
+      typeof imageFile === "string" ||
+      typeof imageFile.arrayBuffer !== "function"
+    ) {
+      return null;
+    }
+    if (!imageFile.type.startsWith("image/") || imageFile.size > 5 * 1024 * 1024) return null;
+
+    const buffer = Buffer.from(await imageFile.arrayBuffer());
+    const dataUrl = `data:${imageFile.type};base64,${buffer.toString("base64")}`;
+    const setting = await prisma.portalSetting.findUnique({
+      where: { key: FABRIC_CELL_OVERRIDES_KEY },
+      select: { value: true },
+    });
+    const overrides = normalizeFabricCellOverrides(setting?.value);
+    overrides[fabricCellKey(gid, rowIndex, colIndex)] = dataUrl;
+
+    await prisma.portalSetting.upsert({
+      where: { key: FABRIC_CELL_OVERRIDES_KEY },
+      create: { key: FABRIC_CELL_OVERRIDES_KEY, value: overrides },
+      update: { value: overrides },
+    });
+    return null;
+  }
+
+  if (intent === "add_fabric_row") {
+    const gid = String(form.get("gid") ?? "");
+    const sheet = fabricStockSheets.find((item) => item.gid === gid);
+    if (!sheet) return null;
+
+    const setting = await prisma.portalSetting.findUnique({
+      where: { key: FABRIC_CUSTOM_ROWS_KEY },
+      select: { value: true },
+    });
+    const customRows = normalizeFabricCustomRows(setting?.value);
+    customRows[gid] = [...(customRows[gid] ?? []), Array.from({ length: sheet.headers.length }, () => "")];
+
+    await prisma.portalSetting.upsert({
+      where: { key: FABRIC_CUSTOM_ROWS_KEY },
+      create: { key: FABRIC_CUSTOM_ROWS_KEY, value: customRows },
+      update: { value: customRows },
+    });
+    return null;
+  }
+
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
   if (intent === "update_priority")      updates.priority = form.get("value");
   if (intent === "update_product_type")  updates.productType = normalizeProductGroup(String(form.get("value") ?? "")) || null;
@@ -1075,6 +1139,7 @@ const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
 const UNIVERSAL_SETTINGS_KEY = "production-portal-universal-settings-v1";
 const PORTAL_NAV_ORDER_KEY = "production-portal-nav-order-v1";
 const FABRIC_CELL_OVERRIDES_KEY = "production-portal-fabric-cell-overrides-v1";
+const FABRIC_CUSTOM_ROWS_KEY = "production-portal-fabric-custom-rows-v1";
 const ALL_NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", href: "/portal?page=dashboard" },
   { id: "restock", label: "Existing Products Restock", href: "/portal" },
@@ -1087,7 +1152,7 @@ const ALL_NAV_ITEMS = [
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
 const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct"];
-type FabricSheetData = FabricStockSheet & { error?: string };
+type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
 const PORTAL_USERS_KEY = "supplier-portal-users-v1";
@@ -1273,13 +1338,50 @@ function normalizeFabricCellOverrides(value: unknown): Record<string, string> {
   ) as Record<string, string>;
 }
 
-function getFabricSheets(overridesValue?: unknown): FabricSheetData[] {
+function normalizeFabricCustomRows(value: unknown): Record<string, string[][]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([gid, rows]) => [
+        gid,
+        Array.isArray(rows)
+          ? rows
+              .filter((row): row is unknown[] => Array.isArray(row))
+              .map((row) => row.map((cell) => String(cell ?? "")))
+          : [],
+      ] as const)
+      .filter(([gid]) => Boolean(gid)),
+  );
+}
+
+function sumFabricRows(headers: string[], rows: string[][]) {
+  const quantityIndexes = headers
+    .map((header, index) => ({ header: header.toLowerCase(), index }))
+    .filter(({ header }) => /(meter|qty|quantity|ordered|stock|available)/.test(header) && !/(date|cost|price)/.test(header))
+    .map(({ index }) => index);
+  if (!quantityIndexes.length) return rows.length || null;
+  const total = rows.reduce((sum, row) => (
+    sum + quantityIndexes.reduce((cellSum, index) => cellSum + (Number(String(row[index] ?? "").replace(/,/g, "")) || 0), 0)
+  ), 0);
+  return total > 0 ? total : rows.length || null;
+}
+
+function getFabricSheets(overridesValue?: unknown, customRowsValue?: unknown): FabricSheetData[] {
   const overrides = normalizeFabricCellOverrides(overridesValue);
+  const customRows = normalizeFabricCustomRows(customRowsValue);
   return fabricStockSheets.map((sheet) => ({
     ...sheet,
-    rows: sheet.rows.map((row, rowIndex) => (
+    originalRows: [...sheet.rows, ...(customRows[sheet.gid] ?? [])],
+    rows: [...sheet.rows, ...(customRows[sheet.gid] ?? [])].map((row, rowIndex) => (
       row.map((value, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? value)
     )),
+    rowCount: sheet.rows.length + (customRows[sheet.gid]?.length ?? 0),
+    totalQuantity: sumFabricRows(
+      sheet.headers,
+      [...sheet.rows, ...(customRows[sheet.gid] ?? [])].map((row, rowIndex) => (
+        row.map((value, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? value)
+      )),
+    ),
   }));
 }
 
@@ -2778,6 +2880,13 @@ function FabricSheetsPanel({
             <span>{selectedSheet.rowCount} rows</span>
             {selectedSheet.totalQuantity != null && <span>{formatFabricNumber(selectedSheet.totalQuantity)} total</span>}
           </div>
+          <button
+            type="button"
+            style={s.secondaryButton}
+            onClick={() => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: selectedSheet.gid })}
+          >
+            Add row
+          </button>
         </div>
         <FabricSheetTable sheet={selectedSheet} fetcher={fetcher} />
       </div>
@@ -2848,6 +2957,8 @@ function FabricSheetTable({
                     rowIndex={rowIndex}
                     colIndex={colIndex}
                     value={row[colIndex] ?? ""}
+                    originalValue={sheet.originalRows?.[rowIndex]?.[colIndex] ?? ""}
+                    header={sheet.headers[colIndex] ?? ""}
                     fetcher={fetcher}
                   />
                 </FabricTd>
@@ -2893,7 +3004,7 @@ function FabricTd({
 }
 
 function isFabricImageValue(value: string) {
-  return /^(?:https?:\/\/|\/).+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(value.trim());
+  return /^data:image\//i.test(value.trim()) || /^(?:https?:\/\/|\/).+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(value.trim());
 }
 
 function FabricCell({
@@ -2901,18 +3012,25 @@ function FabricCell({
   rowIndex,
   colIndex,
   value,
+  originalValue,
+  header,
   fetcher,
 }: {
   gid: string;
   rowIndex: number;
   colIndex: number;
   value: string;
+  originalValue: string;
+  header: string;
   fetcher: ReturnType<typeof useFetcher>;
 }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   const trimmed = draft.trim();
   const imageValue = isFabricImageValue(trimmed);
+  const dataImageValue = /^data:image\//i.test(trimmed);
+  const imageColumn = /picture|fabric|image/i.test(header) || imageValue || isFabricImageValue(originalValue);
   const multiline = draft.includes("\n") || draft.length > 34 || imageValue;
   const save = (nextValue: string) => {
     if (nextValue === value) return;
@@ -2924,18 +3042,62 @@ function FabricCell({
       value: nextValue,
     });
   };
+  const uploadImage = (file: File | null) => {
+    if (!file) return;
+    const formData = new FormData();
+    formData.set("intent", "upload_fabric_image");
+    formData.set("gid", gid);
+    formData.set("rowIndex", String(rowIndex));
+    formData.set("colIndex", String(colIndex));
+    formData.set("image", file);
+    fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
+  };
   const common = {
-    value: draft,
+    value: dataImageValue ? "Uploaded image" : draft,
     onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(event.currentTarget.value),
-    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => save(event.currentTarget.value),
+    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (!dataImageValue) save(event.currentTarget.value);
+    },
     style: multiline ? s.fabricCellTextarea : s.fabricCellInput,
     placeholder: "—",
+    readOnly: dataImageValue,
   };
 
   return (
     <div style={imageValue ? s.fabricImageEditCell : undefined}>
       {imageValue && <img src={trimmed} alt="" style={s.fabricSheetImage} />}
       {multiline ? <textarea rows={imageValue ? 2 : 3} {...common} /> : <input type="text" {...common} />}
+      {(imageColumn || (originalValue && originalValue !== draft)) && (
+        <div style={s.fabricCellActions}>
+          {imageColumn && (
+            <button type="button" style={s.fabricMiniButton} onClick={() => fileInputRef.current?.click()}>
+              Upload image
+            </button>
+          )}
+          {originalValue && originalValue !== draft && (
+            <button
+              type="button"
+              style={s.fabricMiniButton}
+              onClick={() => {
+                setDraft(originalValue);
+                save(originalValue);
+              }}
+            >
+              Restore
+            </button>
+          )}
+        </div>
+      )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={(event) => {
+          uploadImage(event.currentTarget.files?.[0] ?? null);
+          event.currentTarget.value = "";
+        }}
+      />
     </div>
   );
 }
@@ -6132,6 +6294,22 @@ const s: Record<string, React.CSSProperties> = {
     gap: 6,
     justifyItems: "start",
     padding: "8px 10px",
+  },
+  fabricCellActions: {
+    display: "flex",
+    gap: 6,
+    flexWrap: "wrap",
+    padding: "0 10px 8px",
+  },
+  fabricMiniButton: {
+    border: "1px solid #cbd5e1",
+    borderRadius: 6,
+    padding: "4px 7px",
+    background: "#fff",
+    color: "#374151",
+    fontSize: 11,
+    fontWeight: 800,
+    cursor: "pointer",
   },
   fabricSheetImage: { width: 96, height: 96, objectFit: "cover", borderRadius: 6, border: "1px solid #e5e7eb" },
   fabricLink: { color: "#2563eb", fontWeight: 800, textDecoration: "none" },
