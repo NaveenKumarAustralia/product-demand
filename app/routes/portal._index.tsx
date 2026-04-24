@@ -1520,6 +1520,18 @@ function shouldRestoreLostPeacockRow(gid: string, rowIndex: number) {
   return gid === "1829736341" && (rowIndex === 1 || rowIndex === 2);
 }
 
+function fabricCellByRole(sheet: FabricStockSheet, row: string[], role: string) {
+  const index = sheet.headers.findIndex((header) => fabricHeaderRole(header) === role);
+  return index < 0 ? "" : String(row[index] ?? "").trim();
+}
+
+function fabricMoveMatchKey(sheet: FabricStockSheet, row: string[]) {
+  const supplier = fabricCellByRole(sheet, row, "supplier").toLowerCase();
+  const fabricType = fabricCellByRole(sheet, row, "fabricType").toLowerCase();
+  if (!supplier || !fabricType) return "";
+  return `${supplier}|${fabricType}`;
+}
+
 function isBrokenMovedOnOrderRow(sheet: FabricStockSheet, row: string[], rowIndex: number) {
   if (sheet.gid !== "759049382" || rowIndex < sheet.rows.length) return false;
   const pictureIndex = sheet.headers.findIndex((header) => fabricHeaderRole(header) === "image");
@@ -1529,6 +1541,32 @@ function isBrokenMovedOnOrderRow(sheet: FabricStockSheet, row: string[], rowInde
   const hasSupplierAndType = Boolean(row[supplierIndex]?.trim()) && Boolean(row[fabricTypeIndex]?.trim());
   const missingMovedFields = !row[pictureIndex]?.trim() && !row[quantityIndex]?.trim();
   return hasSupplierAndType && missingMovedFields && row.slice(2).every((cell) => !String(cell ?? "").trim());
+}
+
+function recoveredBrokenMoveRows(customRows: Record<string, string[][]>, deletedRows: Record<string, boolean>) {
+  const recovered = new Set<string>();
+  const onOrderSheet = fabricStockSheets.find((sheet) => sheet.gid === "759049382");
+  if (!onOrderSheet) return recovered;
+
+  const brokenMoveKeys = new Set(
+    (customRows[onOrderSheet.gid] ?? [])
+      .map((row, index) => ({ row, rowIndex: onOrderSheet.rows.length + index }))
+      .filter(({ row, rowIndex }) => isBrokenMovedOnOrderRow(onOrderSheet, row, rowIndex))
+      .map(({ row }) => fabricMoveMatchKey(onOrderSheet, row))
+      .filter(Boolean),
+  );
+  if (!brokenMoveKeys.size) return recovered;
+
+  for (const sheet of fabricStockSheets) {
+    if (sheet.gid === onOrderSheet.gid) continue;
+    for (const [rowIndex, row] of sheet.rows.entries()) {
+      const key = fabricRowKey(sheet.gid, rowIndex);
+      if (!deletedRows[key]) continue;
+      if (brokenMoveKeys.has(fabricMoveMatchKey(sheet, row))) recovered.add(key);
+    }
+  }
+
+  return recovered;
 }
 
 function normalizeFabricCellOverrides(value: unknown): Record<string, string> {
@@ -1621,12 +1659,16 @@ function getFabricSheets(overridesValue?: unknown, customRowsValue?: unknown, de
   const overrides = normalizeFabricCellOverrides(overridesValue);
   const customRows = normalizeFabricCustomRows(customRowsValue);
   const deletedRows = normalizeFabricDeletedRows(deletedRowsValue);
+  const recoveredRows = recoveredBrokenMoveRows(customRows, deletedRows);
   const sheets = fabricStockSheets.filter((sheet) => !isHiddenFabricSheet(sheet.name)).map((sheet) => {
     const originalRows = [...sheet.rows, ...(customRows[sheet.gid] ?? [])];
     const rowEntries = originalRows
       .map((row, rowIndex) => ({ row, rowIndex }))
       .filter(({ row, rowIndex }) => !isBrokenMovedOnOrderRow(sheet, row, rowIndex))
-      .filter(({ rowIndex }) => !deletedRows[fabricRowKey(sheet.gid, rowIndex)] || shouldRestoreLostPeacockRow(sheet.gid, rowIndex));
+      .filter(({ rowIndex }) => {
+        const rowKey = fabricRowKey(sheet.gid, rowIndex);
+        return !deletedRows[rowKey] || recoveredRows.has(rowKey) || shouldRestoreLostPeacockRow(sheet.gid, rowIndex);
+      });
     const rows = rowEntries.map(({ row, rowIndex }) => (
       row.map((value, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? value)
     ));
