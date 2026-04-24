@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useSearchParams } from "react-router";
 import prisma from "../db.server";
+import { fabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
 import { syncOrderNoteMessages } from "../portal-messages.server";
 import { unauthenticated } from "../shopify.server";
 
@@ -115,9 +116,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         take: 25,
       })
     : [];
-  const fabricSheets = page === "fabric"
-    ? await fetchFabricSheets(selectedFabricTab)
-    : [];
+  const fabricSheets = page === "fabric" ? getFabricSheets() : [];
 
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","M","L","XL","2XL","3XL","S-M","M-L","L-XL","S/M","M/L","L/XL","4XL","ONE SIZE"];
@@ -1056,37 +1055,7 @@ const ALL_NAV_ITEMS = [
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
 const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct"];
-const FABRIC_SHEET_ID = "1FavnxWwRsEcMDWm3v7_FdMWeeX93adnvpZGr_Tn6wJ4";
-const FABRIC_SHEET_TABS = [
-  { gid: "759049382", name: "On Order", kind: "order" },
-  { gid: "390729206", name: "Fabric Samples under consideration", kind: "order" },
-  { gid: "1829736341", name: "60x60 Printed", kind: "stock" },
-  { gid: "0", name: "40x40 Printed", kind: "stock" },
-  { gid: "128048837", name: "Velvet", kind: "stock" },
-  { gid: "1670965992", name: "Rayon", kind: "stock" },
-  { gid: "1949735348", name: "Thick Cord", kind: "stock" },
-  { gid: "1128806463", name: "New Fabric on Order", kind: "wide-order" },
-  { gid: "2123625779", name: "Gorge (Double Fabric)", kind: "stock" },
-  { gid: "1972131020", name: "Plain 40x40", kind: "stock" },
-  { gid: "362283931", name: "Plain 60x60", kind: "stock" },
-  { gid: "1240512146", name: "Cotton Drill", kind: "simple-stock" },
-  { gid: "2008557105", name: "Thick Self Black", kind: "simple-stock" },
-  { gid: "1939488240", name: "Seersucker", kind: "simple-stock" },
-  { gid: "246387032", name: "Random Fabrics Bits and Bobs", kind: "random" },
-  { gid: "700159838", name: "Voil", kind: "stock" },
-  { gid: "2030572043", name: "Fabric on Order", kind: "wide-order" },
-] as const;
-type FabricSheetTab = typeof FABRIC_SHEET_TABS[number];
-type FabricSheetData = {
-  gid: string;
-  name: string;
-  kind: string;
-  headers: string[];
-  rows: string[][];
-  rowCount: number;
-  totalQuantity: number | null;
-  error?: string;
-};
+type FabricSheetData = FabricStockSheet & { error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
 const PORTAL_USERS_KEY = "supplier-portal-users-v1";
@@ -1260,140 +1229,8 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
   };
 }
 
-async function fetchFabricSheets(selectedGid: string): Promise<FabricSheetData[]> {
-  const tabs = FABRIC_SHEET_TABS;
-  const selected = selectedGid ? tabs.find((tab) => tab.gid === selectedGid) : null;
-  const tabsToLoad = selected ? tabs : tabs;
-
-  return Promise.all(tabsToLoad.map(fetchFabricSheet));
-}
-
-async function fetchFabricSheet(tab: FabricSheetTab): Promise<FabricSheetData> {
-  const url = `https://docs.google.com/spreadsheets/d/${FABRIC_SHEET_ID}/gviz/tq?tqx=out:json&gid=${encodeURIComponent(tab.gid)}`;
-  try {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Google Sheets returned ${response.status}`);
-    const payload = parseGoogleVisualizationResponse(await response.text());
-    return normalizeFabricSheet(tab, payload?.table);
-  } catch (error) {
-    return {
-      gid: tab.gid,
-      name: tab.name,
-      kind: tab.kind,
-      headers: [],
-      rows: [],
-      rowCount: 0,
-      totalQuantity: null,
-      error: error instanceof Error ? error.message : "Unable to load sheet",
-    };
-  }
-}
-
-function parseGoogleVisualizationResponse(text: string): any {
-  const jsonText = text
-    .replace(/^\/\*O_o\*\/\s*google\.visualization\.Query\.setResponse\(/, "")
-    .replace(/\);\s*$/, "");
-  return JSON.parse(jsonText);
-}
-
-function normalizeFabricSheet(tab: FabricSheetTab, table: any): FabricSheetData {
-  const rawHeaders = (table?.cols || []).map((col: any, index: number) => cleanFabricHeader(col?.label || columnName(index)));
-  const headers = headerPresetForFabricTab(tab, rawHeaders).slice(0, usefulColumnCount(rawHeaders, table?.rows || []));
-  const rows = (table?.rows || [])
-    .map((row: any) => (row?.c || []).slice(0, headers.length).map(fabricCellValue))
-    .filter((row: string[]) => row.some((value) => value.trim() !== ""));
-  const totalQuantity = sumFabricQuantity(headers, table?.rows || [], rows.length);
-
-  return {
-    gid: tab.gid,
-    name: tab.name,
-    kind: tab.kind,
-    headers,
-    rows,
-    rowCount: rows.length,
-    totalQuantity,
-  };
-}
-
-function headerPresetForFabricTab(tab: FabricSheetTab, rawHeaders: string[]) {
-  if (tab.kind === "order") {
-    return [
-      "Supplier", "Fabric Type", "Picture", "Planned Release Date", "Name",
-      "Quantity Ordered", "Quantity Received", "Order Date", "Status", "ETA",
-    ];
-  }
-  if (tab.kind === "stock") {
-    return [
-      "Supplier", "Fabric Type", "Fabric", "Name", "Cost per Meter", "Meters in Stock",
-      "Cut Pieces", "Received / Date", "Products", "Notes",
-    ];
-  }
-  if (tab.kind === "simple-stock") {
-    return [
-      "Fabric", "Name", "Price", "Meters Available", "Additional Quantity",
-      "Meters Received", "Products", "Notes", "Supplier",
-    ];
-  }
-  return rawHeaders.map((header, index) => header || columnName(index));
-}
-
-function usefulColumnCount(headers: string[], rows: any[]) {
-  let last = headers.findLastIndex((header) => header && !/^[A-Z]+$/.test(header));
-  for (const row of rows) {
-    const cells = row?.c || [];
-    for (let index = cells.length - 1; index >= 0; index -= 1) {
-      if (cells[index]?.v != null && String(cells[index].v).trim() !== "") {
-        last = Math.max(last, index);
-        break;
-      }
-    }
-  }
-  return Math.max(1, Math.min(last + 1, 12));
-}
-
-function fabricCellValue(cell: any) {
-  if (!cell || cell.v == null) return "";
-  if (cell.f != null) return String(cell.f);
-  if (typeof cell.v === "string") {
-    const dateMatch = cell.v.match(/^Date\((\d+),(\d+),(\d+)\)$/);
-    if (dateMatch) {
-      const [, y, m, d] = dateMatch;
-      return new Date(Number(y), Number(m), Number(d)).toLocaleDateString("en-AU", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-      });
-    }
-  }
-  return String(cell.v);
-}
-
-function cleanFabricHeader(value: string) {
-  return String(value || "").replace(/\s+/g, " ").trim();
-}
-
-function columnName(index: number) {
-  let n = index + 1;
-  let out = "";
-  while (n > 0) {
-    const rem = (n - 1) % 26;
-    out = String.fromCharCode(65 + rem) + out;
-    n = Math.floor((n - 1) / 26);
-  }
-  return out;
-}
-
-function sumFabricQuantity(headers: string[], rawRows: any[], rowCount: number) {
-  const quantityIndexes = headers
-    .map((header, index) => ({ header: header.toLowerCase(), index }))
-    .filter(({ header }) => /(meter|qty|quantity|ordered|stock|available)/.test(header) && !/(date|cost|price)/.test(header))
-    .map(({ index }) => index);
-  if (!quantityIndexes.length) return rowCount || null;
-  const total = rawRows.reduce((sum: number, row: any) => {
-    const cells = row?.c || [];
-    return sum + quantityIndexes.reduce((cellSum, index) => cellSum + (typeof cells[index]?.v === "number" ? cells[index].v : 0), 0);
-  }, 0);
-  return total > 0 ? total : rowCount || null;
+function getFabricSheets(): FabricSheetData[] {
+  return fabricStockSheets;
 }
 
 function getCookieValue(request: Request, key: string) {
