@@ -4259,7 +4259,6 @@ function FabricCell({
         options={options}
         chipKind={chipKind}
         fabricSettings={fabricSettings}
-        fetcher={fetcher}
         onChange={(nextValue) => {
           setDraft(nextValue);
           save(nextValue);
@@ -4306,7 +4305,6 @@ function FabricChipDropdown({
   options,
   chipKind,
   fabricSettings,
-  fetcher,
   onChange,
 }: {
   value: string;
@@ -4314,13 +4312,30 @@ function FabricChipDropdown({
   options: RestockOption[];
   chipKind: "supplierOptions" | "fabricTypeOptions";
   fabricSettings: FabricSettings;
-  fetcher: ReturnType<typeof useFetcher>;
   onChange: (value: string) => void;
 }) {
+  const settingsFetcher = useFetcher();
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
   const [rect, setRect] = useState<DOMRect | null>(null);
+  const [editingChip, setEditingChip] = useState<RestockOption | null>(null);
+  const [addingChip, setAddingChip] = useState(false);
+  const [editLabel, setEditLabel] = useState("");
+  const [editBg, setEditBg] = useState("#f3f4f6");
+  const [editColor, setEditColor] = useState("#374151");
   const selectedOption = option ?? options.find((item) => item.label === value || item.value === slugForOption(value));
+  const startEdit = (item?: RestockOption) => {
+    setEditingChip(item ?? null);
+    setAddingChip(!item);
+    setEditLabel(item?.label ?? "");
+    setEditBg(item?.bg ?? "#f3f4f6");
+    setEditColor(item?.color ?? "#374151");
+  };
+  const stopEdit = () => {
+    setEditingChip(null);
+    setAddingChip(false);
+    setEditLabel("");
+  };
   const updateRect = () => {
     if (buttonRef.current) setRect(buttonRef.current.getBoundingClientRect());
   };
@@ -4351,17 +4366,27 @@ function FabricChipDropdown({
     const existing = existingIndex >= 0
       ? nextOptions[existingIndex]
       : { value: slugForOption(label) || label, label, bg: "#f3f4f6", color: "#374151" };
-    const nextOption = { ...existing, ...patch, value: existing.value || slugForOption(label) || label, label: existing.label || label };
+    const nextLabel = String(patch.label ?? existing.label ?? label).trim();
+    const nextOption = { ...existing, ...patch, value: existing.value || slugForOption(nextLabel) || nextLabel, label: nextLabel };
     if (existingIndex >= 0) nextOptions[existingIndex] = nextOption;
     else nextOptions.push(nextOption);
     submitPortalCell(
-      fetcher,
+      settingsFetcher,
       {
         intent: "update_fabric_settings",
         value: JSON.stringify({ ...fabricSettings, [chipKind]: nextOptions }),
       },
       { label: "Undo fabric chip", fields: { intent: "update_fabric_settings", value: JSON.stringify(fabricSettings) } },
     );
+    if (value === label) onChange(nextOption.label);
+  };
+
+  const saveEdit = () => {
+    const nextLabel = editLabel.trim();
+    if (!nextLabel) return;
+    updateChipOption(editingChip?.label ?? nextLabel, { label: nextLabel, bg: editBg, color: editColor });
+    if (addingChip) onChange(nextLabel);
+    stopEdit();
   };
 
   const dropdown = open && rect && typeof document !== "undefined" ? createPortal(
@@ -4387,48 +4412,57 @@ function FabricChipDropdown({
       {options.map((item) => {
         const selected = item.label === value || item.value === slugForOption(value);
         return (
-          <button
-            key={item.value}
-            type="button"
-            style={s.fabricChipMenuOption}
-            onClick={() => {
-              onChange(item.label);
-              setOpen(false);
-            }}
-          >
-            <span style={s.fabricChipCheck}>{selected ? "✓" : ""}</span>
-            <span style={{ ...s.fabricChipMenuPill, background: item.bg, color: item.color }}>{item.label}</span>
-          </button>
+          <div key={item.value} style={s.fabricChipMenuItem}>
+            <button
+              type="button"
+              style={s.fabricChipEditButton}
+              onClick={() => startEdit(item)}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              style={s.fabricChipMenuOption}
+              onClick={() => {
+                onChange(item.label);
+                setOpen(false);
+              }}
+            >
+              <span style={s.fabricChipCheck}>{selected ? "✓" : ""}</span>
+              <span style={{ ...s.fabricChipMenuPill, background: item.bg, color: item.color }}>{item.label}</span>
+            </button>
+          </div>
         );
       })}
+      {(editingChip || addingChip) && (
+        <div style={s.fabricChipEditor}>
+          <input
+            value={editLabel}
+            onChange={(event) => setEditLabel(event.currentTarget.value)}
+            style={s.fabricChipEditInput}
+            placeholder="Chip text"
+            autoFocus
+          />
+          <label style={s.fabricChipMenuToolLabel}>
+            Chip
+            <input type="color" value={editBg} style={s.fabricChipColor} onChange={(event) => setEditBg(event.currentTarget.value)} />
+          </label>
+          <label style={s.fabricChipMenuToolLabel}>
+            Text
+            <input type="color" value={editColor} style={s.fabricChipColor} onChange={(event) => setEditColor(event.currentTarget.value)} />
+          </label>
+          <div style={s.fabricChipEditActions}>
+            <button type="button" style={s.fabricMiniButton} onClick={stopEdit}>Cancel</button>
+            <button type="button" style={s.fabricMiniButton} onClick={saveEdit}>Save</button>
+          </div>
+        </div>
+      )}
       <div style={s.fabricChipMenuTools}>
-        <label style={s.fabricChipMenuToolLabel}>
-          Chip
-          <input
-            type="color"
-            value={selectedOption?.bg ?? "#f3f4f6"}
-            style={s.fabricChipColor}
-            onChange={(event) => updateChipOption(value, { bg: event.currentTarget.value })}
-          />
-        </label>
-        <label style={s.fabricChipMenuToolLabel}>
-          Text
-          <input
-            type="color"
-            value={selectedOption?.color ?? "#374151"}
-            style={s.fabricChipColor}
-            onChange={(event) => updateChipOption(value, { color: event.currentTarget.value })}
-          />
-        </label>
         <button
           type="button"
           style={s.fabricMiniButton}
           onClick={() => {
-            const label = window.prompt("New chip name?");
-            if (!label?.trim()) return;
-            updateChipOption(label.trim(), {});
-            onChange(label.trim());
-            setOpen(false);
+            startEdit();
           }}
         >
           Add chip
@@ -6640,13 +6674,13 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={totalCol} center><span style={s.total}>{order.totalQty}</span></Td>
 
         {/* Status */}
-        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} options={restockSettings.statusOptions} /></Td>
+        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} /></Td>
 
         {/* Notes (from order) */}
         <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
 
         {/* Priority */}
-        <Td rowIndex={rowIndex} colIndex={priorityCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Priority" historyEntityName={order.productTitle}><PriorityCell orderId={order.id} value={order.priority ?? ""} options={restockSettings.priorityOptions} /></Td>
+        <Td rowIndex={rowIndex} colIndex={priorityCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Priority" historyEntityName={order.productTitle}><PriorityCell orderId={order.id} value={order.priority ?? ""} restockSettings={restockSettings} /></Td>
 
         {/* ETA */}
         <Td rowIndex={rowIndex} colIndex={etaCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="ETA" historyEntityName={order.productTitle}><EtaCell orderId={order.id} value={etaValue} /></Td>
@@ -6758,61 +6792,232 @@ function TableCustomCell({ cellKey, value }: { cellKey: string; value: string })
   );
 }
 
-function StatusCell({ orderId, value, options }: { orderId: number; value: string; options: RestockOption[] }) {
-  const fetcher = useFetcher();
-  const current = fetcher.formData ? String(fetcher.formData.get("value")) : value;
+function RestockOptionChipDropdown({
+  orderId,
+  value,
+  options,
+  optionKind,
+  restockSettings,
+  updateIntent,
+  undoLabel,
+  emptyLabel,
+}: {
+  orderId: number;
+  value: string;
+  options: RestockOption[];
+  optionKind: "statusOptions" | "priorityOptions";
+  restockSettings: RestockSettings;
+  updateIntent: "update_status" | "update_priority";
+  undoLabel: string;
+  emptyLabel?: string;
+}) {
+  const cellFetcher = useFetcher();
+  const settingsFetcher = useFetcher();
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const [editingChip, setEditingChip] = useState<RestockOption | null>(null);
+  const [addingChip, setAddingChip] = useState(false);
+  const [editLabel, setEditLabel] = useState("");
+  const [editBg, setEditBg] = useState("#f3f4f6");
+  const [editColor, setEditColor] = useState("#374151");
+  const current = cellFetcher.formData ? String(cellFetcher.formData.get("value")) : value;
   const option = options.find((item) => item.value === current);
 
-  return (
-    <select
-      value={current}
-      onChange={(e) => submitPortalCell(
-        fetcher,
-        {
-          intent: "update_status",
-          orderId,
-          value: e.currentTarget.value,
-        },
-        { label: "Undo status", fields: { intent: "update_status", orderId, value } },
-      )}
-      style={{ ...s.select, background: option?.bg ?? "#f3f4f6", color: option?.color ?? "#374151" }}
+  const updateRect = () => {
+    if (buttonRef.current) setRect(buttonRef.current.getBoundingClientRect());
+  };
+  const startEdit = (item?: RestockOption) => {
+    setEditingChip(item ?? null);
+    setAddingChip(!item);
+    setEditLabel(item?.label ?? "");
+    setEditBg(item?.bg ?? "#f3f4f6");
+    setEditColor(item?.color ?? "#374151");
+  };
+  const stopEdit = () => {
+    setEditingChip(null);
+    setAddingChip(false);
+    setEditLabel("");
+  };
+  useEffect(() => {
+    if (!open) return;
+    updateRect();
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (buttonRef.current?.contains(target)) return;
+      const menu = document.querySelector(`[data-restock-chip-menu="${orderId}-${optionKind}"]`);
+      if (menu?.contains(target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    window.addEventListener("resize", updateRect);
+    window.addEventListener("scroll", updateRect, true);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      window.removeEventListener("resize", updateRect);
+      window.removeEventListener("scroll", updateRect, true);
+    };
+  }, [open, optionKind, orderId]);
+
+  const selectValue = (nextValue: string) => {
+    submitPortalCell(
+      cellFetcher,
+      { intent: updateIntent, orderId, value: nextValue },
+      { label: undoLabel, fields: { intent: updateIntent, orderId, value } },
+    );
+  };
+
+  const saveSettingsOptions = (nextOptions: RestockOption[]) => {
+    submitPortalCell(
+      settingsFetcher,
+      {
+        intent: "update_restock_settings",
+        value: JSON.stringify({ ...restockSettings, [optionKind]: nextOptions }),
+      },
+      { label: "Undo restock chip", fields: { intent: "update_restock_settings", value: JSON.stringify(restockSettings) } },
+    );
+  };
+
+  const saveEdit = () => {
+    const nextLabel = editLabel.trim();
+    if (!nextLabel) return;
+    if (editingChip) {
+      const nextOptions = options.map((item) => (
+        item.value === editingChip.value ? { ...item, label: nextLabel, bg: editBg, color: editColor } : item
+      ));
+      saveSettingsOptions(nextOptions);
+    } else {
+      const valueSeed = slugForOption(nextLabel) || `chip_${Date.now()}`;
+      const taken = new Set(options.map((item) => item.value));
+      const nextValue = taken.has(valueSeed) ? `${valueSeed}_${Date.now()}` : valueSeed;
+      saveSettingsOptions([...options, { value: nextValue, label: nextLabel, bg: editBg, color: editColor }]);
+      selectValue(nextValue);
+      setOpen(false);
+    }
+    stopEdit();
+  };
+
+  const dropdown = open && rect && typeof document !== "undefined" ? createPortal(
+    <div
+      data-restock-chip-menu={`${orderId}-${optionKind}`}
+      style={{
+        ...s.fabricChipMenu,
+        top: rect.bottom + 6,
+        left: rect.left,
+        minWidth: Math.max(rect.width, 250),
+      }}
     >
-      {options.map((o) => (
-        <option key={o.value} value={o.value}>{o.label}</option>
-      ))}
-    </select>
+      {emptyLabel && (
+        <button
+          type="button"
+          style={s.fabricChipMenuOption}
+          onClick={() => {
+            selectValue("");
+            setOpen(false);
+          }}
+        >
+          <span style={s.fabricChipCheck}>{current ? "" : "✓"}</span>
+          <span>{emptyLabel}</span>
+        </button>
+      )}
+      {options.map((item) => {
+        const selected = item.value === current;
+        return (
+          <div key={item.value} style={s.fabricChipMenuItem}>
+            <button type="button" style={s.fabricChipEditButton} onClick={() => startEdit(item)}>Edit</button>
+            <button
+              type="button"
+              style={s.fabricChipMenuOption}
+              onClick={() => {
+                selectValue(item.value);
+                setOpen(false);
+              }}
+            >
+              <span style={s.fabricChipCheck}>{selected ? "✓" : ""}</span>
+              <span style={{ ...s.fabricChipMenuPill, background: item.bg, color: item.color }}>{item.label}</span>
+            </button>
+          </div>
+        );
+      })}
+      {(editingChip || addingChip) && (
+        <div style={s.fabricChipEditor}>
+          <input
+            value={editLabel}
+            onChange={(event) => setEditLabel(event.currentTarget.value)}
+            style={s.fabricChipEditInput}
+            placeholder="Chip text"
+            autoFocus
+          />
+          <label style={s.fabricChipMenuToolLabel}>
+            Chip
+            <input type="color" value={editBg} style={s.fabricChipColor} onChange={(event) => setEditBg(event.currentTarget.value)} />
+          </label>
+          <label style={s.fabricChipMenuToolLabel}>
+            Text
+            <input type="color" value={editColor} style={s.fabricChipColor} onChange={(event) => setEditColor(event.currentTarget.value)} />
+          </label>
+          <div style={s.fabricChipEditActions}>
+            <button type="button" style={s.fabricMiniButton} onClick={stopEdit}>Cancel</button>
+            <button type="button" style={s.fabricMiniButton} onClick={saveEdit}>Save</button>
+          </div>
+        </div>
+      )}
+      <div style={s.fabricChipMenuTools}>
+        <button type="button" style={s.fabricMiniButton} onClick={() => startEdit()}>Add chip</button>
+      </div>
+    </div>,
+    document.body,
+  ) : null;
+
+  return (
+    <div style={s.restockChipCell}>
+      <button
+        ref={buttonRef}
+        type="button"
+        style={{
+          ...s.fabricChipSelect,
+          background: option?.bg ?? "#f3f4f6",
+          color: option?.color ?? "#374151",
+        }}
+        onClick={() => {
+          updateRect();
+          setOpen((currentOpen) => !currentOpen);
+        }}
+      >
+        <span style={s.fabricChipButtonText}>{option?.label ?? emptyLabel ?? "—"}</span>
+        <span style={s.fabricChipChevron}>⌄</span>
+      </button>
+      {dropdown}
+    </div>
   );
 }
 
-function PriorityCell({ orderId, value, options }: { orderId: number; value: string; options: RestockOption[] }) {
-  const fetcher = useFetcher();
-  const current = fetcher.formData ? String(fetcher.formData.get("value")) : value;
-  const opt = options.find((o) => o.value === current);
-
+function StatusCell({ orderId, value, restockSettings }: { orderId: number; value: string; restockSettings: RestockSettings }) {
   return (
-    <select
-      value={current}
-      onChange={(e) => submitPortalCell(
-        fetcher,
-        {
-          intent: "update_priority",
-          orderId,
-          value: e.currentTarget.value,
-        },
-        { label: "Undo priority", fields: { intent: "update_priority", orderId, value } },
-      )}
-      style={{
-        ...s.select,
-        background: opt?.bg ?? "#f3f4f6",
-        color: opt?.color ?? "#374151",
-        fontWeight: 700,
-      }}
-    >
-      <option value="">— Priority —</option>
-      {options.map((o) => (
-        <option key={o.value} value={o.value}>{o.label}</option>
-      ))}
-    </select>
+    <RestockOptionChipDropdown
+      orderId={orderId}
+      value={value}
+      options={restockSettings.statusOptions}
+      optionKind="statusOptions"
+      restockSettings={restockSettings}
+      updateIntent="update_status"
+      undoLabel="Undo status"
+    />
+  );
+}
+
+function PriorityCell({ orderId, value, restockSettings }: { orderId: number; value: string; restockSettings: RestockSettings }) {
+  return (
+    <RestockOptionChipDropdown
+      orderId={orderId}
+      value={value}
+      options={restockSettings.priorityOptions}
+      optionKind="priorityOptions"
+      restockSettings={restockSettings}
+      updateIntent="update_priority"
+      undoLabel="Undo priority"
+      emptyLabel="— Priority —"
+    />
   );
 }
 
@@ -8281,6 +8486,12 @@ const s: Record<string, React.CSSProperties> = {
     gap: 7,
     padding: 8,
   },
+  restockChipCell: {
+    minHeight: 44,
+    display: "grid",
+    alignContent: "center",
+    padding: 8,
+  },
   fabricChipColor: {
     width: 28,
     height: 28,
@@ -8321,12 +8532,12 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 800,
   },
   fabricChipSelect: {
-    width: "calc(100% - 20px)",
+    width: "100%",
     minHeight: 34,
-    margin: 10,
+    margin: 0,
     border: "1px solid rgba(15,23,42,0.12)",
-    borderRadius: 999,
-    padding: "6px 28px 6px 10px",
+    borderRadius: 8,
+    padding: "6px 8px 6px 10px",
     outline: "none",
     fontSize: "var(--portal-table-font-size, 13px)",
     fontWeight: 900,
@@ -8347,6 +8558,9 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 16,
     lineHeight: 1,
     fontWeight: 900,
+    marginLeft: "auto",
+    minWidth: 20,
+    textAlign: "right",
   },
   fabricChipMenu: {
     position: "fixed",
@@ -8378,6 +8592,23 @@ const s: Record<string, React.CSSProperties> = {
     textAlign: "left",
     cursor: "pointer",
   },
+  fabricChipMenuItem: {
+    display: "grid",
+    gridTemplateColumns: "44px minmax(0, 1fr)",
+    alignItems: "center",
+    gap: 6,
+  },
+  fabricChipEditButton: {
+    border: "1px solid #cbd5e1",
+    borderRadius: 6,
+    padding: "4px 6px",
+    background: "#fff",
+    color: "#475569",
+    fontSize: 10,
+    fontWeight: 900,
+    cursor: "pointer",
+    lineHeight: 1.1,
+  },
   fabricChipCheck: {
     color: "#111827",
     fontSize: 13,
@@ -8386,11 +8617,38 @@ const s: Record<string, React.CSSProperties> = {
   },
   fabricChipMenuPill: {
     minWidth: 0,
-    borderRadius: 999,
+    borderRadius: 7,
     padding: "4px 9px",
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
+  },
+  fabricChipEditor: {
+    marginTop: 6,
+    padding: 8,
+    border: "1px solid #dbe3ef",
+    borderRadius: 8,
+    background: "#f8fafc",
+    display: "grid",
+    gridTemplateColumns: "minmax(120px, 1fr) auto auto",
+    alignItems: "center",
+    gap: 8,
+  },
+  fabricChipEditInput: {
+    minWidth: 0,
+    border: "1px solid #cbd5e1",
+    borderRadius: 6,
+    padding: "6px 8px",
+    color: "#111827",
+    fontSize: 12,
+    fontWeight: 800,
+    outline: "none",
+  },
+  fabricChipEditActions: {
+    gridColumn: "1 / -1",
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: 6,
   },
   fabricChipMenuTools: {
     marginTop: 6,
