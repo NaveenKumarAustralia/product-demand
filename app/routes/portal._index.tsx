@@ -5923,9 +5923,9 @@ function NotesCell({
             value: e.currentTarget.value,
           });
         }}
-        rows={2}
-        style={s.textarea}
-        placeholder="Add note… use @name"
+        rows={3}
+        style={s.restockNoteTextarea}
+        placeholder="Add note... use @name"
       />
       {focused && suggestions.length > 0 && (
         <div style={s.tagSuggestions}>
@@ -7250,7 +7250,7 @@ const s: Record<string, React.CSSProperties> = {
     minHeight: 96,
     border: "none",
     outline: "none",
-    resize: "vertical",
+    resize: "none",
     padding: "9px 10px",
     background: "transparent",
     color: "var(--portal-table-text-color, #1f2937)",
@@ -7391,7 +7391,7 @@ const s: Record<string, React.CSSProperties> = {
     font: "inherit",
     fontSize: 12,
     fontWeight: 700,
-    resize: "vertical",
+    resize: "none",
     outline: "none",
   },
   fabricProductsActions: {
@@ -7632,6 +7632,20 @@ const s: Record<string, React.CSSProperties> = {
     fontFamily: "inherit",
     outline: "none",
     color: "#374151",
+  },
+  restockNoteTextarea: {
+    width: "100%",
+    minHeight: 96,
+    border: "none",
+    outline: "none",
+    resize: "none",
+    padding: "9px 10px",
+    background: "transparent",
+    color: "var(--portal-table-text-color, #1f2937)",
+    font: "inherit",
+    fontWeight: 700,
+    lineHeight: 1.35,
+    boxSizing: "border-box",
   },
   noteTagWrap: { position: "relative" },
   tagSuggestions: {
