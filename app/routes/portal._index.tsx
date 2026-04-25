@@ -23,7 +23,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -35,6 +35,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
     prisma.portalSetting.findUnique({
       where: { key: PACKING_COLUMN_WIDTHS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: TABLE_HEADER_LABELS_KEY },
       select: { value: true },
     }),
     prisma.portalSetting.findUnique({
@@ -186,6 +190,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
     packingColumnWidths: normalizeColumnWidths(packingColumnWidthsSetting?.value),
+    tableHeaderLabels: normalizeTableHeaderLabels(headerLabelsSetting?.value),
     restockSettings,
     universalSettings,
     fabricSettings,
@@ -448,6 +453,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         sortOrder: (maxLine?.sortOrder ?? 0) + 1,
       },
     });
+    return null;
+  }
+
+  if (intent === "move_packing_line") {
+    const lineId = Number(form.get("lineId"));
+    const direction = String(form.get("direction") ?? "");
+    const line = await prisma.packingListLine.findUnique({
+      where: { id: lineId },
+      select: { id: true, packingListId: true, sortOrder: true },
+    });
+    if (!line || !["up", "down"].includes(direction)) return null;
+    const sibling = await prisma.packingListLine.findFirst({
+      where: {
+        packingListId: line.packingListId,
+        sortOrder: direction === "up" ? { lt: line.sortOrder } : { gt: line.sortOrder },
+      },
+      orderBy: { sortOrder: direction === "up" ? "desc" : "asc" },
+      select: { id: true, sortOrder: true },
+    });
+    if (!sibling) return null;
+    await prisma.$transaction([
+      prisma.packingListLine.update({ where: { id: line.id }, data: { sortOrder: sibling.sortOrder } }),
+      prisma.packingListLine.update({ where: { id: sibling.id }, data: { sortOrder: line.sortOrder } }),
+    ]);
     return null;
   }
 
@@ -783,6 +812,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_table_header") {
+    const key = String(form.get("key") ?? "");
+    const value = String(form.get("value") ?? "").trim();
+    if (!key) return null;
+    const setting = await prisma.portalSetting.findUnique({
+      where: { key: TABLE_HEADER_LABELS_KEY },
+      select: { value: true },
+    });
+    const labels = normalizeTableHeaderLabels(setting?.value);
+    if (value) labels[key] = value;
+    else delete labels[key];
+    await prisma.portalSetting.upsert({
+      where: { key: TABLE_HEADER_LABELS_KEY },
+      create: { key: TABLE_HEADER_LABELS_KEY, value: labels },
+      update: { value: labels },
+    });
+    return null;
+  }
+
   if (intent === "update_restock_settings") {
     let settings: RestockSettings;
     try {
@@ -906,7 +954,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
-  if (intent === "delete_fabric_row" || intent === "move_fabric_row") {
+  if (intent === "delete_fabric_row" || intent === "move_fabric_row" || intent === "duplicate_fabric_row") {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
     const targetGid = String(form.get("targetGid") ?? "");
@@ -924,28 +972,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const deletedRows = normalizeFabricDeletedRows(deletedRowsSetting?.value);
     const overrides = normalizeFabricCellOverrides(overridesSetting?.value);
 
-    if (intent === "move_fabric_row" && targetSheet) {
+    if ((intent === "move_fabric_row" && targetSheet) || intent === "duplicate_fabric_row") {
       const originalRows = [...sourceSheet.rows, ...(customRows[sourceSheet.gid] ?? [])];
       const row = originalRows[rowIndex]?.map((value, colIndex) => overrides[fabricCellKey(sourceSheet.gid, rowIndex, colIndex)] ?? value);
       if (!row) return null;
-      const sourceHeaderMap = new Map<string, number>();
-      for (const [index, header] of sourceSheet.headers.entries()) {
-        sourceHeaderMap.set(normalizeFabricHeader(header), index);
-        const role = fabricHeaderRole(header);
-        if (!sourceHeaderMap.has(role)) sourceHeaderMap.set(role, index);
+      if (intent === "duplicate_fabric_row") {
+        customRows[sourceSheet.gid] = [...(customRows[sourceSheet.gid] ?? []), row];
+      } else if (targetSheet) {
+        const sourceHeaderMap = new Map<string, number>();
+        for (const [index, header] of sourceSheet.headers.entries()) {
+          sourceHeaderMap.set(normalizeFabricHeader(header), index);
+          const role = fabricHeaderRole(header);
+          if (!sourceHeaderMap.has(role)) sourceHeaderMap.set(role, index);
+        }
+        const movedRow = targetSheet.headers.map((header) => {
+          const sourceIndex = sourceHeaderMap.get(normalizeFabricHeader(header)) ?? sourceHeaderMap.get(fabricHeaderRole(header));
+          return sourceIndex == null ? "" : row[sourceIndex] ?? "";
+        });
+        customRows[targetSheet.gid] = [...(customRows[targetSheet.gid] ?? []), movedRow];
       }
-      const movedRow = targetSheet.headers.map((header) => {
-        const sourceIndex = sourceHeaderMap.get(normalizeFabricHeader(header)) ?? sourceHeaderMap.get(fabricHeaderRole(header));
-        return sourceIndex == null ? "" : row[sourceIndex] ?? "";
-      });
-      customRows[targetSheet.gid] = [...(customRows[targetSheet.gid] ?? []), movedRow];
     }
 
-    if (rowIndex >= sourceSheet.rows.length) {
-      const customIndex = rowIndex - sourceSheet.rows.length;
-      customRows[sourceSheet.gid] = (customRows[sourceSheet.gid] ?? []).filter((_, index) => index !== customIndex);
-    } else {
-      deletedRows[fabricRowKey(sourceSheet.gid, rowIndex)] = true;
+    if (intent !== "duplicate_fabric_row") {
+      if (rowIndex >= sourceSheet.rows.length) {
+        const customIndex = rowIndex - sourceSheet.rows.length;
+        customRows[sourceSheet.gid] = (customRows[sourceSheet.gid] ?? []).filter((_, index) => index !== customIndex);
+      } else {
+        deletedRows[fabricRowKey(sourceSheet.gid, rowIndex)] = true;
+      }
     }
 
     await Promise.all([
@@ -1184,7 +1238,6 @@ const PACKING_COLUMNS = [
   { id: "price", label: "Price ₹", width: 92, center: true },
   { id: "value", label: "Value ₹", width: 96, center: true },
   { id: "weight", label: "Weight", width: 90, center: true },
-  { id: "actions", label: "Actions", width: 112, center: true },
 ];
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
@@ -1236,8 +1289,22 @@ function labelForPackingStatus(value: string) {
   return PACKING_STATUS_OPTIONS.find((option) => option.value === value)?.label ?? value;
 }
 
+function normalizeTableHeaderLabels(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, label]) => [key, String(label ?? "").trim()])
+      .filter(([, label]) => label),
+  );
+}
+
+function headerLabel(labels: Record<string, string>, key: string, fallback: string) {
+  return labels[key] || fallback;
+}
+
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
+const TABLE_HEADER_LABELS_KEY = "production-portal-table-header-labels-v1";
 const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
 const UNIVERSAL_SETTINGS_KEY = "production-portal-universal-settings-v1";
 const PORTAL_NAV_ORDER_KEY = "production-portal-nav-order-v1";
@@ -2378,6 +2445,7 @@ function handleTableGridKeyDown(event: React.KeyboardEvent<HTMLTableElement>) {
 
 type Order = Awaited<ReturnType<typeof loader>>["orders"][number];
 type PortalMessageItem = Awaited<ReturnType<typeof loader>>["messages"][number];
+type RowMenuAction = { label: string; onClick: () => void; danger?: boolean; disabled?: boolean };
 
 export default function PortalDashboard() {
   const {
@@ -2394,6 +2462,7 @@ export default function PortalDashboard() {
     page,
     columnWidths: savedColumnWidths,
     packingColumnWidths,
+    tableHeaderLabels,
     restockSettings,
     universalSettings,
     fabricSettings,
@@ -2419,7 +2488,7 @@ export default function PortalDashboard() {
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
-  const [showAddRow, setShowAddRow] = useState(false);
+  const [addRowNonce, setAddRowNonce] = useState(0);
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const [selectedAddCategory, setSelectedAddCategory] = useState<string | null>(null);
   const [newCategoryInput, setNewCategoryInput] = useState("");
@@ -2447,11 +2516,10 @@ export default function PortalDashboard() {
     { id: "notes", label: "Notes" },
     { id: "priority", label: "Priority" },
     { id: "eta", label: "ETA" },
-    { id: "delete", label: "Actions", center: true },
   ];
 
   const widthFor = (columnId: string) => columnWidths[columnId] ?? defaultColumnWidth(columnId);
-  const tableWidth = columns.reduce((sum, column) => sum + widthFor(column.id), 0);
+  const tableWidth = columns.reduce((sum, column) => sum + widthFor(column.id), 48);
   const updateParams = (updates: Record<string, string>) => {
     const next = new URLSearchParams(searchParams);
     for (const [key, value] of Object.entries(updates)) {
@@ -2619,38 +2687,6 @@ export default function PortalDashboard() {
                     ))}
                   </select>
                 </label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowCategoryDropdown((open) => !open);
-                    setShowNewCategoryInput(false);
-                    setNewCategoryInput("");
-                  }}
-                  style={s.addProductButton}
-                >
-                  + Add product
-                </button>
-                {showCategoryDropdown && (
-                  <CategoryDropdown
-                    productGroups={productGroups}
-                    showNewCategoryInput={showNewCategoryInput}
-                    newCategoryInput={newCategoryInput}
-                    onNewCategoryInput={setNewCategoryInput}
-                    onShowNewCategory={() => setShowNewCategoryInput(true)}
-                    onSelect={(category) => {
-                      setSelectedAddCategory(category);
-                      setShowCategoryDropdown(false);
-                      setShowNewCategoryInput(false);
-                      setNewCategoryInput("");
-                      setShowAddRow(true);
-                    }}
-                    onClose={() => {
-                      setShowCategoryDropdown(false);
-                      setShowNewCategoryInput(false);
-                      setNewCategoryInput("");
-                    }}
-                  />
-                )}
               </div>
             )}
           </div>
@@ -2673,6 +2709,7 @@ export default function PortalDashboard() {
             packingLists={packingLists}
             selectedPackingList={selectedPackingList}
             savedPackingColumnWidths={packingColumnWidths}
+            tableHeaderLabels={tableHeaderLabels}
             productSearch={productSearch}
             packingSearchLineId={packingSearchLineId}
             productResults={productResults}
@@ -2684,6 +2721,7 @@ export default function PortalDashboard() {
             selectedGid={selectedFabricTab}
             fabricSettings={fabricSettings}
             users={users}
+            tableHeaderLabels={tableHeaderLabels}
             inrToAudRate={inrToAudRate}
             onSelect={(gid) => updateParams({ fabricTab: gid })}
           />
@@ -2693,19 +2731,22 @@ export default function PortalDashboard() {
           <div style={s.tableWrap}>
             <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleTableGridKeyDown}>
               <colgroup>
+                <col style={{ width: 48 }} />
                 {columns.map((column) => (
                   <col key={column.id} style={{ width: widthFor(column.id) }} />
                 ))}
               </colgroup>
               <thead>
                 <tr style={s.headerRow}>
+                  <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
                   {columns.map((column) => (
                     <Th
                       key={column.id}
                       center={column.center}
+                      headerKey={`restock:${column.id}`}
                       onResizeStart={(event) => startResize(column.id, event)}
                     >
-                      {column.label}
+                      {headerLabel(tableHeaderLabels, `restock:${column.id}`, column.label)}
                     </Th>
                   ))}
                 </tr>
@@ -2723,27 +2764,26 @@ export default function PortalDashboard() {
                   setHistoryMenu({ x: e.clientX, y: e.clientY, entity, entityId, field, entityName });
                 }}
               >
-                {showAddRow && (
+                {orders.map((order, rowIndex) => (
+                  <OrderRow key={order.id} order={order} rowIndex={rowIndex + 1} sizes={sizes} users={users} restockSettings={restockSettings} />
+                ))}
+                {Array.from({ length: 10 }, (_, index) => (
                   <AddRestockOrderRow
+                    key={`${addRowNonce}:${index}`}
+                    rowIndex={orders.length + index + 1}
                     sizes={sizes}
-                    initialProductGroup={selectedAddCategory ?? ""}
+                    initialProductGroup={selectedProductGroup}
                     productSearch={restockProductSearch}
                     productResults={restockProductResults}
                     updateParams={updateParams}
                     restockSettings={restockSettings}
-                    onClose={() => {
-                      setShowAddRow(false);
-                      setSelectedAddCategory(null);
-                    }}
+                    onSaved={() => setAddRowNonce((current) => current + 1)}
                   />
-                )}
-                {orders.map((order, rowIndex) => (
-                  <OrderRow key={order.id} order={order} rowIndex={rowIndex + 1} sizes={sizes} users={users} restockSettings={restockSettings} />
                 ))}
                 {orders.length === 0 && (
                   <tr style={s.row}>
-                    <td colSpan={columns.length} style={{ ...s.td, textAlign: "center", color: "#6b7280", fontWeight: 700 }}>
-                      {messageOrderId ? "That message is for an order that is no longer open." : "No open orders yet. Click \"+ Add product\" to add one."}
+                    <td colSpan={columns.length + 1} style={{ ...s.td, textAlign: "center", color: "#6b7280", fontWeight: 700 }}>
+                      {messageOrderId ? "That message is for an order that is no longer open." : "Search in the blank rows below to add products."}
                     </td>
                   </tr>
                 )}
@@ -2765,6 +2805,57 @@ export default function PortalDashboard() {
         />
       )}
     </div>
+  );
+}
+
+function RowNumberCell({ rowNumber, actions }: { rowNumber: number | string; actions: RowMenuAction[] }) {
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [menu]);
+  return (
+    <>
+      <td
+        tabIndex={0}
+        style={s.rowNumberCell}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
+        title="Right click for row actions"
+      >
+        {rowNumber}
+      </td>
+      {menu && typeof document !== "undefined" && createPortal(
+        <div
+          style={{ ...s.contextMenu, left: menu.x, top: menu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          {actions.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              disabled={action.disabled}
+              style={{ ...s.contextMenuButton, ...(action.danger ? s.contextMenuDanger : {}) }}
+              onClick={() => {
+                setMenu(null);
+                action.onClick();
+              }}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
@@ -3167,6 +3258,7 @@ function FabricSheetsPanel({
   selectedGid,
   fabricSettings,
   users,
+  tableHeaderLabels,
   inrToAudRate,
   onSelect,
 }: {
@@ -3174,6 +3266,7 @@ function FabricSheetsPanel({
   selectedGid: string;
   fabricSettings: FabricSettings;
   users: PortalUser[];
+  tableHeaderLabels: Record<string, string>;
   inrToAudRate: number | null;
   onSelect: (gid: string) => void;
 }) {
@@ -3227,6 +3320,7 @@ function FabricSheetsPanel({
           fetcher={fetcher}
           fabricSettings={fabricSettings}
           users={users}
+          tableHeaderLabels={tableHeaderLabels}
           nameSearch={fabricNameSearch}
         />
       </div>
@@ -3311,6 +3405,7 @@ function FabricSheetTable({
   fetcher,
   fabricSettings,
   users,
+  tableHeaderLabels,
   nameSearch,
 }: {
   sheet: FabricSheetData;
@@ -3318,6 +3413,7 @@ function FabricSheetTable({
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
   users: PortalUser[];
+  tableHeaderLabels: Record<string, string>;
   nameSearch: string;
 }) {
   if (sheet.error) {
@@ -3339,15 +3435,35 @@ function FabricSheetTable({
         <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
           <thead>
             <tr>
+              <th style={{ ...s.fabricTh, ...s.rowNumberHeader }}>#</th>
               {sheet.headers.map((header, index) => (
-                <th key={`${header}-${index}`} style={s.fabricTh}>{header}</th>
+                <th key={`${header}-${index}`} style={s.fabricTh}>
+                  <EditableHeaderLabel headerKey={`fabric:${sheet.gid}:${index}`} value={headerLabel(tableHeaderLabels, `fabric:${sheet.gid}:${index}`, header)} />
+                </th>
               ))}
-              <th style={s.fabricTh}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {displayRows.map(({ row, rowIndex, sourceRowIndex }, displayRowIndex) => (
               <tr key={rowIndex} style={s.row}>
+                <RowNumberCell rowNumber={displayRowIndex + 1} actions={[
+                  { label: "Add row", onClick: () => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: sheet.gid }) },
+                  { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }) },
+                  {
+                    label: "Move to fabric type",
+                    onClick: () => {
+                      const targetName = window.prompt(`Move row to which fabric type?\n\n${sheets.filter((item) => item.gid !== sheet.gid).map((item) => item.name).join("\n")}`);
+                      if (!targetName) return;
+                      const targetSheet = sheets.find((item) => item.name.toLowerCase() === targetName.trim().toLowerCase());
+                      if (!targetSheet) {
+                        window.alert("Could not find that fabric type.");
+                        return;
+                      }
+                      submitPortalCell(fetcher, { intent: "move_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex, targetGid: targetSheet.gid });
+                    },
+                  },
+                  { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this fabric row?")) submitPortalCell(fetcher, { intent: "delete_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }); } },
+                ]} />
                 {sheet.headers.map((_, colIndex) => (
                   <FabricTd key={colIndex} rowIndex={displayRowIndex} colIndex={colIndex}>
                     <FabricCell
@@ -3363,14 +3479,6 @@ function FabricSheetTable({
                     />
                   </FabricTd>
                 ))}
-                <FabricTd rowIndex={displayRowIndex} colIndex={sheet.headers.length}>
-                  <FabricRowActions
-                    gid={sheet.gid}
-                    rowIndex={sourceRowIndex}
-                    sheets={sheets}
-                    fetcher={fetcher}
-                  />
-                </FabricTd>
               </tr>
             ))}
             {!displayRows.length && (
@@ -3382,15 +3490,6 @@ function FabricSheetTable({
             )}
           </tbody>
         </table>
-      </div>
-      <div style={s.fabricTableFooter}>
-        <button
-          type="button"
-          style={s.loginButton}
-          onClick={() => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: sheet.gid })}
-        >
-          Add row
-        </button>
       </div>
     </div>
   );
@@ -4529,6 +4628,7 @@ function PackingListsPanel({
   packingLists,
   selectedPackingList,
   savedPackingColumnWidths,
+  tableHeaderLabels,
   productSearch,
   packingSearchLineId,
   productResults,
@@ -4537,6 +4637,7 @@ function PackingListsPanel({
   packingLists: PackingListWithLines[];
   selectedPackingList: PackingListWithLines | null;
   savedPackingColumnWidths: Record<string, number>;
+  tableHeaderLabels: Record<string, string>;
   productSearch: string;
   packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
@@ -4553,6 +4654,7 @@ function PackingListsPanel({
           <PackingListDetail
             packingList={selectedPackingList}
             savedPackingColumnWidths={savedPackingColumnWidths}
+            tableHeaderLabels={tableHeaderLabels}
             productSearch={productSearch}
             packingSearchLineId={packingSearchLineId}
             productResults={productResults}
@@ -4707,6 +4809,7 @@ function PackingListsOverview({
 function PackingListDetail({
   packingList,
   savedPackingColumnWidths,
+  tableHeaderLabels,
   productSearch,
   packingSearchLineId,
   productResults,
@@ -4714,6 +4817,7 @@ function PackingListDetail({
 }: {
   packingList: PackingListWithLines;
   savedPackingColumnWidths: Record<string, number>;
+  tableHeaderLabels: Record<string, string>;
   productSearch: string;
   packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
@@ -4726,7 +4830,7 @@ function PackingListDetail({
   const [skipWords, setSkipWords] = useState("");
   const [packingListSearch, setPackingListSearch] = useState("");
   const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
-  const packingTableWidth = PACKING_COLUMNS.reduce((sum, column) => sum + packingWidthFor(column.id), 0);
+  const packingTableWidth = PACKING_COLUMNS.reduce((sum, column) => sum + packingWidthFor(column.id), 48);
   const normalizedPackingListSearch = packingListSearch.trim().toLowerCase();
   const visiblePackingLines = normalizedPackingListSearch
     ? packingList.lines.filter((line) => packingLineMatchesSearch(line, normalizedPackingListSearch))
@@ -4925,19 +5029,22 @@ function PackingListDetail({
       <div style={s.packingTableWrap}>
         <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
           <colgroup>
+            <col style={{ width: 48 }} />
             {PACKING_COLUMNS.map((column) => (
               <col key={column.id} style={{ width: packingWidthFor(column.id) }} />
             ))}
           </colgroup>
           <thead>
             <tr style={s.headerRow}>
+              <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
               {PACKING_COLUMNS.map((column) => (
                 <Th
                   key={column.id}
                   center={column.center}
+                  headerKey={`packing:${column.id}`}
                   onResizeStart={(event) => startPackingResize(column.id, event)}
                 >
-                  {column.label}
+                  {headerLabel(tableHeaderLabels, `packing:${column.id}`, column.label)}
                 </Th>
               ))}
             </tr>
@@ -4955,7 +5062,7 @@ function PackingListDetail({
               />
             )) : (
               <tr style={s.row}>
-                <td colSpan={PACKING_COLUMNS.length} style={{ ...s.td, textAlign: "center", padding: 40 }}>
+                <td colSpan={PACKING_COLUMNS.length + 1} style={{ ...s.td, textAlign: "center", padding: 40 }}>
                   No packing list rows match this search.
                 </td>
               </tr>
@@ -5004,6 +5111,13 @@ function PackingListLineRow({
 
   return (
     <tr style={s.row}>
+      <RowNumberCell rowNumber={rowIndex + 1} actions={[
+        { label: "Add row", onClick: () => submitPortalCell(fetcher, { intent: "add_custom_packing_line", packingId: line.packingListId }) },
+        { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_packing_line", lineId: line.id }) },
+        { label: "Move up", onClick: () => submitPortalCell(fetcher, { intent: "move_packing_line", lineId: line.id, direction: "up" }) },
+        { label: "Move down", onClick: () => submitPortalCell(fetcher, { intent: "move_packing_line", lineId: line.id, direction: "down" }) },
+        { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this packing row?")) submitPortalCell(fetcher, { intent: "delete_packing_line", lineId: line.id }); } },
+      ]} />
       <PackingTd rowIndex={rowIndex} colIndex={0}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={1} center><PackingImageCell lineId={line.id} field="productImageUrl" value={line.productImageUrl ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={2} center><PackingImageCell lineId={line.id} field="fabricImageData" value={line.fabricImageData ?? ""} /></PackingTd>
@@ -5047,12 +5161,6 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={16} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={17} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={18} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={19} center>
-        <div style={s.rowActions}>
-          <button type="button" style={s.smallButton} onClick={() => submitPortalCell(fetcher, { intent: "duplicate_packing_line", lineId: line.id })}>Duplicate</button>
-          <button type="button" style={s.removeUserButton} onClick={() => submitPortalCell(fetcher, { intent: "delete_packing_line", lineId: line.id })}>Delete</button>
-        </div>
-      </PackingTd>
     </tr>
   );
 }
@@ -5472,21 +5580,23 @@ function CategoryDropdown({
 // ─── Rows ────────────────────────────────────────────────────────────────────
 
 function AddRestockOrderRow({
+  rowIndex,
   sizes,
   initialProductGroup,
   productSearch,
   productResults,
   updateParams,
   restockSettings,
-  onClose,
+  onSaved,
 }: {
+  rowIndex: number;
   sizes: string[];
   initialProductGroup?: string;
   productSearch: string;
   productResults: ShopifySearchProduct[];
   updateParams: (updates: Record<string, string>) => void;
   restockSettings: RestockSettings;
-  onClose?: () => void;
+  onSaved?: () => void;
 }) {
   const fetcher = useFetcher();
   const rowRef = useRef<HTMLTableRowElement | null>(null);
@@ -5508,7 +5618,6 @@ function AddRestockOrderRow({
   const notesCol = totalCol + 2;
   const priorityCol = totalCol + 3;
   const etaCol = totalCol + 4;
-  const deleteCol = totalCol + 5;
 
   const shouldShowResults = !selectedProduct && focused && searchValue.trim().length >= 2;
   const dropdownHeight = searchValue.trim() !== productSearch || !productResults.length
@@ -5567,8 +5676,9 @@ function AddRestockOrderRow({
         setNotes(""); setEta(""); setPriority("");
         setStatus(restockSettings.statusOptions[0]?.value ?? "on_order");
         updateParams({ restockProductSearch: "" });
+        onSaved?.();
       } else {
-        onClose?.();
+        updateParams({ restockProductSearch: "" });
       }
     };
     document.addEventListener("mousedown", handleMouseDown);
@@ -5593,7 +5703,10 @@ function AddRestockOrderRow({
   };
 
   return (
-    <tr ref={rowRef} style={{ ...s.row, ...s.addOrderRow, outline: "2px solid #008060", outlineOffset: -1 }}>
+    <tr ref={rowRef} style={{ ...s.row, ...s.addOrderRow }}>
+      <RowNumberCell rowNumber={rowIndex} actions={[
+        { label: "Blank add row", onClick: () => inputRef.current?.focus() },
+      ]} />
       <Td rowIndex={0} colIndex={0}>
         {initialProductGroup && <span style={{ fontSize: 11, color: "#6b7280", fontStyle: "italic" }}>{initialProductGroup}</span>}
       </Td>
@@ -5684,9 +5797,6 @@ function AddRestockOrderRow({
       <Td rowIndex={0} colIndex={etaCol}>
         <input value={eta} onChange={(e) => setEta(e.currentTarget.value)} style={s.dateInput} placeholder="dd/mm/yy" />
       </Td>
-      <Td rowIndex={0} colIndex={deleteCol} center>
-        {onClose && <button type="button" onClick={onClose} style={s.deleteButton}>✕</button>}
-      </Td>
     </tr>
   );
 }
@@ -5704,6 +5814,7 @@ function OrderRow({
   users: PortalUser[];
   restockSettings: RestockSettings;
 }) {
+  const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
@@ -5723,11 +5834,14 @@ function OrderRow({
   const notesCol = totalCol + 2;
   const priorityCol = totalCol + 3;
   const etaCol = totalCol + 4;
-  const deleteCol = totalCol + 5;
 
   return (
     <>
       <tr id={`order-${order.id}`} style={s.row}>
+        <RowNumberCell rowNumber={rowIndex} actions={[
+          { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
+          { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this restock row?")) submitPortalCell(fetcher, { intent: "delete_order", orderId: order.id }); } },
+        ]} />
         {/* Factory notes */}
         <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
@@ -5784,11 +5898,10 @@ function OrderRow({
         {/* ETA */}
         <Td rowIndex={rowIndex} colIndex={etaCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="ETA" historyEntityName={order.productTitle}><EtaCell orderId={order.id} value={etaValue} /></Td>
 
-        {/* Actions */}
-        <Td rowIndex={rowIndex} colIndex={deleteCol} center><OrderActionsCell orderId={order.id} /></Td>
       </tr>
       {inventoryOpen && (
         <tr style={s.inventoryRow}>
+          <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
@@ -5801,7 +5914,6 @@ function OrderRow({
           ))}
           <td style={{ ...s.td, ...s.inventoryQtyCell }}><span style={s.total}>{inventoryTotal}</span></td>
           <td style={{ ...s.td, ...s.inventoryStatusCell }}>Available</td>
-          <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
@@ -6075,15 +6187,19 @@ function OrderActionsCell({ orderId }: { orderId: number }) {
 function Th({
   children,
   center,
+  headerKey,
   onResizeStart,
 }: {
   children: React.ReactNode;
   center?: boolean;
+  headerKey?: string;
   onResizeStart: (event: React.MouseEvent<HTMLSpanElement>) => void;
 }) {
   return (
     <th style={{ ...s.th, textAlign: center ? "center" : "left" }}>
-      <span style={s.thContent}>{children}</span>
+      {headerKey && typeof children === "string"
+        ? <EditableHeaderLabel headerKey={headerKey} value={children} />
+        : <span style={s.thContent}>{children}</span>}
       <span
         role="separator"
         aria-orientation="vertical"
@@ -6092,6 +6208,32 @@ function Th({
         style={s.resizeHandle}
       />
     </th>
+  );
+}
+
+function EditableHeaderLabel({ headerKey, value }: { headerKey: string; value: string }) {
+  const fetcher = useFetcher();
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const save = (nextValue: string) => {
+    const trimmed = nextValue.trim();
+    if (!trimmed || trimmed === value) return;
+    submitPortalCell(fetcher, { intent: "update_table_header", key: headerKey, value: trimmed });
+  };
+  return (
+    <input
+      value={draft}
+      onChange={(event) => setDraft(event.currentTarget.value)}
+      onBlur={(event) => save(event.currentTarget.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          event.currentTarget.blur();
+        }
+      }}
+      style={s.headerEditInput}
+      title="Edit heading"
+    />
   );
 }
 function Td({
@@ -7223,6 +7365,8 @@ const s: Record<string, React.CSSProperties> = {
     textTransform: "uppercase",
     letterSpacing: "0.04em",
     whiteSpace: "nowrap",
+    overflow: "auto",
+    resize: "horizontal",
   },
   fabricTd: {
     padding: 0,
@@ -7471,6 +7615,65 @@ const s: Record<string, React.CSSProperties> = {
     textOverflow: "ellipsis",
   },
   thContent: { display: "block", overflow: "hidden", textOverflow: "ellipsis" },
+  headerEditInput: {
+    width: "100%",
+    border: 0,
+    outline: "none",
+    background: "transparent",
+    color: "inherit",
+    font: "inherit",
+    fontWeight: "inherit",
+    textTransform: "inherit",
+    letterSpacing: "inherit",
+    padding: 0,
+    minWidth: 42,
+  },
+  rowNumberHeader: {
+    width: 48,
+    minWidth: 48,
+    textAlign: "center",
+    color: "#64748b",
+  },
+  rowNumberCell: {
+    width: 48,
+    minWidth: 48,
+    padding: "8px 6px",
+    verticalAlign: "middle",
+    textAlign: "center",
+    color: "#64748b",
+    background: "#f8fafc",
+    border: "1px solid #d1d5db",
+    fontSize: 12,
+    fontWeight: 900,
+    cursor: "context-menu",
+    position: "sticky",
+    left: 0,
+    zIndex: 24,
+  },
+  contextMenu: {
+    position: "fixed",
+    zIndex: 1200,
+    minWidth: 180,
+    display: "grid",
+    gap: 4,
+    padding: 6,
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 8,
+    boxShadow: "0 18px 42px rgba(15,23,42,0.24)",
+  },
+  contextMenuButton: {
+    border: 0,
+    borderRadius: 6,
+    padding: "8px 10px",
+    background: "#fff",
+    color: "#111827",
+    fontSize: 12,
+    fontWeight: 800,
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  contextMenuDanger: { color: "#991b1b" },
   resizeHandle: {
     position: "absolute",
     top: 0,
