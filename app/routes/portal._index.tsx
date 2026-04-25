@@ -23,7 +23,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -39,6 +39,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
     prisma.portalSetting.findUnique({
       where: { key: TABLE_HEADER_LABELS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: TABLE_CUSTOM_COLUMNS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: TABLE_CUSTOM_CELLS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: TABLE_ROW_HEIGHTS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: FABRIC_CUSTOM_SHEETS_KEY },
       select: { value: true },
     }),
     prisma.portalSetting.findUnique({
@@ -78,6 +94,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       take: 1000,
     }).catch(() => [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[]);
   const users = normalizePortalUsers(usersSetting?.value);
+  const customColumns = normalizeTableCustomColumns(customColumnsSetting?.value);
+  const customCells = normalizeTableCustomCells(customCellsSetting?.value);
+  const rowHeights = normalizeTableRowHeights(rowHeightsSetting?.value);
   const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
   const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
   const fabricSettings = normalizeFabricSettings(fabricSettingsSetting?.value);
@@ -150,6 +169,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         fabricCustomRowsSetting?.value,
         fabricDeletedRowsSetting?.value,
         fabricSettings.tileOrder,
+        normalizeFabricCustomSheets(fabricCustomSheetsSetting?.value),
+        customColumns.fabric,
       )
     : [];
 
@@ -191,6 +212,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
     packingColumnWidths: normalizeColumnWidths(packingColumnWidthsSetting?.value),
     tableHeaderLabels: normalizeTableHeaderLabels(headerLabelsSetting?.value),
+    customColumns,
+    customCells,
+    rowHeights,
     restockSettings,
     universalSettings,
     fabricSettings,
@@ -831,6 +855,80 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_table_custom_cell") {
+    const key = String(form.get("key") ?? "");
+    const value = String(form.get("value") ?? "");
+    if (!key) return null;
+    const setting = await prisma.portalSetting.findUnique({ where: { key: TABLE_CUSTOM_CELLS_KEY }, select: { value: true } });
+    const cells = normalizeTableCustomCells(setting?.value);
+    cells[key] = value;
+    await prisma.portalSetting.upsert({
+      where: { key: TABLE_CUSTOM_CELLS_KEY },
+      create: { key: TABLE_CUSTOM_CELLS_KEY, value: cells },
+      update: { value: cells },
+    });
+    return null;
+  }
+
+  if (intent === "add_table_column" || intent === "remove_table_column") {
+    const table = String(form.get("table") ?? "");
+    const gid = String(form.get("gid") ?? "");
+    const columnId = String(form.get("columnId") ?? "");
+    const label = String(form.get("label") ?? "New Column").trim() || "New Column";
+    const setting = await prisma.portalSetting.findUnique({ where: { key: TABLE_CUSTOM_COLUMNS_KEY }, select: { value: true } });
+    const columns = normalizeTableCustomColumns(setting?.value);
+    if (intent === "add_table_column") {
+      const column = { id: `custom_${Date.now()}`, label };
+      if (table === "restock") columns.restock = [...columns.restock, column];
+      if (table === "packing") columns.packing = [...columns.packing, column];
+      if (table === "fabric" && gid) columns.fabric[gid] = [...(columns.fabric[gid] ?? []), column];
+    } else if (columnId) {
+      if (table === "restock") columns.restock = columns.restock.filter((column) => column.id !== columnId);
+      if (table === "packing") columns.packing = columns.packing.filter((column) => column.id !== columnId);
+      if (table === "fabric" && gid) columns.fabric[gid] = (columns.fabric[gid] ?? []).filter((column) => column.id !== columnId);
+    }
+    await prisma.portalSetting.upsert({
+      where: { key: TABLE_CUSTOM_COLUMNS_KEY },
+      create: { key: TABLE_CUSTOM_COLUMNS_KEY, value: columns },
+      update: { value: columns },
+    });
+    return null;
+  }
+
+  if (intent === "update_row_height") {
+    const key = String(form.get("key") ?? "");
+    const height = Math.min(420, Math.max(34, Number(form.get("height")) || 0));
+    if (!key || !height) return null;
+    const setting = await prisma.portalSetting.findUnique({ where: { key: TABLE_ROW_HEIGHTS_KEY }, select: { value: true } });
+    const heights = normalizeTableRowHeights(setting?.value);
+    heights[key] = height;
+    await prisma.portalSetting.upsert({
+      where: { key: TABLE_ROW_HEIGHTS_KEY },
+      create: { key: TABLE_ROW_HEIGHTS_KEY, value: heights },
+      update: { value: heights },
+    });
+    return null;
+  }
+
+  if (intent === "create_fabric_sheet") {
+    const name = String(form.get("name") ?? "").trim();
+    if (!name) return null;
+    const setting = await prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } });
+    const sheets = normalizeFabricCustomSheets(setting?.value);
+    sheets.push({
+      gid: `custom_${Date.now()}`,
+      name,
+      headers: DEFAULT_FABRIC_HEADERS,
+      rows: Array.from({ length: 3 }, () => Array.from({ length: DEFAULT_FABRIC_HEADERS.length }, () => "")),
+    });
+    await prisma.portalSetting.upsert({
+      where: { key: FABRIC_CUSTOM_SHEETS_KEY },
+      create: { key: FABRIC_CUSTOM_SHEETS_KEY, value: sheets },
+      update: { value: sheets },
+    });
+    return null;
+  }
+
   if (intent === "update_restock_settings") {
     let settings: RestockSettings;
     try {
@@ -958,8 +1056,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
     const targetGid = String(form.get("targetGid") ?? "");
-    const sourceSheet = fabricStockSheets.find((item) => item.gid === gid);
-    const targetSheet = fabricStockSheets.find((item) => item.gid === targetGid);
+    const customSheetsSetting = await prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } });
+    const allFabricSheets = [
+      ...fabricStockSheets,
+      ...normalizeFabricCustomSheets(customSheetsSetting?.value).map((sheet) => ({ ...sheet, kind: "stock", rowCount: sheet.rows.length, totalQuantity: null })),
+    ] as FabricStockSheet[];
+    const sourceSheet = allFabricSheets.find((item) => item.gid === gid);
+    const targetSheet = allFabricSheets.find((item) => item.gid === targetGid);
     if (!sourceSheet || !Number.isInteger(rowIndex) || rowIndex < 0) return null;
     if (intent === "move_fabric_row" && (!targetSheet || targetSheet.gid === sourceSheet.gid || isHiddenFabricSheet(targetSheet.name))) return null;
 
@@ -1019,7 +1122,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "add_fabric_row") {
     const gid = String(form.get("gid") ?? "");
-    const sheet = fabricStockSheets.find((item) => item.gid === gid);
+    const customSheetsSetting = await prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } });
+    const customSheets = normalizeFabricCustomSheets(customSheetsSetting?.value);
+    const sheet = fabricStockSheets.find((item) => item.gid === gid)
+      ?? customSheets.find((item) => item.gid === gid);
     if (!sheet) return null;
 
     const setting = await prisma.portalSetting.findUnique({
@@ -1302,9 +1408,58 @@ function headerLabel(labels: Record<string, string>, key: string, fallback: stri
   return labels[key] || fallback;
 }
 
+function normalizeTableCustomColumns(value: unknown): TableCustomColumns {
+  const raw = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const normalizeList = (list: unknown): TableCustomColumn[] => Array.isArray(list)
+    ? list.map((item) => {
+        if (!item || typeof item !== "object") return null;
+        const column = item as Record<string, unknown>;
+        const id = String(column.id ?? "").trim();
+        const label = String(column.label ?? "").trim();
+        return id && label ? { id, label } : null;
+      }).filter(Boolean) as TableCustomColumn[]
+    : [];
+  const fabric = raw.fabric && typeof raw.fabric === "object" && !Array.isArray(raw.fabric)
+    ? Object.fromEntries(Object.entries(raw.fabric as Record<string, unknown>).map(([gid, list]) => [gid, normalizeList(list)]))
+    : {};
+  return { restock: normalizeList(raw.restock), packing: normalizeList(raw.packing), fabric };
+}
+
+function normalizeTableCustomCells(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, cellValue]) => [key, String(cellValue ?? "")]));
+}
+
+function normalizeTableRowHeights(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([key, height]) => [key, Math.min(420, Math.max(34, Number(height) || 0))] as const)
+      .filter(([, height]) => height > 0),
+  );
+}
+
+function normalizeFabricCustomSheets(value: unknown): FabricCustomSheet[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    if (!item || typeof item !== "object") return null;
+    const sheet = item as Record<string, unknown>;
+    const gid = String(sheet.gid ?? "").trim();
+    const name = String(sheet.name ?? "").trim();
+    const headers = Array.isArray(sheet.headers) ? sheet.headers.map((header) => String(header || "Column")) : [];
+    const rows = Array.isArray(sheet.rows)
+      ? sheet.rows.filter((row): row is unknown[] => Array.isArray(row)).map((row) => row.map((cell) => String(cell ?? "")))
+      : [];
+    return gid && name ? { gid, name, headers: headers.length ? headers : DEFAULT_FABRIC_HEADERS, rows } : null;
+  }).filter(Boolean) as FabricCustomSheet[];
+}
+
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
 const TABLE_HEADER_LABELS_KEY = "production-portal-table-header-labels-v1";
+const TABLE_CUSTOM_COLUMNS_KEY = "production-portal-table-custom-columns-v1";
+const TABLE_CUSTOM_CELLS_KEY = "production-portal-table-custom-cells-v1";
+const TABLE_ROW_HEIGHTS_KEY = "production-portal-table-row-heights-v1";
 const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
 const UNIVERSAL_SETTINGS_KEY = "production-portal-universal-settings-v1";
 const PORTAL_NAV_ORDER_KEY = "production-portal-nav-order-v1";
@@ -1312,6 +1467,8 @@ const FABRIC_SETTINGS_KEY = "production-portal-fabric-settings-v1";
 const FABRIC_CELL_OVERRIDES_KEY = "production-portal-fabric-cell-overrides-v1";
 const FABRIC_CUSTOM_ROWS_KEY = "production-portal-fabric-custom-rows-v1";
 const FABRIC_DELETED_ROWS_KEY = "production-portal-fabric-deleted-rows-v1";
+const FABRIC_CUSTOM_SHEETS_KEY = "production-portal-fabric-custom-sheets-v1";
+const DEFAULT_FABRIC_HEADERS = ["Supplier", "Fabric Type", "Fabric", "Name", "Cost per Meter", "Meters in Stock", "Cut Pieces", "Received / Date", "Products", "Notes"];
 const HIDDEN_FABRIC_SHEET_NAMES = new Set(["new fabric on order", "fabric on order"]);
 const FABRIC_TOTAL_EXCLUDED_NAMES = new Set([
   "on order",
@@ -1376,6 +1533,18 @@ type FabricSettings = {
   supplierOptions: RestockOption[];
   fabricTypeOptions: RestockOption[];
   tileOrder: string[];
+};
+type TableCustomColumn = { id: string; label: string };
+type TableCustomColumns = {
+  restock: TableCustomColumn[];
+  packing: TableCustomColumn[];
+  fabric: Record<string, TableCustomColumn[]>;
+};
+type FabricCustomSheet = {
+  gid: string;
+  name: string;
+  headers: string[];
+  rows: string[][];
 };
 type UniversalSettings = {
   primaryButtonBg: string;
@@ -1722,12 +1891,30 @@ async function getInrToAudRate() {
   }
 }
 
-function getFabricSheets(overridesValue?: unknown, customRowsValue?: unknown, deletedRowsValue?: unknown, tileOrder: string[] = []): FabricSheetData[] {
+function getFabricSheets(
+  overridesValue?: unknown,
+  customRowsValue?: unknown,
+  deletedRowsValue?: unknown,
+  tileOrder: string[] = [],
+  customSheets: FabricCustomSheet[] = [],
+  customColumns: Record<string, TableCustomColumn[]> = {},
+): FabricSheetData[] {
   const overrides = normalizeFabricCellOverrides(overridesValue);
   const customRows = normalizeFabricCustomRows(customRowsValue);
   const deletedRows = normalizeFabricDeletedRows(deletedRowsValue);
   const recoveredRows = recoveredBrokenMoveRows(customRows, deletedRows);
-  const sheets = fabricStockSheets.filter((sheet) => !isHiddenFabricSheet(sheet.name)).map((sheet) => {
+  const sourceSheets: FabricStockSheet[] = [
+    ...fabricStockSheets.filter((sheet) => !isHiddenFabricSheet(sheet.name)),
+    ...customSheets.map((sheet) => ({
+      ...sheet,
+      kind: "stock",
+      rowCount: sheet.rows.length,
+      totalQuantity: sumFabricRows(sheet.headers, sheet.rows),
+    })),
+  ];
+  const sheets = sourceSheets.map((sheet) => {
+    const extraHeaders = (customColumns[sheet.gid] ?? []).map((column) => column.label);
+    const headers = [...sheet.headers, ...extraHeaders];
     const originalRows = [...sheet.rows, ...(customRows[sheet.gid] ?? [])];
     const rowEntries = originalRows
       .map((row, rowIndex) => ({ row, rowIndex }))
@@ -1737,10 +1924,11 @@ function getFabricSheets(overridesValue?: unknown, customRowsValue?: unknown, de
         return !deletedRows[rowKey] || recoveredRows.has(rowKey) || shouldRestoreLostPeacockRow(sheet.gid, rowIndex);
       });
     const rows = rowEntries.map(({ row, rowIndex }) => (
-      row.map((value, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? value)
+      Array.from({ length: headers.length }, (_, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? row[colIndex] ?? "")
     ));
     return {
       ...sheet,
+      headers,
       originalRows,
       rowKeys: rowEntries.map(({ rowIndex }) => rowIndex),
       rows,
@@ -2445,7 +2633,14 @@ function handleTableGridKeyDown(event: React.KeyboardEvent<HTMLTableElement>) {
 
 type Order = Awaited<ReturnType<typeof loader>>["orders"][number];
 type PortalMessageItem = Awaited<ReturnType<typeof loader>>["messages"][number];
-type RowMenuAction = { label: string; onClick: () => void; danger?: boolean; disabled?: boolean };
+type RowMenuAction = {
+  label: string;
+  onClick?: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+  options?: { label: string; value: string }[];
+  onSelect?: (value: string) => void;
+};
 
 export default function PortalDashboard() {
   const {
@@ -2463,6 +2658,9 @@ export default function PortalDashboard() {
     columnWidths: savedColumnWidths,
     packingColumnWidths,
     tableHeaderLabels,
+    customColumns,
+    customCells,
+    rowHeights,
     restockSettings,
     universalSettings,
     fabricSettings,
@@ -2516,6 +2714,7 @@ export default function PortalDashboard() {
     { id: "notes", label: "Notes" },
     { id: "priority", label: "Priority" },
     { id: "eta", label: "ETA" },
+    ...customColumns.restock.map((column) => ({ id: column.id, label: column.label })),
   ];
 
   const widthFor = (columnId: string) => columnWidths[columnId] ?? defaultColumnWidth(columnId);
@@ -2700,7 +2899,6 @@ export default function PortalDashboard() {
               loginRequired={loginRequired}
               restockSettings={restockSettings}
               universalSettings={universalSettings}
-              fabricSettings={fabricSettings}
             />
             <ActivityLogPanel activityLogs={activityLogs} />
           </div>
@@ -2710,6 +2908,9 @@ export default function PortalDashboard() {
             selectedPackingList={selectedPackingList}
             savedPackingColumnWidths={packingColumnWidths}
             tableHeaderLabels={tableHeaderLabels}
+            customColumns={customColumns.packing}
+            customCells={customCells}
+            rowHeights={rowHeights}
             productSearch={productSearch}
             packingSearchLineId={packingSearchLineId}
             productResults={productResults}
@@ -2722,6 +2923,8 @@ export default function PortalDashboard() {
             fabricSettings={fabricSettings}
             users={users}
             tableHeaderLabels={tableHeaderLabels}
+            customColumns={customColumns}
+            rowHeights={rowHeights}
             inrToAudRate={inrToAudRate}
             onSelect={(gid) => updateParams({ fabricTab: gid })}
           />
@@ -2744,6 +2947,7 @@ export default function PortalDashboard() {
                       key={column.id}
                       center={column.center}
                       headerKey={`restock:${column.id}`}
+                      columnId={column.id}
                       onResizeStart={(event) => startResize(column.id, event)}
                     >
                       {headerLabel(tableHeaderLabels, `restock:${column.id}`, column.label)}
@@ -2765,7 +2969,17 @@ export default function PortalDashboard() {
                 }}
               >
                 {orders.map((order, rowIndex) => (
-                  <OrderRow key={order.id} order={order} rowIndex={rowIndex + 1} sizes={sizes} users={users} restockSettings={restockSettings} />
+                  <OrderRow
+                    key={order.id}
+                    order={order}
+                    rowIndex={rowIndex + 1}
+                    sizes={sizes}
+                    users={users}
+                    restockSettings={restockSettings}
+                    customColumns={customColumns.restock}
+                    customCells={customCells}
+                    rowHeights={rowHeights}
+                  />
                 ))}
                 {Array.from({ length: 10 }, (_, index) => (
                   <AddRestockOrderRow
@@ -2808,8 +3022,44 @@ export default function PortalDashboard() {
   );
 }
 
-function RowNumberCell({ rowNumber, actions }: { rowNumber: number | string; actions: RowMenuAction[] }) {
+function RowNumberCell({
+  rowNumber,
+  actions,
+  heightKey,
+}: {
+  rowNumber: number | string;
+  actions: RowMenuAction[];
+  heightKey?: string;
+}) {
+  const fetcher = useFetcher();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const startRowResize = (event: React.MouseEvent<HTMLSpanElement>) => {
+    if (!heightKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const row = event.currentTarget.closest("tr");
+    if (!row) return;
+    const startY = event.clientY;
+    const startHeight = row.getBoundingClientRect().height;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    let nextHeight = startHeight;
+    const handleMove = (moveEvent: MouseEvent) => {
+      nextHeight = Math.min(420, Math.max(34, startHeight + moveEvent.clientY - startY));
+      row.style.height = `${nextHeight}px`;
+    };
+    const handleUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      document.removeEventListener("mousemove", handleMove);
+      document.removeEventListener("mouseup", handleUp);
+      submitPortalCell(fetcher, { intent: "update_row_height", key: heightKey, height: Math.round(nextHeight) });
+    };
+    document.addEventListener("mousemove", handleMove);
+    document.addEventListener("mouseup", handleUp);
+  };
   useEffect(() => {
     if (!menu) return;
     const close = () => setMenu(null);
@@ -2832,13 +3082,34 @@ function RowNumberCell({ rowNumber, actions }: { rowNumber: number | string; act
         title="Right click for row actions"
       >
         {rowNumber}
+        {heightKey ? <span style={s.rowResizeHandle} onMouseDown={startRowResize} title="Drag to resize row" /> : null}
       </td>
       {menu && typeof document !== "undefined" && createPortal(
         <div
           style={{ ...s.contextMenu, left: menu.x, top: menu.y }}
           onMouseDown={(event) => event.stopPropagation()}
         >
-          {actions.map((action) => (
+          {actions.map((action) => action.options ? (
+            <label key={action.label} style={s.contextMenuLabel}>
+              <span>{action.label}</span>
+              <select
+                value=""
+                disabled={action.disabled}
+                style={s.contextMenuSelect}
+                onChange={(event) => {
+                  const nextValue = event.currentTarget.value;
+                  if (!nextValue) return;
+                  setMenu(null);
+                  action.onSelect?.(nextValue);
+                }}
+              >
+                <option value="">Select...</option>
+                {action.options.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+          ) : (
             <button
               key={action.label}
               type="button"
@@ -2846,7 +3117,7 @@ function RowNumberCell({ rowNumber, actions }: { rowNumber: number | string; act
               style={{ ...s.contextMenuButton, ...(action.danger ? s.contextMenuDanger : {}) }}
               onClick={() => {
                 setMenu(null);
-                action.onClick();
+                action.onClick?.();
               }}
             >
               {action.label}
@@ -3259,6 +3530,8 @@ function FabricSheetsPanel({
   fabricSettings,
   users,
   tableHeaderLabels,
+  customColumns,
+  rowHeights,
   inrToAudRate,
   onSelect,
 }: {
@@ -3267,6 +3540,8 @@ function FabricSheetsPanel({
   fabricSettings: FabricSettings;
   users: PortalUser[];
   tableHeaderLabels: Record<string, string>;
+  customColumns: TableCustomColumns;
+  rowHeights: Record<string, number>;
   inrToAudRate: number | null;
   onSelect: (gid: string) => void;
 }) {
@@ -3321,6 +3596,8 @@ function FabricSheetsPanel({
           fabricSettings={fabricSettings}
           users={users}
           tableHeaderLabels={tableHeaderLabels}
+          customColumns={customColumns}
+          rowHeights={rowHeights}
           nameSearch={fabricNameSearch}
         />
       </div>
@@ -3341,7 +3618,7 @@ function FabricSheetsPanel({
           !
           {showTotalsHelp && (
             <span style={s.fabricTotalsHelpBubble}>
-              Totals do not include On Order, Fabric on Order, New Fabric on Order, Random Fabric Bits and Bobs, or Fabric Samples under consideration.
+              Totals do not include On Order, Fabric on Order, Random Fabric Bits and Bobs
             </span>
           )}
         </span>
@@ -3357,6 +3634,19 @@ function FabricSheetsPanel({
           <strong>{totalCostAud == null ? "—" : formatAudCurrency(totalCostAud)}</strong>
           <span>AUD value</span>
         </span>
+      </div>
+      <div style={s.fabricTileActions}>
+        <button
+          type="button"
+          style={s.secondaryButton}
+          onClick={() => {
+            const name = window.prompt("New fabric type name?");
+            if (!name?.trim()) return;
+            submitPortalCell(fetcher, { intent: "create_fabric_sheet", name: name.trim() });
+          }}
+        >
+          Create fabric list
+        </button>
       </div>
       <div style={s.fabricGrid}>
         {orderedSheets.map((sheet) => (
@@ -3406,6 +3696,8 @@ function FabricSheetTable({
   fabricSettings,
   users,
   tableHeaderLabels,
+  customColumns,
+  rowHeights,
   nameSearch,
 }: {
   sheet: FabricSheetData;
@@ -3414,6 +3706,8 @@ function FabricSheetTable({
   fabricSettings: FabricSettings;
   users: PortalUser[];
   tableHeaderLabels: Record<string, string>;
+  customColumns: TableCustomColumns;
+  rowHeights: Record<string, number>;
   nameSearch: string;
 }) {
   if (sheet.error) {
@@ -3436,34 +3730,38 @@ function FabricSheetTable({
           <thead>
             <tr>
               <th style={{ ...s.fabricTh, ...s.rowNumberHeader }}>#</th>
-              {sheet.headers.map((header, index) => (
-                <th key={`${header}-${index}`} style={s.fabricTh}>
-                  <EditableHeaderLabel headerKey={`fabric:${sheet.gid}:${index}`} value={headerLabel(tableHeaderLabels, `fabric:${sheet.gid}:${index}`, header)} />
-                </th>
-              ))}
+              {sheet.headers.map((header, index) => {
+                const customSheetColumns = customColumns.fabric[sheet.gid] ?? [];
+                const customStartIndex = sheet.headers.length - customSheetColumns.length;
+                return (
+                  <FabricHeaderCell
+                    key={`${header}-${index}`}
+                    gid={sheet.gid}
+                    columnId={index >= customStartIndex ? customSheetColumns[index - customStartIndex]?.id : undefined}
+                    index={index}
+                    label={headerLabel(tableHeaderLabels, `fabric:${sheet.gid}:${index}`, header)}
+                  />
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {displayRows.map(({ row, rowIndex, sourceRowIndex }, displayRowIndex) => (
-              <tr key={rowIndex} style={s.row}>
+            {displayRows.map(({ row, rowIndex, sourceRowIndex }, displayRowIndex) => {
+              const rowHeightKey = `fabric:${sheet.gid}:${sourceRowIndex}`;
+              return (
+              <tr key={rowIndex} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
                 <RowNumberCell rowNumber={displayRowIndex + 1} actions={[
                   { label: "Add row", onClick: () => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: sheet.gid }) },
                   { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }) },
                   {
                     label: "Move to fabric type",
-                    onClick: () => {
-                      const targetName = window.prompt(`Move row to which fabric type?\n\n${sheets.filter((item) => item.gid !== sheet.gid).map((item) => item.name).join("\n")}`);
-                      if (!targetName) return;
-                      const targetSheet = sheets.find((item) => item.name.toLowerCase() === targetName.trim().toLowerCase());
-                      if (!targetSheet) {
-                        window.alert("Could not find that fabric type.");
-                        return;
-                      }
-                      submitPortalCell(fetcher, { intent: "move_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex, targetGid: targetSheet.gid });
-                    },
+                    options: sheets
+                      .filter((item) => item.gid !== sheet.gid && !isHiddenFabricSheet(item.name))
+                      .map((item) => ({ label: item.name, value: item.gid })),
+                    onSelect: (targetGid) => submitPortalCell(fetcher, { intent: "move_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex, targetGid }),
                   },
                   { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this fabric row?")) submitPortalCell(fetcher, { intent: "delete_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }); } },
-                ]} />
+                ]} heightKey={rowHeightKey} />
                 {sheet.headers.map((_, colIndex) => (
                   <FabricTd key={colIndex} rowIndex={displayRowIndex} colIndex={colIndex}>
                     <FabricCell
@@ -3480,7 +3778,7 @@ function FabricSheetTable({
                   </FabricTd>
                 ))}
               </tr>
-            ))}
+            );})}
             {!displayRows.length && (
               <tr>
                 <td colSpan={sheet.headers.length + 1} style={{ ...s.fabricTd, padding: 24, textAlign: "center" }}>
@@ -3492,6 +3790,85 @@ function FabricSheetTable({
         </table>
       </div>
     </div>
+  );
+}
+
+function FabricHeaderCell({
+  gid,
+  columnId,
+  index,
+  label,
+}: {
+  gid: string;
+  columnId?: string;
+  index: number;
+  label: string;
+}) {
+  const fetcher = useFetcher();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [width, setWidth] = useState<number | null>(null);
+  const startResize = (event: React.MouseEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    const th = event.currentTarget.closest("th");
+    const startX = event.clientX;
+    const startWidth = th?.getBoundingClientRect().width ?? 140;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const handleMove = (moveEvent: MouseEvent) => {
+      setWidth(Math.max(MIN_COLUMN_WIDTH, startWidth + moveEvent.clientX - startX));
+    };
+    const handleUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      document.removeEventListener("mousemove", handleMove);
+      document.removeEventListener("mouseup", handleUp);
+    };
+    document.addEventListener("mousemove", handleMove);
+    document.addEventListener("mouseup", handleUp);
+  };
+
+  return (
+    <th
+      style={{ ...s.fabricTh, ...(width ? { width, minWidth: width } : {}) }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
+      <EditableHeaderLabel headerKey={`fabric:${gid}:${index}`} value={label} />
+      <span role="separator" aria-orientation="vertical" aria-label={`Resize ${label} column`} onMouseDown={startResize} style={s.resizeHandle} />
+      {menu && typeof document !== "undefined" && createPortal(
+        <div style={{ ...s.contextMenu, left: menu.x, top: menu.y }} onMouseDown={(event) => event.stopPropagation()}>
+          <button
+            type="button"
+            style={s.contextMenuButton}
+            onClick={() => {
+              setMenu(null);
+              const nextLabel = window.prompt("New column name?");
+              if (!nextLabel?.trim()) return;
+              submitPortalCell(fetcher, { intent: "add_table_column", table: "fabric", gid, label: nextLabel.trim() });
+            }}
+          >
+            Add column
+          </button>
+          <button
+            type="button"
+            disabled={!columnId?.startsWith("custom_")}
+            style={{ ...s.contextMenuButton, ...(!columnId?.startsWith("custom_") ? s.contextMenuDisabled : {}), ...(columnId?.startsWith("custom_") ? s.contextMenuDanger : {}) }}
+            onClick={() => {
+              if (!columnId?.startsWith("custom_")) return;
+              setMenu(null);
+              submitPortalCell(fetcher, { intent: "remove_table_column", table: "fabric", gid, columnId });
+            }}
+          >
+            Remove column
+          </button>
+        </div>,
+        document.body,
+      )}
+    </th>
   );
 }
 
@@ -3566,9 +3943,14 @@ function FabricCell({
   const imageValue = isFabricImageValue(trimmed);
   const normalizedHeader = header.trim().toLowerCase();
   const imageColumn = /picture|image/i.test(header) || normalizedHeader === "fabric" || imageValue || isFabricImageValue(originalValue);
-  const chipOptions = /^supplier$/i.test(header)
-    ? fabricSettings.supplierOptions
+  const chipKind = /^supplier$/i.test(header)
+    ? "supplierOptions"
     : /fabric\s*type/i.test(header)
+      ? "fabricTypeOptions"
+      : null;
+  const chipOptions = chipKind === "supplierOptions"
+    ? fabricSettings.supplierOptions
+    : chipKind === "fabricTypeOptions"
       ? fabricSettings.fabricTypeOptions
       : null;
   const chipOption = chipOptions?.find((option) => option.label === draft || option.value === slugForOption(draft));
@@ -3681,24 +4063,70 @@ function FabricCell({
       : draft
         ? [...chipOptions, { value: slugForOption(draft) || draft, label: draft, bg: "#f3f4f6", color: "#374151" }]
         : chipOptions;
+    const updateChipOption = (label: string, patch: Partial<RestockOption>) => {
+      if (!chipKind || !label.trim()) return;
+      const nextOptions = [...chipOptions];
+      const existingIndex = nextOptions.findIndex((option) => option.label.toLowerCase() === label.trim().toLowerCase());
+      const existing = existingIndex >= 0
+        ? nextOptions[existingIndex]
+        : { value: slugForOption(label) || label, label, bg: "#f3f4f6", color: "#374151" };
+      const nextOption = { ...existing, ...patch, value: existing.value || slugForOption(label) || label, label: existing.label || label };
+      if (existingIndex >= 0) nextOptions[existingIndex] = nextOption;
+      else nextOptions.push(nextOption);
+      submitPortalCell(fetcher, {
+        intent: "update_fabric_settings",
+        value: JSON.stringify({ ...fabricSettings, [chipKind]: nextOptions }),
+      });
+    };
     return (
-      <select
-        value={draft}
-        onChange={(event) => {
-          setDraft(event.currentTarget.value);
-          save(event.currentTarget.value);
-        }}
-        style={{
-          ...s.fabricChipSelect,
-          background: chipOption?.bg ?? "#f3f4f6",
-          color: chipOption?.color ?? "#374151",
-        }}
-      >
-        <option value="">—</option>
-        {options.map((option) => (
-          <option key={option.value} value={option.label}>{option.label}</option>
-        ))}
-      </select>
+      <div style={s.fabricChipCell}>
+        <select
+          value={draft}
+          onChange={(event) => {
+            setDraft(event.currentTarget.value);
+            save(event.currentTarget.value);
+          }}
+          style={{
+            ...s.fabricChipSelect,
+            background: chipOption?.bg ?? "#f3f4f6",
+            color: chipOption?.color ?? "#374151",
+          }}
+        >
+          <option value="">—</option>
+          {options.map((option) => (
+            <option key={option.value} value={option.label}>{option.label}</option>
+          ))}
+        </select>
+        <div style={s.fabricChipTools}>
+          <input
+            type="color"
+            aria-label="Chip colour"
+            value={chipOption?.bg ?? "#f3f4f6"}
+            style={s.fabricChipColor}
+            onChange={(event) => updateChipOption(draft, { bg: event.currentTarget.value })}
+          />
+          <input
+            type="color"
+            aria-label="Chip text colour"
+            value={chipOption?.color ?? "#374151"}
+            style={s.fabricChipColor}
+            onChange={(event) => updateChipOption(draft, { color: event.currentTarget.value })}
+          />
+          <button
+            type="button"
+            style={s.fabricMiniButton}
+            onClick={() => {
+              const label = window.prompt("New chip name?");
+              if (!label?.trim()) return;
+              updateChipOption(label.trim(), {});
+              setDraft(label.trim());
+              save(label.trim());
+            }}
+          >
+            Add chip
+          </button>
+        </div>
+      </div>
     );
   }
 
@@ -4042,20 +4470,17 @@ function SettingsPanel({
   loginRequired,
   restockSettings,
   universalSettings,
-  fabricSettings,
 }: {
   users: PortalUser[];
   currentUser: PortalUser | null;
   loginRequired: boolean;
   restockSettings: RestockSettings;
   universalSettings: UniversalSettings;
-  fabricSettings: FabricSettings;
 }) {
   const settingsFetcher = useFetcher();
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
   const [restockDraft, setRestockDraft] = useState<RestockSettings>(restockSettings);
   const [universalDraft, setUniversalDraft] = useState<UniversalSettings>(universalSettings);
-  const [fabricDraft, setFabricDraft] = useState<FabricSettings>(fabricSettings);
   const updateRestockOption = (kind: "statusOptions" | "priorityOptions", index: number, patch: Partial<RestockOption>) => {
     setRestockDraft((current) => ({
       ...current,
@@ -4091,41 +4516,6 @@ function SettingsPanel({
       [kind]: current[kind].filter((_, optionIndex) => optionIndex !== index),
     }));
   };
-  const updateFabricOption = (kind: "supplierOptions" | "fabricTypeOptions", index: number, patch: Partial<RestockOption>) => {
-    setFabricDraft((current) => ({
-      ...current,
-      [kind]: current[kind].map((option, optionIndex) => {
-        if (optionIndex !== index) return option;
-        const label = patch.label ?? option.label;
-        return {
-          ...option,
-          ...patch,
-          label,
-          value: patch.label && option.value.startsWith("new_") ? slugForOption(patch.label) || option.value : option.value,
-        };
-      }),
-    }));
-  };
-  const addFabricOption = (kind: "supplierOptions" | "fabricTypeOptions") => {
-    setFabricDraft((current) => ({
-      ...current,
-      [kind]: [
-        ...current[kind],
-        {
-          value: `new_${Date.now()}`,
-          label: "New option",
-          bg: "#f3f4f6",
-          color: "#374151",
-        },
-      ],
-    }));
-  };
-  const removeFabricOption = (kind: "supplierOptions" | "fabricTypeOptions", index: number) => {
-    setFabricDraft((current) => ({
-      ...current,
-      [kind]: current[kind].filter((_, optionIndex) => optionIndex !== index),
-    }));
-  };
   const saveRestockSettings = () => submitPortalCell(settingsFetcher, {
     intent: "update_restock_settings",
     value: JSON.stringify(restockDraft),
@@ -4134,11 +4524,6 @@ function SettingsPanel({
     intent: "update_universal_settings",
     value: JSON.stringify(universalDraft),
   });
-  const saveFabricSettings = () => submitPortalCell(settingsFetcher, {
-    intent: "update_fabric_settings",
-    value: JSON.stringify(fabricDraft),
-  });
-
   return (
     <div style={s.settingsPanel}>
       <section style={s.settingsCard}>
@@ -4389,41 +4774,6 @@ function SettingsPanel({
       <section style={s.settingsCard}>
         <div style={s.settingsHeader}>
           <div>
-            <h2 style={s.settingsTitle}>Fabric in Stock Settings</h2>
-            <p style={s.settingsHint}>Edit supplier and fabric type chips used on the fabric pages.</p>
-          </div>
-          <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveFabricSettings}>
-            Save fabric settings
-          </button>
-        </div>
-
-        {!canManageUsers && (
-          <div style={s.settingsWarning}>Only an admin user can change fabric settings.</div>
-        )}
-
-        <div style={s.settingsGrid}>
-          <RestockOptionsEditor
-            title="Supplier chips"
-            options={fabricDraft.supplierOptions}
-            disabled={!canManageUsers}
-            onChange={(index, patch) => updateFabricOption("supplierOptions", index, patch)}
-            onAdd={() => addFabricOption("supplierOptions")}
-            onRemove={(index) => removeFabricOption("supplierOptions", index)}
-          />
-          <RestockOptionsEditor
-            title="Fabric type chips"
-            options={fabricDraft.fabricTypeOptions}
-            disabled={!canManageUsers}
-            onChange={(index, patch) => updateFabricOption("fabricTypeOptions", index, patch)}
-            onAdd={() => addFabricOption("fabricTypeOptions")}
-            onRemove={(index) => removeFabricOption("fabricTypeOptions", index)}
-          />
-        </div>
-      </section>
-
-      <section style={s.settingsCard}>
-        <div style={s.settingsHeader}>
-          <div>
             <h2 style={s.settingsTitle}>Existing Product Restock Settings</h2>
             <p style={s.settingsHint}>Edit dropdown options and table number styling for the restock page.</p>
           </div>
@@ -4629,6 +4979,9 @@ function PackingListsPanel({
   selectedPackingList,
   savedPackingColumnWidths,
   tableHeaderLabels,
+  customColumns,
+  customCells,
+  rowHeights,
   productSearch,
   packingSearchLineId,
   productResults,
@@ -4638,6 +4991,9 @@ function PackingListsPanel({
   selectedPackingList: PackingListWithLines | null;
   savedPackingColumnWidths: Record<string, number>;
   tableHeaderLabels: Record<string, string>;
+  customColumns: TableCustomColumn[];
+  customCells: Record<string, string>;
+  rowHeights: Record<string, number>;
   productSearch: string;
   packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
@@ -4655,6 +5011,9 @@ function PackingListsPanel({
             packingList={selectedPackingList}
             savedPackingColumnWidths={savedPackingColumnWidths}
             tableHeaderLabels={tableHeaderLabels}
+            customColumns={customColumns}
+            customCells={customCells}
+            rowHeights={rowHeights}
             productSearch={productSearch}
             packingSearchLineId={packingSearchLineId}
             productResults={productResults}
@@ -4810,6 +5169,9 @@ function PackingListDetail({
   packingList,
   savedPackingColumnWidths,
   tableHeaderLabels,
+  customColumns,
+  customCells,
+  rowHeights,
   productSearch,
   packingSearchLineId,
   productResults,
@@ -4818,6 +5180,9 @@ function PackingListDetail({
   packingList: PackingListWithLines;
   savedPackingColumnWidths: Record<string, number>;
   tableHeaderLabels: Record<string, string>;
+  customColumns: TableCustomColumn[];
+  customCells: Record<string, string>;
+  rowHeights: Record<string, number>;
   productSearch: string;
   packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
@@ -4829,8 +5194,12 @@ function PackingListDetail({
   const [packingColumnWidths, setPackingColumnWidths] = useState<Record<string, number>>(savedPackingColumnWidths);
   const [skipWords, setSkipWords] = useState("");
   const [packingListSearch, setPackingListSearch] = useState("");
+  const packingColumns = [
+    ...PACKING_COLUMNS,
+    ...customColumns.map((column) => ({ id: column.id, label: column.label, width: 130, center: false })),
+  ];
   const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
-  const packingTableWidth = PACKING_COLUMNS.reduce((sum, column) => sum + packingWidthFor(column.id), 48);
+  const packingTableWidth = packingColumns.reduce((sum, column) => sum + packingWidthFor(column.id), 48);
   const normalizedPackingListSearch = packingListSearch.trim().toLowerCase();
   const visiblePackingLines = normalizedPackingListSearch
     ? packingList.lines.filter((line) => packingLineMatchesSearch(line, normalizedPackingListSearch))
@@ -5030,18 +5399,19 @@ function PackingListDetail({
         <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
           <colgroup>
             <col style={{ width: 48 }} />
-            {PACKING_COLUMNS.map((column) => (
+            {packingColumns.map((column) => (
               <col key={column.id} style={{ width: packingWidthFor(column.id) }} />
             ))}
           </colgroup>
           <thead>
             <tr style={s.headerRow}>
               <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
-              {PACKING_COLUMNS.map((column) => (
+              {packingColumns.map((column) => (
                 <Th
                   key={column.id}
                   center={column.center}
                   headerKey={`packing:${column.id}`}
+                  columnId={column.id}
                   onResizeStart={(event) => startPackingResize(column.id, event)}
                 >
                   {headerLabel(tableHeaderLabels, `packing:${column.id}`, column.label)}
@@ -5059,10 +5429,13 @@ function PackingListDetail({
                 productSearch={productSearch}
                 productResults={productResults}
                 updateParams={updateParams}
+                customColumns={customColumns}
+                customCells={customCells}
+                rowHeights={rowHeights}
               />
             )) : (
               <tr style={s.row}>
-                <td colSpan={PACKING_COLUMNS.length + 1} style={{ ...s.td, textAlign: "center", padding: 40 }}>
+                <td colSpan={packingColumns.length + 1} style={{ ...s.td, textAlign: "center", padding: 40 }}>
                   No packing list rows match this search.
                 </td>
               </tr>
@@ -5094,6 +5467,9 @@ function PackingListLineRow({
   productSearch,
   productResults,
   updateParams,
+  customColumns,
+  customCells,
+  rowHeights,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -5101,6 +5477,9 @@ function PackingListLineRow({
   productSearch: string;
   productResults: ShopifySearchProduct[];
   updateParams: (updates: Record<string, string>) => void;
+  customColumns: TableCustomColumn[];
+  customCells: Record<string, string>;
+  rowHeights: Record<string, number>;
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -5109,15 +5488,17 @@ function PackingListLineRow({
   const price = line.priceRupees ?? 0;
   const value = total * price;
 
+  const rowHeightKey = `packing:${line.id}`;
+
   return (
-    <tr style={s.row}>
+    <tr style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
       <RowNumberCell rowNumber={rowIndex + 1} actions={[
         { label: "Add row", onClick: () => submitPortalCell(fetcher, { intent: "add_custom_packing_line", packingId: line.packingListId }) },
         { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_packing_line", lineId: line.id }) },
         { label: "Move up", onClick: () => submitPortalCell(fetcher, { intent: "move_packing_line", lineId: line.id, direction: "up" }) },
         { label: "Move down", onClick: () => submitPortalCell(fetcher, { intent: "move_packing_line", lineId: line.id, direction: "down" }) },
         { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this packing row?")) submitPortalCell(fetcher, { intent: "delete_packing_line", lineId: line.id }); } },
-      ]} />
+      ]} heightKey={rowHeightKey} />
       <PackingTd rowIndex={rowIndex} colIndex={0}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={1} center><PackingImageCell lineId={line.id} field="productImageUrl" value={line.productImageUrl ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={2} center><PackingImageCell lineId={line.id} field="fabricImageData" value={line.fabricImageData ?? ""} /></PackingTd>
@@ -5161,6 +5542,11 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={16} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={17} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={18} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
+      {customColumns.map((column, customIndex) => (
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={19 + customIndex}>
+          <TableCustomCell cellKey={`packing:${line.id}:${column.id}`} value={customCells[`packing:${line.id}:${column.id}`] ?? ""} />
+        </PackingTd>
+      ))}
     </tr>
   );
 }
@@ -5807,12 +6193,18 @@ function OrderRow({
   sizes,
   users,
   restockSettings,
+  customColumns,
+  customCells,
+  rowHeights,
 }: {
   order: Order;
   rowIndex: number;
   sizes: string[];
   users: PortalUser[];
   restockSettings: RestockSettings;
+  customColumns: TableCustomColumn[];
+  customCells: Record<string, string>;
+  rowHeights: Record<string, number>;
 }) {
   const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
@@ -5834,14 +6226,15 @@ function OrderRow({
   const notesCol = totalCol + 2;
   const priorityCol = totalCol + 3;
   const etaCol = totalCol + 4;
+  const rowHeightKey = `restock:${order.id}`;
 
   return (
     <>
-      <tr id={`order-${order.id}`} style={s.row}>
+      <tr id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
         <RowNumberCell rowNumber={rowIndex} actions={[
           { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
           { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this restock row?")) submitPortalCell(fetcher, { intent: "delete_order", orderId: order.id }); } },
-        ]} />
+        ]} heightKey={rowHeightKey} />
         {/* Factory notes */}
         <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
@@ -5898,6 +6291,12 @@ function OrderRow({
         {/* ETA */}
         <Td rowIndex={rowIndex} colIndex={etaCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="ETA" historyEntityName={order.productTitle}><EtaCell orderId={order.id} value={etaValue} /></Td>
 
+        {customColumns.map((column, customIndex) => (
+          <Td key={column.id} rowIndex={rowIndex} colIndex={etaCol + 1 + customIndex}>
+            <TableCustomCell cellKey={`restock:${order.id}:${column.id}`} value={customCells[`restock:${order.id}:${column.id}`] ?? ""} />
+          </Td>
+        ))}
+
       </tr>
       {inventoryOpen && (
         <tr style={s.inventoryRow}>
@@ -5934,6 +6333,26 @@ function submitPortalCell(
     formData.set(key, String(value));
   }
   fetcher.submit(formData, { method: "post" });
+}
+
+function TableCustomCell({ cellKey, value }: { cellKey: string; value: string }) {
+  const fetcher = useFetcher();
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const save = (nextValue: string) => {
+    if (nextValue === value) return;
+    submitPortalCell(fetcher, { intent: "update_table_custom_cell", key: cellKey, value: nextValue });
+  };
+  return (
+    <textarea
+      value={draft}
+      onChange={(event) => setDraft(event.currentTarget.value)}
+      onBlur={(event) => save(event.currentTarget.value)}
+      rows={3}
+      style={s.customCellTextarea}
+      placeholder="Add..."
+    />
+  );
 }
 
 function StatusCell({ orderId, value, options }: { orderId: number; value: string; options: RestockOption[] }) {
@@ -6188,15 +6607,26 @@ function Th({
   children,
   center,
   headerKey,
+  columnId,
   onResizeStart,
 }: {
   children: React.ReactNode;
   center?: boolean;
   headerKey?: string;
+  columnId?: string;
   onResizeStart: (event: React.MouseEvent<HTMLSpanElement>) => void;
 }) {
+  const fetcher = useFetcher();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [table, gid] = headerKey?.split(":") ?? [];
   return (
-    <th style={{ ...s.th, textAlign: center ? "center" : "left" }}>
+    <th
+      style={{ ...s.th, textAlign: center ? "center" : "left" }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
       {headerKey && typeof children === "string"
         ? <EditableHeaderLabel headerKey={headerKey} value={children} />
         : <span style={s.thContent}>{children}</span>}
@@ -6207,6 +6637,35 @@ function Th({
         onMouseDown={onResizeStart}
         style={s.resizeHandle}
       />
+      {menu && typeof document !== "undefined" && createPortal(
+        <div style={{ ...s.contextMenu, left: menu.x, top: menu.y }} onMouseDown={(event) => event.stopPropagation()}>
+          <button
+            type="button"
+            style={s.contextMenuButton}
+            onClick={() => {
+              setMenu(null);
+              const label = window.prompt("New column name?");
+              if (!label) return;
+              submitPortalCell(fetcher, { intent: "add_table_column", table: table || "restock", gid: gid || "", label });
+            }}
+          >
+            Add column
+          </button>
+          <button
+            type="button"
+            disabled={!columnId?.startsWith("custom_")}
+            style={{ ...s.contextMenuButton, ...(!columnId?.startsWith("custom_") ? s.contextMenuDisabled : {}), ...(columnId?.startsWith("custom_") ? s.contextMenuDanger : {}) }}
+            onClick={() => {
+              if (!columnId?.startsWith("custom_")) return;
+              setMenu(null);
+              submitPortalCell(fetcher, { intent: "remove_table_column", table: table || "restock", gid: gid || "", columnId });
+            }}
+          >
+            Remove column
+          </button>
+        </div>,
+        document.body,
+      )}
     </th>
   );
 }
@@ -7215,6 +7674,11 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #dbe3ee",
     borderRadius: 10,
   },
+  fabricTileActions: {
+    display: "flex",
+    justifyContent: "flex-end",
+    marginBottom: 12,
+  },
   fabricTotalsItem: {
     minWidth: 170,
     display: "grid",
@@ -7365,8 +7829,6 @@ const s: Record<string, React.CSSProperties> = {
     textTransform: "uppercase",
     letterSpacing: "0.04em",
     whiteSpace: "nowrap",
-    overflow: "auto",
-    resize: "horizontal",
   },
   fabricTd: {
     padding: 0,
@@ -7401,6 +7863,28 @@ const s: Record<string, React.CSSProperties> = {
     font: "inherit",
     fontWeight: 700,
     lineHeight: 1.35,
+  },
+  fabricChipCell: {
+    minHeight: 96,
+    display: "grid",
+    alignContent: "start",
+    gap: 7,
+    padding: 8,
+  },
+  fabricChipTools: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 5,
+  },
+  fabricChipColor: {
+    width: 28,
+    height: 28,
+    padding: 0,
+    border: "1px solid #cbd5e1",
+    borderRadius: 6,
+    background: "#fff",
+    cursor: "pointer",
   },
   fabricNumberCellInput: {
     textAlign: "center",
@@ -7650,6 +8134,15 @@ const s: Record<string, React.CSSProperties> = {
     left: 0,
     zIndex: 24,
   },
+  rowResizeHandle: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: -4,
+    height: 8,
+    cursor: "row-resize",
+    zIndex: 4,
+  },
   contextMenu: {
     position: "fixed",
     zIndex: 1200,
@@ -7673,7 +8166,26 @@ const s: Record<string, React.CSSProperties> = {
     textAlign: "left",
     cursor: "pointer",
   },
+  contextMenuLabel: {
+    display: "grid",
+    gap: 5,
+    padding: "8px 10px",
+    color: "#111827",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+  contextMenuSelect: {
+    width: "100%",
+    border: "1px solid #cbd5e1",
+    borderRadius: 6,
+    padding: "6px 8px",
+    background: "#fff",
+    color: "#111827",
+    fontSize: 12,
+    fontWeight: 700,
+  },
   contextMenuDanger: { color: "#991b1b" },
+  contextMenuDisabled: { color: "#94a3b8", cursor: "not-allowed" },
   resizeHandle: {
     position: "absolute",
     top: 0,
@@ -7683,6 +8195,19 @@ const s: Record<string, React.CSSProperties> = {
     cursor: "col-resize",
     zIndex: 2,
     touchAction: "none",
+  },
+  customCellTextarea: {
+    width: "100%",
+    minHeight: 96,
+    border: "none",
+    outline: "none",
+    resize: "vertical",
+    background: "transparent",
+    padding: "9px 10px",
+    color: "var(--portal-table-text-color, #1f2937)",
+    font: "inherit",
+    fontWeight: 700,
+    boxSizing: "border-box",
   },
   row: { background: "#fff" },
   addOrderRow: { background: "#f8fafc" },
