@@ -4814,41 +4814,6 @@ function SettingsPanel({
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
   const [restockDraft, setRestockDraft] = useState<RestockSettings>(restockSettings);
   const [universalDraft, setUniversalDraft] = useState<UniversalSettings>(universalSettings);
-  const updateRestockOption = (kind: "statusOptions" | "priorityOptions", index: number, patch: Partial<RestockOption>) => {
-    setRestockDraft((current) => ({
-      ...current,
-      [kind]: current[kind].map((option, optionIndex) => {
-        if (optionIndex !== index) return option;
-        const label = patch.label ?? option.label;
-        return {
-          ...option,
-          ...patch,
-          label,
-          value: patch.label && option.value.startsWith("new_") ? slugForOption(patch.label) || option.value : option.value,
-        };
-      }),
-    }));
-  };
-  const addRestockOption = (kind: "statusOptions" | "priorityOptions") => {
-    setRestockDraft((current) => ({
-      ...current,
-      [kind]: [
-        ...current[kind],
-        {
-          value: `new_${Date.now()}`,
-          label: "New option",
-          bg: kind === "statusOptions" ? "#f3f4f6" : "#111827",
-          color: kind === "statusOptions" ? "#374151" : "#ffffff",
-        },
-      ],
-    }));
-  };
-  const removeRestockOption = (kind: "statusOptions" | "priorityOptions", index: number) => {
-    setRestockDraft((current) => ({
-      ...current,
-      [kind]: current[kind].filter((_, optionIndex) => optionIndex !== index),
-    }));
-  };
   const saveRestockSettings = () => submitPortalCell(
     settingsFetcher,
     {
@@ -5120,7 +5085,7 @@ function SettingsPanel({
         <div style={s.settingsHeader}>
           <div>
             <h2 style={s.settingsTitle}>Existing Product Restock Settings</h2>
-            <p style={s.settingsHint}>Edit dropdown options and table number styling for the restock page.</p>
+            <p style={s.settingsHint}>Edit table number styling for the restock page.</p>
           </div>
           <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveRestockSettings}>
             Save restock settings
@@ -5130,25 +5095,6 @@ function SettingsPanel({
         {!canManageUsers && (
           <div style={s.settingsWarning}>Only an admin user can change restock settings.</div>
         )}
-
-        <div style={s.settingsGrid}>
-          <RestockOptionsEditor
-            title="Status options"
-            options={restockDraft.statusOptions}
-            disabled={!canManageUsers}
-            onChange={(index, patch) => updateRestockOption("statusOptions", index, patch)}
-            onAdd={() => addRestockOption("statusOptions")}
-            onRemove={(index) => removeRestockOption("statusOptions", index)}
-          />
-          <RestockOptionsEditor
-            title="Priority options"
-            options={restockDraft.priorityOptions}
-            disabled={!canManageUsers}
-            onChange={(index, patch) => updateRestockOption("priorityOptions", index, patch)}
-            onAdd={() => addRestockOption("priorityOptions")}
-            onRemove={(index) => removeRestockOption("priorityOptions", index)}
-          />
-        </div>
 
         <div style={s.settingsSubCard}>
           <h3 style={s.settingsSubTitle}>Quantity numbers</h3>
@@ -5186,51 +5132,6 @@ function SettingsPanel({
         </div>
       </section>
 
-    </div>
-  );
-}
-
-function RestockOptionsEditor({
-  title,
-  options,
-  disabled,
-  onChange,
-  onAdd,
-  onRemove,
-}: {
-  title: string;
-  options: RestockOption[];
-  disabled: boolean;
-  onChange: (index: number, patch: Partial<RestockOption>) => void;
-  onAdd: () => void;
-  onRemove: (index: number) => void;
-}) {
-  return (
-    <div style={s.settingsSubCard}>
-      <div style={s.settingsSubHeader}>
-        <h3 style={s.settingsSubTitle}>{title}</h3>
-        <button type="button" disabled={disabled} style={s.smallButton} onClick={onAdd}>Add option</button>
-      </div>
-      <div style={s.optionRows}>
-        {options.map((option, index) => (
-          <div key={`${option.value}-${index}`} style={s.optionRow}>
-            <input
-              value={option.label}
-              disabled={disabled}
-              onChange={(event) => onChange(index, { label: event.currentTarget.value })}
-              style={s.optionLabelInput}
-            />
-            <ColorPickerInput value={option.bg} disabled={disabled}
-              onChange={(hex) => onChange(index, { bg: hex })} />
-            <ColorPickerInput value={option.color} disabled={disabled}
-              onChange={(hex) => onChange(index, { color: hex })} />
-            <span style={{ ...s.optionPreview, background: option.bg, color: option.color }}>{option.label || "Option"}</span>
-            <button type="button" disabled={disabled || options.length <= 1} style={s.removeUserButton} onClick={() => onRemove(index)}>
-              Remove
-            </button>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -7734,12 +7635,6 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 13,
     fontWeight: 700,
   },
-  settingsGrid: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 14,
-    marginTop: 16,
-  },
   settingsSubCard: {
     display: "grid",
     gap: 10,
@@ -7749,33 +7644,7 @@ const s: Record<string, React.CSSProperties> = {
     background: "#f8fafc",
     marginTop: 14,
   },
-  settingsSubHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 },
   settingsSubTitle: { margin: 0, fontSize: 14, color: "#111827" },
-  optionRows: { display: "grid", gap: 8 },
-  optionRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    overflow: "hidden",
-  },
-  optionLabelInput: {
-    flex: 1,
-    minWidth: 0,
-    border: "1px solid #cbd5e1",
-    borderRadius: 7,
-    padding: "8px 9px",
-    fontSize: 13,
-    fontWeight: 700,
-  },
-  colorLabel: { display: "flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 800, color: "#4b5563" },
-  colorInput: { width: 36, height: 32, padding: 1, border: "1px solid #cbd5e1", borderRadius: 6, background: "#fff" },
-  optionPreview: {
-    borderRadius: 999,
-    padding: "6px 9px",
-    fontSize: 11,
-    fontWeight: 900,
-    whiteSpace: "nowrap",
-  },
   settingsInlineFields: { display: "flex", alignItems: "end", flexWrap: "wrap", gap: 12 },
   settingsFieldLabel: { display: "grid", gap: 5, fontSize: 12, fontWeight: 800, color: "#4b5563" },
   settingsSmallInput: {
