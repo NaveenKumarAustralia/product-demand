@@ -885,7 +885,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const setting = await prisma.portalSetting.findUnique({ where: { key: TABLE_CUSTOM_COLUMNS_KEY }, select: { value: true } });
     const columns = normalizeTableCustomColumns(setting?.value);
     if (intent === "add_table_column") {
-      const column = { id: `custom_${Date.now()}`, label };
+      const column = { id: columnId.startsWith("custom_") ? columnId : `custom_${Date.now()}`, label };
       if (table === "restock") columns.restock = [...columns.restock, column];
       if (table === "packing") columns.packing = [...columns.packing, column];
       if (table === "fabric" && gid) columns.fabric[gid] = [...(columns.fabric[gid] ?? []), column];
@@ -919,11 +919,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "create_fabric_sheet") {
     const name = String(form.get("name") ?? "").trim();
+    const gid = String(form.get("gid") ?? "").trim();
     if (!name) return null;
     const setting = await prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } });
     const sheets = normalizeFabricCustomSheets(setting?.value);
     sheets.push({
-      gid: `custom_${Date.now()}`,
+      gid: gid.startsWith("custom_") ? gid : `custom_${Date.now()}`,
       name,
       headers: DEFAULT_FABRIC_HEADERS,
       rows: Array.from({ length: 3 }, () => Array.from({ length: DEFAULT_FABRIC_HEADERS.length }, () => "")),
@@ -952,6 +953,38 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         where: { key: FABRIC_CUSTOM_SHEETS_KEY },
         create: { key: FABRIC_CUSTOM_SHEETS_KEY, value: nextCustomSheets },
         update: { value: nextCustomSheets },
+      }),
+      prisma.portalSetting.upsert({
+        where: { key: FABRIC_DELETED_SHEETS_KEY },
+        create: { key: FABRIC_DELETED_SHEETS_KEY, value: deletedSheets },
+        update: { value: deletedSheets },
+      }),
+    ]);
+    return null;
+  }
+
+  if (intent === "restore_fabric_sheet") {
+    const gid = String(form.get("gid") ?? "");
+    const sheetJson = String(form.get("sheet") ?? "");
+    if (!gid) return null;
+    const [customSheetsSetting, deletedSheetsSetting] = await Promise.all([
+      prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } }),
+      prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_SHEETS_KEY }, select: { value: true } }),
+    ]);
+    const customSheets = normalizeFabricCustomSheets(customSheetsSetting?.value);
+    const deletedSheets = normalizeFabricDeletedSheets(deletedSheetsSetting?.value);
+    delete deletedSheets[gid];
+    try {
+      const restoredSheet = normalizeFabricCustomSheets([JSON.parse(sheetJson)])[0];
+      if (restoredSheet && !customSheets.some((sheet) => sheet.gid === restoredSheet.gid)) {
+        customSheets.push(restoredSheet);
+      }
+    } catch { /* static sheet restore only */ }
+    await Promise.all([
+      prisma.portalSetting.upsert({
+        where: { key: FABRIC_CUSTOM_SHEETS_KEY },
+        create: { key: FABRIC_CUSTOM_SHEETS_KEY, value: customSheets },
+        update: { value: customSheets },
       }),
       prisma.portalSetting.upsert({
         where: { key: FABRIC_DELETED_SHEETS_KEY },
@@ -2685,6 +2718,10 @@ type RowMenuAction = {
   options?: { label: string; value: string }[];
   onSelect?: (value: string) => void;
 };
+type PortalUndoEntry = {
+  label: string;
+  fields: Record<string, string | number>;
+};
 
 export default function PortalDashboard() {
   const {
@@ -2730,6 +2767,7 @@ export default function PortalDashboard() {
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
+  const undoFetcher = useFetcher();
   const [addRowNonce, setAddRowNonce] = useState(0);
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const [selectedAddCategory, setSelectedAddCategory] = useState<string | null>(null);
@@ -2744,6 +2782,20 @@ export default function PortalDashboard() {
     document.addEventListener("show-cell-history", handler);
     return () => document.removeEventListener("show-cell-history", handler);
   }, []);
+  useEffect(() => {
+    const handleUndoKey = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.key.toLowerCase() !== "z") return;
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isEditingText = activeElement instanceof HTMLInputElement
+        || activeElement instanceof HTMLTextAreaElement
+        || activeElement?.isContentEditable;
+      if (isEditingText) return;
+      const undone = submitLastPortalUndo(undoFetcher);
+      if (undone) event.preventDefault();
+    };
+    window.addEventListener("keydown", handleUndoKey);
+    return () => window.removeEventListener("keydown", handleUndoKey);
+  }, [undoFetcher]);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
   const columns: ColumnDef[] = [
@@ -2816,10 +2868,11 @@ export default function PortalDashboard() {
       document.body.style.userSelect = previousUserSelect;
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
-      const formData = new FormData();
-      formData.set("intent", "update_column_widths");
-      formData.set("value", JSON.stringify(nextColumnWidths));
-      columnWidthsFetcher.submit(formData, { method: "post" });
+      submitPortalCell(
+        columnWidthsFetcher,
+        { intent: "update_column_widths", value: JSON.stringify(nextColumnWidths) },
+        { label: "Undo column width", fields: { intent: "update_column_widths", value: JSON.stringify(columnWidths) } },
+      );
     };
 
     document.addEventListener("mousemove", handleMove);
@@ -3099,7 +3152,11 @@ function RowNumberCell({
       document.body.style.userSelect = previousUserSelect;
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
-      submitPortalCell(fetcher, { intent: "update_row_height", key: heightKey, height: Math.round(nextHeight) });
+      submitPortalCell(
+        fetcher,
+        { intent: "update_row_height", key: heightKey, height: Math.round(nextHeight) },
+        { label: "Undo row height", fields: { intent: "update_row_height", key: heightKey, height: Math.round(startHeight) } },
+      );
     };
     document.addEventListener("mousemove", handleMove);
     document.addEventListener("mouseup", handleUp);
@@ -3596,10 +3653,14 @@ function FabricSheetsPanel({
   const [fabricNameSearch, setFabricNameSearch] = useState("");
   useEffect(() => setOrderedSheets(sheets), [sheets]);
   const saveTileOrder = (nextSheets: FabricSheetData[]) => {
-    submitPortalCell(fetcher, {
-      intent: "update_fabric_settings",
-      value: JSON.stringify({ ...fabricSettings, tileOrder: nextSheets.map((sheet) => sheet.gid) }),
-    });
+    submitPortalCell(
+      fetcher,
+      {
+        intent: "update_fabric_settings",
+        value: JSON.stringify({ ...fabricSettings, tileOrder: nextSheets.map((sheet) => sheet.gid) }),
+      },
+      { label: "Undo fabric tile order", fields: { intent: "update_fabric_settings", value: JSON.stringify(fabricSettings) } },
+    );
   };
   const totalSheets = orderedSheets.filter((sheet) => !isFabricTotalsExcluded(sheet.name));
   const totalQuantity = totalSheets.reduce((sum, sheet) => sum + (sheet.totalQuantity ?? 0), 0);
@@ -3687,7 +3748,12 @@ function FabricSheetsPanel({
           onClick={() => {
             const name = window.prompt("New fabric type name?");
             if (!name?.trim()) return;
-            submitPortalCell(fetcher, { intent: "create_fabric_sheet", name: name.trim() });
+            const gid = `custom_${Date.now()}`;
+            submitPortalCell(
+              fetcher,
+              { intent: "create_fabric_sheet", gid, name: name.trim() },
+              { label: "Undo create fabric list", fields: { intent: "delete_fabric_sheet", gid } },
+            );
           }}
         >
           Create fabric list
@@ -3842,7 +3908,18 @@ function FabricSheetTable({
           style={s.deleteButton}
           onClick={() => {
             if (!window.confirm(`Delete the "${sheet.name}" fabric list?`)) return;
-            submitPortalCell(fetcher, { intent: "delete_fabric_sheet", gid: sheet.gid });
+            submitPortalCell(
+              fetcher,
+              { intent: "delete_fabric_sheet", gid: sheet.gid },
+              {
+                label: "Undo delete fabric list",
+                fields: {
+                  intent: "restore_fabric_sheet",
+                  gid: sheet.gid,
+                  sheet: JSON.stringify({ gid: sheet.gid, name: sheet.name, headers: sheet.headers, rows: sheet.rows }),
+                },
+              },
+            );
             onDeleteList();
           }}
         >
@@ -3908,7 +3985,12 @@ function FabricHeaderCell({
               setMenu(null);
               const nextLabel = window.prompt("New column name?");
               if (!nextLabel?.trim()) return;
-              submitPortalCell(fetcher, { intent: "add_table_column", table: "fabric", gid, label: nextLabel.trim() });
+              const nextColumnId = `custom_${Date.now()}`;
+              submitPortalCell(
+                fetcher,
+                { intent: "add_table_column", table: "fabric", gid, columnId: nextColumnId, label: nextLabel.trim() },
+                { label: "Undo add column", fields: { intent: "remove_table_column", table: "fabric", gid, columnId: nextColumnId } },
+              );
             }}
           >
             Add column
@@ -3920,7 +4002,11 @@ function FabricHeaderCell({
             onClick={() => {
               if (!columnId?.startsWith("custom_")) return;
               setMenu(null);
-              submitPortalCell(fetcher, { intent: "remove_table_column", table: "fabric", gid, columnId });
+              submitPortalCell(
+                fetcher,
+                { intent: "remove_table_column", table: "fabric", gid, columnId },
+                { label: "Undo remove column", fields: { intent: "add_table_column", table: "fabric", gid, columnId, label } },
+              );
             }}
           >
             Remove column
@@ -4018,16 +4104,21 @@ function FabricCell({
   const centerValue = isNumericFabricCell(header, draft);
   const save = (nextValue: string) => {
     if (nextValue === value) return;
-    submitPortalCell(fetcher, {
-      intent: "update_fabric_cell",
-      gid,
-      rowIndex,
-      colIndex,
-      value: nextValue,
-    });
+    submitPortalCell(
+      fetcher,
+      {
+        intent: "update_fabric_cell",
+        gid,
+        rowIndex,
+        colIndex,
+        value: nextValue,
+      },
+      { label: "Undo fabric cell", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } },
+    );
   };
   const uploadImage = (file: File | null) => {
     if (!file) return;
+    pushPortalUndo({ label: "Undo fabric image", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } });
     const formData = new FormData();
     formData.set("intent", "upload_fabric_image");
     formData.set("gid", gid);
@@ -4225,10 +4316,14 @@ function FabricChipDropdown({
     const nextOption = { ...existing, ...patch, value: existing.value || slugForOption(label) || label, label: existing.label || label };
     if (existingIndex >= 0) nextOptions[existingIndex] = nextOption;
     else nextOptions.push(nextOption);
-    submitPortalCell(fetcher, {
-      intent: "update_fabric_settings",
-      value: JSON.stringify({ ...fabricSettings, [chipKind]: nextOptions }),
-    });
+    submitPortalCell(
+      fetcher,
+      {
+        intent: "update_fabric_settings",
+        value: JSON.stringify({ ...fabricSettings, [chipKind]: nextOptions }),
+      },
+      { label: "Undo fabric chip", fields: { intent: "update_fabric_settings", value: JSON.stringify(fabricSettings) } },
+    );
   };
 
   const dropdown = open && rect && typeof document !== "undefined" ? createPortal(
@@ -4682,14 +4777,22 @@ function SettingsPanel({
       [kind]: current[kind].filter((_, optionIndex) => optionIndex !== index),
     }));
   };
-  const saveRestockSettings = () => submitPortalCell(settingsFetcher, {
-    intent: "update_restock_settings",
-    value: JSON.stringify(restockDraft),
-  });
-  const saveUniversalSettings = () => submitPortalCell(settingsFetcher, {
-    intent: "update_universal_settings",
-    value: JSON.stringify(universalDraft),
-  });
+  const saveRestockSettings = () => submitPortalCell(
+    settingsFetcher,
+    {
+      intent: "update_restock_settings",
+      value: JSON.stringify(restockDraft),
+    },
+    { label: "Undo restock settings", fields: { intent: "update_restock_settings", value: JSON.stringify(restockSettings) } },
+  );
+  const saveUniversalSettings = () => submitPortalCell(
+    settingsFetcher,
+    {
+      intent: "update_universal_settings",
+      value: JSON.stringify(universalDraft),
+    },
+    { label: "Undo universal settings", fields: { intent: "update_universal_settings", value: JSON.stringify(universalSettings) } },
+  );
   return (
     <div style={s.settingsPanel}>
       <section style={s.settingsCard}>
@@ -4711,10 +4814,14 @@ function SettingsPanel({
             type="checkbox"
             checked={loginRequired}
             disabled={!canManageUsers}
-            onChange={(event) => submitPortalCell(settingsFetcher, {
-              intent: "update_login_required",
-              value: event.currentTarget.checked ? "on" : "off",
-            })}
+            onChange={(event) => submitPortalCell(
+              settingsFetcher,
+              {
+                intent: "update_login_required",
+                value: event.currentTarget.checked ? "on" : "off",
+              },
+              { label: "Undo portal access setting", fields: { intent: "update_login_required", value: loginRequired ? "on" : "off" } },
+            )}
           />
           Require users to select their name before entering
         </label>
@@ -5441,10 +5548,11 @@ function PackingListDetail({
       document.body.style.userSelect = previousUserSelect;
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
-      const formData = new FormData();
-      formData.set("intent", "update_packing_column_widths");
-      formData.set("value", JSON.stringify(nextColumnWidths));
-      columnWidthsFetcher.submit(formData, { method: "post" });
+      submitPortalCell(
+        columnWidthsFetcher,
+        { intent: "update_packing_column_widths", value: JSON.stringify(nextColumnWidths) },
+        { label: "Undo column width", fields: { intent: "update_packing_column_widths", value: JSON.stringify(packingColumnWidths) } },
+      );
     };
 
     document.addEventListener("mousemove", handleMove);
@@ -5462,12 +5570,16 @@ function PackingListDetail({
             <span>Invoice number</span>
             <input
               defaultValue={packingList.invoiceNumber ?? ""}
-              onBlur={(event) => submitPortalCell(fetcher, {
-                intent: "update_packing_list",
-                packingId: packingList.id,
-                field: "invoiceNumber",
-                value: event.currentTarget.value,
-              })}
+              onBlur={(event) => submitPortalCell(
+                fetcher,
+                {
+                  intent: "update_packing_list",
+                  packingId: packingList.id,
+                  field: "invoiceNumber",
+                  value: event.currentTarget.value,
+                },
+                { label: "Undo invoice number", fields: { intent: "update_packing_list", packingId: packingList.id, field: "invoiceNumber", value: packingList.invoiceNumber ?? "" } },
+              )}
               placeholder="Invoice number"
               style={{ ...s.packingInput, ...s.invoiceInput }}
             />
@@ -5483,12 +5595,16 @@ function PackingListDetail({
                 const dt = new Date(d);
                 return isNaN(dt.getTime()) ? "" : dt.toISOString().slice(0, 10);
               })()}
-              onBlur={(event) => submitPortalCell(fetcher, {
-                intent: "update_packing_list",
-                packingId: packingList.id,
-                field: "expectedLeaveFactoryDate",
-                value: event.currentTarget.value,
-              })}
+              onBlur={(event) => submitPortalCell(
+                fetcher,
+                {
+                  intent: "update_packing_list",
+                  packingId: packingList.id,
+                  field: "expectedLeaveFactoryDate",
+                  value: event.currentTarget.value,
+                },
+                { label: "Undo estimated arrival", fields: { intent: "update_packing_list", packingId: packingList.id, field: "expectedLeaveFactoryDate", value: packingList.expectedLeaveFactoryDate ? new Date(packingList.expectedLeaveFactoryDate).toISOString().slice(0, 10) : "" } },
+              )}
               style={{ ...s.packingInput, width: 150 }}
             />
           </label>
@@ -5497,12 +5613,16 @@ function PackingListDetail({
             <select
               key={packingList.status ?? "still_packing"}
               defaultValue={packingList.status ?? "still_packing"}
-              onChange={(event) => submitPortalCell(fetcher, {
-                intent: "update_packing_list",
-                packingId: packingList.id,
-                field: "status",
-                value: event.currentTarget.value,
-              })}
+              onChange={(event) => submitPortalCell(
+                fetcher,
+                {
+                  intent: "update_packing_list",
+                  packingId: packingList.id,
+                  field: "status",
+                  value: event.currentTarget.value,
+                },
+                { label: "Undo packing status", fields: { intent: "update_packing_list", packingId: packingList.id, field: "status", value: packingList.status ?? "still_packing" } },
+              )}
               style={{ ...s.packingInput, width: 160 }}
             >
               {PACKING_STATUS_OPTIONS.map((opt) => (
@@ -5694,12 +5814,16 @@ function PackingListLineRow({
             inputMode="numeric"
             defaultValue={qtys[size] || ""}
             onChange={(event) => { event.currentTarget.value = event.currentTarget.value.replace(/\D/g, ""); }}
-            onBlur={(event) => submitPortalCell(fetcher, {
-              intent: "update_packing_qty",
-              lineId: line.id,
-              size,
-              value: event.currentTarget.value,
-            })}
+            onBlur={(event) => submitPortalCell(
+              fetcher,
+              {
+                intent: "update_packing_qty",
+                lineId: line.id,
+                size,
+                value: event.currentTarget.value,
+              },
+              { label: "Undo packing quantity", fields: { intent: "update_packing_qty", lineId: line.id, size, value: qtys[size] ?? 0 } },
+            )}
             style={{ ...s.qtyInput, ...(qtys[size] > 0 && shopifyLoadedQtys[size] === qtys[size] ? { color: "#fff" } : {}) }}
           />
         </PackingTd>
@@ -5793,11 +5917,23 @@ function PackingProductNameCell({
     setIsChangingProduct(false);
     setDropdownRect(null);
     inputRef.current?.blur();
-    submitPortalCell(fetcher, {
-      intent: "apply_product_to_packing_line",
-      lineId: line.id,
-      product: JSON.stringify(product),
-    });
+    submitPortalCell(
+      fetcher,
+      {
+        intent: "apply_product_to_packing_line",
+        lineId: line.id,
+        product: JSON.stringify(product),
+      },
+      {
+        label: "Undo product selection",
+        fields: {
+          intent: "update_packing_line",
+          lineId: line.id,
+          field: "productTitle",
+          value: displayValue,
+        },
+      },
+    );
     updateParams({ productSearch: "", packingSearchLineId: "" });
   };
 
@@ -5843,12 +5979,16 @@ function PackingProductNameCell({
             updateParams({ productSearch: "", packingSearchLineId: "" });
             return;
           }
-          submitPortalCell(fetcher, {
-            intent: "update_packing_line",
-            lineId: line.id,
-            field: "productTitle",
-            value: event.currentTarget.value,
-          });
+          submitPortalCell(
+            fetcher,
+            {
+              intent: "update_packing_line",
+              lineId: line.id,
+              field: "productTitle",
+              value: event.currentTarget.value,
+            },
+            { label: "Undo product title", fields: { intent: "update_packing_line", lineId: line.id, field: "productTitle", value: displayValue } },
+          );
         }}
         placeholder="Search or type product"
         style={s.packingCellInput}
@@ -5893,12 +6033,16 @@ function PackingTextInput({ lineId, field, value, multiline, center }: { lineId:
   const fetcher = useFetcher();
   const common = {
     defaultValue: value,
-    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => submitPortalCell(fetcher, {
-      intent: "update_packing_line",
-      lineId,
-      field,
-      value: event.currentTarget.value,
-    }),
+    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => submitPortalCell(
+      fetcher,
+      {
+        intent: "update_packing_line",
+        lineId,
+        field,
+        value: event.currentTarget.value,
+      },
+      { label: "Undo packing cell", fields: { intent: "update_packing_line", lineId, field, value } },
+    ),
     style: { ...(multiline ? s.packingTextarea : s.packingCellInput), ...(center ? { textAlign: "center" as const } : {}) },
   };
   return multiline ? <textarea rows={3} {...common} /> : <input type="text" {...common} />;
@@ -5911,12 +6055,16 @@ function PackingSkuCell({ lineId, value }: { lineId: number; value: string }) {
     <textarea
       rows={7}
       defaultValue={value}
-      onBlur={(event) => submitPortalCell(fetcher, {
-        intent: "update_packing_line",
-        lineId,
-        field: "sku",
-        value: event.currentTarget.value,
-      })}
+      onBlur={(event) => submitPortalCell(
+        fetcher,
+        {
+          intent: "update_packing_line",
+          lineId,
+          field: "sku",
+          value: event.currentTarget.value,
+        },
+        { label: "Undo SKU", fields: { intent: "update_packing_line", lineId, field: "sku", value } },
+      )}
       style={s.packingSkuTextarea}
     />
   );
@@ -5928,20 +6076,28 @@ function PackingImageCell({ lineId, field, value }: { lineId: number; field: "pr
 
   const saveFile = (file: File) => {
     const reader = new FileReader();
-    reader.onload = () => submitPortalCell(fetcher, {
+    reader.onload = () => submitPortalCell(
+      fetcher,
+      {
+        intent: "update_packing_line",
+        lineId,
+        field,
+        value: String(reader.result ?? ""),
+      },
+      { label: "Undo packing image", fields: { intent: "update_packing_line", lineId, field, value } },
+    );
+    reader.readAsDataURL(file);
+  };
+  const clearImage = () => submitPortalCell(
+    fetcher,
+    {
       intent: "update_packing_line",
       lineId,
       field,
-      value: String(reader.result ?? ""),
-    });
-    reader.readAsDataURL(file);
-  };
-  const clearImage = () => submitPortalCell(fetcher, {
-    intent: "update_packing_line",
-    lineId,
-    field,
-    value: "",
-  });
+      value: "",
+    },
+    { label: "Undo image delete", fields: { intent: "update_packing_line", lineId, field, value } },
+  );
 
   return (
     <div style={s.packingImageCell}>
@@ -6490,10 +6646,49 @@ function OrderRow({
 
 // ─── Editable cells ───────────────────────────────────────────────────────────
 
+const PORTAL_UNDO_STACK_KEY = "production-portal-undo-stack-v1";
+const MAX_PORTAL_UNDO_ENTRIES = 80;
+
+function readPortalUndoStack(): PortalUndoEntry[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PORTAL_UNDO_STACK_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is PortalUndoEntry => (
+      entry
+      && typeof entry === "object"
+      && typeof (entry as PortalUndoEntry).label === "string"
+      && (entry as PortalUndoEntry).fields
+      && typeof (entry as PortalUndoEntry).fields === "object"
+    ));
+  } catch {
+    return [];
+  }
+}
+
+function pushPortalUndo(entry?: PortalUndoEntry | null) {
+  if (!entry || typeof window === "undefined") return;
+  const stack = readPortalUndoStack();
+  stack.push(entry);
+  window.localStorage.setItem(PORTAL_UNDO_STACK_KEY, JSON.stringify(stack.slice(-MAX_PORTAL_UNDO_ENTRIES)));
+}
+
+function submitLastPortalUndo(fetcher: ReturnType<typeof useFetcher>) {
+  if (typeof window === "undefined") return false;
+  const stack = readPortalUndoStack();
+  const entry = stack.pop();
+  if (!entry) return false;
+  window.localStorage.setItem(PORTAL_UNDO_STACK_KEY, JSON.stringify(stack));
+  submitPortalCell(fetcher, entry.fields, null);
+  return true;
+}
+
 function submitPortalCell(
   fetcher: ReturnType<typeof useFetcher>,
   fields: Record<string, string | number>,
+  undo?: PortalUndoEntry | null,
 ) {
+  pushPortalUndo(undo);
   const formData = new FormData();
   for (const [key, value] of Object.entries(fields)) {
     formData.set(key, String(value));
@@ -6507,7 +6702,11 @@ function TableCustomCell({ cellKey, value }: { cellKey: string; value: string })
   useEffect(() => setDraft(value), [value]);
   const save = (nextValue: string) => {
     if (nextValue === value) return;
-    submitPortalCell(fetcher, { intent: "update_table_custom_cell", key: cellKey, value: nextValue });
+    submitPortalCell(
+      fetcher,
+      { intent: "update_table_custom_cell", key: cellKey, value: nextValue },
+      { label: "Undo custom cell", fields: { intent: "update_table_custom_cell", key: cellKey, value } },
+    );
   };
   return (
     <textarea
@@ -6529,11 +6728,15 @@ function StatusCell({ orderId, value, options }: { orderId: number; value: strin
   return (
     <select
       value={current}
-      onChange={(e) => submitPortalCell(fetcher, {
-        intent: "update_status",
-        orderId,
-        value: e.currentTarget.value,
-      })}
+      onChange={(e) => submitPortalCell(
+        fetcher,
+        {
+          intent: "update_status",
+          orderId,
+          value: e.currentTarget.value,
+        },
+        { label: "Undo status", fields: { intent: "update_status", orderId, value } },
+      )}
       style={{ ...s.select, background: option?.bg ?? "#f3f4f6", color: option?.color ?? "#374151" }}
     >
       {options.map((o) => (
@@ -6551,11 +6754,15 @@ function PriorityCell({ orderId, value, options }: { orderId: number; value: str
   return (
     <select
       value={current}
-      onChange={(e) => submitPortalCell(fetcher, {
-        intent: "update_priority",
-        orderId,
-        value: e.currentTarget.value,
-      })}
+      onChange={(e) => submitPortalCell(
+        fetcher,
+        {
+          intent: "update_priority",
+          orderId,
+          value: e.currentTarget.value,
+        },
+        { label: "Undo priority", fields: { intent: "update_priority", orderId, value } },
+      )}
       style={{
         ...s.select,
         background: opt?.bg ?? "#f3f4f6",
@@ -6614,11 +6821,15 @@ function NotesCell({
         onFocus={() => setFocused(true)}
         onBlur={(e) => {
           window.setTimeout(() => setFocused(false), 120);
-          submitPortalCell(fetcher, {
-            intent: `update_${field}`,
-            orderId,
-            value: e.currentTarget.value,
-          });
+          submitPortalCell(
+            fetcher,
+            {
+              intent: `update_${field}`,
+              orderId,
+              value: e.currentTarget.value,
+            },
+            { label: "Undo note", fields: { intent: `update_${field}`, orderId, value } },
+          );
         }}
         rows={3}
         style={s.restockNoteTextarea}
@@ -6651,11 +6862,15 @@ function EtaCell({ orderId, value }: { orderId: number; value: string }) {
     <input
       type="text"
       defaultValue={value}
-      onBlur={(e) => submitPortalCell(fetcher, {
-        intent: "update_eta",
-        orderId,
-        value: e.currentTarget.value,
-      })}
+      onBlur={(e) => submitPortalCell(
+        fetcher,
+        {
+          intent: "update_eta",
+          orderId,
+          value: e.currentTarget.value,
+        },
+        { label: "Undo ETA", fields: { intent: "update_eta", orderId, value } },
+      )}
       style={s.dateInput}
       placeholder="dd/mm/yy"
     />
@@ -6677,12 +6892,16 @@ function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; s
       pattern="[0-9]*"
       defaultValue={value}
       onChange={(e) => normalizeQty(e.currentTarget)}
-      onBlur={(e) => submitPortalCell(fetcher, {
-        intent: "update_qty",
-        orderId,
-        size,
-        value: e.currentTarget.value,
-      })}
+      onBlur={(e) => submitPortalCell(
+        fetcher,
+        {
+          intent: "update_qty",
+          orderId,
+          size,
+          value: e.currentTarget.value,
+        },
+        { label: "Undo quantity", fields: { intent: "update_qty", orderId, size, value } },
+      )}
       style={{
         ...s.qtyInput,
         ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
@@ -6812,7 +7031,12 @@ function Th({
               setMenu(null);
               const label = window.prompt("New column name?");
               if (!label) return;
-              submitPortalCell(fetcher, { intent: "add_table_column", table: table || "restock", gid: gid || "", label });
+              const nextColumnId = `custom_${Date.now()}`;
+              submitPortalCell(
+                fetcher,
+                { intent: "add_table_column", table: table || "restock", gid: gid || "", columnId: nextColumnId, label },
+                { label: "Undo add column", fields: { intent: "remove_table_column", table: table || "restock", gid: gid || "", columnId: nextColumnId } },
+              );
             }}
           >
             Add column
@@ -6824,7 +7048,11 @@ function Th({
             onClick={() => {
               if (!columnId?.startsWith("custom_")) return;
               setMenu(null);
-              submitPortalCell(fetcher, { intent: "remove_table_column", table: table || "restock", gid: gid || "", columnId });
+              submitPortalCell(
+                fetcher,
+                { intent: "remove_table_column", table: table || "restock", gid: gid || "", columnId },
+                { label: "Undo remove column", fields: { intent: "add_table_column", table: table || "restock", gid: gid || "", columnId, label: typeof children === "string" ? children : "New Column" } },
+              );
             }}
           >
             Remove column
