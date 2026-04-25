@@ -3974,7 +3974,7 @@ function FabricHeaderCell({
         setMenu({ x: event.clientX, y: event.clientY });
       }}
     >
-      <EditableHeaderLabel headerKey={`fabric:${gid}:${index}`} value={label} />
+      <FabricEditableHeaderLabel headerKey={`fabric:${gid}:${index}`} value={label} />
       <span role="separator" aria-orientation="vertical" aria-label={`Resize ${label} column`} onMouseDown={startResize} style={s.resizeHandle} />
       {menu && typeof document !== "undefined" && createPortal(
         <div style={{ ...s.contextMenu, left: menu.x, top: menu.y }} onMouseDown={(event) => event.stopPropagation()}>
@@ -4015,6 +4015,36 @@ function FabricHeaderCell({
         document.body,
       )}
     </th>
+  );
+}
+
+function FabricEditableHeaderLabel({ headerKey, value }: { headerKey: string; value: string }) {
+  const fetcher = useFetcher();
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  const save = (nextValue: string) => {
+    const trimmed = nextValue.trim();
+    if (!trimmed || trimmed === value) return;
+    submitPortalCell(
+      fetcher,
+      { intent: "update_table_header", key: headerKey, value: trimmed },
+      { label: "Undo heading text", fields: { intent: "update_table_header", key: headerKey, value } },
+    );
+  };
+  return (
+    <input
+      value={draft}
+      onChange={(event) => setDraft(event.currentTarget.value)}
+      onBlur={(event) => save(event.currentTarget.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          event.currentTarget.blur();
+        }
+      }}
+      style={s.headerEditInput}
+      title="Edit fabric heading"
+    />
   );
 }
 
