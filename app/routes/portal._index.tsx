@@ -6837,29 +6837,7 @@ function Th({
 }
 
 function EditableHeaderLabel({ headerKey, value }: { headerKey: string; value: string }) {
-  const fetcher = useFetcher();
-  const [draft, setDraft] = useState(value);
-  useEffect(() => setDraft(value), [value]);
-  const save = (nextValue: string) => {
-    const trimmed = nextValue.trim();
-    if (!trimmed || trimmed === value) return;
-    submitPortalCell(fetcher, { intent: "update_table_header", key: headerKey, value: trimmed });
-  };
-  return (
-    <input
-      value={draft}
-      onChange={(event) => setDraft(event.currentTarget.value)}
-      onBlur={(event) => save(event.currentTarget.value)}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          event.currentTarget.blur();
-        }
-      }}
-      style={s.headerEditInput}
-      title="Edit heading"
-    />
-  );
+  return <span style={s.thContent} data-header-key={headerKey}>{value}</span>;
 }
 function Td({
   children,
