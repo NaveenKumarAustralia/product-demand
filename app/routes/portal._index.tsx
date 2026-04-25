@@ -1820,6 +1820,12 @@ function fabricHeaderRole(header: string) {
   return normalizeFabricHeader(header);
 }
 
+function isLockedFabricCalculationHeader(header: string) {
+  const normalized = header.trim().toLowerCase();
+  return /cost\s*per\s*meter|price\s*per\s*meter|cost\/meter|price\/meter/.test(normalized)
+    || /meters?\s*in\s*stock|meters?\s*available/.test(normalized);
+}
+
 function isHiddenFabricSheet(name: string) {
   return HIDDEN_FABRIC_SHEET_NAMES.has(normalizeFabricName(name));
 }
@@ -3974,7 +3980,9 @@ function FabricHeaderCell({
         setMenu({ x: event.clientX, y: event.clientY });
       }}
     >
-      <FabricEditableHeaderLabel headerKey={`fabric:${gid}:${index}`} value={label} />
+      {isLockedFabricCalculationHeader(label)
+        ? <span style={s.thContent} title="Locked because this column is used in fabric totals">{label}</span>
+        : <FabricEditableHeaderLabel headerKey={`fabric:${gid}:${index}`} value={label} />}
       <span role="separator" aria-orientation="vertical" aria-label={`Resize ${label} column`} onMouseDown={startResize} style={s.resizeHandle} />
       {menu && typeof document !== "undefined" && createPortal(
         <div style={{ ...s.contextMenu, left: menu.x, top: menu.y }} onMouseDown={(event) => event.stopPropagation()}>
