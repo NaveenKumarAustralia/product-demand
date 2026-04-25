@@ -162,6 +162,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         select: { value: true },
       })
     : null;
+  const fabricDeletedSheetsSetting = page === "fabric"
+    ? await prisma.portalSetting.findUnique({
+        where: { key: FABRIC_DELETED_SHEETS_KEY },
+        select: { value: true },
+      })
+    : null;
   const inrToAudRate = page === "fabric" ? await getInrToAudRate() : null;
   const fabricSheets = page === "fabric"
     ? getFabricSheets(
@@ -171,6 +177,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         fabricSettings.tileOrder,
         normalizeFabricCustomSheets(fabricCustomSheetsSetting?.value),
         customColumns.fabric,
+        normalizeFabricDeletedSheets(fabricDeletedSheetsSetting?.value),
       )
     : [];
 
@@ -929,6 +936,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "delete_fabric_sheet") {
+    const gid = String(form.get("gid") ?? "");
+    if (!gid) return null;
+    const [customSheetsSetting, deletedSheetsSetting] = await Promise.all([
+      prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } }),
+      prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_SHEETS_KEY }, select: { value: true } }),
+    ]);
+    const customSheets = normalizeFabricCustomSheets(customSheetsSetting?.value);
+    const nextCustomSheets = customSheets.filter((sheet) => sheet.gid !== gid);
+    const deletedSheets = normalizeFabricDeletedSheets(deletedSheetsSetting?.value);
+    if (nextCustomSheets.length === customSheets.length) deletedSheets[gid] = true;
+    await Promise.all([
+      prisma.portalSetting.upsert({
+        where: { key: FABRIC_CUSTOM_SHEETS_KEY },
+        create: { key: FABRIC_CUSTOM_SHEETS_KEY, value: nextCustomSheets },
+        update: { value: nextCustomSheets },
+      }),
+      prisma.portalSetting.upsert({
+        where: { key: FABRIC_DELETED_SHEETS_KEY },
+        create: { key: FABRIC_DELETED_SHEETS_KEY, value: deletedSheets },
+        update: { value: deletedSheets },
+      }),
+    ]);
+    return null;
+  }
+
   if (intent === "update_restock_settings") {
     let settings: RestockSettings;
     try {
@@ -1454,6 +1487,15 @@ function normalizeFabricCustomSheets(value: unknown): FabricCustomSheet[] {
   }).filter(Boolean) as FabricCustomSheet[];
 }
 
+function normalizeFabricDeletedSheets(value: unknown): Record<string, boolean> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([gid, deleted]) => gid && Boolean(deleted))
+      .map(([gid]) => [gid, true]),
+  );
+}
+
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
 const TABLE_HEADER_LABELS_KEY = "production-portal-table-header-labels-v1";
@@ -1468,6 +1510,7 @@ const FABRIC_CELL_OVERRIDES_KEY = "production-portal-fabric-cell-overrides-v1";
 const FABRIC_CUSTOM_ROWS_KEY = "production-portal-fabric-custom-rows-v1";
 const FABRIC_DELETED_ROWS_KEY = "production-portal-fabric-deleted-rows-v1";
 const FABRIC_CUSTOM_SHEETS_KEY = "production-portal-fabric-custom-sheets-v1";
+const FABRIC_DELETED_SHEETS_KEY = "production-portal-fabric-deleted-sheets-v1";
 const DEFAULT_FABRIC_HEADERS = ["Supplier", "Fabric Type", "Fabric", "Name", "Cost per Meter", "Meters in Stock", "Cut Pieces", "Received / Date", "Products", "Notes"];
 const HIDDEN_FABRIC_SHEET_NAMES = new Set(["new fabric on order", "fabric on order"]);
 const FABRIC_TOTAL_EXCLUDED_NAMES = new Set([
@@ -1898,19 +1941,20 @@ function getFabricSheets(
   tileOrder: string[] = [],
   customSheets: FabricCustomSheet[] = [],
   customColumns: Record<string, TableCustomColumn[]> = {},
+  deletedSheets: Record<string, boolean> = {},
 ): FabricSheetData[] {
   const overrides = normalizeFabricCellOverrides(overridesValue);
   const customRows = normalizeFabricCustomRows(customRowsValue);
   const deletedRows = normalizeFabricDeletedRows(deletedRowsValue);
   const recoveredRows = recoveredBrokenMoveRows(customRows, deletedRows);
   const sourceSheets: FabricStockSheet[] = [
-    ...fabricStockSheets.filter((sheet) => !isHiddenFabricSheet(sheet.name)),
+    ...fabricStockSheets.filter((sheet) => !isHiddenFabricSheet(sheet.name) && !deletedSheets[sheet.gid]),
     ...customSheets.map((sheet) => ({
       ...sheet,
       kind: "stock",
       rowCount: sheet.rows.length,
       totalQuantity: sumFabricRows(sheet.headers, sheet.rows),
-    })),
+    })).filter((sheet) => !deletedSheets[sheet.gid]),
   ];
   const sheets = sourceSheets.map((sheet) => {
     const extraHeaders = (customColumns[sheet.gid] ?? []).map((column) => column.label);
@@ -3599,6 +3643,7 @@ function FabricSheetsPanel({
           customColumns={customColumns}
           rowHeights={rowHeights}
           nameSearch={fabricNameSearch}
+          onDeleteList={() => onSelect("")}
         />
       </div>
     );
@@ -3699,6 +3744,7 @@ function FabricSheetTable({
   customColumns,
   rowHeights,
   nameSearch,
+  onDeleteList,
 }: {
   sheet: FabricSheetData;
   sheets: FabricSheetData[];
@@ -3709,6 +3755,7 @@ function FabricSheetTable({
   customColumns: TableCustomColumns;
   rowHeights: Record<string, number>;
   nameSearch: string;
+  onDeleteList: () => void;
 }) {
   if (sheet.error) {
     return <div style={s.empty}>Unable to load {sheet.name}: {sheet.error}</div>;
@@ -3788,6 +3835,19 @@ function FabricSheetTable({
             )}
           </tbody>
         </table>
+      </div>
+      <div style={s.fabricTableFooter}>
+        <button
+          type="button"
+          style={s.deleteButton}
+          onClick={() => {
+            if (!window.confirm(`Delete the "${sheet.name}" fabric list?`)) return;
+            submitPortalCell(fetcher, { intent: "delete_fabric_sheet", gid: sheet.gid });
+            onDeleteList();
+          }}
+        >
+          Delete list
+        </button>
       </div>
     </div>
   );
@@ -4063,70 +4123,19 @@ function FabricCell({
       : draft
         ? [...chipOptions, { value: slugForOption(draft) || draft, label: draft, bg: "#f3f4f6", color: "#374151" }]
         : chipOptions;
-    const updateChipOption = (label: string, patch: Partial<RestockOption>) => {
-      if (!chipKind || !label.trim()) return;
-      const nextOptions = [...chipOptions];
-      const existingIndex = nextOptions.findIndex((option) => option.label.toLowerCase() === label.trim().toLowerCase());
-      const existing = existingIndex >= 0
-        ? nextOptions[existingIndex]
-        : { value: slugForOption(label) || label, label, bg: "#f3f4f6", color: "#374151" };
-      const nextOption = { ...existing, ...patch, value: existing.value || slugForOption(label) || label, label: existing.label || label };
-      if (existingIndex >= 0) nextOptions[existingIndex] = nextOption;
-      else nextOptions.push(nextOption);
-      submitPortalCell(fetcher, {
-        intent: "update_fabric_settings",
-        value: JSON.stringify({ ...fabricSettings, [chipKind]: nextOptions }),
-      });
-    };
     return (
-      <div style={s.fabricChipCell}>
-        <select
-          value={draft}
-          onChange={(event) => {
-            setDraft(event.currentTarget.value);
-            save(event.currentTarget.value);
-          }}
-          style={{
-            ...s.fabricChipSelect,
-            background: chipOption?.bg ?? "#f3f4f6",
-            color: chipOption?.color ?? "#374151",
-          }}
-        >
-          <option value="">—</option>
-          {options.map((option) => (
-            <option key={option.value} value={option.label}>{option.label}</option>
-          ))}
-        </select>
-        <div style={s.fabricChipTools}>
-          <input
-            type="color"
-            aria-label="Chip colour"
-            value={chipOption?.bg ?? "#f3f4f6"}
-            style={s.fabricChipColor}
-            onChange={(event) => updateChipOption(draft, { bg: event.currentTarget.value })}
-          />
-          <input
-            type="color"
-            aria-label="Chip text colour"
-            value={chipOption?.color ?? "#374151"}
-            style={s.fabricChipColor}
-            onChange={(event) => updateChipOption(draft, { color: event.currentTarget.value })}
-          />
-          <button
-            type="button"
-            style={s.fabricMiniButton}
-            onClick={() => {
-              const label = window.prompt("New chip name?");
-              if (!label?.trim()) return;
-              updateChipOption(label.trim(), {});
-              setDraft(label.trim());
-              save(label.trim());
-            }}
-          >
-            Add chip
-          </button>
-        </div>
-      </div>
+      <FabricChipDropdown
+        value={draft}
+        option={chipOption}
+        options={options}
+        chipKind={chipKind}
+        fabricSettings={fabricSettings}
+        fetcher={fetcher}
+        onChange={(nextValue) => {
+          setDraft(nextValue);
+          save(nextValue);
+        }}
+      />
     );
   }
 
@@ -4159,6 +4168,163 @@ function FabricCell({
         </div>
       )}
     </>
+  );
+}
+
+function FabricChipDropdown({
+  value,
+  option,
+  options,
+  chipKind,
+  fabricSettings,
+  fetcher,
+  onChange,
+}: {
+  value: string;
+  option?: RestockOption;
+  options: RestockOption[];
+  chipKind: "supplierOptions" | "fabricTypeOptions";
+  fabricSettings: FabricSettings;
+  fetcher: ReturnType<typeof useFetcher>;
+  onChange: (value: string) => void;
+}) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const selectedOption = option ?? options.find((item) => item.label === value || item.value === slugForOption(value));
+  const updateRect = () => {
+    if (buttonRef.current) setRect(buttonRef.current.getBoundingClientRect());
+  };
+  useEffect(() => {
+    if (!open) return;
+    updateRect();
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (buttonRef.current?.contains(target)) return;
+      const menu = document.querySelector("[data-fabric-chip-menu='true']");
+      if (menu?.contains(target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    window.addEventListener("resize", updateRect);
+    window.addEventListener("scroll", updateRect, true);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      window.removeEventListener("resize", updateRect);
+      window.removeEventListener("scroll", updateRect, true);
+    };
+  }, [open]);
+
+  const updateChipOption = (label: string, patch: Partial<RestockOption>) => {
+    if (!label.trim()) return;
+    const nextOptions = [...options];
+    const existingIndex = nextOptions.findIndex((item) => item.label.toLowerCase() === label.trim().toLowerCase());
+    const existing = existingIndex >= 0
+      ? nextOptions[existingIndex]
+      : { value: slugForOption(label) || label, label, bg: "#f3f4f6", color: "#374151" };
+    const nextOption = { ...existing, ...patch, value: existing.value || slugForOption(label) || label, label: existing.label || label };
+    if (existingIndex >= 0) nextOptions[existingIndex] = nextOption;
+    else nextOptions.push(nextOption);
+    submitPortalCell(fetcher, {
+      intent: "update_fabric_settings",
+      value: JSON.stringify({ ...fabricSettings, [chipKind]: nextOptions }),
+    });
+  };
+
+  const dropdown = open && rect && typeof document !== "undefined" ? createPortal(
+    <div
+      data-fabric-chip-menu="true"
+      style={{
+        ...s.fabricChipMenu,
+        top: rect.bottom + 6,
+        left: rect.left,
+        minWidth: Math.max(rect.width, 240),
+      }}
+    >
+      <button
+        type="button"
+        style={s.fabricChipMenuOption}
+        onClick={() => {
+          onChange("");
+          setOpen(false);
+        }}
+      >
+        <span>—</span>
+      </button>
+      {options.map((item) => {
+        const selected = item.label === value || item.value === slugForOption(value);
+        return (
+          <button
+            key={item.value}
+            type="button"
+            style={s.fabricChipMenuOption}
+            onClick={() => {
+              onChange(item.label);
+              setOpen(false);
+            }}
+          >
+            <span style={s.fabricChipCheck}>{selected ? "✓" : ""}</span>
+            <span style={{ ...s.fabricChipMenuPill, background: item.bg, color: item.color }}>{item.label}</span>
+          </button>
+        );
+      })}
+      <div style={s.fabricChipMenuTools}>
+        <label style={s.fabricChipMenuToolLabel}>
+          Chip
+          <input
+            type="color"
+            value={selectedOption?.bg ?? "#f3f4f6"}
+            style={s.fabricChipColor}
+            onChange={(event) => updateChipOption(value, { bg: event.currentTarget.value })}
+          />
+        </label>
+        <label style={s.fabricChipMenuToolLabel}>
+          Text
+          <input
+            type="color"
+            value={selectedOption?.color ?? "#374151"}
+            style={s.fabricChipColor}
+            onChange={(event) => updateChipOption(value, { color: event.currentTarget.value })}
+          />
+        </label>
+        <button
+          type="button"
+          style={s.fabricMiniButton}
+          onClick={() => {
+            const label = window.prompt("New chip name?");
+            if (!label?.trim()) return;
+            updateChipOption(label.trim(), {});
+            onChange(label.trim());
+            setOpen(false);
+          }}
+        >
+          Add chip
+        </button>
+      </div>
+    </div>,
+    document.body,
+  ) : null;
+
+  return (
+    <div style={s.fabricChipCell}>
+      <button
+        ref={buttonRef}
+        type="button"
+        style={{
+          ...s.fabricChipSelect,
+          background: selectedOption?.bg ?? "#f3f4f6",
+          color: selectedOption?.color ?? "#374151",
+        }}
+        onClick={() => {
+          updateRect();
+          setOpen((current) => !current);
+        }}
+      >
+        <span style={s.fabricChipButtonText}>{value || "—"}</span>
+        <span style={s.fabricChipChevron}>⌄</span>
+      </button>
+      {dropdown}
+    </div>
   );
 }
 
@@ -7871,12 +8037,6 @@ const s: Record<string, React.CSSProperties> = {
     gap: 7,
     padding: 8,
   },
-  fabricChipTools: {
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: 5,
-  },
   fabricChipColor: {
     width: 28,
     height: 28,
@@ -7897,8 +8057,8 @@ const s: Record<string, React.CSSProperties> = {
   },
   fabricTableFooter: {
     display: "flex",
-    justifyContent: "flex-start",
-    padding: "0 0 4px",
+    justifyContent: "flex-end",
+    padding: "6px 0 4px",
   },
   fabricRowActions: {
     minWidth: 170,
@@ -7927,6 +8087,83 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: "var(--portal-table-font-size, 13px)",
     fontWeight: 900,
     cursor: "pointer",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    textAlign: "left",
+  },
+  fabricChipButtonText: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  fabricChipChevron: {
+    flex: "0 0 auto",
+    fontSize: 16,
+    lineHeight: 1,
+    fontWeight: 900,
+  },
+  fabricChipMenu: {
+    position: "fixed",
+    zIndex: 2147483647,
+    maxHeight: 420,
+    overflow: "auto",
+    display: "grid",
+    gap: 3,
+    padding: 8,
+    background: "rgba(255,255,255,0.96)",
+    border: "1px solid #cbd5e1",
+    borderRadius: 10,
+    boxShadow: "0 18px 42px rgba(15,23,42,0.24)",
+    backdropFilter: "blur(8px)",
+  },
+  fabricChipMenuOption: {
+    width: "100%",
+    display: "grid",
+    gridTemplateColumns: "18px minmax(0, 1fr)",
+    alignItems: "center",
+    gap: 6,
+    border: 0,
+    borderRadius: 7,
+    padding: "6px 8px",
+    background: "transparent",
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: 800,
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  fabricChipCheck: {
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: 900,
+    textAlign: "center",
+  },
+  fabricChipMenuPill: {
+    minWidth: 0,
+    borderRadius: 999,
+    padding: "4px 9px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  fabricChipMenuTools: {
+    marginTop: 6,
+    paddingTop: 8,
+    borderTop: "1px solid #e5e7eb",
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  fabricChipMenuToolLabel: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+    color: "#475569",
+    fontSize: 11,
+    fontWeight: 900,
   },
   fabricCellActions: {
     display: "flex",
