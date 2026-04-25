@@ -2683,6 +2683,7 @@ export default function PortalDashboard() {
             sheets={fabricSheets}
             selectedGid={selectedFabricTab}
             fabricSettings={fabricSettings}
+            users={users}
             inrToAudRate={inrToAudRate}
             onSelect={(gid) => updateParams({ fabricTab: gid })}
           />
@@ -3165,12 +3166,14 @@ function FabricSheetsPanel({
   sheets,
   selectedGid,
   fabricSettings,
+  users,
   inrToAudRate,
   onSelect,
 }: {
   sheets: FabricSheetData[];
   selectedGid: string;
   fabricSettings: FabricSettings;
+  users: PortalUser[];
   inrToAudRate: number | null;
   onSelect: (gid: string) => void;
 }) {
@@ -3223,6 +3226,7 @@ function FabricSheetsPanel({
           sheets={sheets}
           fetcher={fetcher}
           fabricSettings={fabricSettings}
+          users={users}
           nameSearch={fabricNameSearch}
         />
       </div>
@@ -3306,12 +3310,14 @@ function FabricSheetTable({
   sheets,
   fetcher,
   fabricSettings,
+  users,
   nameSearch,
 }: {
   sheet: FabricSheetData;
   sheets: FabricSheetData[];
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
+  users: PortalUser[];
   nameSearch: string;
 }) {
   if (sheet.error) {
@@ -3353,6 +3359,7 @@ function FabricSheetTable({
                       header={sheet.headers[colIndex] ?? ""}
                       fetcher={fetcher}
                       fabricSettings={fabricSettings}
+                      users={users}
                     />
                   </FabricTd>
                 ))}
@@ -3427,7 +3434,7 @@ function isFabricImageValue(value: string) {
 
 function isNumericFabricCell(header: string, value: string) {
   const normalizedHeader = header.trim().toLowerCase();
-  if (/cost|price|meter|quantity|received|products|^k$|^l$|additional/.test(normalizedHeader)) return true;
+  if (/cost|price|meter|quantity|received|^k$|^l$|additional/.test(normalizedHeader)) return true;
   const trimmed = value.trim();
   return Boolean(trimmed) && /^[-₹$]?\d[\d,]*(?:\.\d+)?$/.test(trimmed);
 }
@@ -3441,6 +3448,7 @@ function FabricCell({
   header,
   fetcher,
   fabricSettings,
+  users,
 }: {
   gid: string;
   rowIndex: number;
@@ -3450,6 +3458,7 @@ function FabricCell({
   header: string;
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
+  users: PortalUser[];
 }) {
   const [draft, setDraft] = useState(value);
   const [imageHover, setImageHover] = useState(false);
@@ -3486,6 +3495,29 @@ function FabricCell({
     formData.set("image", file);
     fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
   };
+
+  if (/^products?$/i.test(normalizedHeader)) {
+    return (
+      <FabricProductsCell
+        value={draft}
+        originalValue={originalValue}
+        onDraftChange={setDraft}
+        onSave={save}
+      />
+    );
+  }
+
+  if (/^notes?$/i.test(normalizedHeader)) {
+    return (
+      <FabricMentionCell
+        value={draft}
+        originalValue={originalValue}
+        users={users}
+        onDraftChange={setDraft}
+        onSave={save}
+      />
+    );
+  }
 
   if (imageColumn) {
     return (
@@ -3600,6 +3632,161 @@ function FabricCell({
         </div>
       )}
     </>
+  );
+}
+
+function productListItems(value: string) {
+  return value
+    .split(/\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function FabricProductsCell({
+  value,
+  originalValue,
+  onDraftChange,
+  onSave,
+}: {
+  value: string;
+  originalValue: string;
+  onDraftChange: (value: string) => void;
+  onSave: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+  const items = productListItems(value);
+  const save = () => {
+    const nextValue = productListItems(text).join("\n");
+    setText(nextValue);
+    onDraftChange(nextValue);
+    onSave(nextValue);
+    setOpen(false);
+  };
+
+  return (
+    <div style={s.fabricProductsCell}>
+      <button
+        type="button"
+        style={items.length ? s.fabricProductsButton : s.fabricProductsEmptyButton}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {items.length ? (
+          <>
+            {items.slice(0, 3).map((item) => <span key={item} style={s.fabricProductChip}>{item}</span>)}
+            {items.length > 3 && <span style={s.fabricProductMore}>+{items.length - 3}</span>}
+          </>
+        ) : "Add products"}
+      </button>
+      {open && (
+        <div style={s.fabricProductsPopover}>
+          <label style={s.fabricProductsLabel}>
+            Products made in this fabric
+            <textarea
+              value={text}
+              onChange={(event) => setText(event.currentTarget.value)}
+              rows={7}
+              autoFocus
+              placeholder="One style name per line"
+              style={s.fabricProductsTextarea}
+            />
+          </label>
+          <div style={s.fabricProductsActions}>
+            <button type="button" style={s.fabricMiniButton} onClick={() => setOpen(false)}>Cancel</button>
+            <button type="button" style={s.loginButton} onClick={save}>Save</button>
+          </div>
+        </div>
+      )}
+      {originalValue && originalValue !== value && (
+        <div style={s.fabricCellActions}>
+          <button
+            type="button"
+            style={s.fabricMiniButton}
+            onClick={() => {
+              setText(originalValue);
+              onDraftChange(originalValue);
+              onSave(originalValue);
+            }}
+          >
+            Restore
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FabricMentionCell({
+  value,
+  originalValue,
+  users,
+  onDraftChange,
+  onSave,
+}: {
+  value: string;
+  originalValue: string;
+  users: PortalUser[];
+  onDraftChange: (value: string) => void;
+  onSave: (value: string) => void;
+}) {
+  const [focused, setFocused] = useState(false);
+  const tagQuery = currentTagQuery(value);
+  const suggestions = tagQuery == null
+    ? []
+    : users
+        .filter((user) => user.active)
+        .filter((user) => user.name.toLowerCase().includes(tagQuery))
+        .slice(0, 5);
+
+  return (
+    <div style={s.fabricNoteCell}>
+      <div style={s.noteTagWrap}>
+        <textarea
+          value={value}
+          onChange={(event) => onDraftChange(event.currentTarget.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={(event) => {
+            window.setTimeout(() => setFocused(false), 120);
+            onSave(event.currentTarget.value);
+          }}
+          rows={3}
+          style={s.fabricCellTextarea}
+          placeholder="Add note... use @name"
+        />
+        {focused && suggestions.length > 0 && (
+          <div style={s.tagSuggestions}>
+            {suggestions.map((user) => (
+              <button
+                key={user.id}
+                type="button"
+                style={s.tagSuggestionButton}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  onDraftChange(insertStaffTag(value, user.name));
+                }}
+              >
+                @{user.name}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {originalValue && originalValue !== value && (
+        <div style={s.fabricCellActions}>
+          <button
+            type="button"
+            style={s.fabricMiniButton}
+            onClick={() => {
+              onDraftChange(originalValue);
+              onSave(originalValue);
+            }}
+          >
+            Restore
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -7118,6 +7305,102 @@ const s: Record<string, React.CSSProperties> = {
     gap: 6,
     flexWrap: "wrap",
     padding: "0 10px 8px",
+  },
+  fabricProductsCell: {
+    position: "relative",
+    minWidth: 190,
+    minHeight: 96,
+    padding: 10,
+  },
+  fabricProductsButton: {
+    width: "100%",
+    minHeight: 76,
+    display: "flex",
+    alignContent: "flex-start",
+    alignItems: "flex-start",
+    gap: 6,
+    flexWrap: "wrap",
+    border: "1px solid transparent",
+    borderRadius: 6,
+    padding: 0,
+    background: "transparent",
+    color: "var(--portal-table-text-color, #1f2937)",
+    font: "inherit",
+    fontWeight: 800,
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  fabricProductsEmptyButton: {
+    width: "100%",
+    minHeight: 76,
+    border: "1px dashed #cbd5e1",
+    borderRadius: 6,
+    background: "#f8fafc",
+    color: "#64748b",
+    font: "inherit",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  fabricProductChip: {
+    display: "inline-flex",
+    maxWidth: "100%",
+    borderRadius: 999,
+    padding: "4px 8px",
+    background: "#eef2ff",
+    color: "#3730a3",
+    fontSize: 11,
+    fontWeight: 900,
+    lineHeight: 1.2,
+  },
+  fabricProductMore: {
+    display: "inline-flex",
+    borderRadius: 999,
+    padding: "4px 8px",
+    background: "#e2e8f0",
+    color: "#334155",
+    fontSize: 11,
+    fontWeight: 900,
+  },
+  fabricProductsPopover: {
+    position: "absolute",
+    left: 10,
+    top: 74,
+    zIndex: 220,
+    width: 310,
+    display: "grid",
+    gap: 10,
+    padding: 12,
+    background: "#fff",
+    border: "1px solid #cbd5e1",
+    borderRadius: 8,
+    boxShadow: "0 18px 38px rgba(15,23,42,0.22)",
+  },
+  fabricProductsLabel: {
+    display: "grid",
+    gap: 6,
+    color: "#334155",
+    fontSize: 12,
+    fontWeight: 900,
+  },
+  fabricProductsTextarea: {
+    width: "100%",
+    border: "1px solid #cbd5e1",
+    borderRadius: 6,
+    padding: "8px 9px",
+    color: "#1f2937",
+    font: "inherit",
+    fontSize: 12,
+    fontWeight: 700,
+    resize: "vertical",
+    outline: "none",
+  },
+  fabricProductsActions: {
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: 8,
+  },
+  fabricNoteCell: {
+    minWidth: 180,
   },
   fabricMiniButton: {
     border: "1px solid #cbd5e1",
