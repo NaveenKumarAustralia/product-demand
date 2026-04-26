@@ -3032,7 +3032,7 @@ export default function PortalDashboard() {
             productSearch={productSearch}
             packingSearchLineId={packingSearchLineId}
             productResults={productResults}
-            searchTitle={searchTitle}
+            searchTitle={searchTitleInput}
             updateParams={updateParams}
           />
         ) : page === "fabric" ? (
@@ -3045,7 +3045,7 @@ export default function PortalDashboard() {
             customColumns={customColumns}
             rowHeights={rowHeights}
             inrToAudRate={inrToAudRate}
-            nameSearch={searchTitle}
+            nameSearch={searchTitleInput}
             onSelect={(gid) => updateParams({ fabricTab: gid })}
           />
         ) : page !== "restock" ? (
@@ -5273,6 +5273,7 @@ function PackingListsPanel({
             productSearch={productSearch}
             packingSearchLineId={packingSearchLineId}
             productResults={productResults}
+            headerSearch={searchTitle}
             updateParams={updateParams}
           />
         </section>
@@ -5441,6 +5442,7 @@ function PackingListDetail({
   productSearch,
   packingSearchLineId,
   productResults,
+  headerSearch = "",
   updateParams,
 }: {
   packingList: PackingListWithLines;
@@ -5452,6 +5454,7 @@ function PackingListDetail({
   productSearch: string;
   packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
+  headerSearch?: string;
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
@@ -5466,7 +5469,7 @@ function PackingListDetail({
   ];
   const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
   const packingTableWidth = packingColumns.reduce((sum, column) => sum + packingWidthFor(column.id), 48);
-  const normalizedPackingListSearch = packingListSearch.trim().toLowerCase();
+  const normalizedPackingListSearch = (packingListSearch || headerSearch).trim().toLowerCase();
   const visiblePackingLines = normalizedPackingListSearch
     ? packingList.lines.filter((line) => packingLineMatchesSearch(line, normalizedPackingListSearch))
     : packingList.lines;
