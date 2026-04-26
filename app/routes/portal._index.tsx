@@ -1078,7 +1078,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     category.styles.push({
       id: `style_${Date.now()}`,
       name,
+      hidden: false,
     });
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
+  if (intent === "hide_product_style") {
+    const categoryId = String(form.get("categoryId") ?? "");
+    const styleId = String(form.get("styleId") ?? "");
+    if (!categoryId || !styleId) return null;
+    const productInfo = await loadProductInfoForAction();
+    const category = productInfo.categories.find((item) => item.id === categoryId);
+    const style = category?.styles.find((item) => item.id === styleId);
+    if (!style) return null;
+    style.hidden = true;
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
+  if (intent === "unhide_product_style") {
+    const categoryId = String(form.get("categoryId") ?? "");
+    const styleId = String(form.get("styleId") ?? "");
+    if (!categoryId || !styleId) return null;
+    const productInfo = await loadProductInfoForAction();
+    const category = productInfo.categories.find((item) => item.id === categoryId);
+    const style = category?.styles.find((item) => item.id === styleId);
+    if (!style) return null;
+    style.hidden = false;
     await saveProductInfo(productInfo);
     return null;
   }
@@ -1635,6 +1662,7 @@ type FabricCustomSheet = {
 type ProductInfoStyle = {
   id: string;
   name: string;
+  hidden?: boolean;
 };
 type ProductInfoCategory = {
   id: string;
@@ -1828,7 +1856,7 @@ function normalizeProductInfo(value: unknown): ProductInfo {
           const style = styleItem as Record<string, unknown>;
           const styleId = String(style.id ?? "").trim();
           const styleName = String(style.name ?? "").trim();
-          return styleId && styleName ? { id: styleId, name: styleName } : null;
+          return styleId && styleName ? { id: styleId, name: styleName, hidden: style.hidden === true } : null;
         }).filter(Boolean) as ProductInfoStyle[]
       : [];
     return id && name ? { id, name, styles } : null;
@@ -3831,29 +3859,20 @@ function ProductInformationPanel({
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
+  const [showHidden, setShowHidden] = useState(false);
+  const [styleChoice, setStyleChoice] = useState<ProductInfoStyle | null>(null);
   const selectedCategory = productInfo.categories.find((category) => category.id === selectedCategoryId)
     ?? productInfo.categories[0]
     ?? null;
   const normalizedSearch = search.trim().toLowerCase();
   const visibleStyles = selectedCategory
-    ? selectedCategory.styles.filter((style) => !normalizedSearch || style.name.toLowerCase().includes(normalizedSearch))
+    ? selectedCategory.styles.filter((style) => (showHidden || !style.hidden) && (!normalizedSearch || style.name.toLowerCase().includes(normalizedSearch)))
     : [];
+  const hiddenStyleCount = selectedCategory?.styles.filter((style) => style.hidden).length ?? 0;
   const isSubmitting = fetcher.state !== "idle";
 
   const submitProductInfo = (fields: Record<string, string>) => {
     fetcher.submit(fields, { method: "post" });
-  };
-
-  const addCategory = () => {
-    const name = window.prompt("Category name");
-    if (!name?.trim()) return;
-    submitProductInfo({ intent: "add_product_category", name: name.trim() });
-  };
-
-  const deleteCategory = (category: ProductInfoCategory) => {
-    if (!window.confirm(`Remove "${category.name}" and its style tiles?`)) return;
-    submitProductInfo({ intent: "delete_product_category", categoryId: category.id });
-    if (selectedCategory?.id === category.id) updateParams({ category: "" });
   };
 
   const addStyle = () => {
@@ -3864,8 +3883,18 @@ function ProductInformationPanel({
   };
 
   const deleteStyle = (style: ProductInfoStyle) => {
-    if (!selectedCategory || !window.confirm(`Remove "${style.name}"?`)) return;
+    if (!selectedCategory) return;
     submitProductInfo({ intent: "delete_product_style", categoryId: selectedCategory.id, styleId: style.id });
+  };
+
+  const hideStyle = (style: ProductInfoStyle) => {
+    if (!selectedCategory) return;
+    submitProductInfo({ intent: "hide_product_style", categoryId: selectedCategory.id, styleId: style.id });
+  };
+
+  const unhideStyle = (style: ProductInfoStyle) => {
+    if (!selectedCategory) return;
+    submitProductInfo({ intent: "unhide_product_style", categoryId: selectedCategory.id, styleId: style.id });
   };
 
   return (
@@ -3892,14 +3921,6 @@ function ProductInformationPanel({
           </div>
         </div>
         <div style={s.productInfoActions}>
-          <button type="button" style={s.secondaryButton} onClick={addCategory} disabled={isSubmitting}>
-            Add Category
-          </button>
-          {selectedCategory && (
-            <button type="button" style={s.removeUserButton} onClick={() => deleteCategory(selectedCategory)} disabled={isSubmitting}>
-              Remove Category
-            </button>
-          )}
           <button type="button" style={s.primaryActionButton} onClick={addStyle} disabled={isSubmitting || !selectedCategory}>
             Add Style
           </button>
@@ -3911,12 +3932,12 @@ function ProductInformationPanel({
           <div key={style.id} style={s.productStyleRow}>
             <div style={s.productStyleRowMain}>
               <span style={s.productStyleTitle}>{style.name}</span>
-              <span style={s.productStyleMeta}>Costing details next</span>
+              <span style={s.productStyleMeta}>{style.hidden ? "Hidden" : "Costing details next"}</span>
             </div>
             <button
               type="button"
               style={s.removeUserButton}
-              onClick={() => deleteStyle(style)}
+              onClick={() => setStyleChoice(style)}
               title={`Remove ${style.name}`}
             >
               Remove
@@ -3931,7 +3952,44 @@ function ProductInformationPanel({
         {!selectedCategory && (
           <div style={s.productInfoEmpty}>Add a category to start building product styles.</div>
         )}
+        <div style={s.productInfoFooterActions}>
+          <button
+            type="button"
+            style={s.secondaryButton}
+            onClick={() => setShowHidden((current) => !current)}
+            disabled={!hiddenStyleCount}
+          >
+            {showHidden ? "Hide hidden styles" : `Show hidden styles${hiddenStyleCount ? ` (${hiddenStyleCount})` : ""}`}
+          </button>
+        </div>
       </div>
+      {styleChoice && selectedCategory && (
+        <div style={s.productInfoModalBackdrop}>
+          <div style={s.productInfoModal}>
+            <h3 style={s.productInfoModalTitle}>Remove this style?</h3>
+            <p style={s.productInfoModalText}>
+              Are you sure you want to remove "{styleChoice.name}"? You can hide it instead if you may use it again later.
+            </p>
+            <div style={s.productInfoModalActions}>
+              {styleChoice.hidden ? (
+                <button type="button" style={s.secondaryButton} onClick={() => { unhideStyle(styleChoice); setStyleChoice(null); }}>
+                  Unhide
+                </button>
+              ) : (
+                <button type="button" style={s.secondaryButton} onClick={() => { hideStyle(styleChoice); setStyleChoice(null); }}>
+                  Hide
+                </button>
+              )}
+              <button type="button" style={s.removeUserButton} onClick={() => { deleteStyle(styleChoice); setStyleChoice(null); }}>
+                Remove
+              </button>
+              <button type="button" style={s.secondaryButton} onClick={() => setStyleChoice(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -8503,6 +8561,49 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #e5e7eb",
     borderRadius: 8,
     background: "#f8fafc",
+  },
+  productInfoFooterActions: {
+    display: "flex",
+    justifyContent: "flex-end",
+    paddingTop: 2,
+  },
+  productInfoModalBackdrop: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 99998,
+    display: "grid",
+    placeItems: "center",
+    padding: 20,
+    background: "rgba(15,23,42,0.36)",
+  },
+  productInfoModal: {
+    width: "min(440px, 100%)",
+    display: "grid",
+    gap: 12,
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    padding: 18,
+    background: "#fff",
+    boxShadow: "0 24px 60px rgba(15,23,42,0.28)",
+  },
+  productInfoModalTitle: {
+    margin: 0,
+    color: "#111827",
+    fontSize: 18,
+    fontWeight: 900,
+  },
+  productInfoModalText: {
+    margin: 0,
+    color: "#4b5563",
+    fontSize: 13,
+    fontWeight: 700,
+    lineHeight: 1.45,
+  },
+  productInfoModalActions: {
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: 8,
+    flexWrap: "wrap",
   },
   productStyleRowMain: {
     minWidth: 0,
