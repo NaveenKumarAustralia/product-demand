@@ -3101,7 +3101,7 @@ export default function PortalDashboard() {
           </div>
           <div style={s.headerControls}>
             <div style={s.utilityBar}>
-              {(page === "restock" || page === "packing" || page === "fabric") && (
+              {(page === "restock" || page === "packing" || page === "fabric" || page === "productinfo") && (
                 <label style={s.filterLabel}>
                   Search
                   <input
@@ -3114,7 +3114,7 @@ export default function PortalDashboard() {
                       if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
                     }}
                     style={s.searchInput}
-                    placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : "Product title"}
+                    placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : page === "productinfo" ? "Style name" : "Product title"}
                   />
                 </label>
               )}
@@ -3216,6 +3216,7 @@ export default function PortalDashboard() {
           <ProductInformationPanel
             productInfo={productInfo}
             selectedCategoryId={searchParams.get("category") ?? ""}
+            search={searchTitleInput}
             updateParams={updateParams}
           />
         ) : page !== "restock" ? (
@@ -3821,14 +3822,22 @@ function CellHistoryMenu({
 function ProductInformationPanel({
   productInfo,
   selectedCategoryId,
+  search,
   updateParams,
 }: {
   productInfo: ProductInfo;
   selectedCategoryId: string;
+  search: string;
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
-  const selectedCategory = productInfo.categories.find((category) => category.id === selectedCategoryId) ?? null;
+  const selectedCategory = productInfo.categories.find((category) => category.id === selectedCategoryId)
+    ?? productInfo.categories[0]
+    ?? null;
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleStyles = selectedCategory
+    ? selectedCategory.styles.filter((style) => !normalizedSearch || style.name.toLowerCase().includes(normalizedSearch))
+    : [];
   const isSubmitting = fetcher.state !== "idle";
 
   const submitProductInfo = (fields: Record<string, string>) => {
@@ -3844,7 +3853,7 @@ function ProductInformationPanel({
   const deleteCategory = (category: ProductInfoCategory) => {
     if (!window.confirm(`Remove "${category.name}" and its style tiles?`)) return;
     submitProductInfo({ intent: "delete_product_category", categoryId: category.id });
-    if (selectedCategoryId === category.id) updateParams({ category: "" });
+    if (selectedCategory?.id === category.id) updateParams({ category: "" });
   };
 
   const addStyle = () => {
@@ -3859,80 +3868,69 @@ function ProductInformationPanel({
     submitProductInfo({ intent: "delete_product_style", categoryId: selectedCategory.id, styleId: style.id });
   };
 
-  if (selectedCategory) {
-    return (
-      <div style={s.productInfoPage}>
-        <div style={s.productInfoToolbar}>
-          <div style={s.productInfoToolbarLeft}>
-            <button type="button" style={s.secondaryButton} onClick={() => updateParams({ category: "" })}>
-              Back to categories
-            </button>
-            <div>
-              <h2 style={s.productInfoHeading}>{selectedCategory.name}</h2>
-              <div style={s.productInfoMeta}>{selectedCategory.styles.length} styles</div>
-            </div>
-          </div>
-          <button type="button" style={s.primaryActionButton} onClick={addStyle} disabled={isSubmitting}>
-            Add Style
-          </button>
-        </div>
-
-        <div style={s.productInfoGrid}>
-          {selectedCategory.styles.map((style) => (
-            <div key={style.id} style={s.productStyleTile}>
-              <div style={s.productStyleTitle}>{style.name}</div>
-              <div style={s.productStyleMeta}>Costing details next</div>
-              <button
-                type="button"
-                style={s.productTileRemove}
-                onClick={() => deleteStyle(style)}
-                title={`Remove ${style.name}`}
-              >
-                Remove
-              </button>
-            </div>
-          ))}
-          {!selectedCategory.styles.length && (
-            <div style={s.productInfoEmpty}>No styles in this category yet.</div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div style={s.productInfoPage}>
       <div style={s.productInfoToolbar}>
-        <div>
-          <h2 style={s.productInfoHeading}>Product Categories</h2>
-          <div style={s.productInfoMeta}>{productInfo.categories.length} categories</div>
+        <div style={s.productInfoToolbarLeft}>
+          <label style={s.productInfoSelectLabel}>
+            Category
+            <select
+              value={selectedCategory?.id ?? ""}
+              onChange={(event) => updateParams({ category: event.currentTarget.value })}
+              style={s.productInfoSelect}
+            >
+              {productInfo.categories.map((category) => (
+                <option key={category.id} value={category.id}>{category.name}</option>
+              ))}
+            </select>
+          </label>
+          <div>
+            <h2 style={s.productInfoHeading}>{selectedCategory?.name ?? "Product Styles"}</h2>
+            <div style={s.productInfoMeta}>
+              {visibleStyles.length} of {selectedCategory?.styles.length ?? 0} styles
+            </div>
+          </div>
         </div>
-        <button type="button" style={s.primaryActionButton} onClick={addCategory} disabled={isSubmitting}>
-          Add Category
-        </button>
+        <div style={s.productInfoActions}>
+          <button type="button" style={s.secondaryButton} onClick={addCategory} disabled={isSubmitting}>
+            Add Category
+          </button>
+          {selectedCategory && (
+            <button type="button" style={s.removeUserButton} onClick={() => deleteCategory(selectedCategory)} disabled={isSubmitting}>
+              Remove Category
+            </button>
+          )}
+          <button type="button" style={s.primaryActionButton} onClick={addStyle} disabled={isSubmitting || !selectedCategory}>
+            Add Style
+          </button>
+        </div>
       </div>
 
-      <div style={s.productInfoGrid}>
-        {productInfo.categories.map((category) => (
-          <div key={category.id} style={s.productCategoryTile}>
+      <div style={s.productInfoList}>
+        {visibleStyles.map((style) => (
+          <div key={style.id} style={s.productStyleRow}>
+            <div style={s.productStyleRowMain}>
+              <span style={s.productStyleTitle}>{style.name}</span>
+              <span style={s.productStyleMeta}>Costing details next</span>
+            </div>
             <button
               type="button"
-              style={s.productTileMainButton}
-              onClick={() => updateParams({ category: category.id })}
-            >
-              <span style={s.productCategoryTitle}>{category.name}</span>
-              <span style={s.productCategoryMeta}>{category.styles.length} styles</span>
-            </button>
-            <button
-              type="button"
-              style={s.productTileRemove}
-              onClick={() => deleteCategory(category)}
-              title={`Remove ${category.name}`}
+              style={s.removeUserButton}
+              onClick={() => deleteStyle(style)}
+              title={`Remove ${style.name}`}
             >
               Remove
             </button>
           </div>
         ))}
+        {selectedCategory && !visibleStyles.length && (
+          <div style={s.productInfoEmpty}>
+            {normalizedSearch ? "No styles match this search." : "No styles in this category yet."}
+          </div>
+        )}
+        {!selectedCategory && (
+          <div style={s.productInfoEmpty}>Add a category to start building product styles.</div>
+        )}
       </div>
     </div>
   );
@@ -8445,6 +8443,30 @@ const s: Record<string, React.CSSProperties> = {
     gap: 12,
     flexWrap: "wrap",
   },
+  productInfoActions: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  productInfoSelectLabel: {
+    display: "grid",
+    gap: 5,
+    color: "#4b5563",
+    fontSize: 12,
+    fontWeight: 900,
+  },
+  productInfoSelect: {
+    minWidth: 240,
+    border: "1px solid #cbd5e1",
+    borderRadius: 8,
+    padding: "9px 10px",
+    background: "#fff",
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: 800,
+  },
   productInfoHeading: {
     margin: 0,
     color: "var(--portal-heading-text-color, #111827)",
@@ -8462,6 +8484,30 @@ const s: Record<string, React.CSSProperties> = {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
     gap: 12,
+  },
+  productInfoList: {
+    display: "grid",
+    gap: 8,
+    background: "#fff",
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+    padding: 10,
+  },
+  productStyleRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    minHeight: 58,
+    padding: "10px 12px",
+    border: "1px solid #e5e7eb",
+    borderRadius: 8,
+    background: "#f8fafc",
+  },
+  productStyleRowMain: {
+    minWidth: 0,
+    display: "grid",
+    gap: 3,
   },
   productCategoryTile: {
     position: "relative",
