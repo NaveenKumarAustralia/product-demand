@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useSearchParams } from "react-router";
+import { isRouteErrorResponse, useFetcher, useLoaderData, useRouteError, useSearchParams } from "react-router";
 import prisma from "../db.server";
 import { fabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
 import { syncOrderNoteMessages } from "../portal-messages.server";
@@ -23,6 +23,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
+  try {
   const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
@@ -245,9 +246,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     selectedFabricTab,
     inrToAudRate,
   };
+  } catch (error) {
+    console.error("Portal loader error:", error);
+    throw new Response("Failed to load portal data. Please refresh the page.", { status: 503 });
+  }
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
+  try {
   const form = await request.formData();
   const intent = String(form.get("intent"));
   const orderId = Number(form.get("orderId"));
@@ -1324,6 +1330,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
   return null;
+  } catch (error) {
+    console.error("Portal action error:", error);
+    return null;
+  }
 };
 
 // ─── Activity log helper ──────────────────────────────────────────────────────
@@ -9105,3 +9115,26 @@ const s: Record<string, React.CSSProperties> = {
     whiteSpace: "nowrap" as const,
   },
 };
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  const message = isRouteErrorResponse(error)
+    ? error.data
+    : error instanceof Error
+    ? error.message
+    : "An unexpected error occurred.";
+  return (
+    <div style={{ fontFamily: "Inter, sans-serif", padding: "3rem 2rem", maxWidth: 480, margin: "0 auto", color: "#374151" }}>
+      <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Something went wrong</h2>
+      <p style={{ color: "#6b7280", marginBottom: 24, fontSize: 14 }}>{String(message)}</p>
+      <button
+        type="button"
+        onClick={() => window.location.reload()}
+        style={{ background: "#2563eb", color: "#fff", border: "none", borderRadius: 6, padding: "8px 18px", cursor: "pointer", fontSize: 14, marginRight: 12 }}
+      >
+        Reload page
+      </button>
+      <a href="/portal" style={{ color: "#2563eb", fontSize: 14 }}>← Back to portal</a>
+    </div>
+  );
+}
