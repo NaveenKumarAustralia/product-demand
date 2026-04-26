@@ -7145,16 +7145,9 @@ function Th({
   columnId?: string;
   onResizeStart: (event: React.MouseEvent<HTMLSpanElement>) => void;
 }) {
-  const fetcher = useFetcher();
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const [table, gid] = headerKey?.split(":") ?? [];
   return (
     <th
       style={{ ...s.th, textAlign: center ? "center" : "left" }}
-      onContextMenu={(event) => {
-        event.preventDefault();
-        setMenu({ x: event.clientX, y: event.clientY });
-      }}
     >
       {headerKey && typeof children === "string"
         ? <EditableHeaderLabel headerKey={headerKey} value={children} />
@@ -7166,44 +7159,6 @@ function Th({
         onMouseDown={onResizeStart}
         style={s.resizeHandle}
       />
-      {menu && typeof document !== "undefined" && createPortal(
-        <div style={{ ...s.contextMenu, left: menu.x, top: menu.y }} onMouseDown={(event) => event.stopPropagation()}>
-          <button
-            type="button"
-            style={s.contextMenuButton}
-            onClick={() => {
-              setMenu(null);
-              const label = window.prompt("New column name?");
-              if (!label) return;
-              const nextColumnId = `custom_${Date.now()}`;
-              submitPortalCell(
-                fetcher,
-                { intent: "add_table_column", table: table || "restock", gid: gid || "", columnId: nextColumnId, label },
-                { label: "Undo add column", fields: { intent: "remove_table_column", table: table || "restock", gid: gid || "", columnId: nextColumnId } },
-              );
-            }}
-          >
-            Add column
-          </button>
-          <button
-            type="button"
-            disabled={!columnId?.startsWith("custom_")}
-            style={{ ...s.contextMenuButton, ...(!columnId?.startsWith("custom_") ? s.contextMenuDisabled : {}), ...(columnId?.startsWith("custom_") ? s.contextMenuDanger : {}) }}
-            onClick={() => {
-              if (!columnId?.startsWith("custom_")) return;
-              setMenu(null);
-              submitPortalCell(
-                fetcher,
-                { intent: "remove_table_column", table: table || "restock", gid: gid || "", columnId },
-                { label: "Undo remove column", fields: { intent: "add_table_column", table: table || "restock", gid: gid || "", columnId, label: typeof children === "string" ? children : "New Column" } },
-              );
-            }}
-          >
-            Remove column
-          </button>
-        </div>,
-        document.body,
-      )}
     </th>
   );
 }
