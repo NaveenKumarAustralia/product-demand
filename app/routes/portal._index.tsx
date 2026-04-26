@@ -2937,24 +2937,22 @@ export default function PortalDashboard() {
           </div>
           <div style={s.headerControls}>
             <div style={s.utilityBar}>
-              {page === "restock" && (
-                <>
-                  <label style={s.filterLabel}>
-                    Search
-                    <input
-                      type="search"
-                      value={searchTitleInput}
-                      onChange={(event) => setSearchTitleInput(event.currentTarget.value)}
-                      onFocus={() => setIsSearchFocused(true)}
-                      onBlur={() => {
-                        setIsSearchFocused(false);
-                        if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
-                      }}
-                      style={s.searchInput}
-                      placeholder="Product title"
-                    />
-                  </label>
-                </>
+              {(page === "restock" || page === "packing" || page === "fabric") && (
+                <label style={s.filterLabel}>
+                  Search
+                  <input
+                    type="search"
+                    value={searchTitleInput}
+                    onChange={(event) => setSearchTitleInput(event.currentTarget.value)}
+                    onFocus={() => setIsSearchFocused(true)}
+                    onBlur={() => {
+                      setIsSearchFocused(false);
+                      if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
+                    }}
+                    style={s.searchInput}
+                    placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : "Product title"}
+                  />
+                </label>
               )}
               <MessagesMenu messages={messages} />
               <div style={s.activeUsers} title="Currently active">
@@ -3034,6 +3032,7 @@ export default function PortalDashboard() {
             productSearch={productSearch}
             packingSearchLineId={packingSearchLineId}
             productResults={productResults}
+            searchTitle={searchTitle}
             updateParams={updateParams}
           />
         ) : page === "fabric" ? (
@@ -3046,6 +3045,7 @@ export default function PortalDashboard() {
             customColumns={customColumns}
             rowHeights={rowHeights}
             inrToAudRate={inrToAudRate}
+            nameSearch={searchTitle}
             onSelect={(gid) => updateParams({ fabricTab: gid })}
           />
         ) : page !== "restock" ? (
@@ -3657,6 +3657,7 @@ function FabricSheetsPanel({
   customColumns,
   rowHeights,
   inrToAudRate,
+  nameSearch = "",
   onSelect,
 }: {
   sheets: FabricSheetData[];
@@ -3667,13 +3668,13 @@ function FabricSheetsPanel({
   customColumns: TableCustomColumns;
   rowHeights: Record<string, number>;
   inrToAudRate: number | null;
+  nameSearch?: string;
   onSelect: (gid: string) => void;
 }) {
   const fetcher = useFetcher();
   const selectedSheet = sheets.find((sheet) => sheet.gid === selectedGid) ?? null;
   const [orderedSheets, setOrderedSheets] = useState(sheets);
   const [dragGid, setDragGid] = useState<string | null>(null);
-  const [fabricNameSearch, setFabricNameSearch] = useState("");
   useEffect(() => setOrderedSheets(sheets), [sheets]);
   const saveTileOrder = (nextSheets: FabricSheetData[]) => {
     submitPortalCell(
@@ -3699,16 +3700,6 @@ function FabricSheetsPanel({
             <button type="button" onClick={() => onSelect("")} style={s.secondaryButton}>
               Back to fabric types
             </button>
-            <label style={s.fabricSearchLabel}>
-              Search fabric name
-              <input
-                type="search"
-                value={fabricNameSearch}
-                onChange={(event) => setFabricNameSearch(event.currentTarget.value)}
-                placeholder="Search by name"
-                style={s.fabricSearchInput}
-              />
-            </label>
           </div>
           <div style={s.fabricToolbarMeta}>
             <strong>{selectedSheet.name}</strong>
@@ -3726,7 +3717,7 @@ function FabricSheetsPanel({
           tableHeaderLabels={tableHeaderLabels}
           customColumns={customColumns}
           rowHeights={rowHeights}
-          nameSearch={fabricNameSearch}
+          nameSearch={nameSearch}
           onDeleteList={() => onSelect("")}
         />
       </div>
@@ -5248,6 +5239,7 @@ function PackingListsPanel({
   productSearch,
   packingSearchLineId,
   productResults,
+  searchTitle,
   updateParams,
 }: {
   packingLists: PackingListWithLines[];
@@ -5260,6 +5252,7 @@ function PackingListsPanel({
   productSearch: string;
   packingSearchLineId: number | null;
   productResults: ShopifySearchProduct[];
+  searchTitle: string;
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
@@ -5267,7 +5260,7 @@ function PackingListsPanel({
   return (
     <div style={s.packingLayout}>
       {!selectedPackingList ? (
-        <PackingListsOverview packingLists={packingLists} fetcher={fetcher} />
+        <PackingListsOverview packingLists={packingLists} fetcher={fetcher} searchTitle={searchTitle} />
       ) : (
         <section style={s.packingDetail}>
           <PackingListDetail
@@ -5291,9 +5284,11 @@ function PackingListsPanel({
 function PackingListsOverview({
   packingLists,
   fetcher,
+  searchTitle,
 }: {
   packingLists: PackingListWithLines[];
   fetcher: ReturnType<typeof useFetcher>;
+  searchTitle: string;
 }) {
   const [searchParams] = useSearchParams();
   const [hoveredListId, setHoveredListId] = useState<number | null>(null);
@@ -5301,7 +5296,15 @@ function PackingListsOverview({
   const showHidden = searchParams.get("showHidden") === "true";
   const visibleLists = packingLists.filter((list) => !list.hiddenAt);
   const hiddenLists = packingLists.filter((list) => list.hiddenAt);
-  const rows = showHidden ? hiddenLists : visibleLists;
+  const baseRows = showHidden ? hiddenLists : visibleLists;
+  const rows = searchTitle
+    ? baseRows.filter((list) => {
+        const q = searchTitle.toLowerCase();
+        return (list.invoiceNumber ?? "").toLowerCase().includes(q)
+          || (list.title ?? "").toLowerCase().includes(q)
+          || `packing list #${list.id}`.includes(q);
+      })
+    : baseRows;
   const isImporting = fetcher.state !== "idle" && String(fetcher.formData?.get("intent") ?? "") === "import_supplier_packing_csv";
 
   return (
