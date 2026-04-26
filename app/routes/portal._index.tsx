@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { isRouteErrorResponse, useFetcher, useLoaderData, useRouteError, useSearchParams } from "react-router";
 import prisma from "../db.server";
-import { fabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
+import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
 import { syncOrderNoteMessages } from "../portal-messages.server";
 import { unauthenticated } from "../shopify.server";
 
@@ -24,7 +24,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
   try {
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, fabricManualSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -56,6 +56,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }),
     prisma.portalSetting.findUnique({
       where: { key: FABRIC_CUSTOM_SHEETS_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
+      where: { key: FABRIC_MANUAL_SHEETS_KEY },
       select: { value: true },
     }),
     prisma.portalSetting.findUnique({
@@ -170,15 +174,26 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       })
     : null;
   const inrToAudRate = page === "fabric" ? await getInrToAudRate() : null;
+  const manualFabricSheets = page === "fabric"
+    ? await getManualFabricSheets({
+        savedValue: fabricManualSheetsSetting?.value,
+        customSheetsValue: fabricCustomSheetsSetting?.value,
+        customRowsValue: fabricCustomRowsSetting?.value,
+        deletedRowsValue: fabricDeletedRowsSetting?.value,
+        overridesValue: fabricCellOverridesSetting?.value,
+        deletedSheetsValue: fabricDeletedSheetsSetting?.value,
+      })
+    : [];
   const fabricSheets = page === "fabric"
     ? getFabricSheets(
-        fabricCellOverridesSetting?.value,
-        fabricCustomRowsSetting?.value,
-        fabricDeletedRowsSetting?.value,
+        undefined,
+        undefined,
+        undefined,
         fabricSettings.tileOrder,
-        normalizeFabricCustomSheets(fabricCustomSheetsSetting?.value),
+        [],
         customColumns.fabric,
-        normalizeFabricDeletedSheets(fabricDeletedSheetsSetting?.value),
+        {},
+        manualFabricSheets,
       )
     : [];
 
@@ -927,45 +942,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const name = String(form.get("name") ?? "").trim();
     const gid = String(form.get("gid") ?? "").trim();
     if (!name) return null;
-    const setting = await prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } });
-    const sheets = normalizeFabricCustomSheets(setting?.value);
+    const sheets = await loadManualFabricSheetsForAction();
     sheets.push({
       gid: gid.startsWith("custom_") ? gid : `custom_${Date.now()}`,
       name,
+      kind: "stock",
       headers: DEFAULT_FABRIC_HEADERS,
       rows: Array.from({ length: 3 }, () => Array.from({ length: DEFAULT_FABRIC_HEADERS.length }, () => "")),
+      rowCount: 3,
+      totalQuantity: 3,
     });
-    await prisma.portalSetting.upsert({
-      where: { key: FABRIC_CUSTOM_SHEETS_KEY },
-      create: { key: FABRIC_CUSTOM_SHEETS_KEY, value: sheets },
-      update: { value: sheets },
-    });
+    await saveManualFabricSheets(sheets);
     return null;
   }
 
   if (intent === "delete_fabric_sheet") {
     const gid = String(form.get("gid") ?? "");
     if (!gid) return null;
-    const [customSheetsSetting, deletedSheetsSetting] = await Promise.all([
-      prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } }),
-      prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_SHEETS_KEY }, select: { value: true } }),
-    ]);
-    const customSheets = normalizeFabricCustomSheets(customSheetsSetting?.value);
-    const nextCustomSheets = customSheets.filter((sheet) => sheet.gid !== gid);
-    const deletedSheets = normalizeFabricDeletedSheets(deletedSheetsSetting?.value);
-    if (nextCustomSheets.length === customSheets.length) deletedSheets[gid] = true;
-    await Promise.all([
-      prisma.portalSetting.upsert({
-        where: { key: FABRIC_CUSTOM_SHEETS_KEY },
-        create: { key: FABRIC_CUSTOM_SHEETS_KEY, value: nextCustomSheets },
-        update: { value: nextCustomSheets },
-      }),
-      prisma.portalSetting.upsert({
-        where: { key: FABRIC_DELETED_SHEETS_KEY },
-        create: { key: FABRIC_DELETED_SHEETS_KEY, value: deletedSheets },
-        update: { value: deletedSheets },
-      }),
-    ]);
+    await saveManualFabricSheets((await loadManualFabricSheetsForAction()).filter((sheet) => sheet.gid !== gid));
     return null;
   }
 
@@ -973,31 +967,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const gid = String(form.get("gid") ?? "");
     const sheetJson = String(form.get("sheet") ?? "");
     if (!gid) return null;
-    const [customSheetsSetting, deletedSheetsSetting] = await Promise.all([
-      prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } }),
-      prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_SHEETS_KEY }, select: { value: true } }),
-    ]);
-    const customSheets = normalizeFabricCustomSheets(customSheetsSetting?.value);
-    const deletedSheets = normalizeFabricDeletedSheets(deletedSheetsSetting?.value);
-    delete deletedSheets[gid];
+    const sheets = await loadManualFabricSheetsForAction();
     try {
       const restoredSheet = normalizeFabricCustomSheets([JSON.parse(sheetJson)])[0];
-      if (restoredSheet && !customSheets.some((sheet) => sheet.gid === restoredSheet.gid)) {
-        customSheets.push(restoredSheet);
+      if (restoredSheet && !sheets.some((sheet) => sheet.gid === restoredSheet.gid)) {
+        sheets.push(toManualFabricSheet(restoredSheet));
       }
-    } catch { /* static sheet restore only */ }
-    await Promise.all([
-      prisma.portalSetting.upsert({
-        where: { key: FABRIC_CUSTOM_SHEETS_KEY },
-        create: { key: FABRIC_CUSTOM_SHEETS_KEY, value: customSheets },
-        update: { value: customSheets },
-      }),
-      prisma.portalSetting.upsert({
-        where: { key: FABRIC_DELETED_SHEETS_KEY },
-        create: { key: FABRIC_DELETED_SHEETS_KEY, value: deletedSheets },
-        update: { value: deletedSheets },
-      }),
-    ]);
+    } catch { /* ignore malformed undo payload */ }
+    await saveManualFabricSheets(sheets);
     return null;
   }
 
@@ -1072,19 +1049,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return null;
     }
 
-    const setting = await prisma.portalSetting.findUnique({
-      where: { key: FABRIC_CELL_OVERRIDES_KEY },
-      select: { value: true },
-    });
-    const overrides = normalizeFabricCellOverrides(setting?.value);
-    const key = fabricCellKey(gid, rowIndex, colIndex);
-    overrides[key] = value;
-
-    await prisma.portalSetting.upsert({
-      where: { key: FABRIC_CELL_OVERRIDES_KEY },
-      create: { key: FABRIC_CELL_OVERRIDES_KEY, value: overrides },
-      update: { value: overrides },
-    });
+    const sheets = await loadManualFabricSheetsForAction();
+    const sheet = sheets.find((item) => item.gid === gid);
+    if (!sheet?.rows[rowIndex]) return null;
+    while (sheet.rows[rowIndex].length <= colIndex) sheet.rows[rowIndex].push("");
+    sheet.rows[rowIndex][colIndex] = value;
+    await saveManualFabricSheets(sheets);
     return null;
   }
 
@@ -1109,18 +1079,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     const buffer = Buffer.from(await imageFile.arrayBuffer());
     const dataUrl = `data:${imageFile.type};base64,${buffer.toString("base64")}`;
-    const setting = await prisma.portalSetting.findUnique({
-      where: { key: FABRIC_CELL_OVERRIDES_KEY },
-      select: { value: true },
-    });
-    const overrides = normalizeFabricCellOverrides(setting?.value);
-    overrides[fabricCellKey(gid, rowIndex, colIndex)] = dataUrl;
-
-    await prisma.portalSetting.upsert({
-      where: { key: FABRIC_CELL_OVERRIDES_KEY },
-      create: { key: FABRIC_CELL_OVERRIDES_KEY, value: overrides },
-      update: { value: overrides },
-    });
+    const sheets = await loadManualFabricSheetsForAction();
+    const sheet = sheets.find((item) => item.gid === gid);
+    if (!sheet?.rows[rowIndex]) return null;
+    while (sheet.rows[rowIndex].length <= colIndex) sheet.rows[rowIndex].push("");
+    sheet.rows[rowIndex][colIndex] = dataUrl;
+    await saveManualFabricSheets(sheets);
     return null;
   }
 
@@ -1128,31 +1092,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
     const targetGid = String(form.get("targetGid") ?? "");
-    const customSheetsSetting = await prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } });
-    const allFabricSheets = [
-      ...fabricStockSheets,
-      ...normalizeFabricCustomSheets(customSheetsSetting?.value).map((sheet) => ({ ...sheet, kind: "stock", rowCount: sheet.rows.length, totalQuantity: null })),
-    ] as FabricStockSheet[];
-    const sourceSheet = allFabricSheets.find((item) => item.gid === gid);
-    const targetSheet = allFabricSheets.find((item) => item.gid === targetGid);
+    const sheets = await loadManualFabricSheetsForAction();
+    const sourceSheet = sheets.find((item) => item.gid === gid);
+    const targetSheet = sheets.find((item) => item.gid === targetGid);
     if (!sourceSheet || !Number.isInteger(rowIndex) || rowIndex < 0) return null;
     if (intent === "move_fabric_row" && (!targetSheet || targetSheet.gid === sourceSheet.gid || isHiddenFabricSheet(targetSheet.name))) return null;
 
-    const [customRowsSetting, deletedRowsSetting, overridesSetting] = await Promise.all([
-      prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_ROWS_KEY }, select: { value: true } }),
-      prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_ROWS_KEY }, select: { value: true } }),
-      prisma.portalSetting.findUnique({ where: { key: FABRIC_CELL_OVERRIDES_KEY }, select: { value: true } }),
-    ]);
-    const customRows = normalizeFabricCustomRows(customRowsSetting?.value);
-    const deletedRows = normalizeFabricDeletedRows(deletedRowsSetting?.value);
-    const overrides = normalizeFabricCellOverrides(overridesSetting?.value);
-
     if ((intent === "move_fabric_row" && targetSheet) || intent === "duplicate_fabric_row") {
-      const originalRows = [...sourceSheet.rows, ...(customRows[sourceSheet.gid] ?? [])];
-      const row = originalRows[rowIndex]?.map((value, colIndex) => overrides[fabricCellKey(sourceSheet.gid, rowIndex, colIndex)] ?? value);
+      const row = sourceSheet.rows[rowIndex]?.map((value) => value);
       if (!row) return null;
       if (intent === "duplicate_fabric_row") {
-        customRows[sourceSheet.gid] = [...(customRows[sourceSheet.gid] ?? []), row];
+        sourceSheet.rows.push(row);
       } else if (targetSheet) {
         const sourceHeaderMap = new Map<string, number>();
         for (const [index, header] of sourceSheet.headers.entries()) {
@@ -1164,54 +1114,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const sourceIndex = sourceHeaderMap.get(normalizeFabricHeader(header)) ?? sourceHeaderMap.get(fabricHeaderRole(header));
           return sourceIndex == null ? "" : row[sourceIndex] ?? "";
         });
-        customRows[targetSheet.gid] = [...(customRows[targetSheet.gid] ?? []), movedRow];
+        targetSheet.rows.push(movedRow);
       }
     }
 
     if (intent !== "duplicate_fabric_row") {
-      if (rowIndex >= sourceSheet.rows.length) {
-        const customIndex = rowIndex - sourceSheet.rows.length;
-        customRows[sourceSheet.gid] = (customRows[sourceSheet.gid] ?? []).filter((_, index) => index !== customIndex);
-      } else {
-        deletedRows[fabricRowKey(sourceSheet.gid, rowIndex)] = true;
-      }
+      sourceSheet.rows.splice(rowIndex, 1);
     }
 
-    await Promise.all([
-      prisma.portalSetting.upsert({
-        where: { key: FABRIC_CUSTOM_ROWS_KEY },
-        create: { key: FABRIC_CUSTOM_ROWS_KEY, value: customRows },
-        update: { value: customRows },
-      }),
-      prisma.portalSetting.upsert({
-        where: { key: FABRIC_DELETED_ROWS_KEY },
-        create: { key: FABRIC_DELETED_ROWS_KEY, value: deletedRows },
-        update: { value: deletedRows },
-      }),
-    ]);
+    await saveManualFabricSheets(sheets);
     return null;
   }
 
   if (intent === "add_fabric_row") {
     const gid = String(form.get("gid") ?? "");
-    const customSheetsSetting = await prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } });
-    const customSheets = normalizeFabricCustomSheets(customSheetsSetting?.value);
-    const sheet = fabricStockSheets.find((item) => item.gid === gid)
-      ?? customSheets.find((item) => item.gid === gid);
+    const sheets = await loadManualFabricSheetsForAction();
+    const sheet = sheets.find((item) => item.gid === gid);
     if (!sheet) return null;
-
-    const setting = await prisma.portalSetting.findUnique({
-      where: { key: FABRIC_CUSTOM_ROWS_KEY },
-      select: { value: true },
-    });
-    const customRows = normalizeFabricCustomRows(setting?.value);
-    customRows[gid] = [...(customRows[gid] ?? []), Array.from({ length: sheet.headers.length }, () => "")];
-
-    await prisma.portalSetting.upsert({
-      where: { key: FABRIC_CUSTOM_ROWS_KEY },
-      create: { key: FABRIC_CUSTOM_ROWS_KEY, value: customRows },
-      update: { value: customRows },
-    });
+    sheet.rows.push(Array.from({ length: sheet.headers.length }, () => ""));
+    await saveManualFabricSheets(sheets);
     return null;
   }
 
@@ -1554,6 +1475,7 @@ const FABRIC_CUSTOM_ROWS_KEY = "production-portal-fabric-custom-rows-v1";
 const FABRIC_DELETED_ROWS_KEY = "production-portal-fabric-deleted-rows-v1";
 const FABRIC_CUSTOM_SHEETS_KEY = "production-portal-fabric-custom-sheets-v1";
 const FABRIC_DELETED_SHEETS_KEY = "production-portal-fabric-deleted-sheets-v1";
+const FABRIC_MANUAL_SHEETS_KEY = "production-portal-fabric-manual-sheets-v1";
 const DEFAULT_FABRIC_HEADERS = ["Supplier", "Fabric Type", "Fabric", "Name", "Cost per Meter", "Meters in Stock", "Cut Pieces", "Received / Date", "Products", "Notes"];
 const HIDDEN_FABRIC_SHEET_NAMES = new Set(["new fabric on order", "fabric on order"]);
 const FABRIC_TOTAL_EXCLUDED_NAMES = new Set([
@@ -1753,7 +1675,7 @@ function fabricHeaderIndex(headers: string[], pattern: RegExp) {
 
 function buildFabricDefaults(pattern: RegExp): RestockOption[] {
   const labels = new Set<string>();
-  for (const sheet of fabricStockSheets) {
+  for (const sheet of initialFabricStockSheets) {
     const index = fabricHeaderIndex(sheet.headers, pattern);
     if (index < 0) continue;
     for (const row of sheet.rows) {
@@ -1873,7 +1795,7 @@ function isBrokenMovedOnOrderRow(sheet: FabricStockSheet, row: string[], rowInde
 
 function recoveredBrokenMoveRows(customRows: Record<string, string[][]>, deletedRows: Record<string, boolean>) {
   const recovered = new Set<string>();
-  const onOrderSheet = fabricStockSheets.find((sheet) => sheet.gid === "759049382");
+  const onOrderSheet = initialFabricStockSheets.find((sheet) => sheet.gid === "759049382");
   if (!onOrderSheet) return recovered;
 
   const brokenMoveKeys = new Set(
@@ -1885,7 +1807,7 @@ function recoveredBrokenMoveRows(customRows: Record<string, string[][]>, deleted
   );
   if (!brokenMoveKeys.size) return recovered;
 
-  for (const sheet of fabricStockSheets) {
+  for (const sheet of initialFabricStockSheets) {
     if (sheet.gid === onOrderSheet.gid) continue;
     for (const [rowIndex, row] of sheet.rows.entries()) {
       const key = fabricRowKey(sheet.gid, rowIndex);
@@ -1969,6 +1891,112 @@ function orderFabricSheets(sheets: FabricSheetData[], tileOrder: string[] = []) 
   });
 }
 
+function toManualFabricSheet(sheet: FabricStockSheet | FabricCustomSheet): FabricStockSheet {
+  return {
+    gid: sheet.gid,
+    name: sheet.name,
+    kind: "kind" in sheet ? sheet.kind : "stock",
+    headers: sheet.headers.map((header) => String(header || "Column")),
+    rows: sheet.rows.map((row) => row.map((cell) => String(cell ?? ""))),
+    rowCount: sheet.rows.length,
+    totalQuantity: sumFabricRows(sheet.headers, sheet.rows),
+  };
+}
+
+function normalizeManualFabricSheets(value: unknown): FabricStockSheet[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => {
+    if (!item || typeof item !== "object") return null;
+    const sheet = item as Record<string, unknown>;
+    const gid = String(sheet.gid ?? "").trim();
+    const name = String(sheet.name ?? "").trim();
+    const headers = Array.isArray(sheet.headers)
+      ? sheet.headers.map((header) => String(header || "Column"))
+      : [];
+    const rows = Array.isArray(sheet.rows)
+      ? sheet.rows.filter((row): row is unknown[] => Array.isArray(row)).map((row) => row.map((cell) => String(cell ?? "")))
+      : [];
+    if (!gid || !name || !headers.length) return null;
+    return {
+      gid,
+      name,
+      kind: String(sheet.kind ?? "stock"),
+      headers,
+      rows,
+      rowCount: rows.length,
+      totalQuantity: sumFabricRows(headers, rows),
+    };
+  }).filter(Boolean) as FabricStockSheet[];
+}
+
+async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
+  const value = sheets.map(toManualFabricSheet);
+  await prisma.portalSetting.upsert({
+    where: { key: FABRIC_MANUAL_SHEETS_KEY },
+    create: { key: FABRIC_MANUAL_SHEETS_KEY, value },
+    update: { value },
+  });
+}
+
+async function getManualFabricSheets({
+  savedValue,
+  customSheetsValue,
+  customRowsValue,
+  deletedRowsValue,
+  overridesValue,
+  deletedSheetsValue,
+}: {
+  savedValue?: unknown;
+  customSheetsValue?: unknown;
+  customRowsValue?: unknown;
+  deletedRowsValue?: unknown;
+  overridesValue?: unknown;
+  deletedSheetsValue?: unknown;
+}) {
+  const savedSheets = normalizeManualFabricSheets(savedValue);
+  if (savedSheets.length) return savedSheets;
+
+  const legacySheets = getFabricSheets(
+    overridesValue,
+    customRowsValue,
+    deletedRowsValue,
+    [],
+    normalizeFabricCustomSheets(customSheetsValue),
+    {},
+    normalizeFabricDeletedSheets(deletedSheetsValue),
+    initialFabricStockSheets,
+    { includeHidden: true },
+  ).map(toManualFabricSheet);
+  await saveManualFabricSheets(legacySheets);
+  return legacySheets;
+}
+
+async function loadManualFabricSheetsForAction() {
+  const [
+    manualSheetsSetting,
+    customSheetsSetting,
+    customRowsSetting,
+    deletedRowsSetting,
+    overridesSetting,
+    deletedSheetsSetting,
+  ] = await Promise.all([
+    prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } }),
+    prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } }),
+    prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_ROWS_KEY }, select: { value: true } }),
+    prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_ROWS_KEY }, select: { value: true } }),
+    prisma.portalSetting.findUnique({ where: { key: FABRIC_CELL_OVERRIDES_KEY }, select: { value: true } }),
+    prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_SHEETS_KEY }, select: { value: true } }),
+  ]);
+  return getManualFabricSheets({
+    savedValue: manualSheetsSetting?.value,
+    customSheetsValue: customSheetsSetting?.value,
+    customRowsValue: customRowsSetting?.value,
+    deletedRowsValue: deletedRowsSetting?.value,
+    overridesValue: overridesSetting?.value,
+    deletedSheetsValue: deletedSheetsSetting?.value,
+  });
+}
+
 async function getInrToAudRate() {
   try {
     const response = await fetch("https://open.er-api.com/v6/latest/INR", {
@@ -1991,19 +2019,21 @@ function getFabricSheets(
   customSheets: FabricCustomSheet[] = [],
   customColumns: Record<string, TableCustomColumn[]> = {},
   deletedSheets: Record<string, boolean> = {},
+  baseSheets: FabricStockSheet[] = initialFabricStockSheets,
+  options: { includeHidden?: boolean } = {},
 ): FabricSheetData[] {
   const overrides = normalizeFabricCellOverrides(overridesValue);
   const customRows = normalizeFabricCustomRows(customRowsValue);
   const deletedRows = normalizeFabricDeletedRows(deletedRowsValue);
   const recoveredRows = recoveredBrokenMoveRows(customRows, deletedRows);
   const sourceSheets: FabricStockSheet[] = [
-    ...fabricStockSheets.filter((sheet) => !isHiddenFabricSheet(sheet.name) && !deletedSheets[sheet.gid]),
+    ...baseSheets.filter((sheet) => (options.includeHidden || !isHiddenFabricSheet(sheet.name)) && !deletedSheets[sheet.gid]),
     ...customSheets.map((sheet) => ({
       ...sheet,
       kind: "stock",
       rowCount: sheet.rows.length,
       totalQuantity: sumFabricRows(sheet.headers, sheet.rows),
-    })).filter((sheet) => !deletedSheets[sheet.gid]),
+    })).filter((sheet) => (options.includeHidden || !isHiddenFabricSheet(sheet.name)) && !deletedSheets[sheet.gid]),
   ];
   const sheets = sourceSheets.map((sheet) => {
     const extraHeaders = (customColumns[sheet.gid] ?? []).map((column) => column.label);
