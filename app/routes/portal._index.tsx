@@ -2814,6 +2814,7 @@ export default function PortalDashboard() {
   }, [undoFetcher]);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
+  const [isSearchFocused, setIsSearchFocused] = useState(false);
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
     { id: "orderDate", label: "Order Date" },
@@ -2840,14 +2841,15 @@ export default function PortalDashboard() {
     setSearchParams(next, { replace: true, preventScrollReset: true });
   };
   useEffect(() => {
-    setSearchTitleInput(searchTitle);
+    if (!isSearchFocused) setSearchTitleInput(searchTitle);
   }, [searchTitle]);
   useEffect(() => {
+    if (!isSearchFocused) return;
     const timer = window.setTimeout(() => {
       if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [searchTitleInput, searchTitle]);
+  }, [searchTitleInput, isSearchFocused]);
   const activePageTitle = page === "dashboard" ? "Dashboard"
     : page === "fabric" ? "Fabric in stock"
     : page === "settings" ? "Settings"
@@ -2943,6 +2945,11 @@ export default function PortalDashboard() {
                       type="search"
                       value={searchTitleInput}
                       onChange={(event) => setSearchTitleInput(event.currentTarget.value)}
+                      onFocus={() => setIsSearchFocused(true)}
+                      onBlur={() => {
+                        setIsSearchFocused(false);
+                        if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
+                      }}
                       style={s.searchInput}
                       placeholder="Product title"
                     />
