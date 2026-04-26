@@ -24,7 +24,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
   try {
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, fabricManualSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, fabricManualSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, productInfoSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { status: "open" },
       include: { lines: { orderBy: { id: "asc" } } },
@@ -75,6 +75,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       select: { value: true },
     }),
     prisma.portalSetting.findUnique({
+      where: { key: PRODUCT_INFO_KEY },
+      select: { value: true },
+    }),
+    prisma.portalSetting.findUnique({
       where: { key: PORTAL_LOGIN_REQUIRED_KEY },
       select: { value: true },
     }),
@@ -105,6 +109,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
   const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
   const fabricSettings = normalizeFabricSettings(fabricSettingsSetting?.value);
+  const productInfo = normalizeProductInfo(productInfoSetting?.value);
   const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
   const currentUser = getCurrentPortalUser(request, users);
   const activeUsers = await recordAndGetActiveUsers(currentUser, users, activeUsersSetting?.value);
@@ -241,6 +246,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     restockSettings,
     universalSettings,
     fabricSettings,
+    productInfo,
     packingLists,
     selectedPackingList,
     productSearch,
@@ -1040,6 +1046,55 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "add_product_category") {
+    const name = String(form.get("name") ?? "").trim();
+    if (!name) return null;
+    const productInfo = await loadProductInfoForAction();
+    productInfo.categories.push({
+      id: `category_${Date.now()}`,
+      name,
+      styles: [],
+    });
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
+  if (intent === "delete_product_category") {
+    const categoryId = String(form.get("categoryId") ?? "");
+    if (!categoryId) return null;
+    const productInfo = await loadProductInfoForAction();
+    productInfo.categories = productInfo.categories.filter((category) => category.id !== categoryId);
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
+  if (intent === "add_product_style") {
+    const categoryId = String(form.get("categoryId") ?? "");
+    const name = String(form.get("name") ?? "").trim();
+    if (!categoryId || !name) return null;
+    const productInfo = await loadProductInfoForAction();
+    const category = productInfo.categories.find((item) => item.id === categoryId);
+    if (!category) return null;
+    category.styles.push({
+      id: `style_${Date.now()}`,
+      name,
+    });
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
+  if (intent === "delete_product_style") {
+    const categoryId = String(form.get("categoryId") ?? "");
+    const styleId = String(form.get("styleId") ?? "");
+    if (!categoryId || !styleId) return null;
+    const productInfo = await loadProductInfoForAction();
+    const category = productInfo.categories.find((item) => item.id === categoryId);
+    if (!category) return null;
+    category.styles = category.styles.filter((style) => style.id !== styleId);
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
   if (intent === "update_fabric_cell") {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
@@ -1476,7 +1531,30 @@ const FABRIC_DELETED_ROWS_KEY = "production-portal-fabric-deleted-rows-v1";
 const FABRIC_CUSTOM_SHEETS_KEY = "production-portal-fabric-custom-sheets-v1";
 const FABRIC_DELETED_SHEETS_KEY = "production-portal-fabric-deleted-sheets-v1";
 const FABRIC_MANUAL_SHEETS_KEY = "production-portal-fabric-manual-sheets-v1";
+const PRODUCT_INFO_KEY = "production-portal-product-info-v1";
 const DEFAULT_FABRIC_HEADERS = ["Supplier", "Fabric Type", "Fabric", "Name", "Cost per Meter", "Meters in Stock", "Cut Pieces", "Received / Date", "Products", "Notes"];
+const DEFAULT_PRODUCT_INFO: ProductInfo = {
+  categories: [
+    {
+      id: "short_sleeve_dresses",
+      name: "Short Sleeve Dresses",
+      styles: [
+        { id: "vivien_dress", name: "Vivien Dress" },
+        { id: "sun_dress", name: "Sun Dress" },
+        { id: "mabel_dress", name: "Mabel Dress" },
+        { id: "billie_dress", name: "Billie Dress" },
+        { id: "katie_dress", name: "Katie Dress" },
+      ],
+    },
+    { id: "long_sleeve_dresses", name: "Long Sleeve Dresses", styles: [] },
+    { id: "short_sleeve_tops", name: "Short Sleeve Tops", styles: [] },
+    { id: "long_sleeve_tops", name: "Long Sleeve Tops", styles: [] },
+    { id: "mid_length_skirts", name: "Mid Length Skirts", styles: [] },
+    { id: "long_skirts", name: "Long Skirts", styles: [] },
+    { id: "pants", name: "Pants", styles: [] },
+    { id: "jackets", name: "Jackets", styles: [] },
+  ],
+};
 const HIDDEN_FABRIC_SHEET_NAMES = new Set(["new fabric on order", "fabric on order"]);
 const FABRIC_TOTAL_EXCLUDED_NAMES = new Set([
   "on order",
@@ -1553,6 +1631,18 @@ type FabricCustomSheet = {
   name: string;
   headers: string[];
   rows: string[][];
+};
+type ProductInfoStyle = {
+  id: string;
+  name: string;
+};
+type ProductInfoCategory = {
+  id: string;
+  name: string;
+  styles: ProductInfoStyle[];
+};
+type ProductInfo = {
+  categories: ProductInfoCategory[];
 };
 type UniversalSettings = {
   primaryButtonBg: string;
@@ -1719,6 +1809,49 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
     pageBg: normalizeHexColor(settings.pageBg, "#f3f4f6"),
     logoUrl: typeof settings.logoUrl === "string" ? settings.logoUrl : "",
   };
+}
+
+function normalizeProductInfo(value: unknown): ProductInfo {
+  const rawCategories = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>).categories
+    : null;
+  if (!Array.isArray(rawCategories)) return structuredClone(DEFAULT_PRODUCT_INFO);
+
+  const categories = rawCategories.map((item) => {
+    if (!item || typeof item !== "object") return null;
+    const category = item as Record<string, unknown>;
+    const id = String(category.id ?? "").trim();
+    const name = String(category.name ?? "").trim();
+    const styles = Array.isArray(category.styles)
+      ? category.styles.map((styleItem) => {
+          if (!styleItem || typeof styleItem !== "object") return null;
+          const style = styleItem as Record<string, unknown>;
+          const styleId = String(style.id ?? "").trim();
+          const styleName = String(style.name ?? "").trim();
+          return styleId && styleName ? { id: styleId, name: styleName } : null;
+        }).filter(Boolean) as ProductInfoStyle[]
+      : [];
+    return id && name ? { id, name, styles } : null;
+  }).filter(Boolean) as ProductInfoCategory[];
+
+  return categories.length ? { categories } : structuredClone(DEFAULT_PRODUCT_INFO);
+}
+
+async function loadProductInfoForAction() {
+  const setting = await prisma.portalSetting.findUnique({
+    where: { key: PRODUCT_INFO_KEY },
+    select: { value: true },
+  });
+  return normalizeProductInfo(setting?.value);
+}
+
+async function saveProductInfo(productInfo: ProductInfo) {
+  const value = normalizeProductInfo(productInfo);
+  await prisma.portalSetting.upsert({
+    where: { key: PRODUCT_INFO_KEY },
+    create: { key: PRODUCT_INFO_KEY, value },
+    update: { value },
+  });
 }
 
 function fabricCellKey(gid: string, rowIndex: number, colIndex: number) {
@@ -2791,6 +2924,7 @@ export default function PortalDashboard() {
     restockSettings,
     universalSettings,
     fabricSettings,
+    productInfo,
     packingLists,
     selectedPackingList,
     productSearch,
@@ -3077,6 +3211,12 @@ export default function PortalDashboard() {
             inrToAudRate={inrToAudRate}
             nameSearch={searchTitleInput}
             onSelect={(gid) => updateParams({ fabricTab: gid })}
+          />
+        ) : page === "productinfo" ? (
+          <ProductInformationPanel
+            productInfo={productInfo}
+            selectedCategoryId={searchParams.get("category") ?? ""}
+            updateParams={updateParams}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -3677,6 +3817,126 @@ function CellHistoryMenu({
 }
 
 // ─── Fabric Sheets ───────────────────────────────────────────────────────────
+
+function ProductInformationPanel({
+  productInfo,
+  selectedCategoryId,
+  updateParams,
+}: {
+  productInfo: ProductInfo;
+  selectedCategoryId: string;
+  updateParams: (updates: Record<string, string>) => void;
+}) {
+  const fetcher = useFetcher();
+  const selectedCategory = productInfo.categories.find((category) => category.id === selectedCategoryId) ?? null;
+  const isSubmitting = fetcher.state !== "idle";
+
+  const submitProductInfo = (fields: Record<string, string>) => {
+    fetcher.submit(fields, { method: "post" });
+  };
+
+  const addCategory = () => {
+    const name = window.prompt("Category name");
+    if (!name?.trim()) return;
+    submitProductInfo({ intent: "add_product_category", name: name.trim() });
+  };
+
+  const deleteCategory = (category: ProductInfoCategory) => {
+    if (!window.confirm(`Remove "${category.name}" and its style tiles?`)) return;
+    submitProductInfo({ intent: "delete_product_category", categoryId: category.id });
+    if (selectedCategoryId === category.id) updateParams({ category: "" });
+  };
+
+  const addStyle = () => {
+    if (!selectedCategory) return;
+    const name = window.prompt("Style name");
+    if (!name?.trim()) return;
+    submitProductInfo({ intent: "add_product_style", categoryId: selectedCategory.id, name: name.trim() });
+  };
+
+  const deleteStyle = (style: ProductInfoStyle) => {
+    if (!selectedCategory || !window.confirm(`Remove "${style.name}"?`)) return;
+    submitProductInfo({ intent: "delete_product_style", categoryId: selectedCategory.id, styleId: style.id });
+  };
+
+  if (selectedCategory) {
+    return (
+      <div style={s.productInfoPage}>
+        <div style={s.productInfoToolbar}>
+          <div style={s.productInfoToolbarLeft}>
+            <button type="button" style={s.secondaryButton} onClick={() => updateParams({ category: "" })}>
+              Back to categories
+            </button>
+            <div>
+              <h2 style={s.productInfoHeading}>{selectedCategory.name}</h2>
+              <div style={s.productInfoMeta}>{selectedCategory.styles.length} styles</div>
+            </div>
+          </div>
+          <button type="button" style={s.primaryActionButton} onClick={addStyle} disabled={isSubmitting}>
+            Add Style
+          </button>
+        </div>
+
+        <div style={s.productInfoGrid}>
+          {selectedCategory.styles.map((style) => (
+            <div key={style.id} style={s.productStyleTile}>
+              <div style={s.productStyleTitle}>{style.name}</div>
+              <div style={s.productStyleMeta}>Costing details next</div>
+              <button
+                type="button"
+                style={s.productTileRemove}
+                onClick={() => deleteStyle(style)}
+                title={`Remove ${style.name}`}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          {!selectedCategory.styles.length && (
+            <div style={s.productInfoEmpty}>No styles in this category yet.</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={s.productInfoPage}>
+      <div style={s.productInfoToolbar}>
+        <div>
+          <h2 style={s.productInfoHeading}>Product Categories</h2>
+          <div style={s.productInfoMeta}>{productInfo.categories.length} categories</div>
+        </div>
+        <button type="button" style={s.primaryActionButton} onClick={addCategory} disabled={isSubmitting}>
+          Add Category
+        </button>
+      </div>
+
+      <div style={s.productInfoGrid}>
+        {productInfo.categories.map((category) => (
+          <div key={category.id} style={s.productCategoryTile}>
+            <button
+              type="button"
+              style={s.productTileMainButton}
+              onClick={() => updateParams({ category: category.id })}
+            >
+              <span style={s.productCategoryTitle}>{category.name}</span>
+              <span style={s.productCategoryMeta}>{category.styles.length} styles</span>
+            </button>
+            <button
+              type="button"
+              style={s.productTileRemove}
+              onClick={() => deleteCategory(category)}
+              title={`Remove ${category.name}`}
+            >
+              Remove
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function FabricSheetsPanel({
   sheets,
@@ -8155,6 +8415,137 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow: "inset 0 0 0 9999px rgba(37,99,235,0.05)",
   },
   empty: { background: "#fff", borderRadius: 12, padding: 40, textAlign: "center", color: "#6b7280" },
+  primaryActionButton: {
+    border: "1px solid var(--portal-primary-button-bg, #111827)",
+    borderRadius: 8,
+    padding: "9px 12px",
+    background: "var(--portal-primary-button-bg, #111827)",
+    color: "var(--portal-primary-button-color, #ffffff)",
+    fontSize: 13,
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  productInfoPage: {
+    display: "grid",
+    gap: 14,
+  },
+  productInfoToolbar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "14px 16px",
+    background: "#fff",
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+  },
+  productInfoToolbarLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    flexWrap: "wrap",
+  },
+  productInfoHeading: {
+    margin: 0,
+    color: "var(--portal-heading-text-color, #111827)",
+    fontSize: 18,
+    fontWeight: 900,
+    lineHeight: 1.2,
+  },
+  productInfoMeta: {
+    marginTop: 3,
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+  productInfoGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))",
+    gap: 12,
+  },
+  productCategoryTile: {
+    position: "relative",
+    minHeight: 132,
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+    background: "#fff",
+    boxShadow: "0 1px 2px rgba(15,23,42,0.06)",
+  },
+  productTileMainButton: {
+    width: "100%",
+    height: "100%",
+    minHeight: 132,
+    display: "grid",
+    alignContent: "start",
+    gap: 10,
+    border: 0,
+    borderRadius: 10,
+    padding: "18px 16px 48px",
+    background: "transparent",
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  productCategoryTitle: {
+    color: "var(--portal-heading-text-color, #111827)",
+    fontSize: 16,
+    fontWeight: 900,
+    lineHeight: 1.25,
+    paddingRight: 48,
+  },
+  productCategoryMeta: {
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+  productStyleTile: {
+    position: "relative",
+    minHeight: 116,
+    display: "grid",
+    alignContent: "start",
+    gap: 8,
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+    background: "#fff",
+    padding: "18px 16px 48px",
+    boxShadow: "0 1px 2px rgba(15,23,42,0.06)",
+  },
+  productStyleTitle: {
+    color: "var(--portal-heading-text-color, #111827)",
+    fontSize: 16,
+    fontWeight: 900,
+    lineHeight: 1.25,
+    paddingRight: 48,
+  },
+  productStyleMeta: {
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+  productTileRemove: {
+    position: "absolute",
+    right: 10,
+    bottom: 10,
+    border: "1px solid #fecaca",
+    borderRadius: 7,
+    padding: "5px 8px",
+    background: "#fff5f5",
+    color: "#991b1b",
+    fontSize: 11,
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  productInfoEmpty: {
+    gridColumn: "1 / -1",
+    minHeight: 120,
+    display: "grid",
+    placeItems: "center",
+    border: "1px dashed #cbd5e1",
+    borderRadius: 10,
+    background: "#fff",
+    color: "#64748b",
+    fontSize: 13,
+    fontWeight: 800,
+  },
   fabricPage: { display: "flex", flexDirection: "column", gap: 14 },
   fabricTotalsBar: {
     display: "flex",
