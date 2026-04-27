@@ -4950,6 +4950,7 @@ function FabricSheetTable({
                 const cellValue = String(cell ?? "");
                 return isFabricImageValue(cellValue) || (/picture|image/i.test(header) && cellValue.trim());
               }) ?? "";
+              const fabricName = nameIndex >= 0 ? String(row[nameIndex] ?? "") : "";
               return (
               <tr key={rowIndex} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
                 <RowNumberCell rowNumber={displayRowIndex + 1} actions={[
@@ -4973,6 +4974,7 @@ function FabricSheetTable({
                       value={row[colIndex] ?? ""}
                       originalValue={sheet.originalRows?.[sourceRowIndex]?.[colIndex] ?? ""}
                       fabricImageUrl={String(fabricImageUrl)}
+                      fabricName={fabricName}
                       header={sheet.headers[colIndex] ?? ""}
                       fetcher={fetcher}
                       fabricSettings={fabricSettings}
@@ -5191,6 +5193,7 @@ function FabricCell({
   value,
   originalValue,
   fabricImageUrl,
+  fabricName,
   header,
   fetcher,
   fabricSettings,
@@ -5203,6 +5206,7 @@ function FabricCell({
   value: string;
   originalValue: string;
   fabricImageUrl: string;
+  fabricName: string;
   header: string;
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
@@ -5261,6 +5265,7 @@ function FabricCell({
         value={draft}
         originalValue={originalValue}
         fabricImageUrl={fabricImageUrl}
+        fabricName={fabricName}
         productInfo={productInfo}
         onDraftChange={setDraft}
         onSave={save}
@@ -5644,6 +5649,7 @@ function FabricProductsCell({
   value,
   originalValue,
   fabricImageUrl,
+  fabricName,
   productInfo,
   onDraftChange,
   onSave,
@@ -5651,6 +5657,7 @@ function FabricProductsCell({
   value: string;
   originalValue: string;
   fabricImageUrl: string;
+  fabricName: string;
   productInfo: ProductInfo;
   onDraftChange: (value: string) => void;
   onSave: (value: string) => void;
@@ -5711,11 +5718,14 @@ function FabricProductsCell({
           <div style={s.fabricStyleUsageModal}>
             <div style={s.fabricStyleUsageLayout}>
               <div style={s.fabricStyleUsageImagePane}>
-                {isFabricImageValue(fabricImageUrl) ? (
-                  <img src={fabricImageUrl} alt="" style={s.fabricStyleUsageImage} />
-                ) : (
-                  <div style={s.fabricStyleUsageImageEmpty}>No image</div>
-                )}
+                <div style={s.fabricStyleUsageImageFrame}>
+                  {isFabricImageValue(fabricImageUrl) ? (
+                    <img src={fabricImageUrl} alt="" style={s.fabricStyleUsageImage} />
+                  ) : (
+                    <div style={s.fabricStyleUsageImageEmpty}>No image</div>
+                  )}
+                </div>
+                {fabricName.trim() && <h1 style={s.fabricStyleUsagePrintName}>{fabricName.trim()}</h1>}
               </div>
               <div style={s.fabricStyleUsageContent}>
                 <div style={s.fabricStyleUsageHeader}>
@@ -10314,6 +10324,11 @@ const s: Record<string, React.CSSProperties> = {
     position: "sticky",
     top: 0,
     width: "100%",
+    display: "grid",
+    gap: 12,
+  },
+  fabricStyleUsageImageFrame: {
+    width: "100%",
     aspectRatio: "1 / 1.25",
     overflow: "hidden",
     border: "1px solid #dbe3ef",
@@ -10333,6 +10348,14 @@ const s: Record<string, React.CSSProperties> = {
     color: "#94a3b8",
     fontSize: 13,
     fontWeight: 900,
+  },
+  fabricStyleUsagePrintName: {
+    margin: 0,
+    color: "#111827",
+    fontSize: 26,
+    lineHeight: 1.08,
+    fontWeight: 900,
+    textAlign: "center",
   },
   fabricStyleUsageContent: {
     minWidth: 0,
