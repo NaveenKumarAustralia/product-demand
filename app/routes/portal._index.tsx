@@ -5636,6 +5636,8 @@ function parseFabricStyleUsage(value: string): FabricStyleUsage[] {
 
 function serializeFabricStyleUsage(items: FabricStyleUsage[]) {
   const styles = items
+    .slice()
+    .sort(compareFabricStyleUsage)
     .map((item) => ({
       styleId: item.styleId || slugForOption(item.styleName),
       styleName: item.styleName.trim(),
@@ -5643,6 +5645,22 @@ function serializeFabricStyleUsage(items: FabricStyleUsage[]) {
     }))
     .filter((item) => item.styleName);
   return styles.length ? JSON.stringify({ styles }) : "";
+}
+
+function fabricStyleSortGroup(styleName: string) {
+  const normalized = styleName.toLowerCase();
+  if (/\bjacket(s)?\b/.test(normalized)) return 0;
+  if (/\bdress(es)?\b/.test(normalized)) return 1;
+  if (/\btop(s)?\b/.test(normalized)) return 2;
+  if (/\bskirt(s)?\b/.test(normalized)) return 3;
+  if (/\bpant(s)?\b|\bpants\b/.test(normalized)) return 4;
+  return 5;
+}
+
+function compareFabricStyleUsage(a: FabricStyleUsage, b: FabricStyleUsage) {
+  const groupDiff = fabricStyleSortGroup(a.styleName) - fabricStyleSortGroup(b.styleName);
+  if (groupDiff !== 0) return groupDiff;
+  return a.styleName.localeCompare(b.styleName, undefined, { sensitivity: "base" });
 }
 
 function FabricProductsCell({
@@ -5677,6 +5695,8 @@ function FabricProductsCell({
         .slice(0, 8)
     : [];
   const previewItems = parseFabricStyleUsage(value);
+  const sortedPreviewItems = previewItems.slice().sort(compareFabricStyleUsage);
+  const sortedItems = items.slice().sort(compareFabricStyleUsage);
   const hasChanges = originalValue && originalValue !== value;
   const save = () => {
     const nextValue = serializeFabricStyleUsage(items);
@@ -5695,21 +5715,21 @@ function FabricProductsCell({
     <div style={s.fabricProductsCell}>
       <button
         type="button"
-        style={previewItems.length ? s.fabricProductsButton : s.fabricProductsEmptyButton}
+        style={sortedPreviewItems.length ? s.fabricProductsButton : s.fabricProductsEmptyButton}
         onClick={() => {
           setItems(parseFabricStyleUsage(value));
           setQuery("");
           setOpen(true);
         }}
       >
-        {previewItems.length ? (
+        {sortedPreviewItems.length ? (
           <>
-            {previewItems.slice(0, 5).map((item) => (
+            {sortedPreviewItems.slice(0, 5).map((item) => (
               <span key={`${item.styleId}-${item.styleName}`} style={s.fabricProductChip}>
                 {item.styleName}{item.meters ? ` ${item.meters}m` : ""}
               </span>
             ))}
-            {previewItems.length > 5 && <span style={s.fabricProductMore}>Show more</span>}
+            {sortedPreviewItems.length > 5 && <span style={s.fabricProductMore}>Show more</span>}
           </>
         ) : "Add style usage"}
       </button>
@@ -5780,8 +5800,10 @@ function FabricProductsCell({
                       </tr>
                     </thead>
                     <tbody>
-                      {items.map((item, index) => (
-                        <tr key={`${item.styleId}-${index}`}>
+                      {sortedItems.map((item) => {
+                        const itemIndex = items.findIndex((currentItem) => currentItem === item);
+                        return (
+                        <tr key={`${item.styleId}-${itemIndex}`}>
                           <td style={s.fabricStyleUsageTd}>{item.styleName}</td>
                           <td style={s.fabricStyleUsageTd}>
                             <input
@@ -5792,7 +5814,7 @@ function FabricProductsCell({
                               value={item.meters}
                               onChange={(event) => {
                                 const meters = event.currentTarget.value;
-                                setItems((current) => current.map((currentItem, itemIndex) => itemIndex === index ? { ...currentItem, meters } : currentItem));
+                                setItems((current) => current.map((currentItem, currentIndex) => currentIndex === itemIndex ? { ...currentItem, meters } : currentItem));
                               }}
                               style={s.fabricStyleUsageInput}
                             />
@@ -5801,13 +5823,13 @@ function FabricProductsCell({
                             <button
                               type="button"
                               style={s.removeUserButton}
-                              onClick={() => setItems((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                              onClick={() => setItems((current) => current.filter((_, currentIndex) => currentIndex !== itemIndex))}
                             >
                               Remove
                             </button>
                           </td>
                         </tr>
-                      ))}
+                      );})}
                       {!items.length && (
                         <tr>
                           <td colSpan={3} style={s.fabricStyleUsageEmpty}>No styles added yet.</td>
