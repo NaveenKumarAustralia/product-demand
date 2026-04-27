@@ -16,6 +16,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const selectedStatus = url.searchParams.get("status") ?? "";
   const selectedPriority = url.searchParams.get("priority") ?? "";
   const searchTitle = url.searchParams.get("q") ?? "";
+  const serverSearchTitle = page === "restock" ? "" : searchTitle;
   const messageOrderId = Number(url.searchParams.get("messageOrderId") ?? 0) || null;
   const packingId = Number(url.searchParams.get("packingId") ?? 0) || null;
   const productSearch = url.searchParams.get("productSearch") ?? "";
@@ -127,7 +128,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
     .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
     .filter((order) => !selectedPriority || order.priority === selectedPriority)
-    .filter((order) => !searchTitle || order.productTitle.toLowerCase().includes(searchTitle.toLowerCase()))
+    .filter((order) => !serverSearchTitle || order.productTitle.toLowerCase().includes(serverSearchTitle.toLowerCase()))
     .filter((order) => !messageOrderId || order.id === messageOrderId)
     .sort((a, b) => {
       if (sortBy === "titleAsc") return a.productTitle.localeCompare(b.productTitle);
@@ -3037,11 +3038,16 @@ export default function PortalDashboard() {
   }, [searchTitle]);
   useEffect(() => {
     if (!isSearchFocused) return;
+    if (page === "restock") return;
     const timer = window.setTimeout(() => {
       if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [searchTitleInput, isSearchFocused]);
+  }, [searchTitleInput, isSearchFocused, page]);
+  const restockSearch = page === "restock" ? searchTitleInput.trim().toLowerCase() : "";
+  const visibleOrders = page === "restock" && restockSearch
+    ? orders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
+    : orders;
   const activePageTitle = page === "dashboard" ? "Dashboard"
     : page === "fabric" ? "Fabric in stock"
     : page === "settings" ? "Settings"
@@ -3139,7 +3145,7 @@ export default function PortalDashboard() {
                     onFocus={() => setIsSearchFocused(true)}
                     onBlur={() => {
                       setIsSearchFocused(false);
-                      if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
+                      if (page !== "restock" && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
                     }}
                     style={s.searchInput}
                     placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : page === "productinfo" ? "Style name" : "Product title"}
@@ -3287,7 +3293,7 @@ export default function PortalDashboard() {
                   setHistoryMenu({ x: e.clientX, y: e.clientY, entity, entityId, field, entityName });
                 }}
               >
-                {orders.map((order, rowIndex) => (
+                {visibleOrders.map((order, rowIndex) => (
                   <OrderRow
                     key={order.id}
                     order={order}
@@ -3303,7 +3309,7 @@ export default function PortalDashboard() {
                 {Array.from({ length: 10 }, (_, index) => (
                   <AddRestockOrderRow
                     key={`${addRowNonce}:${index}`}
-                    rowIndex={orders.length + index + 1}
+                    rowIndex={visibleOrders.length + index + 1}
                     sizes={sizes}
                     initialProductGroup={selectedProductGroup}
                     productSearch={restockProductSearch}
@@ -3313,10 +3319,10 @@ export default function PortalDashboard() {
                     onSaved={() => setAddRowNonce((current) => current + 1)}
                   />
                 ))}
-                {orders.length === 0 && (
+                {visibleOrders.length === 0 && (
                   <tr style={s.row}>
                     <td colSpan={columns.length + 1} style={{ ...s.td, textAlign: "center", color: "#6b7280", fontWeight: 700 }}>
-                      {messageOrderId ? "That message is for an order that is no longer open." : "Search in the blank rows below to add products."}
+                      {messageOrderId ? "That message is for an order that is no longer open." : restockSearch ? "No restock rows match this search." : "Search in the blank rows below to add products."}
                     </td>
                   </tr>
                 )}
@@ -6872,6 +6878,7 @@ function OrderRow({
 }) {
   const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
     return acc;
@@ -6891,13 +6898,29 @@ function OrderRow({
   const priorityCol = totalCol + 3;
   const etaCol = totalCol + 4;
   const rowHeightKey = `restock:${order.id}`;
+  const shouldSkipDeleteConfirm = () => {
+    if (typeof window === "undefined") return false;
+    const skipUntil = Number(window.localStorage.getItem(DELETE_CONFIRM_SKIP_KEY) ?? 0);
+    return skipUntil > Date.now();
+  };
+  const deleteOrder = () => submitPortalCell(fetcher, { intent: "delete_order", orderId: order.id });
+  const requestDeleteOrder = () => {
+    if (shouldSkipDeleteConfirm()) {
+      deleteOrder();
+      return;
+    }
+    setDeleteConfirmOpen(true);
+  };
+  const skipDeleteConfirmForDay = () => {
+    window.localStorage.setItem(DELETE_CONFIRM_SKIP_KEY, String(Date.now() + 24 * 60 * 60 * 1000));
+  };
 
   return (
     <>
       <tr id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
         <RowNumberCell rowNumber={rowIndex} actions={[
           { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
-          { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this restock row?")) submitPortalCell(fetcher, { intent: "delete_order", orderId: order.id }); } },
+          { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
         {/* Factory notes */}
         <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
@@ -6962,6 +6985,44 @@ function OrderRow({
         ))}
 
       </tr>
+      {deleteConfirmOpen && (
+        <tr>
+          <td colSpan={etaCol + customColumns.length + 2}>
+            <div style={s.deleteConfirm} onClick={() => setDeleteConfirmOpen(false)}>
+              <div style={s.deleteConfirmCard} onClick={(event) => event.stopPropagation()}>
+                <div style={s.deleteConfirmTitle}>Delete this restock row?</div>
+                <div style={s.deleteConfirmText}>{order.productTitle}</div>
+                <div style={s.deleteConfirmActions}>
+                  <button type="button" style={s.deleteConfirmButton} onClick={() => setDeleteConfirmOpen(false)}>
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    style={{ ...s.deleteConfirmButton, ...s.deleteConfirmDanger }}
+                    onClick={() => {
+                      deleteOrder();
+                      setDeleteConfirmOpen(false);
+                    }}
+                  >
+                    OK
+                  </button>
+                  <button
+                    type="button"
+                    style={s.deleteConfirmButton}
+                    onClick={() => {
+                      skipDeleteConfirmForDay();
+                      deleteOrder();
+                      setDeleteConfirmOpen(false);
+                    }}
+                  >
+                    Don’t show for 24 hours
+                  </button>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>
+      )}
       {inventoryOpen && (
         <tr style={s.inventoryRow}>
           <td style={s.inventoryBlankCell} />
