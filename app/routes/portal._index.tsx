@@ -5672,12 +5672,12 @@ function FabricProductsCell({
       >
         {previewItems.length ? (
           <>
-            {previewItems.slice(0, 3).map((item) => (
+            {previewItems.slice(0, 5).map((item) => (
               <span key={`${item.styleId}-${item.styleName}`} style={s.fabricProductChip}>
                 {item.styleName}{item.meters ? ` ${item.meters}m` : ""}
               </span>
             ))}
-            {previewItems.length > 3 && <span style={s.fabricProductMore}>+{previewItems.length - 3}</span>}
+            {previewItems.length > 5 && <span style={s.fabricProductMore}>Show more</span>}
           </>
         ) : "Add style usage"}
       </button>
@@ -10258,7 +10258,7 @@ const s: Record<string, React.CSSProperties> = {
     gap: 8,
   },
   fabricStyleUsageModal: {
-    width: "min(860px, 100%)",
+    width: "min(602px, 100%)",
     maxHeight: "calc(100vh - 40px)",
     overflow: "auto",
     display: "grid",
@@ -10332,7 +10332,7 @@ const s: Record<string, React.CSSProperties> = {
   fabricStyleUsageTable: {
     width: "100%",
     borderCollapse: "collapse",
-    minWidth: 620,
+    minWidth: 520,
   },
   fabricStyleUsageTh: {
     padding: "9px 10px",
