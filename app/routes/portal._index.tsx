@@ -9104,7 +9104,7 @@ const s: Record<string, React.CSSProperties> = {
     outlineOffset: 2,
   },
   productStyleImageWrap: {
-    aspectRatio: "2 / 3",
+    aspectRatio: "256 / 361",
     background: "#eef2f7",
   },
   productStyleImage: {
