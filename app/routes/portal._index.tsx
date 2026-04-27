@@ -1111,6 +1111,33 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_product_style_details") {
+    const categoryId = String(form.get("categoryId") ?? "");
+    const styleId = String(form.get("styleId") ?? "");
+    if (!categoryId || !styleId) return null;
+    const productInfo = await loadProductInfoForAction();
+    const category = productInfo.categories.find((item) => item.id === categoryId);
+    const style = category?.styles.find((item) => item.id === styleId);
+    if (!style) return null;
+    const readNumber = (key: string) => {
+      const raw = String(form.get(key) ?? "").trim();
+      if (!raw) return undefined;
+      const value = Number(raw);
+      return Number.isFinite(value) ? value : undefined;
+    };
+    style.averageMeters = readNumber("averageMeters");
+    style.averageTrimMeters = readNumber("averageTrimMeters");
+    style.stitchingCost = readNumber("stitchingCost");
+    style.fabricCost = readNumber("fabricCost");
+    style.zipButtonsCost = readNumber("zipButtonsCost");
+    style.totalCost = readNumber("totalCost");
+    style.sheetCount = readNumber("sheetCount");
+    style.zipButtonType = String(form.get("zipButtonType") ?? "").trim();
+    style.costingNotes = String(form.get("costingNotes") ?? "").trim();
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
   if (intent === "update_product_info_grid") {
     const gridColumns = Number(form.get("gridColumns"));
     if (gridColumns !== 3 && gridColumns !== 4) return null;
@@ -1724,9 +1751,54 @@ const PRODUCT_STYLE_IMAGES: Record<string, string> = {
   "Nora Corduroy Pants": "https://cdn.shopify.com/s/files/1/1204/4848/files/nora-corduroy-pants-black-100-cotton-pockets-zip-high-waist-karma-east_1409.jpg?v=1773294116",
   "Polly Pocket Corduroy Tunic": "https://cdn.shopify.com/s/files/1/1204/4848/files/polly-pocket-corduroy-sleeveless-tunic-black-100-cotton-pockets-karma-east_2609_1430bb10-1339-438e-8dfe-80c16f2d61dd.jpg?v=1773284527",
 };
+const PRODUCT_STYLE_COSTING: Record<string, ProductStyleCosting> = {
+  "Acacia Maxi Dress": { sheetCount: 8, averageMeters: 4.47, stitchingCost: 105, fabricCost: 385.88, zipButtonsCost: 6, totalCost: 494.38, zipButtonType: "6 Button" },
+  "Alice Dress": { sheetCount: 24, averageMeters: 2.7, stitchingCost: 100, fabricCost: 310.88, zipButtonsCost: 40.29, totalCost: 451.17, zipButtonType: "24 inch" },
+  "August Dress": { sheetCount: 16, averageMeters: 3.44, averageTrimMeters: 1.79, stitchingCost: 75, fabricCost: 437.63, zipButtonsCost: 2.44, totalCost: 515.06, zipButtonType: "3 Button" },
+  "Billie Dress": { sheetCount: 28, averageMeters: 2.49, stitchingCost: 90, fabricCost: 297.41, zipButtonsCost: 28.04, totalCost: 415.41, zipButtonType: "14 Inch" },
+  "Boho Tiered Maxi Dress": { sheetCount: 15, averageMeters: 3.74, stitchingCost: 95.67, fabricCost: 391, zipButtonsCost: 5.87, totalCost: 492.53, zipButtonType: "3 Button" },
+  "Chelsea Dress": { sheetCount: 21, averageMeters: 3.6, stitchingCost: 79.52, fabricCost: 352.95, zipButtonsCost: 14.1, totalCost: 445.62, zipButtonType: "14 Button" },
+  "Claudia Dress": { sheetCount: 24, averageMeters: 2.65, averageTrimMeters: 2, stitchingCost: 82.08, fabricCost: 316.7, zipButtonsCost: 3.75, totalCost: 402.65, zipButtonType: "2 Button" },
+  "Ember Midi Dress": { sheetCount: 13, averageMeters: 2.85, stitchingCost: 85, fabricCost: 297.54, zipButtonsCost: 5.38, totalCost: 387.92, zipButtonType: "5 Button" },
+  "Etta Dress": { sheetCount: 26, averageMeters: 2.39, stitchingCost: 75, fabricCost: 270.6, totalCost: 345.6 },
+  "Francesca Dress": { sheetCount: 9, averageMeters: 3.89, stitchingCost: 75, fabricCost: 332.22, totalCost: 407.22 },
+  "Frankie Dress": { sheetCount: 37, averageMeters: 2.9, averageTrimMeters: 3.46, stitchingCost: 80, fabricCost: 383.08, totalCost: 463.08 },
+  "Harper Dress": { sheetCount: 16, averageMeters: 2.44, stitchingCost: 80, fabricCost: 298.33, zipButtonsCost: 4.63, totalCost: 382.93, zipButtonType: "2 Button" },
+  "Kari Dress": { sheetCount: 13, averageMeters: 2.32, stitchingCost: 100, fabricCost: 292.75, zipButtonsCost: 35.77, totalCost: 428.25, zipButtonType: "22 Inch" },
+  "Katie Dress": { sheetCount: 15, averageMeters: 3.08, stitchingCost: 100, fabricCost: 306.4, zipButtonsCost: 7.6, totalCost: 414, zipButtonType: "7 bouton" },
+  "Mabel Dress": { sheetCount: 47, averageMeters: 2.08, stitchingCost: 56.91, fabricCost: 245.59, zipButtonsCost: 2.38, totalCost: 304.91, zipButtonType: "2 Button" },
+  "Maddison Dress": { sheetCount: 14, averageMeters: 2.4, stitchingCost: 75, fabricCost: 316.77, zipButtonsCost: 4.36, totalCost: 396.31, zipButtonType: "2 Button" },
+  "Nakita Dress": { sheetCount: 8, averageMeters: 3.66, stitchingCost: 75, fabricCost: 317.13, totalCost: 392.13 },
+  "Nina Dress": { sheetCount: 15, averageMeters: 2.44, stitchingCost: 90, fabricCost: 271.27, zipButtonsCost: 28, totalCost: 389.27, zipButtonType: "14 Inch" },
+  "Pippa Dress": { sheetCount: 1, averageMeters: 3.7, stitchingCost: 80, fabricCost: 354, zipButtonsCost: 12, totalCost: 446, zipButtonType: "12 Button" },
+  "Promenade Dress": { sheetCount: 23, averageMeters: 3.66, stitchingCost: 95, fabricCost: 352.78, zipButtonsCost: 13, totalCost: 460.78, zipButtonType: "13 Botton" },
+  "Riley Dress": { sheetCount: 16, averageMeters: 3.35, stitchingCost: 80, fabricCost: 318.47, zipButtonsCost: 12, totalCost: 410.47, zipButtonType: "12 Button" },
+  "Rita Dress": { sheetCount: 3, averageMeters: 2.62, stitchingCost: 70, fabricCost: 213, zipButtonsCost: 11, totalCost: 294, zipButtonType: "11 Button" },
+  "Scarlett Dress": { sheetCount: 20, averageMeters: 3.37, averageTrimMeters: 12, stitchingCost: 130, fabricCost: 393.1, zipButtonsCost: 37.55, totalCost: 560.65, zipButtonType: "22 Inch" },
+  "Tully Dress": { sheetCount: 25, averageMeters: 2.46, stitchingCost: 84.8, fabricCost: 280.76, zipButtonsCost: 3.96, totalCost: 369.52, zipButtonType: "2 Button" },
+  "Tulsi Dress": { sheetCount: 29, averageMeters: 2.68, averageTrimMeters: 1.29, stitchingCost: 80, fabricCost: 323.03, totalCost: 403.03 },
+  "Ursula Dress": { sheetCount: 9, averageMeters: 2.76, stitchingCost: 100, fabricCost: 276.44, zipButtonsCost: 7.22, totalCost: 383.67, zipButtonType: "5 Button" },
+  "Vivien Dress": { sheetCount: 40, averageMeters: 3.9, stitchingCost: 110, fabricCost: 425.85, zipButtonsCost: 22.35, totalCost: 558, zipButtonType: "12 Butten" },
+  "Willow Dress": { sheetCount: 7, averageMeters: 2.35, stitchingCost: 70, fabricCost: 234.33, zipButtonsCost: 3, totalCost: 307.33, zipButtonType: "3 Button" },
+  "Avery Dress": { sheetCount: 18, averageMeters: 2.59, stitchingCost: 68.33, fabricCost: 332.39, totalCost: 400.72 },
+  "Briar Dress": { sheetCount: 9, averageMeters: 3.32, averageTrimMeters: 1.4, stitchingCost: 75, fabricCost: 360.89, zipButtonsCost: 2, totalCost: 437.89, zipButtonType: "2 Button" },
+  "Ella Wrap Dress": { sheetCount: 15, averageMeters: 4.67, stitchingCost: 80, fabricCost: 535.33, totalCost: 615.33 },
+  "Jamie Dress": { sheetCount: 21, averageMeters: 2.28, stitchingCost: 69.29, fabricCost: 264.43, totalCost: 333.71 },
+  "Olivia Dress": { sheetCount: 6, averageMeters: 3.23, stitchingCost: 80, fabricCost: 340, zipButtonsCost: 2, totalCost: 422, zipButtonType: "2 Button" },
+  "Savannah Dress": { sheetCount: 3, averageMeters: 3.47, stitchingCost: 75, fabricCost: 283, zipButtonsCost: 6, totalCost: 364, zipButtonType: "6 Button" },
+  "Tiered Maxi Dress": { sheetCount: 33, averageMeters: 4.4, stitchingCost: 95.76, fabricCost: 430.09, zipButtonsCost: 6.52, totalCost: 532.36, zipButtonType: "4 Botton" },
+  "Tiered Midi Dress": { sheetCount: 19, averageMeters: 3.55, stitchingCost: 85, fabricCost: 315.95, zipButtonsCost: 6.84, totalCost: 407.79, zipButtonType: "4 Botton" },
+  "Tilda Dress": { sheetCount: 24, averageMeters: 3.06, averageTrimMeters: 1.82, stitchingCost: 89.79, fabricCost: 379.63, totalCost: 469.42 },
+  "Zoey Dress": { sheetCount: 7, averageMeters: 2.51, stitchingCost: 75, fabricCost: 401, totalCost: 476 },
+};
 
 function productInfoStyles(names: string[]): ProductInfoStyle[] {
-  return names.map((name) => ({ id: slugForOption(name), name, imageUrl: PRODUCT_STYLE_IMAGES[name] ?? "" }));
+  return names.map((name) => ({
+    id: slugForOption(name),
+    name,
+    imageUrl: PRODUCT_STYLE_IMAGES[name] ?? "",
+    ...(PRODUCT_STYLE_COSTING[name] ?? {}),
+  }));
 }
 
 const DEFAULT_PRODUCT_INFO: ProductInfo = {
@@ -1952,6 +2024,15 @@ type ProductInfoStyle = {
   id: string;
   name: string;
   imageUrl?: string;
+  averageMeters?: number;
+  averageTrimMeters?: number;
+  zipButtonType?: string;
+  stitchingCost?: number;
+  fabricCost?: number;
+  zipButtonsCost?: number;
+  totalCost?: number;
+  sheetCount?: number;
+  costingNotes?: string;
   hidden?: boolean;
 };
 type ProductInfoCategory = {
@@ -1963,6 +2044,10 @@ type ProductInfo = {
   gridColumns?: 3 | 4;
   categories: ProductInfoCategory[];
 };
+type ProductStyleCosting = Pick<
+  ProductInfoStyle,
+  "averageMeters" | "averageTrimMeters" | "zipButtonType" | "stitchingCost" | "fabricCost" | "zipButtonsCost" | "totalCost" | "sheetCount" | "costingNotes"
+>;
 type UniversalSettings = {
   primaryButtonBg: string;
   primaryButtonColor: string;
@@ -2148,7 +2233,22 @@ function normalizeProductInfo(value: unknown): ProductInfo {
           const styleId = String(style.id ?? "").trim();
           const styleName = String(style.name ?? "").trim();
           const imageUrl = String(style.imageUrl ?? PRODUCT_STYLE_IMAGES[styleName] ?? "").trim();
-          return styleId && styleName ? { id: styleId, name: styleName, imageUrl, hidden: style.hidden === true } : null;
+          const defaults = PRODUCT_STYLE_COSTING[styleName] ?? {};
+          return styleId && styleName ? {
+            id: styleId,
+            name: styleName,
+            imageUrl,
+            averageMeters: Number(style.averageMeters) || defaults.averageMeters,
+            averageTrimMeters: Number(style.averageTrimMeters) || defaults.averageTrimMeters,
+            zipButtonType: String(style.zipButtonType ?? defaults.zipButtonType ?? "").trim(),
+            stitchingCost: Number(style.stitchingCost) || defaults.stitchingCost,
+            fabricCost: Number(style.fabricCost) || defaults.fabricCost,
+            zipButtonsCost: Number(style.zipButtonsCost) || defaults.zipButtonsCost,
+            totalCost: Number(style.totalCost) || defaults.totalCost,
+            sheetCount: Number(style.sheetCount) || defaults.sheetCount,
+            costingNotes: String(style.costingNotes ?? defaults.costingNotes ?? "").trim(),
+            hidden: style.hidden === true,
+          } : null;
         }).filter(Boolean) as ProductInfoStyle[]
       : [];
     return id && name ? { id, name, styles } : null;
@@ -4201,6 +4301,8 @@ function ProductInformationPanel({
   const fetcher = useFetcher();
   const [showHidden, setShowHidden] = useState(false);
   const [styleChoice, setStyleChoice] = useState<ProductInfoStyle | null>(null);
+  const [detailStyle, setDetailStyle] = useState<ProductInfoStyle | null>(null);
+  const [detailDraft, setDetailDraft] = useState<Record<string, string>>({});
   const [dragStyleId, setDragStyleId] = useState<string | null>(null);
   const [dragOverStyleId, setDragOverStyleId] = useState<string | null>(null);
   const selectedCategory = productInfo.categories.find((category) => category.id === selectedCategoryId)
@@ -4259,6 +4361,40 @@ function ProductInformationPanel({
 
   const updateGridColumns = (nextColumns: 3 | 4) => {
     submitProductInfo({ intent: "update_product_info_grid", gridColumns: String(nextColumns) });
+  };
+
+  const numberToDraft = (value?: number) => (
+    typeof value === "number" && Number.isFinite(value) ? String(value) : ""
+  );
+
+  const openStyleDetails = (style: ProductInfoStyle) => {
+    setDetailStyle(style);
+    setDetailDraft({
+      averageMeters: numberToDraft(style.averageMeters),
+      averageTrimMeters: numberToDraft(style.averageTrimMeters),
+      zipButtonType: style.zipButtonType ?? "",
+      stitchingCost: numberToDraft(style.stitchingCost),
+      fabricCost: numberToDraft(style.fabricCost),
+      zipButtonsCost: numberToDraft(style.zipButtonsCost),
+      totalCost: numberToDraft(style.totalCost),
+      sheetCount: numberToDraft(style.sheetCount),
+      costingNotes: style.costingNotes ?? "",
+    });
+  };
+
+  const updateDetailDraft = (field: string, value: string) => {
+    setDetailDraft((current) => ({ ...current, [field]: value }));
+  };
+
+  const saveStyleDetails = () => {
+    if (!selectedCategory || !detailStyle) return;
+    submitProductInfo({
+      intent: "update_product_style_details",
+      categoryId: selectedCategory.id,
+      styleId: detailStyle.id,
+      ...detailDraft,
+    });
+    setDetailStyle(null);
   };
 
   const reorderStyles = (targetStyleId: string) => {
@@ -4357,16 +4493,25 @@ function ProductInformationPanel({
               setDragOverStyleId(null);
             }}
           >
+            <span style={s.productStyleDragHandle} title="Drag to reorder">::</span>
             <div style={s.productStyleImageWrap}>
-              {style.imageUrl ? (
-                <img src={style.imageUrl} alt={style.name} style={s.productStyleImage} loading="lazy" />
-              ) : (
-                <div style={s.productStyleImageEmpty}>No image</div>
-              )}
+              <button
+                type="button"
+                style={s.productStyleImageButton}
+                onClick={() => openStyleDetails(style)}
+              >
+                {style.imageUrl ? (
+                  <img src={style.imageUrl} alt={style.name} style={s.productStyleImage} loading="lazy" />
+                ) : (
+                  <div style={s.productStyleImageEmpty}>No image</div>
+                )}
+              </button>
             </div>
             <div style={s.productStyleCardBody}>
               <span style={s.productStyleTitle}>{style.name}</span>
-              <span style={s.productStyleMeta}>{style.hidden ? "Hidden" : "Costing details next"}</span>
+              <span style={s.productStyleMeta}>
+                {style.hidden ? "Hidden" : style.averageMeters ? `${style.averageMeters}m avg fabric` : "Click image for details"}
+              </span>
             </div>
             <div style={s.productStyleCardActions}>
               <label style={s.secondaryButton}>
@@ -4419,6 +4564,119 @@ function ProductInformationPanel({
           {showHidden ? "Hide hidden styles" : `Show hidden styles${hiddenStyleCount ? ` (${hiddenStyleCount})` : ""}`}
         </button>
       </div>
+      {detailStyle && selectedCategory && (
+        <div style={s.productInfoModalBackdrop}>
+          <div style={s.productInfoDetailsModal}>
+            <div style={s.productInfoDetailsHeader}>
+              <div>
+                <h3 style={s.productInfoModalTitle}>{detailStyle.name}</h3>
+                <p style={s.productInfoModalText}>
+                  Edit the averaged costing details for this style.
+                </p>
+              </div>
+              {detailStyle.imageUrl && <img src={detailStyle.imageUrl} alt="" style={s.productInfoDetailsThumb} />}
+            </div>
+            <div style={s.productInfoDetailsGrid}>
+              <label style={s.productInfoDetailsField}>
+                Fabric meters average
+                <input
+                  type="number"
+                  step="0.01"
+                  value={detailDraft.averageMeters ?? ""}
+                  onChange={(event) => updateDetailDraft("averageMeters", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Lining/trim meters
+                <input
+                  type="number"
+                  step="0.01"
+                  value={detailDraft.averageTrimMeters ?? ""}
+                  onChange={(event) => updateDetailDraft("averageTrimMeters", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Zip/button size/type
+                <input
+                  type="text"
+                  value={detailDraft.zipButtonType ?? ""}
+                  onChange={(event) => updateDetailDraft("zipButtonType", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Sheet samples
+                <input
+                  type="number"
+                  step="1"
+                  value={detailDraft.sheetCount ?? ""}
+                  onChange={(event) => updateDetailDraft("sheetCount", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Stitching cost
+                <input
+                  type="number"
+                  step="0.01"
+                  value={detailDraft.stitchingCost ?? ""}
+                  onChange={(event) => updateDetailDraft("stitchingCost", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Fabric cost
+                <input
+                  type="number"
+                  step="0.01"
+                  value={detailDraft.fabricCost ?? ""}
+                  onChange={(event) => updateDetailDraft("fabricCost", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Zip/buttons cost
+                <input
+                  type="number"
+                  step="0.01"
+                  value={detailDraft.zipButtonsCost ?? ""}
+                  onChange={(event) => updateDetailDraft("zipButtonsCost", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Total cost
+                <input
+                  type="number"
+                  step="0.01"
+                  value={detailDraft.totalCost ?? ""}
+                  onChange={(event) => updateDetailDraft("totalCost", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={{ ...s.productInfoDetailsField, gridColumn: "1 / -1" }}>
+                Notes
+                <textarea
+                  rows={3}
+                  value={detailDraft.costingNotes ?? ""}
+                  onChange={(event) => updateDetailDraft("costingNotes", event.currentTarget.value)}
+                  style={s.productInfoDetailsTextarea}
+                />
+              </label>
+            </div>
+            <div style={s.productInfoModalActions}>
+              <button type="button" style={s.primaryActionButton} onClick={saveStyleDetails}>
+                Save details
+              </button>
+              <button type="button" style={s.secondaryButton} onClick={() => setDetailStyle(null)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {styleChoice && selectedCategory && (
         <div style={s.productInfoModalBackdrop}>
           <div style={s.productInfoModal}>
@@ -9086,6 +9344,7 @@ const s: Record<string, React.CSSProperties> = {
     padding: 10,
   },
   productStyleCard: {
+    position: "relative",
     minWidth: 0,
     display: "grid",
     gridTemplateRows: "auto 1fr auto",
@@ -9103,9 +9362,37 @@ const s: Record<string, React.CSSProperties> = {
     outline: "3px solid var(--portal-primary-button-bg, #111827)",
     outlineOffset: 2,
   },
+  productStyleDragHandle: {
+    position: "absolute",
+    top: 8,
+    left: 8,
+    zIndex: 2,
+    display: "grid",
+    placeItems: "center",
+    width: 28,
+    height: 28,
+    border: "1px solid rgba(15,23,42,0.22)",
+    borderRadius: 7,
+    background: "rgba(255,255,255,0.88)",
+    color: "#475569",
+    fontSize: 14,
+    fontWeight: 900,
+    letterSpacing: 1,
+    boxShadow: "0 2px 8px rgba(15,23,42,0.16)",
+    pointerEvents: "none",
+  },
   productStyleImageWrap: {
     aspectRatio: "256 / 361",
     background: "#eef2f7",
+  },
+  productStyleImageButton: {
+    width: "100%",
+    height: "100%",
+    display: "block",
+    border: 0,
+    padding: 0,
+    background: "transparent",
+    cursor: "pointer",
   },
   productStyleImage: {
     width: "100%",
@@ -9171,6 +9458,66 @@ const s: Record<string, React.CSSProperties> = {
     padding: 18,
     background: "#fff",
     boxShadow: "0 24px 60px rgba(15,23,42,0.28)",
+  },
+  productInfoDetailsModal: {
+    width: "min(760px, 100%)",
+    maxHeight: "calc(100vh - 40px)",
+    overflow: "auto",
+    display: "grid",
+    gap: 14,
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    padding: 18,
+    background: "#fff",
+    boxShadow: "0 24px 60px rgba(15,23,42,0.28)",
+  },
+  productInfoDetailsHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 14,
+  },
+  productInfoDetailsThumb: {
+    width: 72,
+    aspectRatio: "256 / 361",
+    objectFit: "cover",
+    borderRadius: 7,
+    border: "1px solid #e5e7eb",
+    flex: "0 0 auto",
+  },
+  productInfoDetailsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: 10,
+  },
+  productInfoDetailsField: {
+    display: "grid",
+    gap: 5,
+    color: "#4b5563",
+    fontSize: 12,
+    fontWeight: 900,
+  },
+  productInfoDetailsInput: {
+    width: "100%",
+    border: "1px solid #cbd5e1",
+    borderRadius: 8,
+    padding: "9px 10px",
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: 800,
+    boxSizing: "border-box",
+  },
+  productInfoDetailsTextarea: {
+    width: "100%",
+    border: "1px solid #cbd5e1",
+    borderRadius: 8,
+    padding: "9px 10px",
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: 800,
+    boxSizing: "border-box",
+    resize: "vertical",
+    fontFamily: "inherit",
   },
   productInfoModalTitle: {
     margin: 0,
