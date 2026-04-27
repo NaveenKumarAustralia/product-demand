@@ -25,78 +25,80 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
   try {
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, fabricManualSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, productInfoSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await Promise.all([
-    prisma.supplierOrder.findMany({
-      where: { status: "open" },
-      include: { lines: { orderBy: { id: "asc" } } },
-      orderBy: { createdAt: "desc" },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: COLUMN_WIDTHS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: PACKING_COLUMN_WIDTHS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: TABLE_HEADER_LABELS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: TABLE_CUSTOM_COLUMNS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: TABLE_CUSTOM_CELLS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: TABLE_ROW_HEIGHTS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: FABRIC_CUSTOM_SHEETS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: FABRIC_MANUAL_SHEETS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: RESTOCK_SETTINGS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: UNIVERSAL_SETTINGS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: FABRIC_SETTINGS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: PRODUCT_INFO_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: PORTAL_LOGIN_REQUIRED_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: PORTAL_USERS_KEY },
-      select: { value: true },
-    }),
-    prisma.portalSetting.findUnique({
-      where: { key: PORTAL_ACTIVE_USERS_KEY },
-      select: { value: true },
-    }),
-    prisma.packingList.findMany({
-      orderBy: { createdAt: "desc" },
-      include: { lines: { orderBy: [{ boxNumber: "asc" }, { sortOrder: "asc" }, { id: "asc" }] } },
-    }),
-    prisma.portalSetting.findUnique({ where: { key: PORTAL_NAV_ORDER_KEY }, select: { value: true } }),
-  ]);
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, fabricManualSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, productInfoSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await retryAsync(() => Promise.all([
+      prisma.supplierOrder.findMany({
+        where: { status: "open" },
+        include: { lines: { orderBy: { id: "asc" } } },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: COLUMN_WIDTHS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: PACKING_COLUMN_WIDTHS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: TABLE_HEADER_LABELS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: TABLE_CUSTOM_COLUMNS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: TABLE_CUSTOM_CELLS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: TABLE_ROW_HEIGHTS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: FABRIC_CUSTOM_SHEETS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: FABRIC_MANUAL_SHEETS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: RESTOCK_SETTINGS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: UNIVERSAL_SETTINGS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: FABRIC_SETTINGS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: PRODUCT_INFO_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: PORTAL_LOGIN_REQUIRED_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: PORTAL_USERS_KEY },
+        select: { value: true },
+      }),
+      prisma.portalSetting.findUnique({
+        where: { key: PORTAL_ACTIVE_USERS_KEY },
+        select: { value: true },
+      }),
+      prisma.packingList.findMany({
+        orderBy: { createdAt: "desc" },
+        include: { lines: { orderBy: [{ boxNumber: "asc" }, { sortOrder: "asc" }, { id: "asc" }] } },
+      }),
+      prisma.portalSetting.findUnique({ where: { key: PORTAL_NAV_ORDER_KEY }, select: { value: true } }),
+    ]),
+    "portal base data",
+  );
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = await prisma.activityLog.findMany({
       where: { createdAt: { gte: ninetyDaysAgo } },
@@ -113,7 +115,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productInfo = normalizeProductInfo(productInfoSetting?.value);
   const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
   const currentUser = getCurrentPortalUser(request, users);
-  const activeUsers = await recordAndGetActiveUsers(currentUser, users, activeUsersSetting?.value);
+  const activeUsers = await recordAndGetActiveUsers(currentUser, users, activeUsersSetting?.value)
+    .catch((error) => {
+      console.error("Active user tracking failed", error);
+      return [] as ActivePortalUser[];
+    });
   const normalizedOrders = allOrders.map((order) => ({
     ...order,
     productType: normalizeProductGroup(order.productType) || null,
@@ -149,10 +155,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ? await searchShopifyProducts(restockProductSearch)
     : [];
   const messages = currentUser
-    ? await prisma.portalMessage.findMany({
+    ? await retryAsync(() => prisma.portalMessage.findMany({
         where: { userId: currentUser.id, readAt: null },
         orderBy: { createdAt: "desc" },
         take: 25,
+      }), "portal messages").catch((error) => {
+        console.error("Portal messages failed", error);
+        return [] as PortalMessageItem[];
       })
     : [];
   const fabricCellOverridesSetting = page === "fabric"
@@ -1467,6 +1476,21 @@ function parsePortalDate(value: string) {
   return valid ? date : null;
 }
 
+async function retryAsync<T>(operation: () => Promise<T>, label: string, attempts = 2): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) break;
+      await new Promise((resolve) => setTimeout(resolve, 180 * (attempt + 1)));
+    }
+  }
+  console.error(`${label} failed after retry`, lastError);
+  throw lastError;
+}
+
 function labelForOption(options: RestockOption[], value: string) {
   return options.find((option) => option.value === value)?.label ?? value;
 }
@@ -2502,11 +2526,16 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
   const trimmedQuery = query.trim();
   if (trimmedQuery.length < 2) return [];
 
-  const session = await prisma.session.findFirst({
-    where: {
-      accessToken: { not: "" },
-    },
-    orderBy: { isOnline: "asc" },
+  const session = await retryAsync(() => prisma.session.findFirst({
+      where: {
+        accessToken: { not: "" },
+      },
+      orderBy: { isOnline: "asc" },
+    }),
+    "Shopify product search session",
+  ).catch((error) => {
+    console.error("Shopify product search session failed", error);
+    return null;
   });
   if (!session?.shop || !session.accessToken) return [];
 
@@ -2624,9 +2653,14 @@ type ShopifyInventoryVariantInfo = ShopifyVariantInfo & { inventoryItemId: strin
 type ShopifyInventoryChange = { size: string; qty: number; inventoryItemId: string };
 
 async function getShopifyProductVariants(shop: string, productId: string): Promise<ShopifyVariantInfo[]> {
-  const session = await prisma.session.findFirst({
-    where: { shop, accessToken: { not: "" } },
-    orderBy: { isOnline: "asc" },
+  const session = await retryAsync(() => prisma.session.findFirst({
+      where: { shop, accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }),
+    "Shopify variant session",
+  ).catch((error) => {
+    console.error("Shopify variant session failed", error);
+    return null;
   });
   if (!session) return [];
 
@@ -2703,9 +2737,14 @@ async function shopifyGraphql<T>(
 }
 
 async function getShopifyInventoryVariants(shop: string, productId: string): Promise<ShopifyInventoryVariantInfo[]> {
-  const session = await prisma.session.findFirst({
-    where: { shop, accessToken: { not: "" } },
-    orderBy: { isOnline: "asc" },
+  const session = await retryAsync(() => prisma.session.findFirst({
+      where: { shop, accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }),
+    "Shopify inventory session",
+  ).catch((error) => {
+    console.error("Shopify inventory session failed", error);
+    return null;
   });
   if (!session) return [];
 
