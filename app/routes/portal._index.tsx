@@ -5761,9 +5761,8 @@ function FabricProductsCell({
                           <td style={s.fabricStyleUsageTd}>{item.styleName}</td>
                           <td style={s.fabricStyleUsageTd}>
                             <input
-                              type="number"
-                              min="0"
-                              step="0.01"
+                              type="text"
+                              inputMode="decimal"
                               value={item.meters}
                               onChange={(event) => {
                                 const meters = event.currentTarget.value;
