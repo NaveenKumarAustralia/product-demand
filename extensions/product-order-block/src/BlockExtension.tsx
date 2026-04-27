@@ -17,6 +17,7 @@ import {
 
 const TARGET = "admin.product-details.block.render";
 const APP_URL = "https://product-demand-production.up.railway.app";
+const PORTAL_URL = `${APP_URL}/portal`;
 
 export default reactExtension(TARGET, () => <ProductOrderBlock />);
 
@@ -416,7 +417,10 @@ function ProductOrderBlock() {
       <BlockStack gap="base">
         {successMsg && <Banner tone="success">{successMsg}</Banner>}
         {statusRow}
-        <Button onPress={() => setShowForm(true)}>Add order or order note</Button>
+        <InlineStack gap="base" blockAlignment="center">
+          <Button onPress={() => setShowForm(true)}>Add order or order note</Button>
+          <Button href={PORTAL_URL} target="_blank" variant="secondary">Open portal</Button>
+        </InlineStack>
       </BlockStack>
     );
   }
@@ -555,6 +559,7 @@ function ProductOrderBlock() {
         <Button variant={order ? "secondary" : "primary"} disabled={!hasProductGroup || submitting} onPress={() => handleSubmit("new")}>
           {submitting ? "Saving..." : "Create new order"}
         </Button>
+        <Button href={PORTAL_URL} target="_blank" variant="secondary">Open portal</Button>
         <Button variant="tertiary" onPress={() => { setShowForm(false); setFormError(null); }}>Cancel</Button>
       </InlineStack>
     </BlockStack>
