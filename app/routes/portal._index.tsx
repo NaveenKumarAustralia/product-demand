@@ -4931,6 +4931,11 @@ function FabricSheetTable({
           <tbody>
             {displayRows.map(({ row, rowIndex, sourceRowIndex }, displayRowIndex) => {
               const rowHeightKey = `fabric:${sheet.gid}:${sourceRowIndex}`;
+              const fabricImageUrl = row.find((cell, cellIndex) => {
+                const header = sheet.headers[cellIndex] ?? "";
+                const cellValue = String(cell ?? "");
+                return isFabricImageValue(cellValue) || (/picture|image/i.test(header) && cellValue.trim());
+              }) ?? "";
               return (
               <tr key={rowIndex} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
                 <RowNumberCell rowNumber={displayRowIndex + 1} actions={[
@@ -4953,6 +4958,7 @@ function FabricSheetTable({
                       colIndex={colIndex}
                       value={row[colIndex] ?? ""}
                       originalValue={sheet.originalRows?.[sourceRowIndex]?.[colIndex] ?? ""}
+                      fabricImageUrl={String(fabricImageUrl)}
                       header={sheet.headers[colIndex] ?? ""}
                       fetcher={fetcher}
                       fabricSettings={fabricSettings}
@@ -5170,6 +5176,7 @@ function FabricCell({
   colIndex,
   value,
   originalValue,
+  fabricImageUrl,
   header,
   fetcher,
   fabricSettings,
@@ -5181,6 +5188,7 @@ function FabricCell({
   colIndex: number;
   value: string;
   originalValue: string;
+  fabricImageUrl: string;
   header: string;
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
@@ -5238,6 +5246,7 @@ function FabricCell({
       <FabricProductsCell
         value={draft}
         originalValue={originalValue}
+        fabricImageUrl={fabricImageUrl}
         productInfo={productInfo}
         onDraftChange={setDraft}
         onSave={save}
@@ -5620,12 +5629,14 @@ function serializeFabricStyleUsage(items: FabricStyleUsage[]) {
 function FabricProductsCell({
   value,
   originalValue,
+  fabricImageUrl,
   productInfo,
   onDraftChange,
   onSave,
 }: {
   value: string;
   originalValue: string;
+  fabricImageUrl: string;
   productInfo: ProductInfo;
   onDraftChange: (value: string) => void;
   onSave: (value: string) => void;
@@ -5684,97 +5695,108 @@ function FabricProductsCell({
       {open && typeof document !== "undefined" && createPortal(
         <div style={s.productInfoModalBackdrop}>
           <div style={s.fabricStyleUsageModal}>
-            <div style={s.fabricStyleUsageHeader}>
-              <div>
-                <h2 style={s.productInfoModalTitle}>Styles for this fabric</h2>
-                <p style={s.productInfoModalText}>Search Product Information styles and enter meters for this fabric.</p>
+            <div style={s.fabricStyleUsageLayout}>
+              <div style={s.fabricStyleUsageImagePane}>
+                {isFabricImageValue(fabricImageUrl) ? (
+                  <img src={fabricImageUrl} alt="" style={s.fabricStyleUsageImage} />
+                ) : (
+                  <div style={s.fabricStyleUsageImageEmpty}>No image</div>
+                )}
               </div>
-              <button type="button" style={s.secondaryButton} onClick={() => setOpen(false)}>Close</button>
-            </div>
-            <div style={s.fabricStyleSearchWrap}>
-              <input
-                type="search"
-                value={query}
-                onChange={(event) => setQuery(event.currentTarget.value)}
-                autoFocus
-                placeholder="Search product style"
-                style={s.fabricStyleSearchInput}
-              />
-              {searchResults.length > 0 && (
-                <div style={s.fabricStyleSearchResults}>
-                  {searchResults.map((option) => (
-                    <button
-                      key={option.id}
-                      type="button"
-                      style={s.fabricStyleSearchResult}
-                      onClick={() => {
-                        setItems((current) => [
-                          ...current,
-                          {
-                            styleId: option.id,
-                            styleName: option.name,
-                            meters: option.averageMeters ? String(option.averageMeters) : "",
-                          },
-                        ]);
-                        setQuery("");
-                      }}
-                    >
-                      <span style={s.fabricStyleSearchName}>{option.name}</span>
-                      <span style={s.fabricStyleSearchCategory}>{option.categoryName}</span>
-                    </button>
-                  ))}
+              <div style={s.fabricStyleUsageContent}>
+                <div style={s.fabricStyleUsageHeader}>
+                  <div>
+                    <h2 style={s.productInfoModalTitle}>Styles for this fabric</h2>
+                    <p style={s.productInfoModalText}>Search Product Information styles and enter meters for this fabric.</p>
+                  </div>
+                  <button type="button" style={s.secondaryButton} onClick={() => setOpen(false)}>Close</button>
                 </div>
-              )}
-            </div>
-            <div style={s.fabricStyleUsageTableWrap}>
-              <table style={s.fabricStyleUsageTable}>
-                <thead>
-                  <tr>
-                    <th style={s.fabricStyleUsageTh}>Style</th>
-                    <th style={s.fabricStyleUsageTh}>Meters per garment</th>
-                    <th style={s.fabricStyleUsageTh}> </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((item, index) => (
-                    <tr key={`${item.styleId}-${index}`}>
-                      <td style={s.fabricStyleUsageTd}>{item.styleName}</td>
-                      <td style={s.fabricStyleUsageTd}>
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={item.meters}
-                          onChange={(event) => {
-                            const meters = event.currentTarget.value;
-                            setItems((current) => current.map((currentItem, itemIndex) => itemIndex === index ? { ...currentItem, meters } : currentItem));
-                          }}
-                          style={s.fabricStyleUsageInput}
-                        />
-                      </td>
-                      <td style={{ ...s.fabricStyleUsageTd, textAlign: "right" }}>
+                <div style={s.fabricStyleSearchWrap}>
+                  <input
+                    type="search"
+                    value={query}
+                    onChange={(event) => setQuery(event.currentTarget.value)}
+                    autoFocus
+                    placeholder="Search product style"
+                    style={s.fabricStyleSearchInput}
+                  />
+                  {searchResults.length > 0 && (
+                    <div style={s.fabricStyleSearchResults}>
+                      {searchResults.map((option) => (
                         <button
+                          key={option.id}
                           type="button"
-                          style={s.removeUserButton}
-                          onClick={() => setItems((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                          style={s.fabricStyleSearchResult}
+                          onClick={() => {
+                            setItems((current) => [
+                              ...current,
+                              {
+                                styleId: option.id,
+                                styleName: option.name,
+                                meters: option.averageMeters ? String(option.averageMeters) : "",
+                              },
+                            ]);
+                            setQuery("");
+                          }}
                         >
-                          Remove
+                          <span style={s.fabricStyleSearchName}>{option.name}</span>
+                          <span style={s.fabricStyleSearchCategory}>{option.categoryName}</span>
                         </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {!items.length && (
-                    <tr>
-                      <td colSpan={3} style={s.fabricStyleUsageEmpty}>No styles added yet.</td>
-                    </tr>
+                      ))}
+                    </div>
                   )}
-                </tbody>
-              </table>
-            </div>
-            <div style={s.fabricProductsActions}>
-              {hasChanges && <button type="button" style={s.fabricMiniButton} onClick={restore}>Restore</button>}
-              <button type="button" style={s.secondaryButton} onClick={() => setOpen(false)}>Cancel</button>
-              <button type="button" style={s.primaryActionButton} onClick={save}>Save</button>
+                </div>
+                <div style={s.fabricStyleUsageTableWrap}>
+                  <table style={s.fabricStyleUsageTable}>
+                    <thead>
+                      <tr>
+                        <th style={s.fabricStyleUsageTh}>Style</th>
+                        <th style={s.fabricStyleUsageTh}>Meters per garment</th>
+                        <th style={s.fabricStyleUsageTh}> </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((item, index) => (
+                        <tr key={`${item.styleId}-${index}`}>
+                          <td style={s.fabricStyleUsageTd}>{item.styleName}</td>
+                          <td style={s.fabricStyleUsageTd}>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={item.meters}
+                              onChange={(event) => {
+                                const meters = event.currentTarget.value;
+                                setItems((current) => current.map((currentItem, itemIndex) => itemIndex === index ? { ...currentItem, meters } : currentItem));
+                              }}
+                              style={s.fabricStyleUsageInput}
+                            />
+                          </td>
+                          <td style={{ ...s.fabricStyleUsageTd, textAlign: "right" }}>
+                            <button
+                              type="button"
+                              style={s.removeUserButton}
+                              onClick={() => setItems((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                            >
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {!items.length && (
+                        <tr>
+                          <td colSpan={3} style={s.fabricStyleUsageEmpty}>No styles added yet.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div style={s.fabricProductsActions}>
+                  {hasChanges && <button type="button" style={s.fabricMiniButton} onClick={restore}>Restore</button>}
+                  <button type="button" style={s.secondaryButton} onClick={() => setOpen(false)}>Cancel</button>
+                  <button type="button" style={s.primaryActionButton} onClick={save}>Save</button>
+                </div>
+              </div>
             </div>
           </div>
         </div>,
@@ -10258,16 +10280,49 @@ const s: Record<string, React.CSSProperties> = {
     gap: 8,
   },
   fabricStyleUsageModal: {
-    width: "min(602px, 100%)",
+    width: "min(860px, 100%)",
     maxHeight: "calc(100vh - 40px)",
     overflow: "auto",
-    display: "grid",
-    gap: 14,
     border: "1px solid #cbd5e1",
     borderRadius: 12,
     padding: 18,
     background: "#fff",
     boxShadow: "0 24px 60px rgba(15,23,42,0.28)",
+  },
+  fabricStyleUsageLayout: {
+    display: "grid",
+    gridTemplateColumns: "30% minmax(0, 1fr)",
+    gap: 16,
+    alignItems: "start",
+  },
+  fabricStyleUsageImagePane: {
+    position: "sticky",
+    top: 0,
+    width: "100%",
+    aspectRatio: "1 / 1.25",
+    overflow: "hidden",
+    border: "1px solid #dbe3ef",
+    borderRadius: 10,
+    background: "#f8fafc",
+  },
+  fabricStyleUsageImage: {
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+    display: "block",
+  },
+  fabricStyleUsageImageEmpty: {
+    height: "100%",
+    display: "grid",
+    placeItems: "center",
+    color: "#94a3b8",
+    fontSize: 13,
+    fontWeight: 900,
+  },
+  fabricStyleUsageContent: {
+    minWidth: 0,
+    display: "grid",
+    gap: 14,
   },
   fabricStyleUsageHeader: {
     display: "flex",
