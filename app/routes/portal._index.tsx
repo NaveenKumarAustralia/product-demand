@@ -4567,112 +4567,110 @@ function ProductInformationPanel({
       {detailStyle && selectedCategory && (
         <div style={s.productInfoModalBackdrop}>
           <div style={s.productInfoDetailsModal}>
-            <div style={s.productInfoDetailsHeader}>
-              <div>
-                <h3 style={s.productInfoModalTitle}>{detailStyle.name}</h3>
-                <p style={s.productInfoModalText}>
-                  Edit the averaged costing details for this style.
-                </p>
+            <div style={s.productInfoDetailsLayout}>
+              <div style={s.productInfoDetailsImagePanel}>
+                {detailStyle.imageUrl ? (
+                  <img src={detailStyle.imageUrl} alt="" style={s.productInfoDetailsImage} />
+                ) : (
+                  <div style={s.productInfoDetailsNoImage}>No image</div>
+                )}
               </div>
-              {detailStyle.imageUrl && <img src={detailStyle.imageUrl} alt="" style={s.productInfoDetailsThumb} />}
-            </div>
-            <div style={s.productInfoDetailsGrid}>
-              <label style={s.productInfoDetailsField}>
-                Fabric meters average
-                <input
-                  type="number"
-                  step="0.01"
-                  value={detailDraft.averageMeters ?? ""}
-                  onChange={(event) => updateDetailDraft("averageMeters", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
-                Lining/trim meters
-                <input
-                  type="number"
-                  step="0.01"
-                  value={detailDraft.averageTrimMeters ?? ""}
-                  onChange={(event) => updateDetailDraft("averageTrimMeters", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
-                Zip/button size/type
-                <input
-                  type="text"
-                  value={detailDraft.zipButtonType ?? ""}
-                  onChange={(event) => updateDetailDraft("zipButtonType", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
-                Sheet samples
-                <input
-                  type="number"
-                  step="1"
-                  value={detailDraft.sheetCount ?? ""}
-                  onChange={(event) => updateDetailDraft("sheetCount", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
-                Stitching cost
-                <input
-                  type="number"
-                  step="0.01"
-                  value={detailDraft.stitchingCost ?? ""}
-                  onChange={(event) => updateDetailDraft("stitchingCost", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
-                Fabric cost
-                <input
-                  type="number"
-                  step="0.01"
-                  value={detailDraft.fabricCost ?? ""}
-                  onChange={(event) => updateDetailDraft("fabricCost", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
-                Zip/buttons cost
-                <input
-                  type="number"
-                  step="0.01"
-                  value={detailDraft.zipButtonsCost ?? ""}
-                  onChange={(event) => updateDetailDraft("zipButtonsCost", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
-                Total cost
-                <input
-                  type="number"
-                  step="0.01"
-                  value={detailDraft.totalCost ?? ""}
-                  onChange={(event) => updateDetailDraft("totalCost", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={{ ...s.productInfoDetailsField, gridColumn: "1 / -1" }}>
-                Notes
-                <textarea
-                  rows={3}
-                  value={detailDraft.costingNotes ?? ""}
-                  onChange={(event) => updateDetailDraft("costingNotes", event.currentTarget.value)}
-                  style={s.productInfoDetailsTextarea}
-                />
-              </label>
-            </div>
-            <div style={s.productInfoModalActions}>
-              <button type="button" style={s.primaryActionButton} onClick={saveStyleDetails}>
-                Save details
-              </button>
-              <button type="button" style={s.secondaryButton} onClick={() => setDetailStyle(null)}>
-                Cancel
-              </button>
+              <div style={s.productInfoDetailsContent}>
+                <div style={s.productInfoDetailsHeader}>
+                  <h3 style={s.productInfoModalTitle}>{detailStyle.name}</h3>
+                  <p style={s.productInfoModalText}>
+                    Edit the averaged costing details for this style.
+                  </p>
+                </div>
+                <div style={s.productInfoDetailsGrid}>
+                  <label style={s.productInfoDetailsField}>
+                    Fabric meters average
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={detailDraft.averageMeters ?? ""}
+                      onChange={(event) => updateDetailDraft("averageMeters", event.currentTarget.value)}
+                      style={s.productInfoDetailsInput}
+                    />
+                  </label>
+                  <label style={s.productInfoDetailsField}>
+                    Lining/trim meters
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={detailDraft.averageTrimMeters ?? ""}
+                      onChange={(event) => updateDetailDraft("averageTrimMeters", event.currentTarget.value)}
+                      style={s.productInfoDetailsInput}
+                    />
+                  </label>
+                  <label style={s.productInfoDetailsField}>
+                    Zip/button size/type
+                    <input
+                      type="text"
+                      value={detailDraft.zipButtonType ?? ""}
+                      onChange={(event) => updateDetailDraft("zipButtonType", event.currentTarget.value)}
+                      style={s.productInfoDetailsInput}
+                    />
+                  </label>
+                  <label style={s.productInfoDetailsField}>
+                    Stitching cost
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={detailDraft.stitchingCost ?? ""}
+                      onChange={(event) => updateDetailDraft("stitchingCost", event.currentTarget.value)}
+                      style={s.productInfoDetailsInput}
+                    />
+                  </label>
+                  <label style={s.productInfoDetailsField}>
+                    Fabric cost
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={detailDraft.fabricCost ?? ""}
+                      onChange={(event) => updateDetailDraft("fabricCost", event.currentTarget.value)}
+                      style={s.productInfoDetailsInput}
+                    />
+                  </label>
+                  <label style={s.productInfoDetailsField}>
+                    Zip/buttons cost
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={detailDraft.zipButtonsCost ?? ""}
+                      onChange={(event) => updateDetailDraft("zipButtonsCost", event.currentTarget.value)}
+                      style={s.productInfoDetailsInput}
+                    />
+                  </label>
+                  <label style={s.productInfoDetailsField}>
+                    Total cost
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={detailDraft.totalCost ?? ""}
+                      onChange={(event) => updateDetailDraft("totalCost", event.currentTarget.value)}
+                      style={s.productInfoDetailsInput}
+                    />
+                  </label>
+                  <label style={{ ...s.productInfoDetailsField, gridColumn: "1 / -1" }}>
+                    Notes
+                    <textarea
+                      rows={3}
+                      value={detailDraft.costingNotes ?? ""}
+                      onChange={(event) => updateDetailDraft("costingNotes", event.currentTarget.value)}
+                      style={s.productInfoDetailsTextarea}
+                    />
+                  </label>
+                </div>
+                <div style={s.productInfoModalActions}>
+                  <button type="button" style={s.primaryActionButton} onClick={saveStyleDetails}>
+                    Save details
+                  </button>
+                  <button type="button" style={s.secondaryButton} onClick={() => setDetailStyle(null)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -9460,30 +9458,52 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow: "0 24px 60px rgba(15,23,42,0.28)",
   },
   productInfoDetailsModal: {
-    width: "min(760px, 100%)",
+    width: "min(980px, 100%)",
     maxHeight: "calc(100vh - 40px)",
     overflow: "auto",
-    display: "grid",
-    gap: 14,
     border: "1px solid #cbd5e1",
     borderRadius: 12,
-    padding: 18,
+    padding: 16,
     background: "#fff",
     boxShadow: "0 24px 60px rgba(15,23,42,0.28)",
   },
-  productInfoDetailsHeader: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
+  productInfoDetailsLayout: {
+    display: "grid",
+    gridTemplateColumns: "minmax(220px, 34%) minmax(0, 1fr)",
+    gap: 18,
+    alignItems: "start",
+  },
+  productInfoDetailsImagePanel: {
+    position: "sticky",
+    top: 0,
+    overflow: "hidden",
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+    background: "#eef2f7",
+  },
+  productInfoDetailsImage: {
+    width: "100%",
+    aspectRatio: "256 / 361",
+    display: "block",
+    objectFit: "cover",
+  },
+  productInfoDetailsNoImage: {
+    width: "100%",
+    aspectRatio: "256 / 361",
+    display: "grid",
+    placeItems: "center",
+    color: "#64748b",
+    fontSize: 13,
+    fontWeight: 900,
+  },
+  productInfoDetailsContent: {
+    minWidth: 0,
+    display: "grid",
     gap: 14,
   },
-  productInfoDetailsThumb: {
-    width: 72,
-    aspectRatio: "256 / 361",
-    objectFit: "cover",
-    borderRadius: 7,
-    border: "1px solid #e5e7eb",
-    flex: "0 0 auto",
+  productInfoDetailsHeader: {
+    display: "grid",
+    gap: 5,
   },
   productInfoDetailsGrid: {
     display: "grid",
