@@ -3672,6 +3672,7 @@ export default function PortalDashboard() {
             sheets={fabricSheets}
             selectedGid={selectedFabricTab}
             fabricSettings={fabricSettings}
+            productInfo={productInfo}
             users={users}
             tableHeaderLabels={tableHeaderLabels}
             customColumns={customColumns}
@@ -4702,6 +4703,7 @@ function FabricSheetsPanel({
   sheets,
   selectedGid,
   fabricSettings,
+  productInfo,
   users,
   tableHeaderLabels,
   customColumns,
@@ -4713,6 +4715,7 @@ function FabricSheetsPanel({
   sheets: FabricSheetData[];
   selectedGid: string;
   fabricSettings: FabricSettings;
+  productInfo: ProductInfo;
   users: PortalUser[];
   tableHeaderLabels: Record<string, string>;
   customColumns: TableCustomColumns;
@@ -4763,6 +4766,7 @@ function FabricSheetsPanel({
           sheets={sheets}
           fetcher={fetcher}
           fabricSettings={fabricSettings}
+          productInfo={productInfo}
           users={users}
           tableHeaderLabels={tableHeaderLabels}
           customColumns={customColumns}
@@ -4869,6 +4873,7 @@ function FabricSheetTable({
   sheets,
   fetcher,
   fabricSettings,
+  productInfo,
   users,
   tableHeaderLabels,
   customColumns,
@@ -4880,6 +4885,7 @@ function FabricSheetTable({
   sheets: FabricSheetData[];
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
+  productInfo: ProductInfo;
   users: PortalUser[];
   tableHeaderLabels: Record<string, string>;
   customColumns: TableCustomColumns;
@@ -4950,6 +4956,7 @@ function FabricSheetTable({
                       header={sheet.headers[colIndex] ?? ""}
                       fetcher={fetcher}
                       fabricSettings={fabricSettings}
+                      productInfo={productInfo}
                       users={users}
                     />
                   </FabricTd>
@@ -5166,6 +5173,7 @@ function FabricCell({
   header,
   fetcher,
   fabricSettings,
+  productInfo,
   users,
 }: {
   gid: string;
@@ -5176,6 +5184,7 @@ function FabricCell({
   header: string;
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
+  productInfo: ProductInfo;
   users: PortalUser[];
 }) {
   const [draft, setDraft] = useState(value);
@@ -5229,6 +5238,7 @@ function FabricCell({
       <FabricProductsCell
         value={draft}
         originalValue={originalValue}
+        productInfo={productInfo}
         onDraftChange={setDraft}
         onSave={save}
       />
@@ -5553,82 +5563,226 @@ function FabricChipDropdown({
   );
 }
 
-function productListItems(value: string) {
-  return value
+type FabricStyleUsage = {
+  styleId: string;
+  styleName: string;
+  meters: string;
+};
+
+function productInfoStyleSearchOptions(productInfo: ProductInfo) {
+  return productInfo.categories.flatMap((category) =>
+    category.styles
+      .filter((style) => !style.hidden)
+      .map((style) => ({
+        id: style.id,
+        name: style.name,
+        categoryName: category.name,
+        averageMeters: style.averageMeters,
+      })),
+  );
+}
+
+function parseFabricStyleUsage(value: string): FabricStyleUsage[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  try {
+    const parsed = JSON.parse(trimmed) as { styles?: Partial<FabricStyleUsage>[] };
+    if (Array.isArray(parsed.styles)) {
+      return parsed.styles
+        .map((item) => ({
+          styleId: String(item.styleId ?? slugForOption(String(item.styleName ?? ""))),
+          styleName: String(item.styleName ?? "").trim(),
+          meters: String(item.meters ?? "").trim(),
+        }))
+        .filter((item) => item.styleName);
+    }
+  } catch {
+    // Older rows were saved as plain product names. Keep them editable.
+  }
+  return trimmed
     .split(/\n|,/)
     .map((item) => item.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    .map((styleName) => ({ styleId: slugForOption(styleName), styleName, meters: "" }));
+}
+
+function serializeFabricStyleUsage(items: FabricStyleUsage[]) {
+  const styles = items
+    .map((item) => ({
+      styleId: item.styleId || slugForOption(item.styleName),
+      styleName: item.styleName.trim(),
+      meters: item.meters.trim(),
+    }))
+    .filter((item) => item.styleName);
+  return styles.length ? JSON.stringify({ styles }) : "";
 }
 
 function FabricProductsCell({
   value,
   originalValue,
+  productInfo,
   onDraftChange,
   onSave,
 }: {
   value: string;
   originalValue: string;
+  productInfo: ProductInfo;
   onDraftChange: (value: string) => void;
   onSave: (value: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [text, setText] = useState(value);
-  useEffect(() => setText(value), [value]);
-  const items = productListItems(value);
+  const [query, setQuery] = useState("");
+  const [items, setItems] = useState<FabricStyleUsage[]>(() => parseFabricStyleUsage(value));
+  useEffect(() => setItems(parseFabricStyleUsage(value)), [value]);
+  const options = productInfoStyleSearchOptions(productInfo);
+  const normalizedQuery = query.trim().toLowerCase();
+  const searchResults = normalizedQuery
+    ? options
+        .filter((option) =>
+          `${option.name} ${option.categoryName}`.toLowerCase().includes(normalizedQuery) &&
+          !items.some((item) => item.styleId === option.id),
+        )
+        .slice(0, 8)
+    : [];
+  const previewItems = parseFabricStyleUsage(value);
+  const hasChanges = originalValue && originalValue !== value;
   const save = () => {
-    const nextValue = productListItems(text).join("\n");
-    setText(nextValue);
+    const nextValue = serializeFabricStyleUsage(items);
     onDraftChange(nextValue);
     onSave(nextValue);
     setOpen(false);
+  };
+  const restore = () => {
+    const nextItems = parseFabricStyleUsage(originalValue);
+    setItems(nextItems);
+    onDraftChange(originalValue);
+    onSave(originalValue);
   };
 
   return (
     <div style={s.fabricProductsCell}>
       <button
         type="button"
-        style={items.length ? s.fabricProductsButton : s.fabricProductsEmptyButton}
-        onClick={() => setOpen((current) => !current)}
+        style={previewItems.length ? s.fabricProductsButton : s.fabricProductsEmptyButton}
+        onClick={() => {
+          setItems(parseFabricStyleUsage(value));
+          setQuery("");
+          setOpen(true);
+        }}
       >
-        {items.length ? (
+        {previewItems.length ? (
           <>
-            {items.slice(0, 3).map((item) => <span key={item} style={s.fabricProductChip}>{item}</span>)}
-            {items.length > 3 && <span style={s.fabricProductMore}>+{items.length - 3}</span>}
+            {previewItems.slice(0, 3).map((item) => (
+              <span key={`${item.styleId}-${item.styleName}`} style={s.fabricProductChip}>
+                {item.styleName}{item.meters ? ` ${item.meters}m` : ""}
+              </span>
+            ))}
+            {previewItems.length > 3 && <span style={s.fabricProductMore}>+{previewItems.length - 3}</span>}
           </>
-        ) : "Add products"}
+        ) : "Add style usage"}
       </button>
-      {open && (
-        <div style={s.fabricProductsPopover}>
-          <label style={s.fabricProductsLabel}>
-            Products made in this fabric
-            <textarea
-              value={text}
-              onChange={(event) => setText(event.currentTarget.value)}
-              rows={7}
-              autoFocus
-              placeholder="One style name per line"
-              style={s.fabricProductsTextarea}
-            />
-          </label>
-          <div style={s.fabricProductsActions}>
-            <button type="button" style={s.fabricMiniButton} onClick={() => setOpen(false)}>Cancel</button>
-            <button type="button" style={s.loginButton} onClick={save}>Save</button>
+      {open && typeof document !== "undefined" && createPortal(
+        <div style={s.productInfoModalBackdrop}>
+          <div style={s.fabricStyleUsageModal}>
+            <div style={s.fabricStyleUsageHeader}>
+              <div>
+                <h2 style={s.productInfoModalTitle}>Styles for this fabric</h2>
+                <p style={s.productInfoModalText}>Search Product Information styles and enter meters for this fabric.</p>
+              </div>
+              <button type="button" style={s.secondaryButton} onClick={() => setOpen(false)}>Close</button>
+            </div>
+            <div style={s.fabricStyleSearchWrap}>
+              <input
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.currentTarget.value)}
+                autoFocus
+                placeholder="Search product style"
+                style={s.fabricStyleSearchInput}
+              />
+              {searchResults.length > 0 && (
+                <div style={s.fabricStyleSearchResults}>
+                  {searchResults.map((option) => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      style={s.fabricStyleSearchResult}
+                      onClick={() => {
+                        setItems((current) => [
+                          ...current,
+                          {
+                            styleId: option.id,
+                            styleName: option.name,
+                            meters: option.averageMeters ? String(option.averageMeters) : "",
+                          },
+                        ]);
+                        setQuery("");
+                      }}
+                    >
+                      <span style={s.fabricStyleSearchName}>{option.name}</span>
+                      <span style={s.fabricStyleSearchCategory}>{option.categoryName}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div style={s.fabricStyleUsageTableWrap}>
+              <table style={s.fabricStyleUsageTable}>
+                <thead>
+                  <tr>
+                    <th style={s.fabricStyleUsageTh}>Style</th>
+                    <th style={s.fabricStyleUsageTh}>Meters per garment</th>
+                    <th style={s.fabricStyleUsageTh}> </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item, index) => (
+                    <tr key={`${item.styleId}-${index}`}>
+                      <td style={s.fabricStyleUsageTd}>{item.styleName}</td>
+                      <td style={s.fabricStyleUsageTd}>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={item.meters}
+                          onChange={(event) => {
+                            const meters = event.currentTarget.value;
+                            setItems((current) => current.map((currentItem, itemIndex) => itemIndex === index ? { ...currentItem, meters } : currentItem));
+                          }}
+                          style={s.fabricStyleUsageInput}
+                        />
+                      </td>
+                      <td style={{ ...s.fabricStyleUsageTd, textAlign: "right" }}>
+                        <button
+                          type="button"
+                          style={s.removeUserButton}
+                          onClick={() => setItems((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {!items.length && (
+                    <tr>
+                      <td colSpan={3} style={s.fabricStyleUsageEmpty}>No styles added yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div style={s.fabricProductsActions}>
+              {hasChanges && <button type="button" style={s.fabricMiniButton} onClick={restore}>Restore</button>}
+              <button type="button" style={s.secondaryButton} onClick={() => setOpen(false)}>Cancel</button>
+              <button type="button" style={s.primaryActionButton} onClick={save}>Save</button>
+            </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
-      {originalValue && originalValue !== value && (
+      {hasChanges && (
         <div style={s.fabricCellActions}>
-          <button
-            type="button"
-            style={s.fabricMiniButton}
-            onClick={() => {
-              setText(originalValue);
-              onDraftChange(originalValue);
-              onSave(originalValue);
-            }}
-          >
-            Restore
-          </button>
+          <button type="button" style={s.fabricMiniButton} onClick={restore}>Restore</button>
         </div>
       )}
     </div>
@@ -10102,6 +10256,119 @@ const s: Record<string, React.CSSProperties> = {
     display: "flex",
     justifyContent: "flex-end",
     gap: 8,
+  },
+  fabricStyleUsageModal: {
+    width: "min(860px, 100%)",
+    maxHeight: "calc(100vh - 40px)",
+    overflow: "auto",
+    display: "grid",
+    gap: 14,
+    border: "1px solid #cbd5e1",
+    borderRadius: 12,
+    padding: 18,
+    background: "#fff",
+    boxShadow: "0 24px 60px rgba(15,23,42,0.28)",
+  },
+  fabricStyleUsageHeader: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  fabricStyleSearchWrap: {
+    position: "relative",
+    display: "grid",
+    gap: 8,
+  },
+  fabricStyleSearchInput: {
+    width: "100%",
+    border: "1px solid #cbd5e1",
+    borderRadius: 8,
+    padding: "10px 12px",
+    color: "#111827",
+    font: "inherit",
+    fontSize: 14,
+    fontWeight: 800,
+    outline: "none",
+  },
+  fabricStyleSearchResults: {
+    display: "grid",
+    gap: 6,
+    maxHeight: 220,
+    overflow: "auto",
+    border: "1px solid #e2e8f0",
+    borderRadius: 8,
+    padding: 6,
+    background: "#f8fafc",
+  },
+  fabricStyleSearchResult: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    border: "1px solid #e2e8f0",
+    borderRadius: 7,
+    padding: "8px 10px",
+    background: "#fff",
+    color: "#111827",
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  fabricStyleSearchName: {
+    fontSize: 13,
+    fontWeight: 900,
+  },
+  fabricStyleSearchCategory: {
+    color: "#64748b",
+    fontSize: 12,
+    fontWeight: 800,
+    whiteSpace: "nowrap",
+  },
+  fabricStyleUsageTableWrap: {
+    overflow: "auto",
+    border: "1px solid #e2e8f0",
+    borderRadius: 8,
+  },
+  fabricStyleUsageTable: {
+    width: "100%",
+    borderCollapse: "collapse",
+    minWidth: 620,
+  },
+  fabricStyleUsageTh: {
+    padding: "9px 10px",
+    background: "#f8fafc",
+    borderBottom: "1px solid #e2e8f0",
+    color: "#475569",
+    fontSize: 12,
+    fontWeight: 900,
+    textAlign: "left",
+    textTransform: "uppercase",
+  },
+  fabricStyleUsageTd: {
+    padding: "9px 10px",
+    borderBottom: "1px solid #eef2f7",
+    color: "#111827",
+    fontSize: 13,
+    fontWeight: 800,
+    verticalAlign: "middle",
+  },
+  fabricStyleUsageInput: {
+    width: 140,
+    border: "1px solid #cbd5e1",
+    borderRadius: 7,
+    padding: "7px 9px",
+    color: "#111827",
+    font: "inherit",
+    fontSize: 13,
+    fontWeight: 800,
+    outline: "none",
+  },
+  fabricStyleUsageEmpty: {
+    padding: 22,
+    color: "#64748b",
+    fontSize: 13,
+    fontWeight: 800,
+    textAlign: "center",
   },
   fabricNoteCell: {
     minWidth: 180,
