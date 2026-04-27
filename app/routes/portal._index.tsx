@@ -1091,7 +1091,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       id: `style_${Date.now()}`,
       name,
       hidden: false,
+      imageUrl: "",
     });
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
+  if (intent === "update_product_style_image") {
+    const categoryId = String(form.get("categoryId") ?? "");
+    const styleId = String(form.get("styleId") ?? "");
+    const imageUrl = String(form.get("imageUrl") ?? "").trim();
+    if (!categoryId || !styleId) return null;
+    const productInfo = await loadProductInfoForAction();
+    const category = productInfo.categories.find((item) => item.id === categoryId);
+    const style = category?.styles.find((item) => item.id === styleId);
+    if (!style) return null;
+    style.imageUrl = imageUrl;
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
+  if (intent === "update_product_info_grid") {
+    const gridColumns = Number(form.get("gridColumns"));
+    if (gridColumns !== 3 && gridColumns !== 4) return null;
+    const productInfo = await loadProductInfoForAction();
+    productInfo.gridColumns = gridColumns;
     await saveProductInfo(productInfo);
     return null;
   }
@@ -1587,12 +1611,104 @@ const FABRIC_DELETED_SHEETS_KEY = "production-portal-fabric-deleted-sheets-v1";
 const FABRIC_MANUAL_SHEETS_KEY = "production-portal-fabric-manual-sheets-v1";
 const PRODUCT_INFO_KEY = "production-portal-product-info-v2";
 const DEFAULT_FABRIC_HEADERS = ["Supplier", "Fabric Type", "Fabric", "Name", "Cost per Meter", "Meters in Stock", "Cut Pieces", "Received / Date", "Products", "Notes"];
+const PRODUCT_STYLE_IMAGES: Record<string, string> = {
+  "Acacia Maxi Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/acacia-maxi-dress-spruced-up-teal-rayon-summer-maxi-dress-womens-karma-east_6572.jpg?v=1764067484",
+  "Alice Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Alice-Dress-Midnight-Reverie-retro-cotton-dress-with-pockets.jpg?v=1693956103",
+  "August Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/August-Dress-Dahlia-long-cotton-dress-with-pockets-and-lining.jpg?v=1723600463",
+  "Billie Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/billie-dress-daisy-dress-pockets-sage-floral-print-karma-east.jpg_5255.jpg?v=1768303381",
+  "Blythe Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/blythe-dress-daisy-100-cotton-sage-based-daisy-print-pockets-karma-east_0042.jpg?v=1772595403",
+  "Boho Tiered Maxi Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Boho-Tiered-Maxi-Dress-Rose-100-percent-cotton-pink-floral-sundress-with-pockets_6131.jpg?v=1767960651",
+  "Chelsea Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/chelsea-dress-daisy-100-cotton-sun-dress-pockets-sage-based-floral-karma-east0188.jpg?v=1770206506",
+  "Claudia Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Claudia-Dress-Black-100-percent-cotton-maxi-dress.jpg?v=1710475889",
+  "Ember Midi Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/ember-midi-dress-blue-mango-midi-dress-100-cotton-navy-floral-print-karma-east.jpg_9316.jpg?v=1777029682",
+  "Etta Dress": "https://cdn.shopify.com/s/files/1/1204/4848/products/EttaDressDapple_1104.jpg?v=1665727569",
+  "Francesca Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Francessca-Dress-Lilly-Lane-navy-floral-rayon-sundress-maxi.jpg?v=1727854086",
+  "Frankie Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/frankie-dress-amla-midi-dress-100-cotton-navy-floral-print-karma-east.jpg_9373.jpg?v=1777096362",
+  "Harper Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/HarperPincordDressTabascoOrangeRedCottonCordDress.jpg?v=1776219896",
+  "Kari Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/kari-dress-nocturne-dark-chocolate-black-cotton-womens-dress-with-pockets-karma-east0493.jpg?v=1761705710",
+  "Katie Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/katie-dress-rose-100-cotton-cream-based-floral-buttoned-bodice-karma-east_2144.jpg?v=1772796568",
+  "Mabel Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/MabelTangerineDreams2.jpg?v=1776305383",
+  "Maddison Dress": "https://cdn.shopify.com/s/files/1/1204/4848/products/MaddisonBirdofParadise5.jpg?v=1668577902",
+  "Nakita Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/nakita-dress-spruced-up-teal-rayon-lightweight-sundress-womens-karma-east_6673.jpg?v=1764115693",
+  "Nina Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/nina-dress-rose-100-cotton-cream-based-rose-floral-fit-flare-cap-sleeves-karma-east_0120.jpg?v=1772797333",
+  "Pippa Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Pippa-Dress-Longer-Riley-Dress-Ochre-Front.jpg?v=1776765867",
+  "Promenade Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/promenade-dress-blue-mango-midi-dress-100-cotton-navy-floral-print-karma-east.jpg_9424.jpg?v=1777179679",
+  "Riley Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Riley-Dress-Dapple-navy-cotton-midi-dress-with-pockets-polkadots_4132.jpg?v=1752628341",
+  "Rita Dress": "https://cdn.shopify.com/s/files/1/1204/4848/products/RitaDressViola_1656.jpg?v=1664518477",
+  "Scarlett Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/scarlett-dress-camellia-dress-100-cotton-black-floral-print-karma-east.jpg_6761.jpg?v=1767096580",
+  "Tully Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Tully-Dress-Tibetian-Red-100-percentt-cotton-sundress.jpg?v=1732676529",
+  "Tulsi Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/tulsi-dress-amla-dress-100-cotton-navy-floral-print-karma-east.jpg_9539.jpg?v=1777097015",
+  "Ursula Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/ursula-dress-rose-100-cotton-cream-based-rose-floral-pockets-buttoned-bodice-karma-east_0155.jpg?v=1772797657",
+  "Vivien Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Vivien-Dress-Dapple-50s-style-cotton-button-through-midi-length-pockets-2.jpg?v=1758091942",
+  "Willow Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/willow-dress-sakura-pink-plum-floral-cotton-womens-dress-karma-east_8206.jpg?v=1761964279",
+  "Avery Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Avery-Dress-Black-100-cotton-midi_6654.jpg?v=1752025759",
+  "Briar Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Briar-Dress-Cascade-lined-cotton.jpg?v=1737512029",
+  "Ella Wrap Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Etta-Wrap-Dress-Midnight-Reverie-Front.jpg?v=1773808001",
+  "Jamie Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Jamie-Dress-Pomegranate-knee-length-blue-base-fruit-print.jpg?v=1689726170",
+  "Olivia Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Olivia-Dress-Kaveri-100-cotton-maxi-with-sleeves.jpg?v=1744695045",
+  "Savannah Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/karma-east-savannah-dress-spruced-up-teal-rayon-sundress-lightweight-summer-dress-with-pockets_0067.jpg?v=1763615601",
+  "Tiered Maxi Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/tiered-maxi-dress-blue-mango-maxi-dress-100-cotton-navy-floral-print-karma-east.jpg_9505.jpg?v=1777180192",
+  "Tiered Midi Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/tiered-midi-dress-blue-mango-midi-dress-100-cotton-navy-floral-print-karma-east.jpg_9272.jpg?v=1777026109",
+  "Tilda Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/tilda-dress-amla-dress-100-cotton-navy-floral-print-karma-east.jpg_9595.jpg?v=1777095763",
+  "Zoey Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/Zoey-Dress-Black-100-percent-double-cotton-gauze-long-sleeve-dress.jpg?v=1719463574",
+  "Aria Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/aria-top-amla-top-100-cotton-navy-floral-print-karma-east.jpg_1052.jpg?v=1777094608",
+  "Aubrey Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/aubrey-top-camellia-top-100-cotton-black-floral-print-karma-east.jpg_6546.jpg?v=1766572419",
+  "Boxy Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/Boxy-Top-Bird-of-Paradise-navy-cotton-floral-womens-top_425.jpg?v=1752129885",
+  "Camille Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/camille-top-natural-white-cotton-womens-top-karma-east_9648.jpg?v=1761098932",
+  "Chloe Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/Chloe-Top-Natural-white-cotton-womens.jpg?v=1739337037",
+  "Eden Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/Eden-Top-Neela-loose-cotton-womens-blouse.jpg?v=1725001453",
+  "Neesha Top": "https://cdn.shopify.com/s/files/1/1204/4848/products/NeeshaTopDeepDiveCottonGauzeShortSleeve.jpg?v=1676526279",
+  "Pia Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/Pia-Top-Queen-Protea-black-based-floral-cotton-1.jpg?v=1758717947",
+  "Quinn Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/Quinn-Natural-White-100-percent-cotton-blouse.jpg?v=1760782606",
+  "Shell Top": "https://cdn.shopify.com/s/files/1/1204/4848/products/ShellPeonya.jpg?v=1603953508",
+  "Sky Blouse": "https://cdn.shopify.com/s/files/1/1204/4848/files/sky-blouse-amla-top-100-cotton-navy-floral-print-karma-east.jpg_0999.jpg?v=1777032120",
+  "Sylvia Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/Sylvia-Top-Sweet-Spot-100-percent-cotton_4793.jpg?v=1752808606",
+  "Tillie Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/tillie-top-rose-100-cotton-top-cream-based-floral-karma-east9411.jpg?v=1770375766",
+  "Tulsi Short Sleeve Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/tulsi-short-sleeve-top-amla-top-100-cotton-navy-floral-print-karma-east.jpg_1108.jpg?v=1777180817",
+  "Yasmin Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/yasmin-top-rose-100-cotton-top-cream-based-floral-karma-east9349.jpg?v=1770376178",
+  "Zali Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/zali-top-black-100-percent-cotton-summer-top_6666.jpg?v=1774324401",
+  "Demi Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/Demi-Top-Natural-White-pure-cotton-blouse.jpg?v=1753763334",
+  "Florence Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/florence-top-blue-mango-top-100-cotton-navy-floral-print-karma-east.jpg_0925.jpg?v=1777028824",
+  "Isla Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/Isla-Top-Midnight-Reverie-navy-blue-cotton-floral-womans-top.jpg?v=1693972613",
+  "Leia Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/Leia-Top-Ochre-Front.jpg?v=1776765271",
+  "Sophia Blouse": "https://cdn.shopify.com/s/files/1/1204/4848/files/Sophia-Top-Cranberry-cotton-blouse.jpg?v=1744427994",
+  "Tulsi Long Sleeve Top": "https://cdn.shopify.com/s/files/1/1204/4848/files/tulsi-long-sleeve-top-blue-mango-top-100-cotton-navy-floral-print-karma-east.jpg_0878.jpg?v=1777028016",
+  "Aalia Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/files/aalia-skirt-sakura-pink-plum-floral-cotton-womens-skirt-karma-east_9477.jpg?v=1761967853",
+  "Belt Loop Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/products/ShadedSpruce1.jpg?v=1652670216",
+  "Bridgette Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/files/bridgette-skirt-mistlerose-red-floral-cotton-summer-skirt-womens-karma-east_6113.jpg?v=1763638301",
+  "Reversible Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/files/Reversible-Skirt-Poppy-Queen-Protea-floral-cotton-zip-2.jpg?v=1758890691",
+  "Ruby Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/files/ruby-skirt-tallowwood-100-cotton-retro-floral-a-line-button-through-knee-length-pockets-karma-east_0347.jpg?v=1772799566",
+  "Zarah Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/files/zarah-skirt-daisy-skirt-100-cotton-sage-floral-print-karma-east.jpg_6434.jpg?v=1767419347",
+  "Cora Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/products/CoraSkirtProtea_KE_871-Edit.jpg?v=1662372122",
+  "Dawn Maxi Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/files/dawn-maxi-amla-skirt-100-cotton-navy-floral-print-karma-east.jpg_0607.jpg?v=1777181724",
+  "Acapulco Pant": "https://cdn.shopify.com/s/files/1/1204/4848/files/Acapulco-Pant-White-cotton-harem-pockets-3.jpg?v=1760669768",
+  "Flower Pants": "https://cdn.shopify.com/s/files/1/1204/4848/files/flower-pants-moon-flower-pants-100-cotton-moon-floral-print-karma-east.jpg_0451.jpg?v=1776299535",
+  "Greta Pant": "https://cdn.shopify.com/s/files/1/1204/4848/files/Greta-Pant-Black-100-percent-cotton-womens-pant6305.jpg?v=1758771997",
+  "Janis Pant": "https://cdn.shopify.com/s/files/1/1204/4848/products/JanisPantPowderBlue.jpg?v=1636614663",
+  "Jaya Pant": "https://cdn.shopify.com/s/files/1/1204/4848/files/Jaya-Pant-Evergreen-100-percent-cotton-green-womans-pants-wide-leg-with-pocket.jpg?v=1694655280",
+  "Nora Pant": "https://cdn.shopify.com/s/files/1/1204/4848/files/nora-pants-nocturne-pants-100-cotton-dark-floral-print-karma-east.jpg_0376.jpg?v=1774928258",
+  "Pilot Pant": "https://cdn.shopify.com/s/files/1/1204/4848/files/pilot-pants-amla-pants-100-cotton-navy-floral-print-karma-east.jpg_0713.jpg?v=1777093677",
+  "Remi Pant": "https://cdn.shopify.com/s/files/1/1204/4848/files/Remi-Pants-Queen-Protea-black-cotton-women_s-pant5793.jpg?v=1758888894",
+  "Tenzin Pant": "https://cdn.shopify.com/s/files/1/1204/4848/files/tenzin-pant-nocturne-pants-100-cotton-dark-floral-print-karma-east.jpg_0820.jpg?v=1774009212",
+  "Umbrella Pant": "https://cdn.shopify.com/s/files/1/1204/4848/files/umbrella-pant-jasmine-floral-rayon-womens-pant-karma-east9998.jpg?v=1761625795",
+  "Wide Leg Stretch Pocket Pants": "https://cdn.shopify.com/s/files/1/1204/4848/products/2M4A9621.jpg?v=1603784887",
+  "Aalia Corduroy Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/files/aalia-corduroy-skirt-maritime-blue-100-cotton-knee-length-pockets-karma-east_2049_641405da-7511-4949-9bfd-c0625b68f79e.jpg?v=1773800943",
+  "Belt Loop Corduroy Skirt": "https://cdn.shopify.com/s/files/1/1204/4848/files/Belt-Loop-Corduroy-Skirt-Douglas-Fir-green-midi-length.jpg?v=1741825931",
+  "Corduroy Jacket": "https://cdn.shopify.com/s/files/1/1204/4848/files/Cord-Jacket-Rain-Forest-Green-with-breast-pockets.jpg?v=1684822814",
+  "Corduroy Overalls": "https://cdn.shopify.com/s/files/1/1204/4848/files/Corduroy-Overalls-Parachute-Purple-cotton-pocket-overalls.jpg?v=1712035154",
+  "Corduroy Pinafore": "https://cdn.shopify.com/s/files/1/1204/4848/files/Corduroy-Pinafore-Zinfandel-maroon-cotton-layer-over-leggings.jpg?v=1710811127",
+  "Esta Corduroy Pants": "https://cdn.shopify.com/s/files/1/1204/4848/files/Corduroy-Overalls-Parachute-Purple-cotton-pocket-overalls.jpg?v=1712035154",
+  "Jamie Corduroy Dress": "https://cdn.shopify.com/s/files/1/1204/4848/products/JamieCordCherryc.jpg?v=1620800356",
+  "Nora Corduroy Pants": "https://cdn.shopify.com/s/files/1/1204/4848/files/nora-corduroy-pants-black-100-cotton-pockets-zip-high-waist-karma-east_1409.jpg?v=1773294116",
+  "Polly Pocket Corduroy Tunic": "https://cdn.shopify.com/s/files/1/1204/4848/files/polly-pocket-corduroy-sleeveless-tunic-black-100-cotton-pockets-karma-east_2609_1430bb10-1339-438e-8dfe-80c16f2d61dd.jpg?v=1773284527",
+};
 
 function productInfoStyles(names: string[]): ProductInfoStyle[] {
-  return names.map((name) => ({ id: slugForOption(name), name }));
+  return names.map((name) => ({ id: slugForOption(name), name, imageUrl: PRODUCT_STYLE_IMAGES[name] ?? "" }));
 }
 
 const DEFAULT_PRODUCT_INFO: ProductInfo = {
+  gridColumns: 4,
   categories: [
     {
       id: "short_sleeve_dresses",
@@ -1813,6 +1929,7 @@ type FabricCustomSheet = {
 type ProductInfoStyle = {
   id: string;
   name: string;
+  imageUrl?: string;
   hidden?: boolean;
 };
 type ProductInfoCategory = {
@@ -1821,6 +1938,7 @@ type ProductInfoCategory = {
   styles: ProductInfoStyle[];
 };
 type ProductInfo = {
+  gridColumns?: 3 | 4;
   categories: ProductInfoCategory[];
 };
 type UniversalSettings = {
@@ -2007,13 +2125,15 @@ function normalizeProductInfo(value: unknown): ProductInfo {
           const style = styleItem as Record<string, unknown>;
           const styleId = String(style.id ?? "").trim();
           const styleName = String(style.name ?? "").trim();
-          return styleId && styleName ? { id: styleId, name: styleName, hidden: style.hidden === true } : null;
+          const imageUrl = String(style.imageUrl ?? PRODUCT_STYLE_IMAGES[styleName] ?? "").trim();
+          return styleId && styleName ? { id: styleId, name: styleName, imageUrl, hidden: style.hidden === true } : null;
         }).filter(Boolean) as ProductInfoStyle[]
       : [];
     return id && name ? { id, name, styles } : null;
   }).filter(Boolean) as ProductInfoCategory[];
 
-  return categories.length ? { categories } : structuredClone(DEFAULT_PRODUCT_INFO);
+  const gridColumns = (value as Record<string, unknown>).gridColumns === 3 ? 3 : 4;
+  return categories.length ? { gridColumns, categories } : structuredClone(DEFAULT_PRODUCT_INFO);
 }
 
 async function loadProductInfoForAction() {
@@ -4068,6 +4188,7 @@ function ProductInformationPanel({
     : [];
   const hiddenStyleCount = selectedCategory?.styles.filter((style) => style.hidden).length ?? 0;
   const isSubmitting = fetcher.state !== "idle";
+  const gridColumns = productInfo.gridColumns === 3 ? 3 : 4;
 
   const submitProductInfo = (fields: Record<string, string>) => {
     fetcher.submit(fields, { method: "post" });
@@ -4095,6 +4216,27 @@ function ProductInformationPanel({
     submitProductInfo({ intent: "unhide_product_style", categoryId: selectedCategory.id, styleId: style.id });
   };
 
+  const updateStyleImage = (style: ProductInfoStyle, imageUrl: string) => {
+    if (!selectedCategory) return;
+    submitProductInfo({
+      intent: "update_product_style_image",
+      categoryId: selectedCategory.id,
+      styleId: style.id,
+      imageUrl,
+    });
+  };
+
+  const replaceStyleImage = (style: ProductInfoStyle, file: File | null) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => updateStyleImage(style, String(reader.result ?? ""));
+    reader.readAsDataURL(file);
+  };
+
+  const updateGridColumns = (nextColumns: 3 | 4) => {
+    submitProductInfo({ intent: "update_product_info_grid", gridColumns: String(nextColumns) });
+  };
+
   return (
     <div style={s.productInfoPage}>
       <div style={s.productInfoToolbar}>
@@ -4119,27 +4261,69 @@ function ProductInformationPanel({
           </div>
         </div>
         <div style={s.productInfoActions}>
+          <div style={s.productInfoSegmented} aria-label="Style cards per row">
+            {[3, 4].map((count) => (
+              <button
+                key={count}
+                type="button"
+                style={gridColumns === count ? { ...s.productInfoSegmentButton, ...s.productInfoSegmentButtonActive } : s.productInfoSegmentButton}
+                onClick={() => updateGridColumns(count as 3 | 4)}
+                disabled={isSubmitting}
+              >
+                {count}
+              </button>
+            ))}
+          </div>
           <button type="button" style={s.primaryActionButton} onClick={addStyle} disabled={isSubmitting || !selectedCategory}>
             Add Style
           </button>
         </div>
       </div>
 
-      <div style={s.productInfoList}>
+      <div style={{ ...s.productInfoList, gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }}>
         {visibleStyles.map((style) => (
-          <div key={style.id} style={s.productStyleRow}>
-            <div style={s.productStyleRowMain}>
+          <div key={style.id} style={s.productStyleCard}>
+            <div style={s.productStyleImageWrap}>
+              {style.imageUrl ? (
+                <img src={style.imageUrl} alt={style.name} style={s.productStyleImage} loading="lazy" />
+              ) : (
+                <div style={s.productStyleImageEmpty}>No image</div>
+              )}
+            </div>
+            <div style={s.productStyleCardBody}>
               <span style={s.productStyleTitle}>{style.name}</span>
               <span style={s.productStyleMeta}>{style.hidden ? "Hidden" : "Costing details next"}</span>
             </div>
-            <button
-              type="button"
-              style={s.removeUserButton}
-              onClick={() => setStyleChoice(style)}
-              title={`Remove ${style.name}`}
-            >
-              Remove
-            </button>
+            <div style={s.productStyleCardActions}>
+              <label style={s.secondaryButton}>
+                Replace image
+                <input
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={(event) => {
+                    replaceStyleImage(style, event.currentTarget.files?.[0] ?? null);
+                    event.currentTarget.value = "";
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                style={s.secondaryButton}
+                onClick={() => updateStyleImage(style, "")}
+                disabled={!style.imageUrl || isSubmitting}
+              >
+                Remove image
+              </button>
+              <button
+                type="button"
+                style={s.removeUserButton}
+                onClick={() => setStyleChoice(style)}
+                title={`Remove ${style.name}`}
+              >
+                Remove style
+              </button>
+            </div>
           </div>
         ))}
         {selectedCategory && !visibleStyles.length && (
@@ -8761,6 +8945,29 @@ const s: Record<string, React.CSSProperties> = {
     gap: 8,
     flexWrap: "wrap",
   },
+  productInfoSegmented: {
+    display: "inline-flex",
+    alignItems: "center",
+    overflow: "hidden",
+    border: "1px solid #cbd5e1",
+    borderRadius: 8,
+    background: "#fff",
+  },
+  productInfoSegmentButton: {
+    minWidth: 38,
+    border: 0,
+    borderRight: "1px solid #cbd5e1",
+    padding: "9px 11px",
+    background: "#fff",
+    color: "#475569",
+    fontSize: 13,
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  productInfoSegmentButtonActive: {
+    background: "var(--portal-primary-button-bg, #111827)",
+    color: "var(--portal-primary-button-color, #ffffff)",
+  },
   productInfoSelectLabel: {
     display: "grid",
     gap: 5,
@@ -8798,11 +9005,52 @@ const s: Record<string, React.CSSProperties> = {
   },
   productInfoList: {
     display: "grid",
-    gap: 8,
+    gap: 12,
     background: "#fff",
     border: "1px solid #dbe3ee",
     borderRadius: 10,
     padding: 10,
+  },
+  productStyleCard: {
+    minWidth: 0,
+    display: "grid",
+    gridTemplateRows: "auto 1fr auto",
+    overflow: "hidden",
+    border: "1px solid #dbe3ee",
+    borderRadius: 8,
+    background: "#fff",
+    boxShadow: "0 1px 2px rgba(15,23,42,0.06)",
+  },
+  productStyleImageWrap: {
+    aspectRatio: "3 / 4",
+    background: "#eef2f7",
+  },
+  productStyleImage: {
+    width: "100%",
+    height: "100%",
+    display: "block",
+    objectFit: "cover",
+  },
+  productStyleImageEmpty: {
+    width: "100%",
+    height: "100%",
+    display: "grid",
+    placeItems: "center",
+    color: "#64748b",
+    fontSize: 13,
+    fontWeight: 900,
+  },
+  productStyleCardBody: {
+    display: "grid",
+    gap: 4,
+    padding: "12px 12px 4px",
+  },
+  productStyleCardActions: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap",
+    padding: 12,
   },
   productStyleRow: {
     display: "flex",
@@ -8914,7 +9162,6 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 16,
     fontWeight: 900,
     lineHeight: 1.25,
-    paddingRight: 48,
   },
   productStyleMeta: {
     color: "#64748b",
