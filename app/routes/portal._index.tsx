@@ -1585,28 +1585,152 @@ const FABRIC_DELETED_ROWS_KEY = "production-portal-fabric-deleted-rows-v1";
 const FABRIC_CUSTOM_SHEETS_KEY = "production-portal-fabric-custom-sheets-v1";
 const FABRIC_DELETED_SHEETS_KEY = "production-portal-fabric-deleted-sheets-v1";
 const FABRIC_MANUAL_SHEETS_KEY = "production-portal-fabric-manual-sheets-v1";
-const PRODUCT_INFO_KEY = "production-portal-product-info-v1";
+const PRODUCT_INFO_KEY = "production-portal-product-info-v2";
 const DEFAULT_FABRIC_HEADERS = ["Supplier", "Fabric Type", "Fabric", "Name", "Cost per Meter", "Meters in Stock", "Cut Pieces", "Received / Date", "Products", "Notes"];
+
+function productInfoStyles(names: string[]): ProductInfoStyle[] {
+  return names.map((name) => ({ id: slugForOption(name), name }));
+}
+
 const DEFAULT_PRODUCT_INFO: ProductInfo = {
   categories: [
     {
       id: "short_sleeve_dresses",
       name: "Short Sleeve Dresses",
-      styles: [
-        { id: "vivien_dress", name: "Vivien Dress" },
-        { id: "sun_dress", name: "Sun Dress" },
-        { id: "mabel_dress", name: "Mabel Dress" },
-        { id: "billie_dress", name: "Billie Dress" },
-        { id: "katie_dress", name: "Katie Dress" },
-      ],
+      styles: productInfoStyles([
+        "Acacia Maxi Dress",
+        "Alice Dress",
+        "August Dress",
+        "Billie Dress",
+        "Blythe Dress",
+        "Boho Tiered Maxi Dress",
+        "Chelsea Dress",
+        "Claudia Dress",
+        "Ember Midi Dress",
+        "Etta Dress",
+        "Francesca Dress",
+        "Frankie Dress",
+        "Harper Dress",
+        "Kari Dress",
+        "Katie Dress",
+        "Mabel Dress",
+        "Maddison Dress",
+        "Nakita Dress",
+        "Nina Dress",
+        "Pippa Dress",
+        "Promenade Dress",
+        "Riley Dress",
+        "Rita Dress",
+        "Scarlett Dress",
+        "Tully Dress",
+        "Tulsi Dress",
+        "Ursula Dress",
+        "Vivien Dress",
+        "Willow Dress",
+      ]),
     },
-    { id: "long_sleeve_dresses", name: "Long Sleeve Dresses", styles: [] },
-    { id: "short_sleeve_tops", name: "Short Sleeve Tops", styles: [] },
-    { id: "long_sleeve_tops", name: "Long Sleeve Tops", styles: [] },
-    { id: "mid_length_skirts", name: "Mid Length Skirts", styles: [] },
-    { id: "long_skirts", name: "Long Skirts", styles: [] },
-    { id: "pants", name: "Pants", styles: [] },
-    { id: "jackets", name: "Jackets", styles: [] },
+    {
+      id: "long_sleeve_dresses",
+      name: "Long Sleeve Dresses",
+      styles: productInfoStyles([
+        "Avery Dress",
+        "Briar Dress",
+        "Ella Wrap Dress",
+        "Jamie Dress",
+        "Olivia Dress",
+        "Savannah Dress",
+        "Tiered Maxi Dress",
+        "Tiered Midi Dress",
+        "Tilda Dress",
+        "Zoey Dress",
+      ]),
+    },
+    {
+      id: "short_sleeve_tops",
+      name: "Short Sleeve Tops",
+      styles: productInfoStyles([
+        "Aria Top",
+        "Aubrey Top",
+        "Boxy Top",
+        "Camille Top",
+        "Chloe Top",
+        "Eden Top",
+        "Neesha Top",
+        "Pia Top",
+        "Quinn Top",
+        "Shell Top",
+        "Sky Blouse",
+        "Sylvia Top",
+        "Tillie Top",
+        "Tulsi Short Sleeve Top",
+        "Yasmin Top",
+        "Zali Top",
+      ]),
+    },
+    {
+      id: "long_sleeve_tops",
+      name: "Long Sleeve Tops",
+      styles: productInfoStyles([
+        "Demi Top",
+        "Florence Top",
+        "Isla Top",
+        "Leia Top",
+        "Sophia Blouse",
+        "Tulsi Long Sleeve Top",
+      ]),
+    },
+    {
+      id: "mid_length_skirts",
+      name: "Mid Length Skirts",
+      styles: productInfoStyles([
+        "Aalia Skirt",
+        "Belt Loop Skirt",
+        "Bridgette Skirt",
+        "Reversible Skirt",
+        "Ruby Skirt",
+        "Zarah Skirt",
+      ]),
+    },
+    {
+      id: "long_skirts",
+      name: "Long Skirts",
+      styles: productInfoStyles([
+        "Cora Skirt",
+        "Dawn Maxi Skirt",
+      ]),
+    },
+    {
+      id: "pants",
+      name: "Pants",
+      styles: productInfoStyles([
+        "Acapulco Pant",
+        "Flower Pants",
+        "Greta Pant",
+        "Janis Pant",
+        "Jaya Pant",
+        "Nora Pant",
+        "Pilot Pant",
+        "Remi Pant",
+        "Tenzin Pant",
+        "Umbrella Pant",
+        "Wide Leg Stretch Pocket Pants",
+      ]),
+    },
+    {
+      id: "corduroy",
+      name: "Corduroy",
+      styles: productInfoStyles([
+        "Aalia Corduroy Skirt",
+        "Belt Loop Corduroy Skirt",
+        "Corduroy Jacket",
+        "Corduroy Overalls",
+        "Corduroy Pinafore",
+        "Esta Corduroy Pants",
+        "Jamie Corduroy Dress",
+        "Nora Corduroy Pants",
+        "Polly Pocket Corduroy Tunic",
+      ]),
+    },
   ],
 };
 const HIDDEN_FABRIC_SHEET_NAMES = new Set(["new fabric on order", "fabric on order"]);
