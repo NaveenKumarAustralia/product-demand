@@ -1814,6 +1814,7 @@ const DEFAULT_PRODUCT_INFO: ProductInfo = {
         "Billie Dress",
         "Blythe Dress",
         "Boho Tiered Maxi Dress",
+        "Brixton Dress",
         "Chelsea Dress",
         "Claudia Dress",
         "Ember Midi Dress",
