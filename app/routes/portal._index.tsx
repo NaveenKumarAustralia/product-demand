@@ -3542,6 +3542,20 @@ export default function PortalDashboard() {
         "--portal-heading-text-color": universalSettings.headingTextColor,
       } as React.CSSProperties}
     >
+      <style>
+        {`
+          .no-number-spinner::-webkit-outer-spin-button,
+          .no-number-spinner::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+          }
+
+          .no-number-spinner {
+            appearance: textfield;
+            -moz-appearance: textfield;
+          }
+        `}
+      </style>
       <aside style={{ ...s.sidebar, background: universalSettings.menuBg, color: universalSettings.menuTextColor }}>
         {universalSettings.logoUrl && (
           <div style={{ padding: "2px 14px 0" }}>
@@ -5761,8 +5775,10 @@ function FabricProductsCell({
                           <td style={s.fabricStyleUsageTd}>{item.styleName}</td>
                           <td style={s.fabricStyleUsageTd}>
                             <input
-                              type="text"
-                              inputMode="decimal"
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              className="no-number-spinner"
                               value={item.meters}
                               onChange={(event) => {
                                 const meters = event.currentTarget.value;
