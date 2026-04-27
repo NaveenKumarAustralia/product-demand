@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import type { HeadersFunction, LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useLoaderData, useFetcher } from "react-router";
+import { redirect, useLoaderData, useFetcher } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -34,6 +34,8 @@ type OpenOrder = {
 // ─── Loader ──────────────────────────────────────────────────────────────────
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
+  throw redirect("/portal");
+
   const { admin, session } = await authenticate.admin(request);
 
   const response = await admin.graphql(`
