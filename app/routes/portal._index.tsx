@@ -188,7 +188,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         select: { value: true },
       })
     : null;
-  const inrToAudRate = page === "fabric" ? await getInrToAudRate() : null;
+  const inrToAudRate = page === "fabric" && !selectedFabricTab ? await getInrToAudRate() : null;
   const manualFabricSheets = page === "fabric"
     ? await getManualFabricSheets({
         savedValue: fabricManualSheetsSetting?.value,
@@ -199,7 +199,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         deletedSheetsValue: fabricDeletedSheetsSetting?.value,
       })
     : [];
-  const fabricSheets = page === "fabric"
+  const fabricSheets = page === "fabric" && selectedFabricTab
     ? getFabricSheets(
         undefined,
         undefined,
@@ -210,6 +210,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         {},
         manualFabricSheets,
       )
+    : page === "fabric"
+      ? getFabricSheetSummaries(manualFabricSheets, fabricSettings.tileOrder)
     : [];
 
   // Collect all unique size names across all orders, sorted logically
@@ -2077,6 +2079,21 @@ function orderFabricSheets(sheets: FabricSheetData[], tileOrder: string[] = []) 
   });
 }
 
+function getFabricSheetSummaries(sheets: FabricStockSheet[], tileOrder: string[] = []): FabricSheetData[] {
+  return orderFabricSheets(
+    sheets
+      .filter((sheet) => !isHiddenFabricSheet(sheet.name))
+      .map((sheet) => ({
+        ...sheet,
+        rows: [],
+        rowCount: sheet.rows.length,
+        totalQuantity: sumFabricRows(sheet.headers, sheet.rows),
+        totalCost: sumFabricCost(sheet.headers, sheet.rows),
+      })),
+    tileOrder,
+  );
+}
+
 function toManualFabricSheet(sheet: FabricStockSheet | FabricCustomSheet): FabricStockSheet {
   return {
     gid: sheet.gid,
@@ -2184,16 +2201,28 @@ async function loadManualFabricSheetsForAction() {
 }
 
 async function getInrToAudRate() {
+  const cached = getInrToAudRate as typeof getInrToAudRate & { cachedRate?: number; cachedAt?: number };
+  if (cached.cachedRate && cached.cachedAt && Date.now() - cached.cachedAt < 3 * 60 * 60 * 1000) {
+    return cached.cachedRate;
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 700);
   try {
     const response = await fetch("https://open.er-api.com/v6/latest/INR", {
       headers: { Accept: "application/json" },
+      signal: controller.signal,
     });
     if (!response.ok) return null;
     const data = await response.json() as { rates?: Record<string, number> };
     const rate = Number(data.rates?.AUD);
-    return Number.isFinite(rate) && rate > 0 ? rate : null;
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    cached.cachedRate = rate;
+    cached.cachedAt = Date.now();
+    return rate;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
