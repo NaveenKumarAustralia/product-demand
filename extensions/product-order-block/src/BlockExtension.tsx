@@ -167,7 +167,7 @@ function ProductOrderBlock() {
   const [orders, setOrders] = useState<OrderStatusItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [showForm, setShowForm] = useState(false);
+  const [showForm, setShowForm] = useState(true);
   const [variants, setVariants] = useState<Variant[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -385,7 +385,6 @@ function ProductOrderBlock() {
           : `${mode === "existing" ? "Existing order note added" : "New order note created"}`,
       );
       if (shop && productGid) await refreshOrderStatus(shop, productGid);
-      setShowForm(false);
       setNotes("");
       setCustomProductGroup("");
       setVariants((prev) => prev.map((v) => ({ ...v, qtyOrdered: "" })));
@@ -447,6 +446,7 @@ function ProductOrderBlock() {
 
   return (
     <BlockStack gap="small">
+      {successMsg && <Banner tone="success">{successMsg}</Banner>}
       {statusRow}
       <Divider />
       {formError && <Banner tone="critical">{formError}</Banner>}
@@ -560,7 +560,7 @@ function ProductOrderBlock() {
           {submitting ? "Saving..." : "Create new order"}
         </Button>
         <Button href={PORTAL_URL} target="_blank" variant="secondary">Open portal</Button>
-        <Button variant="tertiary" onPress={() => { setShowForm(false); setFormError(null); }}>Cancel</Button>
+        <Button variant="tertiary" onPress={() => { setFormError(null); setNotes(""); }}>Cancel</Button>
       </InlineStack>
     </BlockStack>
   );
