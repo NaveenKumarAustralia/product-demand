@@ -1120,6 +1120,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "reorder_product_styles") {
+    const categoryId = String(form.get("categoryId") ?? "");
+    if (!categoryId) return null;
+    let styleIds: string[] = [];
+    try {
+      const parsed = JSON.parse(String(form.get("styleIds") ?? "[]"));
+      if (Array.isArray(parsed)) styleIds = parsed.map((item) => String(item)).filter(Boolean);
+    } catch {
+      styleIds = [];
+    }
+    if (!styleIds.length) return null;
+    const productInfo = await loadProductInfoForAction();
+    const category = productInfo.categories.find((item) => item.id === categoryId);
+    if (!category) return null;
+    const styleById = new Map(category.styles.map((style) => [style.id, style]));
+    const ordered = styleIds.map((id) => styleById.get(id)).filter(Boolean) as ProductInfoStyle[];
+    const orderedIds = new Set(ordered.map((style) => style.id));
+    category.styles = [...ordered, ...category.styles.filter((style) => !orderedIds.has(style.id))];
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
   if (intent === "hide_product_style") {
     const categoryId = String(form.get("categoryId") ?? "");
     const styleId = String(form.get("styleId") ?? "");
@@ -4179,6 +4201,8 @@ function ProductInformationPanel({
   const fetcher = useFetcher();
   const [showHidden, setShowHidden] = useState(false);
   const [styleChoice, setStyleChoice] = useState<ProductInfoStyle | null>(null);
+  const [dragStyleId, setDragStyleId] = useState<string | null>(null);
+  const [dragOverStyleId, setDragOverStyleId] = useState<string | null>(null);
   const selectedCategory = productInfo.categories.find((category) => category.id === selectedCategoryId)
     ?? productInfo.categories[0]
     ?? null;
@@ -4237,6 +4261,22 @@ function ProductInformationPanel({
     submitProductInfo({ intent: "update_product_info_grid", gridColumns: String(nextColumns) });
   };
 
+  const reorderStyles = (targetStyleId: string) => {
+    if (!selectedCategory || !dragStyleId || dragStyleId === targetStyleId || normalizedSearch) return;
+    const currentIds = selectedCategory.styles.map((style) => style.id);
+    const fromIndex = currentIds.indexOf(dragStyleId);
+    const toIndex = currentIds.indexOf(targetStyleId);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const nextIds = [...currentIds];
+    const [movedId] = nextIds.splice(fromIndex, 1);
+    nextIds.splice(toIndex, 0, movedId);
+    submitProductInfo({
+      intent: "reorder_product_styles",
+      categoryId: selectedCategory.id,
+      styleIds: JSON.stringify(nextIds),
+    });
+  };
+
   return (
     <div style={s.productInfoPage}>
       <div style={s.productInfoToolbar}>
@@ -4282,7 +4322,41 @@ function ProductInformationPanel({
 
       <div style={{ ...s.productInfoList, gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }}>
         {visibleStyles.map((style) => (
-          <div key={style.id} style={s.productStyleCard}>
+          <div
+            key={style.id}
+            draggable={!normalizedSearch}
+            style={{
+              ...s.productStyleCard,
+              ...(dragStyleId === style.id ? s.productStyleCardDragging : {}),
+              ...(dragOverStyleId === style.id && dragStyleId !== style.id ? s.productStyleCardDropTarget : {}),
+              cursor: normalizedSearch ? "default" : "grab",
+            }}
+            onDragStart={(event) => {
+              if (normalizedSearch) {
+                event.preventDefault();
+                return;
+              }
+              setDragStyleId(style.id);
+              event.dataTransfer.effectAllowed = "move";
+              event.dataTransfer.setData("text/plain", style.id);
+            }}
+            onDragOver={(event) => {
+              if (!dragStyleId || normalizedSearch) return;
+              event.preventDefault();
+              setDragOverStyleId(style.id);
+            }}
+            onDragLeave={() => setDragOverStyleId((current) => current === style.id ? null : current)}
+            onDrop={(event) => {
+              event.preventDefault();
+              reorderStyles(style.id);
+              setDragStyleId(null);
+              setDragOverStyleId(null);
+            }}
+            onDragEnd={() => {
+              setDragStyleId(null);
+              setDragOverStyleId(null);
+            }}
+          >
             <div style={s.productStyleImageWrap}>
               {style.imageUrl ? (
                 <img src={style.imageUrl} alt={style.name} style={s.productStyleImage} loading="lazy" />
@@ -4334,16 +4408,16 @@ function ProductInformationPanel({
         {!selectedCategory && (
           <div style={s.productInfoEmpty}>Add a category to start building product styles.</div>
         )}
-        <div style={s.productInfoFooterActions}>
-          <button
-            type="button"
-            style={s.secondaryButton}
-            onClick={() => setShowHidden((current) => !current)}
-            disabled={!hiddenStyleCount}
-          >
-            {showHidden ? "Hide hidden styles" : `Show hidden styles${hiddenStyleCount ? ` (${hiddenStyleCount})` : ""}`}
-          </button>
-        </div>
+      </div>
+      <div style={s.productInfoFooterActions}>
+        <button
+          type="button"
+          style={s.secondaryButton}
+          onClick={() => setShowHidden((current) => !current)}
+          disabled={!hiddenStyleCount}
+        >
+          {showHidden ? "Hide hidden styles" : `Show hidden styles${hiddenStyleCount ? ` (${hiddenStyleCount})` : ""}`}
+        </button>
       </div>
       {styleChoice && selectedCategory && (
         <div style={s.productInfoModalBackdrop}>
@@ -9021,8 +9095,16 @@ const s: Record<string, React.CSSProperties> = {
     background: "#fff",
     boxShadow: "0 1px 2px rgba(15,23,42,0.06)",
   },
+  productStyleCardDragging: {
+    opacity: 0.56,
+    boxShadow: "0 10px 24px rgba(15,23,42,0.16)",
+  },
+  productStyleCardDropTarget: {
+    outline: "3px solid var(--portal-primary-button-bg, #111827)",
+    outlineOffset: 2,
+  },
   productStyleImageWrap: {
-    aspectRatio: "3 / 4",
+    aspectRatio: "2 / 3",
     background: "#eef2f7",
   },
   productStyleImage: {
@@ -9044,13 +9126,17 @@ const s: Record<string, React.CSSProperties> = {
     display: "grid",
     gap: 4,
     padding: "12px 12px 4px",
+    textAlign: "center",
+    justifyItems: "center",
   },
   productStyleCardActions: {
     display: "flex",
     alignItems: "center",
+    justifyContent: "center",
     gap: 6,
     flexWrap: "wrap",
     padding: 12,
+    textAlign: "center",
   },
   productStyleRow: {
     display: "flex",
@@ -9066,7 +9152,6 @@ const s: Record<string, React.CSSProperties> = {
   productInfoFooterActions: {
     display: "flex",
     justifyContent: "flex-end",
-    paddingTop: 2,
   },
   productInfoModalBackdrop: {
     position: "fixed",
