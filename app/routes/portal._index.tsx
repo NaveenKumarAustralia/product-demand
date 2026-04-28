@@ -2980,9 +2980,10 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
 
   const escapedQuery = trimmedQuery.replace(/[\\"]/g, "\\$&");
   const graphqlQuery = `#graphql
-    query PackingProductSearch($query: String) {
-      products(first: 100, query: $query, sortKey: TITLE) {
+    query PackingProductSearch($query: String, $after: String) {
+      products(first: 100, query: $query, after: $after, sortKey: TITLE) {
         edges {
+          cursor
           node {
             id
             title
@@ -3000,6 +3001,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
             }
           }
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
   `;
@@ -3061,7 +3063,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
         },
         body: JSON.stringify({
           query: graphqlQuery,
-          variables: { query: shopifyQuery },
+          variables: { query: shopifyQuery, after: null },
         }),
       });
       if (!response.ok) return [];
@@ -3070,32 +3072,66 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
       return [];
     }
   };
+  const findAllMatchingProducts = async (fetchPage: (after: string | null) => Promise<any>) => {
+    const matches: ShopifySearchProduct[] = [];
+    const seen = new Set<string>();
+    let after: string | null = null;
+
+    for (let pageIndex = 0; pageIndex < 50; pageIndex += 1) {
+      const json = await fetchPage(after);
+      const pageProducts = mapProducts(json);
+      for (const product of pageProducts) {
+        if (seen.has(product.id) || !matchesLocally(product)) continue;
+        seen.add(product.id);
+        matches.push(product);
+        if (matches.length >= 20) return matches;
+      }
+
+      const pageInfo = json?.data?.products?.pageInfo;
+      if (!pageInfo?.hasNextPage || !pageInfo.endCursor) break;
+      after = String(pageInfo.endCursor);
+    }
+
+    return matches;
+  };
 
   try {
     const { admin } = await unauthenticated.admin(session.shop);
     const plainResponse = await admin.graphql(graphqlQuery, {
-      variables: { query: escapedQuery },
+      variables: { query: escapedQuery, after: null },
     });
     const plainProducts = mapProducts(await plainResponse.json());
     if (plainProducts.length) return plainProducts.slice(0, 20);
 
     const response = await admin.graphql(graphqlQuery, {
-      variables: { query: `title:*${escapedQuery}* OR sku:*${escapedQuery}*` },
+      variables: { query: `title:*${escapedQuery}* OR sku:*${escapedQuery}*`, after: null },
     });
     const json = await response.json();
     const products = mapProducts(json);
     if (products.length) return products.slice(0, 20);
 
-    const fallbackResponse = await admin.graphql(graphqlQuery, { variables: { query: null } });
-    const fallbackJson = await fallbackResponse.json();
-    return mapProducts(fallbackJson).filter(matchesLocally).slice(0, 20);
+    return findAllMatchingProducts(async (after) => {
+      const fallbackResponse = await admin.graphql(graphqlQuery, { variables: { query: null, after } });
+      return fallbackResponse.json();
+    });
   } catch (error) {
     console.error("Shopify product search failed", error);
     const plainProducts = await directFetch(escapedQuery);
     if (plainProducts.length) return plainProducts.slice(0, 20);
     const products = await directFetch(`title:*${escapedQuery}* OR sku:*${escapedQuery}*`);
     if (products.length) return products.slice(0, 20);
-    return (await directFetch(null)).filter(matchesLocally).slice(0, 20);
+    return findAllMatchingProducts(async (after) => {
+      const response = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": session.accessToken,
+        },
+        body: JSON.stringify({ query: graphqlQuery, variables: { query: null, after } }),
+      });
+      if (!response.ok) return null;
+      return response.json();
+    });
   }
 }
 
