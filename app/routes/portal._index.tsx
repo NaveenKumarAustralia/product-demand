@@ -310,6 +310,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
   const currentUser = getCurrentPortalUser(request, users);
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
+  const canLoadPackingInventory = !loginRequired || users.length === 0 || Boolean(currentUser?.canLoadInventory);
 
   const updates: Record<string, unknown> = {};
 
@@ -356,6 +357,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         id: crypto.randomUUID(),
         name,
         admin: form.get("admin") === "on",
+        canLoadInventory: form.get("canLoadInventory") === "on" || form.get("admin") === "on",
         active: true,
       },
     ];
@@ -367,6 +369,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!canManageUsers) return null;
     const userId = String(form.get("userId") ?? "");
     await savePortalUsers(users.filter((user) => user.id !== userId));
+    return null;
+  }
+
+  if (intent === "update_portal_user_inventory_access") {
+    if (!canManageUsers) return null;
+    const userId = String(form.get("userId") ?? "");
+    const canLoadInventory = form.get("value") === "on";
+    await savePortalUsers(users.map((user) => user.id === userId ? { ...user, canLoadInventory } : user));
     return null;
   }
 
@@ -642,6 +652,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "load_packing_inventory") {
+    if (!canLoadPackingInventory) return null;
     const packingId = Number(form.get("packingId"));
     const skipWords = String(form.get("skipWords") ?? "")
       .split(",")
@@ -2002,7 +2013,7 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
 };
 
 type ColumnDef = { id: string; label: string; center?: boolean };
-type PortalUser = { id: string; name: string; admin: boolean; active: boolean };
+type PortalUser = { id: string; name: string; admin: boolean; active: boolean; canLoadInventory: boolean };
 type ActivePortalUser = PortalUser & { initials: string; lastSeen: number };
 type RestockOption = { value: string; label: string; bg: string; color: string };
 type RestockSettings = {
@@ -2092,6 +2103,7 @@ function normalizePortalUsers(value: unknown): PortalUser[] {
         id,
         name,
         admin: Boolean(user.admin),
+        canLoadInventory: "canLoadInventory" in user ? Boolean(user.canLoadInventory) : Boolean(user.admin),
         active: user.active !== false,
       };
     })
@@ -3504,6 +3516,7 @@ export default function PortalDashboard() {
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
+  const canLoadPackingInventory = !loginRequired || users.length === 0 || Boolean(currentUser?.canLoadInventory);
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
     { id: "orderDate", label: "Order Date" },
@@ -3742,6 +3755,7 @@ export default function PortalDashboard() {
             productResults={productResults}
             searchTitle={searchTitleInput}
             updateParams={updateParams}
+            canLoadInventory={canLoadPackingInventory}
           />
         ) : page === "fabric" ? (
           <FabricSheetsPanel
@@ -6219,6 +6233,19 @@ function SettingsPanel({
               <span style={s.activeUserBadge}>{initialsForName(user.name)}</span>
               <span style={s.userName}>{user.name}</span>
               {user.admin && <span style={s.adminPill}>Admin</span>}
+              <label style={s.inventoryAccessCheckbox}>
+                <input
+                  type="checkbox"
+                  checked={user.canLoadInventory}
+                  disabled={!canManageUsers}
+                  onChange={(event) => submitPortalCell(settingsFetcher, {
+                    intent: "update_portal_user_inventory_access",
+                    userId: user.id,
+                    value: event.currentTarget.checked ? "on" : "off",
+                  })}
+                />
+                Load Shopify inventory
+              </label>
               {canManageUsers && (
                 <button
                   type="button"
@@ -6244,6 +6271,10 @@ function SettingsPanel({
             <label style={s.adminCheckbox}>
               <input type="checkbox" name="admin" />
               Admin
+            </label>
+            <label style={s.adminCheckbox}>
+              <input type="checkbox" name="canLoadInventory" />
+              Load Shopify inventory
             </label>
             <button type="submit" style={s.loginButton}>Add user</button>
           </settingsFetcher.Form>
@@ -6779,6 +6810,7 @@ function PackingListDetail({
   productResults,
   headerSearch = "",
   updateParams,
+  canLoadInventory,
 }: {
   packingList: PackingListWithLines;
   savedPackingColumnWidths: Record<string, number>;
@@ -6791,6 +6823,7 @@ function PackingListDetail({
   productResults: ShopifySearchProduct[];
   headerSearch?: string;
   updateParams: (updates: Record<string, string>) => void;
+  canLoadInventory: boolean;
 }) {
   const fetcher = useFetcher();
   const loadInventoryFetcher = useFetcher();
@@ -6964,30 +6997,32 @@ function PackingListDetail({
         </div>
         {/* Row 2: load inventory (left) + total quantity (right) */}
         <div style={s.packingBottomRow}>
-          <loadInventoryFetcher.Form
-            method="post"
-            style={s.loadInventoryForm}
-            onSubmit={(event) => {
-              const ok = window.confirm("Add these packing list quantities to current Shopify stock?");
-              if (!ok) event.preventDefault();
-            }}
-          >
-            <input type="hidden" name="intent" value="load_packing_inventory" />
-            <input type="hidden" name="packingId" value={packingList.id} />
-            <label style={s.packingToolbarLabel}>
-              <span>Skip words</span>
-              <input
-                name="skipWords"
-                value={skipWords}
-                onChange={(event) => setSkipWords(event.currentTarget.value)}
-                placeholder="acacia, sample, fabric"
-                style={{ ...s.packingInput, ...s.skipWordsInput }}
-              />
-            </label>
-            <button type="submit" style={{ ...s.loginButton, ...s.loadInventoryButton }} disabled={loadInventoryFetcher.state !== "idle"}>
-              {loadInventoryFetcher.state === "idle" ? "Load inventory on Shopify" : "Loading..."}
-            </button>
-          </loadInventoryFetcher.Form>
+          {canLoadInventory ? (
+            <loadInventoryFetcher.Form
+              method="post"
+              style={s.loadInventoryForm}
+              onSubmit={(event) => {
+                const ok = window.confirm("Add these packing list quantities to current Shopify stock?");
+                if (!ok) event.preventDefault();
+              }}
+            >
+              <input type="hidden" name="intent" value="load_packing_inventory" />
+              <input type="hidden" name="packingId" value={packingList.id} />
+              <label style={s.packingToolbarLabel}>
+                <span>Skip words</span>
+                <input
+                  name="skipWords"
+                  value={skipWords}
+                  onChange={(event) => setSkipWords(event.currentTarget.value)}
+                  placeholder="acacia, sample, fabric"
+                  style={{ ...s.packingInput, ...s.skipWordsInput }}
+                />
+              </label>
+              <button type="submit" style={{ ...s.loginButton, ...s.loadInventoryButton }} disabled={loadInventoryFetcher.state !== "idle"}>
+                {loadInventoryFetcher.state === "idle" ? "Load inventory on Shopify" : "Loading..."}
+              </button>
+            </loadInventoryFetcher.Form>
+          ) : <div />}
           <div style={s.packingTotalPill}>
             Total quantity <strong>{packingListTotal(packingList)}</strong>
           </div>
@@ -9101,6 +9136,15 @@ const s: Record<string, React.CSSProperties> = {
     color: "#166534",
     fontSize: 11,
     fontWeight: 800,
+  },
+  inventoryAccessCheckbox: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    color: "#374151",
+    fontSize: 12,
+    fontWeight: 800,
+    whiteSpace: "nowrap",
   },
   removeUserButton: {
     border: "1px solid #fecaca",
