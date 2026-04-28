@@ -2,7 +2,7 @@
 name = "Product Demand"
 client_id = "96e96c6bb0e33380b852c0df2d0fd82b"
 application_url = "https://product-demand-production.up.railway.app/auth-portal"
-embedded = false
+embedded = true
 
 [auth]
 redirect_urls = [
