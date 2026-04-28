@@ -3099,9 +3099,6 @@ function shopifyVariantSizeTitle(variant: any) {
 }
 
 function shopifyVariantAvailableInventory(variant: any): number | null {
-  const directInventory = Number(variant.inventoryQuantity);
-  if (Number.isFinite(directInventory)) return directInventory;
-
   const inventoryLevels = variant.inventoryItem?.inventoryLevels?.nodes ?? [];
   let totalAvailable = 0;
   let hasAvailableQuantity = false;
@@ -3116,7 +3113,10 @@ function shopifyVariantAvailableInventory(variant: any): number | null {
     }
   }
 
-  return hasAvailableQuantity ? totalAvailable : null;
+  if (hasAvailableQuantity) return totalAvailable;
+
+  const directInventory = Number(variant.inventoryQuantity);
+  return Number.isFinite(directInventory) ? directInventory : null;
 }
 
 async function getShopifyProductVariants(shop: string, productId: string): Promise<ShopifyVariantInfo[]> {
