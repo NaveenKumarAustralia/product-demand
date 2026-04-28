@@ -7,9 +7,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Delete the expired session so the auth flow creates a fresh one
   await prisma.session.deleteMany({ where: { shop } }).catch(() => {});
 
-  // Redirect to the Shopify auth flow
+  // Redirect to the login route with shop param — the loader calls login(request)
+  // which detects the GET+shop and immediately redirects to Shopify's install page
   return Response.redirect(
-    `${new URL(request.url).origin}/auth?shop=${shop}`,
+    `${new URL(request.url).origin}/auth/login?shop=${shop}`,
     302,
   );
 };
