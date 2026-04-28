@@ -1147,9 +1147,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     style.averageMeters = readNumber("averageMeters");
     style.averageTrimMeters = readNumber("averageTrimMeters");
     style.stitchingCost = readNumber("stitchingCost");
-    style.fabricCost = readNumber("fabricCost");
     style.zipButtonsCost = readNumber("zipButtonsCost");
-    style.totalCost = readNumber("totalCost");
     style.sheetCount = readNumber("sheetCount");
     style.zipButtonType = String(form.get("zipButtonType") ?? "").trim();
     style.costingNotes = String(form.get("costingNotes") ?? "").trim();
@@ -4470,9 +4468,7 @@ function ProductInformationPanel({
       averageTrimMeters: numberToDraft(style.averageTrimMeters),
       zipButtonType: style.zipButtonType ?? "",
       stitchingCost: numberToDraft(style.stitchingCost),
-      fabricCost: numberToDraft(style.fabricCost),
       zipButtonsCost: numberToDraft(style.zipButtonsCost),
-      totalCost: numberToDraft(style.totalCost),
       sheetCount: numberToDraft(style.sheetCount),
       costingNotes: style.costingNotes ?? "",
     });
@@ -4667,7 +4663,7 @@ function ProductInformationPanel({
               <div>
                 <h3 style={s.productInfoModalTitle}>{detailStyle.name}</h3>
                 <p style={s.productInfoModalText}>
-                  Edit the averaged costing details for this style.
+                  Edit the averaged production details for this style.
                 </p>
               </div>
               {detailStyle.imageUrl && <img src={detailStyle.imageUrl} alt="" style={s.productInfoDetailsThumb} />}
@@ -4713,32 +4709,12 @@ function ProductInformationPanel({
                 />
               </label>
               <label style={s.productInfoDetailsField}>
-                Fabric cost
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={detailDraft.fabricCost ?? ""}
-                  onChange={(event) => updateDetailDraft("fabricCost", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
                 Zip/buttons cost
                 <input
                   type="text"
                   inputMode="decimal"
                   value={detailDraft.zipButtonsCost ?? ""}
                   onChange={(event) => updateDetailDraft("zipButtonsCost", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
-                Total cost
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={detailDraft.totalCost ?? ""}
-                  onChange={(event) => updateDetailDraft("totalCost", event.currentTarget.value)}
                   style={s.productInfoDetailsInput}
                 />
               </label>
