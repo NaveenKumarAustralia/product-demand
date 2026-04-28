@@ -86,8 +86,17 @@
       "rowIndex": 11,
       "productsColumnIndex": 8,
       "styles": [
+        { "styleId": "briar_dress", "styleName": "Briar Dress", "meters": "3.32" },
+        { "styleId": "ember_midi_dress", "styleName": "Ember Midi Dress", "meters": "2.85" },
+        { "styleId": "frankie_dress", "styleName": "Frankie Dress", "meters": "2.9" },
+        { "styleId": "pippa_dress", "styleName": "Pippa Dress", "meters": "3.7" },
         { "styleId": "promenade_dress", "styleName": "Promenade Dress", "meters": "3.66" },
-        { "styleId": "tiered_maxi_dress", "styleName": "Tiered Maxi Dress", "meters": "4.4" }
+        { "styleId": "tiered_maxi_dress", "styleName": "Tiered Maxi Dress", "meters": "4.4" },
+        { "styleId": "tiered_midi_dress", "styleName": "Tiered Midi Dress", "meters": "3.55" },
+        { "styleId": "tilda_dress", "styleName": "Tilda Dress", "meters": "3.06" },
+        { "styleId": "florence_top", "styleName": "Florence Top", "meters": "" },
+        { "styleId": "tulsi_long_sleeve_top", "styleName": "Tulsi Long Sleeve Top", "meters": "" },
+        { "styleId": "tulsi_short_sleeve_top", "styleName": "Tulsi Short Sleeve Top", "meters": "" }
       ]
     },
     {
