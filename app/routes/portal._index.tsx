@@ -6267,10 +6267,13 @@ function SettingsPanel({
                   type="checkbox"
                   checked={Boolean(inventoryAccessDraft[user.id])}
                   disabled={!canManageUsers}
-                  onChange={(event) => setInventoryAccessDraft((current) => ({
-                    ...current,
-                    [user.id]: event.currentTarget.checked,
-                  }))}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    setInventoryAccessDraft((current) => ({
+                      ...current,
+                      [user.id]: checked,
+                    }));
+                  }}
                 />
                 Load Shopify inventory
               </label>
