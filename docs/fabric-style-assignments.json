@@ -61,6 +61,30 @@
       ]
     },
     {
+      "sheet": "60x60 Printed",
+      "gid": "1829736341",
+      "rowName": "Ochre",
+      "rowIndex": 8,
+      "productsColumnIndex": 8,
+      "styles": [
+        { "styleId": "ember_midi_dress", "styleName": "Ember Midi Dress", "meters": "2.85" },
+        { "styleId": "frankie_dress", "styleName": "Frankie Dress", "meters": "2.9" },
+        { "styleId": "pippa_dress", "styleName": "Pippa Dress", "meters": "3.7" },
+        { "styleId": "promenade_dress", "styleName": "Promenade Dress", "meters": "3.66" },
+        { "styleId": "tiered_maxi_dress", "styleName": "Tiered Maxi Dress", "meters": "4.4" },
+        { "styleId": "tiered_midi_dress", "styleName": "Tiered Midi Dress", "meters": "3.55" },
+        { "styleId": "tilda_dress", "styleName": "Tilda Dress", "meters": "3.06" },
+        { "styleId": "tulsi_dress", "styleName": "Tulsi Dress", "meters": "2.68" },
+        { "styleId": "aria_top", "styleName": "Aria Top", "meters": "" },
+        { "styleId": "demi_top", "styleName": "Demi Top", "meters": "" },
+        { "styleId": "florence_top", "styleName": "Florence Top", "meters": "" },
+        { "styleId": "leia_top", "styleName": "Leia Top", "meters": "" },
+        { "styleId": "tulsi_long_sleeve_top", "styleName": "Tulsi Long Sleeve Top", "meters": "" },
+        { "styleId": "tulsi_short_sleeve_top", "styleName": "Tulsi Short Sleeve Top", "meters": "" },
+        { "styleId": "dawn_maxi_skirt", "styleName": "Dawn Maxi Skirt", "meters": "" }
+      ]
+    },
+    {
       "sheet": "Thick Cord",
       "gid": "1949735348",
       "productsColumnIndex": 8,
