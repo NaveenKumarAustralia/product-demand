@@ -32,9 +32,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const shop = "karma-east-au.myshopify.com";
   const apiKey = process.env.SHOPIFY_API_KEY!;
   const apiSecret = process.env.SHOPIFY_API_SECRET!;
-  const appUrl = (process.env.SHOPIFY_APP_URL || "https://product-demand-production.up.railway.app")
-    .replace(/\/$/, "")
-    .replace(/\/portal$/, "");
+  // Use origin of the incoming request so this works in any environment
+  const appUrl = new URL(request.url).origin;
   const scopes =
     process.env.SCOPES ||
     "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_reports";
