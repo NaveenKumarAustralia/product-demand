@@ -357,7 +357,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         id: crypto.randomUUID(),
         name,
         admin: form.get("admin") === "on",
-        canLoadInventory: form.get("canLoadInventory") === "on" || form.get("admin") === "on",
+        canLoadInventory: form.get("canLoadInventory") === "on",
         active: true,
       },
     ];
@@ -395,7 +395,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     await savePortalUsers(users.map((user) => ({
       ...user,
-      canLoadInventory: Boolean(user.admin || accessByUser[user.id]),
+      canLoadInventory: Boolean(accessByUser[user.id]),
     })));
     return null;
   }
@@ -2134,7 +2134,7 @@ function normalizeBooleanSetting(value: unknown) {
 
 function canPortalUserLoadPackingInventory(_loginRequired: boolean, users: PortalUser[], currentUser: PortalUser | null) {
   if (users.length === 0) return true;
-  return Boolean(currentUser?.admin || currentUser?.canLoadInventory);
+  return Boolean(currentUser?.canLoadInventory);
 }
 
 function slugForOption(label: string) {
@@ -6173,10 +6173,10 @@ function SettingsPanel({
   const [restockDraft, setRestockDraft] = useState<RestockSettings>(restockSettings);
   const [universalDraft, setUniversalDraft] = useState<UniversalSettings>(universalSettings);
   const [inventoryAccessDraft, setInventoryAccessDraft] = useState<Record<string, boolean>>(
-    Object.fromEntries(users.map((user) => [user.id, user.admin || user.canLoadInventory])),
+    Object.fromEntries(users.map((user) => [user.id, user.canLoadInventory])),
   );
   useEffect(() => {
-    setInventoryAccessDraft(Object.fromEntries(users.map((user) => [user.id, user.admin || user.canLoadInventory])));
+    setInventoryAccessDraft(Object.fromEntries(users.map((user) => [user.id, user.canLoadInventory])));
   }, [users]);
   const saveRestockSettings = () => submitPortalCell(
     settingsFetcher,
@@ -6265,8 +6265,8 @@ function SettingsPanel({
               <label style={s.inventoryAccessCheckbox}>
                 <input
                   type="checkbox"
-                  checked={Boolean(user.admin || inventoryAccessDraft[user.id])}
-                  disabled={!canManageUsers || user.admin}
+                  checked={Boolean(inventoryAccessDraft[user.id])}
+                  disabled={!canManageUsers}
                   onChange={(event) => setInventoryAccessDraft((current) => ({
                     ...current,
                     [user.id]: event.currentTarget.checked,
