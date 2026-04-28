@@ -3004,6 +3004,8 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
     }
   `;
 
+  const VALID_SIZES = new Set(["XS", "S", "M", "L", "XL", "2XL", "3XL", "S-M", "M-L", "L-XL"]);
+
   const mapProducts = (json: any) => (json.data?.products?.edges ?? []).map((edge: any) => {
     const rawVariants: any[] = edge.node.variants.edges.map((variantEdge: any) => variantEdge.node);
 
@@ -3014,7 +3016,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
         const sizeValue: string | null =
           (v.selectedOptions as { name: string; value: string }[] | undefined)
             ?.map((o) => o.value)
-            .find((val) => SHOPIFY_SIZE_OPTIONS.has(val)) ?? null;
+            .find((val) => VALID_SIZES.has(val)) ?? null;
         return { raw: v, sizeValue };
       })
       .filter(({ sizeValue }) => {
@@ -3089,15 +3091,6 @@ type ShopifyVariantInfo = { id: string; title: string; sku: string | null; avail
 type ShopifyInventoryVariantInfo = ShopifyVariantInfo & { inventoryItemId: string | null };
 type ShopifyInventoryChange = { size: string; qty: number; inventoryItemId: string };
 
-const SHOPIFY_SIZE_OPTIONS = new Set(["XS", "S", "M", "L", "XL", "2XL", "3XL", "S-M", "M-L", "L-XL"]);
-
-function shopifyVariantSizeTitle(variant: any) {
-  const selectedSize = (variant.selectedOptions as { name: string; value: string }[] | undefined)
-    ?.map((option) => String(option.value ?? "").trim())
-    .find((value) => SHOPIFY_SIZE_OPTIONS.has(value));
-  return selectedSize || String(variant.title ?? "").trim();
-}
-
 function shopifyVariantAvailableInventory(variant: any): number | null {
   const directInventory = Number(variant.inventoryQuantity);
   if (Number.isFinite(directInventory)) return directInventory;
@@ -3140,7 +3133,6 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
             title
             sku
             inventoryQuantity
-            selectedOptions { name value }
             inventoryItem {
               inventoryLevels(first: 20) {
                 nodes {
@@ -3160,7 +3152,7 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
     (json.data?.product?.variants?.nodes ?? [])
       .map((variant: any) => ({
         id: String(variant.id ?? ""),
-        title: shopifyVariantSizeTitle(variant),
+        title: String(variant.title ?? ""),
         sku: variant.sku ? String(variant.sku) : null,
         availableInventory: shopifyVariantAvailableInventory(variant),
       }))
@@ -3246,7 +3238,6 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
             title
             sku
             inventoryQuantity
-            selectedOptions { name value }
             inventoryItem {
               id
               inventoryLevels(first: 20) {
@@ -3268,7 +3259,7 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
   return (json?.data?.product?.variants?.nodes ?? [])
     .map((variant: any) => ({
       id: String(variant.id ?? ""),
-      title: shopifyVariantSizeTitle(variant),
+      title: String(variant.title ?? ""),
       sku: variant.sku ? String(variant.sku) : null,
       availableInventory: shopifyVariantAvailableInventory(variant),
       inventoryItemId: variant.inventoryItem?.id ? String(variant.inventoryItem.id) : null,
@@ -7950,14 +7941,8 @@ function OrderRow({
   rowHeights: Record<string, number>;
 }) {
   const fetcher = useFetcher();
-  const hasInventoryData = order.lines.some((line) => (
-    "availableInventory" in line && Number.isFinite(Number(line.availableInventory))
-  ));
-  const [inventoryOpen, setInventoryOpen] = useState(hasInventoryData);
+  const [inventoryOpen, setInventoryOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  useEffect(() => {
-    if (hasInventoryData) setInventoryOpen(true);
-  }, [hasInventoryData, order.id]);
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
     return acc;
