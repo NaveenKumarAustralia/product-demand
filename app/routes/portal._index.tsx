@@ -310,7 +310,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
   const currentUser = getCurrentPortalUser(request, users);
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
-  const canLoadPackingInventory = !loginRequired || users.length === 0 || Boolean(currentUser?.canLoadInventory);
+  const canLoadPackingInventory = canPortalUserLoadPackingInventory(loginRequired, users, currentUser);
 
   const updates: Record<string, unknown> = {};
 
@@ -2114,6 +2114,11 @@ function normalizeBooleanSetting(value: unknown) {
   return value === true;
 }
 
+function canPortalUserLoadPackingInventory(loginRequired: boolean, users: PortalUser[], currentUser: PortalUser | null) {
+  if (!loginRequired || users.length === 0) return true;
+  return Boolean(currentUser?.admin || currentUser?.canLoadInventory);
+}
+
 function slugForOption(label: string) {
   return label
     .trim()
@@ -3516,7 +3521,7 @@ export default function PortalDashboard() {
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
-  const canLoadPackingInventory = !loginRequired || users.length === 0 || Boolean(currentUser?.canLoadInventory);
+  const canLoadPackingInventory = canPortalUserLoadPackingInventory(loginRequired, users, currentUser);
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
     { id: "orderDate", label: "Order Date" },
