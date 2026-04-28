@@ -6175,9 +6175,17 @@ function SettingsPanel({
   const [inventoryAccessDraft, setInventoryAccessDraft] = useState<Record<string, boolean>>(
     Object.fromEntries(users.map((user) => [user.id, user.canLoadInventory])),
   );
+  const [inventoryAccessSaved, setInventoryAccessSaved] = useState(false);
   useEffect(() => {
     setInventoryAccessDraft(Object.fromEntries(users.map((user) => [user.id, user.canLoadInventory])));
   }, [users]);
+  useEffect(() => {
+    if (settingsFetcher.state !== "idle") return;
+    if (settingsFetcher.formData?.get("intent") !== "update_portal_inventory_access") return;
+    setInventoryAccessSaved(true);
+    const timer = window.setTimeout(() => setInventoryAccessSaved(false), 2500);
+    return () => window.clearTimeout(timer);
+  }, [settingsFetcher.state, settingsFetcher.formData]);
   const saveRestockSettings = () => submitPortalCell(
     settingsFetcher,
     {
@@ -6252,9 +6260,12 @@ function SettingsPanel({
             <h2 style={s.settingsTitle}>Allowed users</h2>
             <p style={s.settingsHint}>Choose who can load packing list quantities into Shopify inventory.</p>
           </div>
-          <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveInventoryAccess}>
-            Save inventory access
-          </button>
+          <div style={s.settingsSaveGroup}>
+            {inventoryAccessSaved && <span style={s.settingsSavedText}>Settings saved</span>}
+            <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveInventoryAccess}>
+              Save
+            </button>
+          </div>
         </div>
         <div style={s.userList}>
           {users.length ? users.map((user) => (
@@ -6269,6 +6280,7 @@ function SettingsPanel({
                   disabled={!canManageUsers}
                   onChange={(event) => {
                     const checked = event.currentTarget.checked;
+                    setInventoryAccessSaved(false);
                     setInventoryAccessDraft((current) => ({
                       ...current,
                       [user.id]: checked,
@@ -9056,6 +9068,8 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
   },
   settingsHeader: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 },
+  settingsSaveGroup: { display: "flex", alignItems: "center", gap: 10 },
+  settingsSavedText: { color: "#166534", fontSize: 13, fontWeight: 900, whiteSpace: "nowrap" },
   settingsTitle: { margin: 0, fontSize: 18, color: "var(--portal-heading-text-color)" },
   settingsHint: { margin: "6px 0 0", color: "#6b7280", fontSize: 13, fontWeight: 600 },
   switchRow: {
