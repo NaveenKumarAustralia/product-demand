@@ -6588,6 +6588,7 @@ function PackingListsPanel({
   productResults,
   searchTitle,
   updateParams,
+  canLoadInventory,
 }: {
   packingLists: PackingListWithLines[];
   selectedPackingList: PackingListWithLines | null;
@@ -6601,6 +6602,7 @@ function PackingListsPanel({
   productResults: ShopifySearchProduct[];
   searchTitle: string;
   updateParams: (updates: Record<string, string>) => void;
+  canLoadInventory: boolean;
 }) {
   const fetcher = useFetcher();
 
@@ -6622,6 +6624,7 @@ function PackingListsPanel({
             productResults={productResults}
             headerSearch={searchTitle}
             updateParams={updateParams}
+            canLoadInventory={canLoadInventory}
           />
         </section>
       )}
