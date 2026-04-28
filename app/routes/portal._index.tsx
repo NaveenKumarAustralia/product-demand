@@ -3119,6 +3119,36 @@ function shopifyVariantAvailableInventory(variant: any): number | null {
   return Number.isFinite(directInventory) ? directInventory : null;
 }
 
+function mapShopifyVariantInfo(variant: any): ShopifyVariantInfo {
+  return {
+    id: String(variant.id ?? ""),
+    title: shopifyVariantSizeTitle(variant),
+    sku: variant.sku ? String(variant.sku) : null,
+    availableInventory: shopifyVariantAvailableInventory(variant),
+  };
+}
+
+function shopifyVariantInventoryQueryFields(includeInventoryItemId = false) {
+  return `
+    id
+    title
+    sku
+    inventoryQuantity
+    selectedOptions { name value }
+    inventoryItem {
+      ${includeInventoryItemId ? "id" : ""}
+      inventoryLevels(first: 20) {
+        nodes {
+          quantities(names: ["available"]) {
+            name
+            quantity
+          }
+        }
+      }
+    }
+  `;
+}
+
 async function getShopifyProductVariants(shop: string, productId: string): Promise<ShopifyVariantInfo[]> {
   const session = await retryAsync(() => prisma.session.findFirst({
       where: { shop, accessToken: { not: "" } },
@@ -3135,35 +3165,14 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
     query ProductVariants($id: ID!) {
       product(id: $id) {
         variants(first: 100) {
-          nodes {
-            id
-            title
-            sku
-            inventoryQuantity
-            selectedOptions { name value }
-            inventoryItem {
-              inventoryLevels(first: 20) {
-                nodes {
-                  quantities(names: ["available"]) {
-                    name
-                    quantity
-                  }
-                }
-              }
-            }
-          }
+          nodes { ${shopifyVariantInventoryQueryFields()} }
         }
       }
     }
   `;
   const mapVariants = (json: any): ShopifyVariantInfo[] =>
     (json.data?.product?.variants?.nodes ?? [])
-      .map((variant: any) => ({
-        id: String(variant.id ?? ""),
-        title: shopifyVariantSizeTitle(variant),
-        sku: variant.sku ? String(variant.sku) : null,
-        availableInventory: shopifyVariantAvailableInventory(variant),
-      }))
+      .map(mapShopifyVariantInfo)
       .filter((variant: ShopifyVariantInfo) => variant.id && variant.title);
 
   const directFetch = async () => {
@@ -3192,6 +3201,52 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
   } catch {
     return directFetch();
   }
+}
+
+async function getShopifyVariantsBySku(shop: string, skus: string[]): Promise<ShopifyVariantInfo[]> {
+  const cleanedSkus = Array.from(new Set(skus.map((sku) => sku.trim()).filter(Boolean)));
+  if (!cleanedSkus.length) return [];
+
+  const session = await retryAsync(() => prisma.session.findFirst({
+      where: { shop, accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }),
+    "Shopify SKU inventory session",
+  ).catch((error) => {
+    console.error("Shopify SKU inventory session failed", error);
+    return null;
+  });
+  if (!session) return [];
+
+  const graphqlQuery = `
+    query VariantsBySku($query: String!) {
+      productVariants(first: 100, query: $query) {
+        nodes { ${shopifyVariantInventoryQueryFields()} }
+      }
+    }
+  `;
+  const mapVariants = (json: any): ShopifyVariantInfo[] =>
+    (json?.data?.productVariants?.nodes ?? [])
+      .map(mapShopifyVariantInfo)
+      .filter((variant: ShopifyVariantInfo) => variant.id && variant.title && variant.sku);
+
+  const results: ShopifyVariantInfo[] = [];
+  for (let index = 0; index < cleanedSkus.length; index += 40) {
+    const skuChunk = cleanedSkus.slice(index, index + 40);
+    const query = skuChunk.map((sku) => `sku:${sku.replace(/["\\]/g, "\\$&")}`).join(" OR ");
+    const json = await shopifyGraphql<any>(session.shop, session.accessToken, graphqlQuery, { query });
+    results.push(...mapVariants(json));
+  }
+
+  const foundSkus = new Set(results.map((variant) => variant.sku).filter(Boolean) as string[]);
+  const missingSkus = cleanedSkus.filter((sku) => !foundSkus.has(sku));
+  for (const sku of missingSkus) {
+    const query = `sku:${sku.replace(/["\\]/g, "\\$&")}`;
+    const json = await shopifyGraphql<any>(session.shop, session.accessToken, graphqlQuery, { query });
+    results.push(...mapVariants(json));
+  }
+
+  return results;
 }
 
 function normalizeVariantSizeLabel(value: string) {
@@ -3241,24 +3296,7 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
     query ProductInventoryVariants($id: ID!) {
       product(id: $id) {
         variants(first: 100) {
-          nodes {
-            id
-            title
-            sku
-            inventoryQuantity
-            selectedOptions { name value }
-            inventoryItem {
-              id
-              inventoryLevels(first: 20) {
-                nodes {
-                  quantities(names: ["available"]) {
-                    name
-                    quantity
-                  }
-                }
-              }
-            }
-          }
+          nodes { ${shopifyVariantInventoryQueryFields(true)} }
         }
       }
     }
@@ -3267,10 +3305,7 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
 
   return (json?.data?.product?.variants?.nodes ?? [])
     .map((variant: any) => ({
-      id: String(variant.id ?? ""),
-      title: shopifyVariantSizeTitle(variant),
-      sku: variant.sku ? String(variant.sku) : null,
-      availableInventory: shopifyVariantAvailableInventory(variant),
+      ...mapShopifyVariantInfo(variant),
       inventoryItemId: variant.inventoryItem?.id ? String(variant.inventoryItem.id) : null,
     }))
     .filter((variant: ShopifyInventoryVariantInfo) => variant.id && variant.title);
@@ -3334,6 +3369,23 @@ async function enrichOrdersWithShopifyVariants<T extends {
     availableInventory?: number | null;
   }>;
 }>(orders: T[]): Promise<T[]> {
+  const skuEntries = await Promise.all(
+    Array.from(new Set(orders.map((order) => order.shop))).map(async (shop) => {
+      const skus = orders
+        .filter((order) => order.shop === shop)
+        .flatMap((order) => order.lines.map((line) => line.sku ?? ""))
+        .filter(Boolean);
+      return [shop, await getShopifyVariantsBySku(shop, skus)] as const;
+    }),
+  );
+  const variantsByShopSku = new Map<string, Map<string, ShopifyVariantInfo>>();
+  for (const [shop, variants] of skuEntries) {
+    variantsByShopSku.set(
+      shop,
+      new Map(variants.filter((variant) => variant.sku).map((variant) => [variant.sku as string, variant])),
+    );
+  }
+
   const variantEntries = await Promise.all(
     Array.from(new Set(orders.map((order) => `${order.shop}|||${order.productId}`))).map(async (key) => {
       const [shop, productId] = key.split("|||");
@@ -3344,18 +3396,28 @@ async function enrichOrdersWithShopifyVariants<T extends {
 
   return orders.map((order) => {
     const variants = variantsByProduct.get(`${order.shop}|||${order.productId}`) ?? [];
-    if (!variants.length) return order;
+    const variantsBySku = variantsByShopSku.get(order.shop) ?? new Map<string, ShopifyVariantInfo>();
 
     const linesByVariantId = new Map(order.lines.map((line) => [line.variantId, line]));
     const linesByTitle = new Map(order.lines.map((line) => [line.variantTitle.trim().toLowerCase(), line]));
+    const skuInventoryForLine = (line: T["lines"][number], fallback: number | null | undefined) => (
+      line.sku ? variantsBySku.get(line.sku)?.availableInventory ?? fallback ?? null : fallback ?? null
+    );
     const usedLineIds = new Set<number>();
     const nextLines: Array<T["lines"][number]> = [];
+
+    if (!variants.length) {
+      return {
+        ...order,
+        lines: order.lines.map((line) => ({ ...line, availableInventory: skuInventoryForLine(line, line.availableInventory) })),
+      };
+    }
 
     for (const variant of variants) {
       const exactLine = linesByVariantId.get(variant.id);
       if (exactLine) {
         usedLineIds.add(exactLine.id);
-        nextLines.push({ ...exactLine, availableInventory: variant.availableInventory });
+        nextLines.push({ ...exactLine, availableInventory: skuInventoryForLine(exactLine, variant.availableInventory) });
         continue;
       }
       const titleMatch = linesByTitle.get(variant.title.trim().toLowerCase());
@@ -3367,11 +3429,12 @@ async function enrichOrdersWithShopifyVariants<T extends {
           variantId: variant.id,
           variantTitle: variant.title,
           sku: variant.sku ?? titleMatch.sku,
-          availableInventory: variant.availableInventory,
+          availableInventory: skuInventoryForLine(titleMatch, variant.availableInventory),
         });
         continue;
       }
 
+      const skuVariant = variant.sku ? variantsBySku.get(variant.sku) : null;
       nextLines.push({
         id: -Number(`${order.id}${nextLines.length + 1}`),
         orderId: order.id,
@@ -3382,13 +3445,13 @@ async function enrichOrdersWithShopifyVariants<T extends {
         qtyReceived: 0,
         costPrice: null,
         createdAt: order.createdAt,
-        availableInventory: variant.availableInventory,
+        availableInventory: skuVariant?.availableInventory ?? variant.availableInventory,
       });
     }
 
     for (const line of order.lines) {
       if (usedLineIds.has(line.id)) continue;
-      nextLines.push(line);
+      nextLines.push({ ...line, availableInventory: skuInventoryForLine(line, line.availableInventory) });
     }
 
     return {
