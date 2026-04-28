@@ -2980,15 +2980,14 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
 
   const escapedQuery = trimmedQuery.replace(/[\\"]/g, "\\$&");
   const graphqlQuery = `#graphql
-    query PackingProductSearch($query: String, $after: String) {
-      products(first: 100, query: $query, after: $after, sortKey: TITLE) {
+    query PackingProductSearch($query: String) {
+      products(first: 20, query: $query, sortKey: TITLE) {
         edges {
-          cursor
           node {
             id
             title
             featuredImage { url }
-            variants(first: 30) {
+            variants(first: 100) {
               edges {
                 node {
                   id
@@ -3001,13 +3000,14 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
             }
           }
         }
-        pageInfo { hasNextPage endCursor }
       }
     }
   `;
 
+  const VALID_SIZES = new Set(["XS", "S", "M", "L", "XL", "2XL", "3XL", "S-M", "M-L", "L-XL"]);
+
   const mapProducts = (json: any) => (json.data?.products?.edges ?? []).map((edge: any) => {
-    const rawVariants: any[] = (edge.node.variants?.edges ?? []).map((variantEdge: any) => variantEdge.node);
+    const rawVariants: any[] = edge.node.variants.edges.map((variantEdge: any) => variantEdge.node);
 
     const seen = new Set<string>();
     const sizeVariants = rawVariants
@@ -3016,7 +3016,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
         const sizeValue: string | null =
           (v.selectedOptions as { name: string; value: string }[] | undefined)
             ?.map((o) => o.value)
-            .find((val) => SHOPIFY_SIZE_OPTIONS.has(val)) ?? null;
+            .find((val) => VALID_SIZES.has(val)) ?? null;
         return { raw: v, sizeValue };
       })
       .filter(({ sizeValue }) => {
@@ -3045,13 +3045,9 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
 
   const matchesLocally = (product: ShopifySearchProduct) => {
     const needle = trimmedQuery.toLowerCase();
-    const words = needle.split(/\s+/).filter(Boolean);
-    const title = product.title.toLowerCase();
-    return title.includes(needle)
-      || words.every((word) => title.includes(word))
-      || product.skus.some((sku) => sku.toLowerCase().includes(needle));
+    return product.title.toLowerCase().includes(needle) || product.skus.some((sku) => sku.toLowerCase().includes(needle));
   };
-  const directFetch = async (shopifyQuery: string | null, after: string | null = null) => {
+  const directFetch = async (shopifyQuery: string | null) => {
     try {
       const response = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
         method: "POST",
@@ -3061,65 +3057,33 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
         },
         body: JSON.stringify({
           query: graphqlQuery,
-          variables: { query: shopifyQuery, after },
+          variables: { query: shopifyQuery },
         }),
       });
-      if (!response.ok) return null;
-      return response.json();
+      if (!response.ok) return [];
+      return mapProducts(await response.json()) as ShopifySearchProduct[];
     } catch {
-      return null;
+      return [];
     }
   };
-  const collectLocalMatches = async (fetchPage: (after: string | null) => Promise<any>) => {
-    const matches: ShopifySearchProduct[] = [];
-    const seen = new Set<string>();
-    let after: string | null = null;
-
-    for (let pageIndex = 0; pageIndex < 8; pageIndex += 1) {
-      const json = await fetchPage(after);
-      if (!json?.data?.products) break;
-      for (const product of mapProducts(json) as ShopifySearchProduct[]) {
-        if (seen.has(product.id) || !matchesLocally(product)) continue;
-        seen.add(product.id);
-        matches.push(product);
-        if (matches.length >= 20) return matches;
-      }
-
-      const pageInfo = json.data.products.pageInfo;
-      if (!pageInfo?.hasNextPage || !pageInfo.endCursor) break;
-      after = String(pageInfo.endCursor);
-    }
-
-    return matches;
-  };
-  const searchQueries = [
-    escapedQuery,
-    `title:${escapedQuery}* OR sku:${escapedQuery}*`,
-    `title:*${escapedQuery}* OR sku:*${escapedQuery}*`,
-  ];
 
   try {
     const { admin } = await unauthenticated.admin(session.shop);
-    for (const shopifyQuery of searchQueries) {
-      const response = await admin.graphql(graphqlQuery, {
-        variables: { query: shopifyQuery, after: null },
-      });
-      const products = (mapProducts(await response.json()) as ShopifySearchProduct[]).filter(matchesLocally);
-      if (products.length) return products.slice(0, 20);
-    }
-
-    return collectLocalMatches(async (after) => {
-      const response = await admin.graphql(graphqlQuery, { variables: { query: null, after } });
-      return response.json();
+    const response = await admin.graphql(graphqlQuery, {
+      variables: { query: `title:*${escapedQuery}* OR sku:*${escapedQuery}*` },
     });
+    const json = await response.json();
+    const products = mapProducts(json);
+    if (products.length) return products;
+
+    const fallbackResponse = await admin.graphql(graphqlQuery, { variables: { query: null } });
+    const fallbackJson = await fallbackResponse.json();
+    return mapProducts(fallbackJson).filter(matchesLocally).slice(0, 8);
   } catch (error) {
     console.error("Shopify product search failed", error);
-    for (const shopifyQuery of searchQueries) {
-      const json = await directFetch(shopifyQuery);
-      const products = json ? (mapProducts(json) as ShopifySearchProduct[]).filter(matchesLocally) : [];
-      if (products.length) return products.slice(0, 20);
-    }
-    return collectLocalMatches((after) => directFetch(null, after));
+    const products = await directFetch(`title:*${escapedQuery}* OR sku:*${escapedQuery}*`);
+    if (products.length) return products;
+    return (await directFetch(null)).filter(matchesLocally).slice(0, 8);
   }
 }
 
@@ -3127,7 +3091,26 @@ type ShopifyVariantInfo = { id: string; title: string; sku: string | null; avail
 type ShopifyInventoryVariantInfo = ShopifyVariantInfo & { inventoryItemId: string | null };
 type ShopifyInventoryChange = { size: string; qty: number; inventoryItemId: string };
 
-const SHOPIFY_SIZE_OPTIONS = new Set(["XS", "S", "M", "L", "XL", "2XL", "3XL", "S-M", "M-L", "L-XL"]);
+function shopifyVariantAvailableInventory(variant: any): number | null {
+  const directInventory = Number(variant.inventoryQuantity);
+  if (Number.isFinite(directInventory)) return directInventory;
+
+  const inventoryLevels = variant.inventoryItem?.inventoryLevels?.nodes ?? [];
+  let totalAvailable = 0;
+  let hasAvailableQuantity = false;
+
+  for (const level of inventoryLevels) {
+    for (const quantity of level.quantities ?? []) {
+      if (quantity?.name !== "available") continue;
+      const available = Number(quantity.quantity);
+      if (!Number.isFinite(available)) continue;
+      totalAvailable += available;
+      hasAvailableQuantity = true;
+    }
+  }
+
+  return hasAvailableQuantity ? totalAvailable : null;
+}
 
 async function getShopifyProductVariants(shop: string, productId: string): Promise<ShopifyVariantInfo[]> {
   const session = await retryAsync(() => prisma.session.findFirst({
@@ -3145,7 +3128,22 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
     query ProductVariants($id: ID!) {
       product(id: $id) {
         variants(first: 100) {
-          nodes { id title sku inventoryQuantity }
+          nodes {
+            id
+            title
+            sku
+            inventoryQuantity
+            inventoryItem {
+              inventoryLevels(first: 20) {
+                nodes {
+                  quantities(names: ["available"]) {
+                    name
+                    quantity
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -3156,15 +3154,11 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
         id: String(variant.id ?? ""),
         title: String(variant.title ?? ""),
         sku: variant.sku ? String(variant.sku) : null,
-        availableInventory: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null,
+        availableInventory: shopifyVariantAvailableInventory(variant),
       }))
       .filter((variant: ShopifyVariantInfo) => variant.id && variant.title);
 
-  try {
-    const { admin } = await unauthenticated.admin(session.shop);
-    const response = await admin.graphql(graphqlQuery, { variables: { id: productId } });
-    return mapVariants(await response.json());
-  } catch {
+  const directFetch = async () => {
     try {
       const response = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
         method: "POST",
@@ -3179,6 +3173,16 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
     } catch {
       return [];
     }
+  };
+
+  try {
+    const { admin } = await unauthenticated.admin(session.shop);
+    const response = await admin.graphql(graphqlQuery, { variables: { id: productId } });
+    const variants = mapVariants(await response.json());
+    if (variants.length) return variants;
+    return directFetch();
+  } catch {
+    return directFetch();
   }
 }
 
@@ -3234,7 +3238,17 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
             title
             sku
             inventoryQuantity
-            inventoryItem { id }
+            inventoryItem {
+              id
+              inventoryLevels(first: 20) {
+                nodes {
+                  quantities(names: ["available"]) {
+                    name
+                    quantity
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -3247,7 +3261,7 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
       id: String(variant.id ?? ""),
       title: String(variant.title ?? ""),
       sku: variant.sku ? String(variant.sku) : null,
-      availableInventory: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null,
+      availableInventory: shopifyVariantAvailableInventory(variant),
       inventoryItemId: variant.inventoryItem?.id ? String(variant.inventoryItem.id) : null,
     }))
     .filter((variant: ShopifyInventoryVariantInfo) => variant.id && variant.title);
@@ -7935,7 +7949,11 @@ function OrderRow({
   }, {});
   const inventoryBySize = order.lines.reduce<Record<string, number | null>>((acc, line) => {
     const availableInventory = "availableInventory" in line ? line.availableInventory : null;
-    acc[line.variantTitle] = Number.isFinite(Number(availableInventory)) ? Number(availableInventory) : null;
+    if (Number.isFinite(Number(availableInventory))) {
+      acc[line.variantTitle] = Number(availableInventory);
+    } else if (!(line.variantTitle in acc)) {
+      acc[line.variantTitle] = null;
+    }
     return acc;
   }, {});
   const allSkus = order.lines.map((l) => l.sku).filter(Boolean).join("\n");
