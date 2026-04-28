@@ -2981,7 +2981,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
   const escapedQuery = trimmedQuery.replace(/[\\"]/g, "\\$&");
   const graphqlQuery = `#graphql
     query PackingProductSearch($query: String) {
-      products(first: 100, query: $query, sortKey: TITLE) {
+      products(first: 20, query: $query, sortKey: TITLE) {
         edges {
           node {
             id
@@ -3045,11 +3045,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
 
   const matchesLocally = (product: ShopifySearchProduct) => {
     const needle = trimmedQuery.toLowerCase();
-    const words = needle.split(/\s+/).filter(Boolean);
-    const title = product.title.toLowerCase();
-    return title.includes(needle)
-      || words.every((word) => title.includes(word))
-      || product.skus.some((sku) => sku.toLowerCase().includes(needle));
+    return product.title.toLowerCase().includes(needle) || product.skus.some((sku) => sku.toLowerCase().includes(needle));
   };
   const directFetch = async (shopifyQuery: string | null) => {
     try {
@@ -3073,29 +3069,21 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
 
   try {
     const { admin } = await unauthenticated.admin(session.shop);
-    const plainResponse = await admin.graphql(graphqlQuery, {
-      variables: { query: escapedQuery },
-    });
-    const plainProducts = mapProducts(await plainResponse.json());
-    if (plainProducts.length) return plainProducts.slice(0, 20);
-
     const response = await admin.graphql(graphqlQuery, {
       variables: { query: `title:*${escapedQuery}* OR sku:*${escapedQuery}*` },
     });
     const json = await response.json();
     const products = mapProducts(json);
-    if (products.length) return products.slice(0, 20);
+    if (products.length) return products;
 
     const fallbackResponse = await admin.graphql(graphqlQuery, { variables: { query: null } });
     const fallbackJson = await fallbackResponse.json();
-    return mapProducts(fallbackJson).filter(matchesLocally).slice(0, 20);
+    return mapProducts(fallbackJson).filter(matchesLocally).slice(0, 8);
   } catch (error) {
     console.error("Shopify product search failed", error);
-    const plainProducts = await directFetch(escapedQuery);
-    if (plainProducts.length) return plainProducts.slice(0, 20);
     const products = await directFetch(`title:*${escapedQuery}* OR sku:*${escapedQuery}*`);
-    if (products.length) return products.slice(0, 20);
-    return (await directFetch(null)).filter(matchesLocally).slice(0, 20);
+    if (products.length) return products;
+    return (await directFetch(null)).filter(matchesLocally).slice(0, 8);
   }
 }
 
