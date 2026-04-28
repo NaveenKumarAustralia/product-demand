@@ -2976,7 +2976,11 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
     console.error("Shopify product search session failed", error);
     return null;
   });
-  if (!session?.shop || !session.accessToken) return [];
+  if (!session?.shop || !session.accessToken) {
+    console.error("[searchShopifyProducts] no session found for query:", trimmedQuery);
+    return [];
+  }
+  console.log("[searchShopifyProducts] session shop:", session.shop, "query:", trimmedQuery);
 
   const escapedQuery = trimmedQuery.replace(/[\\"]/g, "\\$&");
   const graphqlQuery = `#graphql
@@ -3102,21 +3106,26 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
 
   try {
     const { admin } = await unauthenticated.admin(session.shop);
+    console.log("[searchShopifyProducts] unauthenticated.admin succeeded");
     for (const shopifyQuery of searchQueries) {
       const response = await admin.graphql(graphqlQuery, {
         variables: { query: shopifyQuery, after: null },
       });
-      const products = (mapProducts(await response.json()) as ShopifySearchProduct[]).filter(matchesLocally);
+      const json = await response.json();
+      console.log("[searchShopifyProducts] query:", shopifyQuery, "data null?", json?.data == null, "errors?", JSON.stringify(json?.errors ?? null), "count:", json?.data?.products?.edges?.length ?? 0);
+      const products = (mapProducts(json) as ShopifySearchProduct[]).filter(matchesLocally);
       if (products.length) return products.slice(0, 20);
     }
+    console.log("[searchShopifyProducts] no results from 3 queries, trying collectLocalMatches");
     return collectLocalMatches(async (after) => {
       const response = await admin.graphql(graphqlQuery, { variables: { query: null, after } });
       return response.json();
     });
   } catch (error) {
-    console.error("Shopify product search failed", error);
+    console.error("[searchShopifyProducts] unauthenticated.admin failed:", error);
     for (const shopifyQuery of searchQueries) {
       const json = await directFetch(shopifyQuery);
+      console.log("[searchShopifyProducts] directFetch query:", shopifyQuery, "result:", json == null ? "null" : "got data");
       const products = json ? (mapProducts(json) as ShopifySearchProduct[]).filter(matchesLocally) : [];
       if (products.length) return products.slice(0, 20);
     }
