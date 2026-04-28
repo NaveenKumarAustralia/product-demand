@@ -93,7 +93,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }),
       prisma.packingList.findMany({
         orderBy: { createdAt: "desc" },
-        include: { lines: { orderBy: [{ boxNumber: "asc" }, { sortOrder: "asc" }, { id: "asc" }] } },
+        include: { lines: { orderBy: [{ sortOrder: "asc" }, { id: "asc" }] } },
       }),
       prisma.portalSetting.findUnique({ where: { key: PORTAL_NAV_ORDER_KEY }, select: { value: true } }),
     ]),
@@ -641,7 +641,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       .filter(Boolean);
     const packingList = await prisma.packingList.findUnique({
       where: { id: packingId },
-      include: { lines: { orderBy: [{ boxNumber: "asc" }, { sortOrder: "asc" }, { id: "asc" }] } },
+      include: { lines: { orderBy: [{ sortOrder: "asc" }, { id: "asc" }] } },
     });
     const session = await prisma.session.findFirst({
       where: { accessToken: { not: "" } },
