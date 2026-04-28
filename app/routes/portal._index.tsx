@@ -3091,27 +3091,6 @@ type ShopifyVariantInfo = { id: string; title: string; sku: string | null; avail
 type ShopifyInventoryVariantInfo = ShopifyVariantInfo & { inventoryItemId: string | null };
 type ShopifyInventoryChange = { size: string; qty: number; inventoryItemId: string };
 
-function shopifyVariantAvailableInventory(variant: any): number | null {
-  const directInventory = Number(variant.inventoryQuantity);
-  if (Number.isFinite(directInventory)) return directInventory;
-
-  const inventoryLevels = variant.inventoryItem?.inventoryLevels?.nodes ?? [];
-  let totalAvailable = 0;
-  let hasAvailableQuantity = false;
-
-  for (const level of inventoryLevels) {
-    for (const quantity of level.quantities ?? []) {
-      if (quantity?.name !== "available") continue;
-      const available = Number(quantity.quantity);
-      if (!Number.isFinite(available)) continue;
-      totalAvailable += available;
-      hasAvailableQuantity = true;
-    }
-  }
-
-  return hasAvailableQuantity ? totalAvailable : null;
-}
-
 async function getShopifyProductVariants(shop: string, productId: string): Promise<ShopifyVariantInfo[]> {
   const session = await retryAsync(() => prisma.session.findFirst({
       where: { shop, accessToken: { not: "" } },
@@ -3128,22 +3107,7 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
     query ProductVariants($id: ID!) {
       product(id: $id) {
         variants(first: 100) {
-          nodes {
-            id
-            title
-            sku
-            inventoryQuantity
-            inventoryItem {
-              inventoryLevels(first: 20) {
-                nodes {
-                  quantities(names: ["available"]) {
-                    name
-                    quantity
-                  }
-                }
-              }
-            }
-          }
+          nodes { id title sku inventoryQuantity }
         }
       }
     }
@@ -3154,11 +3118,15 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
         id: String(variant.id ?? ""),
         title: String(variant.title ?? ""),
         sku: variant.sku ? String(variant.sku) : null,
-        availableInventory: shopifyVariantAvailableInventory(variant),
+        availableInventory: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null,
       }))
       .filter((variant: ShopifyVariantInfo) => variant.id && variant.title);
 
-  const directFetch = async () => {
+  try {
+    const { admin } = await unauthenticated.admin(session.shop);
+    const response = await admin.graphql(graphqlQuery, { variables: { id: productId } });
+    return mapVariants(await response.json());
+  } catch {
     try {
       const response = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
         method: "POST",
@@ -3173,16 +3141,6 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
     } catch {
       return [];
     }
-  };
-
-  try {
-    const { admin } = await unauthenticated.admin(session.shop);
-    const response = await admin.graphql(graphqlQuery, { variables: { id: productId } });
-    const variants = mapVariants(await response.json());
-    if (variants.length) return variants;
-    return directFetch();
-  } catch {
-    return directFetch();
   }
 }
 
@@ -3238,17 +3196,7 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
             title
             sku
             inventoryQuantity
-            inventoryItem {
-              id
-              inventoryLevels(first: 20) {
-                nodes {
-                  quantities(names: ["available"]) {
-                    name
-                    quantity
-                  }
-                }
-              }
-            }
+            inventoryItem { id }
           }
         }
       }
@@ -3261,7 +3209,7 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
       id: String(variant.id ?? ""),
       title: String(variant.title ?? ""),
       sku: variant.sku ? String(variant.sku) : null,
-      availableInventory: shopifyVariantAvailableInventory(variant),
+      availableInventory: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null,
       inventoryItemId: variant.inventoryItem?.id ? String(variant.inventoryItem.id) : null,
     }))
     .filter((variant: ShopifyInventoryVariantInfo) => variant.id && variant.title);
@@ -7949,11 +7897,7 @@ function OrderRow({
   }, {});
   const inventoryBySize = order.lines.reduce<Record<string, number | null>>((acc, line) => {
     const availableInventory = "availableInventory" in line ? line.availableInventory : null;
-    if (Number.isFinite(Number(availableInventory))) {
-      acc[line.variantTitle] = Number(availableInventory);
-    } else if (!(line.variantTitle in acc)) {
-      acc[line.variantTitle] = null;
-    }
+    acc[line.variantTitle] = Number.isFinite(Number(availableInventory)) ? Number(availableInventory) : null;
     return acc;
   }, {});
   const allSkus = order.lines.map((l) => l.sku).filter(Boolean).join("\n");
