@@ -128,6 +128,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .sort((a, b) => a.localeCompare(b));
   const statusFilters = Array.from(new Set(normalizedOrders.map((order) => order.supplierStatus).filter(Boolean)))
     .sort((a, b) => labelForOption(restockSettings.statusOptions, a).localeCompare(labelForOption(restockSettings.statusOptions, b)));
+  const statusFilterCounts = normalizedOrders
+    .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
+    .filter((order) => !selectedPriority || order.priority === selectedPriority)
+    .reduce<Record<string, number>>((counts, order) => {
+      if (order.supplierStatus) counts[order.supplierStatus] = (counts[order.supplierStatus] ?? 0) + 1;
+      return counts;
+    }, {});
   const priorityFilters = Array.from(new Set(normalizedOrders.map((order) => order.priority).filter(Boolean) as string[]))
     .sort((a, b) => labelForOption(restockSettings.priorityOptions, a).localeCompare(labelForOption(restockSettings.priorityOptions, b)));
   const filteredOrders = normalizedOrders
@@ -246,6 +253,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     selectedPriority,
     searchTitle,
     statusFilters,
+    statusFilterCounts,
     priorityFilters,
     sortBy,
     page,
@@ -3428,6 +3436,7 @@ export default function PortalDashboard() {
     selectedPriority,
     searchTitle,
     statusFilters,
+    statusFilterCounts,
     priorityFilters,
     sortBy,
     page,
@@ -3690,7 +3699,7 @@ export default function PortalDashboard() {
                   <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
                     <option value="">All statuses</option>
                     {statusFilters.map((status) => (
-                      <option key={status} value={status}>{labelForOption(restockSettings.statusOptions, status)}</option>
+                      <option key={status} value={status}>{labelForOption(restockSettings.statusOptions, status)} ({statusFilterCounts[status] ?? 0})</option>
                     ))}
                   </select>
                 </label>
