@@ -2994,7 +2994,6 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
                   id
                   title
                   sku
-                  inventoryQuantity
                   selectedOptions { name value }
                 }
               }
@@ -3029,7 +3028,7 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
         id: String(v.id ?? ""),
         title: sizeValue as string,
         sku: v.sku ? String(v.sku) : null,
-        availableInventory: Number.isFinite(Number(v.inventoryQuantity)) ? Number(v.inventoryQuantity) : null,
+        availableInventory: null,
       }))
       .filter((v: ShopifyVariantInfo) => v.id && v.title);
 
@@ -3130,9 +3129,6 @@ type ShopifyInventoryVariantInfo = ShopifyVariantInfo & { inventoryItemId: strin
 type ShopifyInventoryChange = { size: string; qty: number; inventoryItemId: string };
 
 function shopifyVariantAvailableInventory(variant: any): number | null {
-  const directInventory = Number(variant.inventoryQuantity);
-  if (Number.isFinite(directInventory)) return directInventory;
-
   const inventoryLevels = variant.inventoryItem?.inventoryLevels?.nodes ?? [];
   let totalAvailable = 0;
   let hasAvailableQuantity = false;
@@ -3170,7 +3166,6 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
             id
             title
             sku
-            inventoryQuantity
             inventoryItem {
               inventoryLevels(first: 20) {
                 nodes {
@@ -3275,7 +3270,6 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
             id
             title
             sku
-            inventoryQuantity
             inventoryItem {
               id
               inventoryLevels(first: 20) {
