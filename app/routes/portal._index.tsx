@@ -380,6 +380,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_portal_inventory_access") {
+    if (!canManageUsers) return null;
+    let accessByUser: Record<string, boolean> = {};
+    try {
+      const parsed = JSON.parse(String(form.get("value") ?? "{}"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        accessByUser = Object.fromEntries(
+          Object.entries(parsed).map(([userId, value]) => [userId, Boolean(value)]),
+        );
+      }
+    } catch {
+      accessByUser = {};
+    }
+    await savePortalUsers(users.map((user) => ({
+      ...user,
+      canLoadInventory: Boolean(user.admin || accessByUser[user.id]),
+    })));
+    return null;
+  }
+
   if (loginRequired && users.length > 0 && !currentUser) {
     return null;
   }
@@ -2112,8 +2132,8 @@ function normalizeBooleanSetting(value: unknown) {
   return value === true;
 }
 
-function canPortalUserLoadPackingInventory(loginRequired: boolean, users: PortalUser[], currentUser: PortalUser | null) {
-  if (!loginRequired || users.length === 0) return true;
+function canPortalUserLoadPackingInventory(_loginRequired: boolean, users: PortalUser[], currentUser: PortalUser | null) {
+  if (users.length === 0) return true;
   return Boolean(currentUser?.admin || currentUser?.canLoadInventory);
 }
 
@@ -6152,6 +6172,12 @@ function SettingsPanel({
   const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
   const [restockDraft, setRestockDraft] = useState<RestockSettings>(restockSettings);
   const [universalDraft, setUniversalDraft] = useState<UniversalSettings>(universalSettings);
+  const [inventoryAccessDraft, setInventoryAccessDraft] = useState<Record<string, boolean>>(
+    Object.fromEntries(users.map((user) => [user.id, user.admin || user.canLoadInventory])),
+  );
+  useEffect(() => {
+    setInventoryAccessDraft(Object.fromEntries(users.map((user) => [user.id, user.admin || user.canLoadInventory])));
+  }, [users]);
   const saveRestockSettings = () => submitPortalCell(
     settingsFetcher,
     {
@@ -6167,6 +6193,20 @@ function SettingsPanel({
       value: JSON.stringify(universalDraft),
     },
     { label: "Undo universal settings", fields: { intent: "update_universal_settings", value: JSON.stringify(universalSettings) } },
+  );
+  const saveInventoryAccess = () => submitPortalCell(
+    settingsFetcher,
+    {
+      intent: "update_portal_inventory_access",
+      value: JSON.stringify(inventoryAccessDraft),
+    },
+    {
+      label: "Undo Shopify inventory access",
+      fields: {
+        intent: "update_portal_inventory_access",
+        value: JSON.stringify(Object.fromEntries(users.map((user) => [user.id, user.canLoadInventory]))),
+      },
+    },
   );
   return (
     <div style={s.settingsPanel}>
@@ -6207,7 +6247,15 @@ function SettingsPanel({
       </section>
 
       <section style={s.settingsCard}>
-        <h2 style={s.settingsTitle}>Allowed users</h2>
+        <div style={s.settingsHeader}>
+          <div>
+            <h2 style={s.settingsTitle}>Allowed users</h2>
+            <p style={s.settingsHint}>Choose who can load packing list quantities into Shopify inventory.</p>
+          </div>
+          <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveInventoryAccess}>
+            Save inventory access
+          </button>
+        </div>
         <div style={s.userList}>
           {users.length ? users.map((user) => (
             <div key={user.id} style={s.userRow}>
@@ -6217,13 +6265,12 @@ function SettingsPanel({
               <label style={s.inventoryAccessCheckbox}>
                 <input
                   type="checkbox"
-                  checked={user.canLoadInventory}
-                  disabled={!canManageUsers}
-                  onChange={(event) => submitPortalCell(settingsFetcher, {
-                    intent: "update_portal_user_inventory_access",
-                    userId: user.id,
-                    value: event.currentTarget.checked ? "on" : "off",
-                  })}
+                  checked={Boolean(user.admin || inventoryAccessDraft[user.id])}
+                  disabled={!canManageUsers || user.admin}
+                  onChange={(event) => setInventoryAccessDraft((current) => ({
+                    ...current,
+                    [user.id]: event.currentTarget.checked,
+                  }))}
                 />
                 Load Shopify inventory
               </label>
