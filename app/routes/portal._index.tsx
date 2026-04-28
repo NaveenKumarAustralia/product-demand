@@ -7950,14 +7950,8 @@ function OrderRow({
   rowHeights: Record<string, number>;
 }) {
   const fetcher = useFetcher();
-  const hasInventoryData = order.lines.some((line) => (
-    "availableInventory" in line && Number.isFinite(Number(line.availableInventory))
-  ));
-  const [inventoryOpen, setInventoryOpen] = useState(hasInventoryData);
+  const [inventoryOpen, setInventoryOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  useEffect(() => {
-    if (hasInventoryData) setInventoryOpen(true);
-  }, [hasInventoryData, order.id]);
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
     return acc;
