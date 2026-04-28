@@ -7112,9 +7112,6 @@ function PackingListDetail({
                 key={line.id}
                 line={line}
                 rowIndex={rowIndex}
-                activeSearchLineId={packingSearchLineId}
-                productSearch={productSearch}
-                productResults={productResults}
                 updateParams={updateParams}
                 customColumns={customColumns}
                 customCells={customCells}
@@ -7150,9 +7147,6 @@ function PackingListDetail({
 function PackingListLineRow({
   line,
   rowIndex,
-  activeSearchLineId,
-  productSearch,
-  productResults,
   updateParams,
   customColumns,
   customCells,
@@ -7160,9 +7154,6 @@ function PackingListLineRow({
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
-  activeSearchLineId: number | null;
-  productSearch: string;
-  productResults: ShopifySearchProduct[];
   updateParams: (updates: Record<string, string>) => void;
   customColumns: TableCustomColumn[];
   customCells: Record<string, string>;
@@ -7192,9 +7183,6 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={3} overflowVisible>
         <PackingProductNameCell
           line={line}
-          isActiveSearch={activeSearchLineId === line.id}
-          productSearch={productSearch}
-          productResults={productResults}
           updateParams={updateParams}
         />
       </PackingTd>
@@ -7244,18 +7232,13 @@ function PackingListLineRow({
 
 function PackingProductNameCell({
   line,
-  isActiveSearch,
-  productSearch,
-  productResults,
   updateParams,
 }: {
   line: PackingListWithLines["lines"][number];
-  isActiveSearch: boolean;
-  productSearch: string;
-  productResults: ShopifySearchProduct[];
   updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
+  const searchFetcher = useFetcher<{ products: ShopifySearchProduct[] }>();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const displayValue = line.isCustom && line.productTitle === "Custom item" ? "" : line.productTitle;
   const [value, setValue] = useState(displayValue);
@@ -7264,12 +7247,15 @@ function PackingProductNameCell({
   const [isChangingProduct, setIsChangingProduct] = useState(false);
   const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
   const [canPortalDropdown, setCanPortalDropdown] = useState(false);
+  const [lastSearchedQuery, setLastSearchedQuery] = useState("");
   const hasLinkedProduct = Boolean(line.productId);
-  const canSearch = !isProductSelected && (!hasLinkedProduct || isChangingProduct) && (isFocused || isActiveSearch);
+  const canSearch = !isProductSelected && (!hasLinkedProduct || isChangingProduct) && isFocused;
   const shouldShowResults = canSearch && value.trim().length >= 2;
-  const dropdownHeight = value.trim() !== productSearch || !productResults.length
+  const searchResults: ShopifySearchProduct[] = searchFetcher.data?.products ?? [];
+  const isSearching = searchFetcher.state !== "idle" || value.trim() !== lastSearchedQuery;
+  const dropdownHeight = isSearching || !searchResults.length
     ? 48
-    : Math.min(320, productResults.length * 62 + 12);
+    : Math.min(320, searchResults.length * 62 + 12);
   const updateDropdownRect = () => {
     if (!inputRef.current) return;
     setDropdownRect(inputRef.current.getBoundingClientRect());
@@ -7301,15 +7287,14 @@ function PackingProductNameCell({
 
   useEffect(() => {
     if (!canSearch) return;
+    const trimmed = value.trim();
+    if (trimmed.length < 2) return;
     const timer = window.setTimeout(() => {
-      const trimmed = value.trim();
-      updateParams({
-        productSearch: trimmed.length >= 2 ? trimmed : "",
-        packingSearchLineId: trimmed.length >= 2 ? String(line.id) : "",
-      });
+      setLastSearchedQuery(trimmed);
+      searchFetcher.load(`/api/packing-search?q=${encodeURIComponent(trimmed)}`);
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [value, canSearch, line.id]);
+  }, [value, canSearch]);
 
   const applyProduct = (product: ShopifySearchProduct) => {
     setValue(product.title);
@@ -7366,9 +7351,6 @@ function PackingProductNameCell({
           setIsFocused(true);
           setIsProductSelected(false);
           if (hasLinkedProduct) setIsChangingProduct(true);
-          if (value.trim().length >= 2) {
-            updateParams({ productSearch: value.trim(), packingSearchLineId: String(line.id) });
-          }
         }}
         onChange={(event) => setValue(event.currentTarget.value)}
         onBlur={(event) => {
@@ -7377,7 +7359,6 @@ function PackingProductNameCell({
           if (hasLinkedProduct) {
             setValue(displayValue);
             setIsChangingProduct(false);
-            updateParams({ productSearch: "", packingSearchLineId: "" });
             return;
           }
           submitPortalCell(
@@ -7404,9 +7385,9 @@ function PackingProductNameCell({
             height: dropdownHeight,
           }}
         >
-          {value.trim() !== productSearch ? (
+          {isSearching ? (
             <div style={s.productCellResultEmpty}>Searching...</div>
-          ) : productResults.length ? productResults.map((product) => (
+          ) : searchResults.length ? searchResults.map((product) => (
             <button
               key={product.id}
               type="button"
