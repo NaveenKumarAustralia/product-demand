@@ -38,8 +38,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     process.env.SCOPES ||
     "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_reports";
 
-  // Delete expired session so the callback creates a fresh one
-  await prisma.session.deleteMany({ where: { shop } }).catch(() => {});
+  // Only delete session if forced (?force=1) or if no valid session exists
+  const forceParam = new URL(request.url).searchParams.get("force");
+  const existing = await prisma.session.findFirst({ where: { shop, accessToken: { not: "" } } }).catch(() => null);
+  if (forceParam === "1" || !existing) {
+    await prisma.session.deleteMany({ where: { shop } }).catch(() => {});
+  } else {
+    // Valid session already exists — nothing to do
+    return Response.json({ status: "session_ok", shop, sessionId: existing.id.substring(0, 10) + "..." });
+  }
 
   // Generate a 15-digit nonce — same algorithm as @shopify/shopify-api
   const nonce = crypto.getRandomValues(new Uint8Array(15))
@@ -66,6 +73,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Library stores state as two cookies: value + HMAC signature
   headers.append("Set-Cookie", `shopify_app_state=${nonce}${cookieOpts}`);
   headers.append("Set-Cookie", `shopify_app_state.sig=${sig}${cookieOpts}`);
+
+  // ?debug=1 shows the OAuth URL instead of redirecting — remove once working
+  if (new URL(request.url).searchParams.get("debug") === "1") {
+    return Response.json({
+      redirect_uri: `${appUrl}${callbackPath}`,
+      oauth_url: oauthUrl,
+      client_id: apiKey,
+    });
+  }
 
   return new Response(null, { status: 302, headers });
 };
