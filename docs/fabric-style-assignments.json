@@ -1,0 +1,121 @@
+{
+  "updatedAt": "2026-04-28",
+  "notes": "Backup record of fabric/print style assignments added through the live portal.",
+  "assignments": [
+    {
+      "sheet": "40x40 Printed",
+      "gid": "0",
+      "rowName": "Neon Jungle",
+      "rowIndex": 4,
+      "productsColumnIndex": 9,
+      "styles": [
+        { "styleId": "brixton_dress", "styleName": "Brixton Dress", "meters": "" },
+        { "styleId": "chelsea_dress", "styleName": "Chelsea Dress", "meters": "3.6" },
+        { "styleId": "jamie_dress", "styleName": "Jamie Dress", "meters": "2.28" },
+        { "styleId": "katie_dress", "styleName": "Katie Dress", "meters": "3.08" },
+        { "styleId": "mabel_dress", "styleName": "Mabel Dress", "meters": "2.08" },
+        { "styleId": "ursula_dress", "styleName": "Ursula Dress", "meters": "2.76" },
+        { "styleId": "shell_top", "styleName": "Shell Top", "meters": "" },
+        { "styleId": "sylvia_top", "styleName": "Sylvia Top", "meters": "" },
+        { "styleId": "aalia_skirt", "styleName": "Aalia Skirt", "meters": "" },
+        { "styleId": "belt_loop_skirt", "styleName": "Belt Loop Skirt", "meters": "" },
+        { "styleId": "cora_skirt", "styleName": "Cora Skirt", "meters": "" },
+        { "styleId": "zarah_skirt", "styleName": "Zarah Skirt", "meters": "" },
+        { "styleId": "greta_pant", "styleName": "Greta Pant", "meters": "" }
+      ]
+    },
+    {
+      "sheet": "40x40 Printed",
+      "gid": "0",
+      "rowName": "Primrose",
+      "rowIndex": 7,
+      "productsColumnIndex": 9,
+      "styles": [
+        { "styleId": "claudia_dress", "styleName": "Claudia Dress", "meters": "2.65" },
+        { "styleId": "etta_dress", "styleName": "Etta Dress", "meters": "2.39" },
+        { "styleId": "frankie_dress", "styleName": "Frankie Dress", "meters": "2.9" },
+        { "styleId": "harper_dress", "styleName": "Harper Dress", "meters": "2.44" },
+        { "styleId": "katie_dress", "styleName": "Katie Dress", "meters": "3.08" },
+        { "styleId": "mabel_dress", "styleName": "Mabel Dress", "meters": "2.08" },
+        { "styleId": "riley_dress", "styleName": "Riley Dress", "meters": "3.35" },
+        { "styleId": "ursula_dress", "styleName": "Ursula Dress", "meters": "2.76" },
+        { "styleId": "vivien_dress", "styleName": "Vivien Dress", "meters": "3.9" },
+        { "styleId": "aria_top", "styleName": "Aria Top", "meters": "" },
+        { "styleId": "cora_skirt", "styleName": "Cora Skirt", "meters": "" },
+        { "styleId": "greta_pant", "styleName": "Greta Pant", "meters": "" }
+      ]
+    },
+    {
+      "sheet": "40x40 Printed",
+      "gid": "0",
+      "rowName": "Nocturne",
+      "rowIndex": 13,
+      "productsColumnIndex": 9,
+      "styles": [
+        { "styleId": "avery_dress", "styleName": "Avery Dress", "meters": "2.59" },
+        { "styleId": "etta_dress", "styleName": "Etta Dress", "meters": "2.39" },
+        { "styleId": "jamie_dress", "styleName": "Jamie Dress", "meters": "2.28" },
+        { "styleId": "nora_pant", "styleName": "Nora Pant", "meters": "" },
+        { "styleId": "remi_pant", "styleName": "Remi Pant", "meters": "" },
+        { "styleId": "tenzin_pant", "styleName": "Tenzin Pant", "meters": "" }
+      ]
+    },
+    {
+      "sheet": "Thick Cord",
+      "gid": "1949735348",
+      "productsColumnIndex": 8,
+      "rows": [
+        {
+          "rowName": "Ganache",
+          "rowIndex": 0,
+          "styles": ["Corduroy Jacket", "Jamie Corduroy Dress", "Aalia Corduroy Skirt", "Belt Loop Corduroy Skirt", "Esta Corduroy Pants", "Nora Corduroy Pants", "Polly Pocket Corduroy Tunic"]
+        },
+        {
+          "rowName": "Maritime Blue",
+          "rowIndex": 1,
+          "styles": ["Corduroy Jacket", "Jamie Corduroy Dress", "Aalia Corduroy Skirt", "Belt Loop Corduroy Skirt", "Esta Corduroy Pants", "Nora Corduroy Pants", "Polly Pocket Corduroy Tunic"]
+        },
+        {
+          "rowName": "Botanical Garden",
+          "rowIndex": 2,
+          "styles": ["Corduroy Jacket", "Jamie Corduroy Dress", "Aalia Corduroy Skirt", "Belt Loop Corduroy Skirt", "Esta Corduroy Pants", "Nora Corduroy Pants", "Polly Pocket Corduroy Tunic"]
+        },
+        {
+          "rowName": "Cabernet",
+          "rowIndex": 3,
+          "styles": ["Corduroy Jacket", "Jamie Corduroy Dress", "Aalia Corduroy Skirt", "Belt Loop Corduroy Skirt", "Esta Corduroy Pants", "Nora Corduroy Pants", "Polly Pocket Corduroy Tunic"]
+        },
+        {
+          "rowName": "Everglade",
+          "rowIndex": 4,
+          "styles": ["Polly Pocket Corduroy Tunic"]
+        },
+        {
+          "rowName": "Plum Caspia",
+          "rowIndex": 5,
+          "styles": ["Jamie Corduroy Dress", "Polly Pocket Corduroy Tunic"]
+        },
+        {
+          "rowName": "Douglas Fir",
+          "rowIndex": 6,
+          "styles": ["Polly Pocket Corduroy Tunic"]
+        },
+        {
+          "rowName": "Burnt Henna",
+          "rowIndex": 7,
+          "styles": ["Jamie Corduroy Dress", "Esta Corduroy Pants"]
+        },
+        {
+          "rowName": "Black",
+          "rowIndex": 8,
+          "styles": ["Corduroy Jacket", "Jamie Corduroy Dress", "Aalia Corduroy Skirt", "Belt Loop Corduroy Skirt", "Esta Corduroy Pants", "Nora Corduroy Pants", "Polly Pocket Corduroy Tunic"]
+        },
+        {
+          "rowName": "Black",
+          "rowIndex": 9,
+          "styles": ["Corduroy Jacket", "Jamie Corduroy Dress", "Aalia Corduroy Skirt", "Belt Loop Corduroy Skirt", "Esta Corduroy Pants", "Nora Corduroy Pants", "Polly Pocket Corduroy Tunic"]
+        }
+      ]
+    }
+  ]
+}
