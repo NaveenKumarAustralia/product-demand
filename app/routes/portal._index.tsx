@@ -2976,23 +2976,18 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
     console.error("Shopify product search session failed", error);
     return null;
   });
-  if (!session?.shop || !session.accessToken) {
-    console.error("[searchShopifyProducts] no session found for query:", trimmedQuery);
-    return [];
-  }
-  console.log("[searchShopifyProducts] session shop:", session.shop, "query:", trimmedQuery);
+  if (!session?.shop || !session.accessToken) return [];
 
   const escapedQuery = trimmedQuery.replace(/[\\"]/g, "\\$&");
   const graphqlQuery = `#graphql
-    query PackingProductSearch($query: String, $after: String) {
-      products(first: 100, query: $query, after: $after, sortKey: TITLE) {
+    query PackingProductSearch($query: String) {
+      products(first: 20, query: $query, sortKey: TITLE) {
         edges {
-          cursor
           node {
             id
             title
             featuredImage { url }
-            variants(first: 30) {
+            variants(first: 100) {
               edges {
                 node {
                   id
@@ -3004,14 +2999,13 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
             }
           }
         }
-        pageInfo { hasNextPage endCursor }
       }
     }
   `;
 
   const VALID_SIZES = new Set(["XS", "S", "M", "L", "XL", "2XL", "3XL", "S-M", "M-L", "L-XL"]);
 
-  const mapProducts = (json: any) => (json.data?.products?.edges ?? []).map((edge: any) => {
+  const mapProducts = (json: any): ShopifySearchProduct[] => (json?.data?.products?.edges ?? []).map((edge: any) => {
     const rawVariants: any[] = (edge.node.variants?.edges ?? []).map((variantEdge: any) => variantEdge.node);
 
     const seen = new Set<string>();
@@ -3048,15 +3042,13 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
   });
 
   const needle = trimmedQuery.toLowerCase();
-  const words = needle.split(/\s+/).filter(Boolean);
-  const matchesLocally = (product: ShopifySearchProduct) => {
-    const title = product.title.toLowerCase();
-    return title.includes(needle)
-      || words.every((word) => title.includes(word))
-      || product.skus.some((sku) => sku.toLowerCase().includes(needle));
-  };
+  const matchesLocally = (product: ShopifySearchProduct) =>
+    product.title.toLowerCase().includes(needle)
+    || product.skus.some((sku) => sku.toLowerCase().includes(needle));
 
-  const directFetch = async (shopifyQuery: string | null, after: string | null = null) => {
+  const shopifyQuery = `title:*${escapedQuery}* OR sku:*${escapedQuery}*`;
+
+  const directFetch = async (q: string | null) => {
     try {
       const response = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
         method: "POST",
@@ -3064,72 +3056,28 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
           "Content-Type": "application/json",
           "X-Shopify-Access-Token": session.accessToken,
         },
-        body: JSON.stringify({
-          query: graphqlQuery,
-          variables: { query: shopifyQuery, after },
-        }),
+        body: JSON.stringify({ query: graphqlQuery, variables: { query: q } }),
       });
-      if (!response.ok) return null;
-      return response.json();
+      if (!response.ok) return [];
+      return mapProducts(await response.json());
     } catch {
-      return null;
+      return [];
     }
   };
-
-  const collectLocalMatches = async (fetchPage: (after: string | null) => Promise<any>) => {
-    const matches: ShopifySearchProduct[] = [];
-    const seen = new Set<string>();
-    let after: string | null = null;
-
-    for (let pageIndex = 0; pageIndex < 8; pageIndex += 1) {
-      const json = await fetchPage(after);
-      if (!json?.data?.products) break;
-      for (const product of mapProducts(json) as ShopifySearchProduct[]) {
-        if (seen.has(product.id) || !matchesLocally(product)) continue;
-        seen.add(product.id);
-        matches.push(product);
-        if (matches.length >= 20) return matches;
-      }
-      const pageInfo = json.data.products.pageInfo;
-      if (!pageInfo?.hasNextPage || !pageInfo.endCursor) break;
-      after = String(pageInfo.endCursor);
-    }
-
-    return matches;
-  };
-
-  const searchQueries = [
-    escapedQuery,
-    `title:${escapedQuery}* OR sku:${escapedQuery}*`,
-    `title:*${escapedQuery}* OR sku:*${escapedQuery}*`,
-  ];
 
   try {
     const { admin } = await unauthenticated.admin(session.shop);
-    console.log("[searchShopifyProducts] unauthenticated.admin succeeded");
-    for (const shopifyQuery of searchQueries) {
-      const response = await admin.graphql(graphqlQuery, {
-        variables: { query: shopifyQuery, after: null },
-      });
-      const json = await response.json();
-      console.log("[searchShopifyProducts] query:", shopifyQuery, "data null?", json?.data == null, "errors?", JSON.stringify(json?.errors ?? null), "count:", json?.data?.products?.edges?.length ?? 0);
-      const products = (mapProducts(json) as ShopifySearchProduct[]).filter(matchesLocally);
-      if (products.length) return products.slice(0, 20);
-    }
-    console.log("[searchShopifyProducts] no results from 3 queries, trying collectLocalMatches");
-    return collectLocalMatches(async (after) => {
-      const response = await admin.graphql(graphqlQuery, { variables: { query: null, after } });
-      return response.json();
-    });
+    const response = await admin.graphql(graphqlQuery, { variables: { query: shopifyQuery } });
+    const products = mapProducts(await response.json());
+    if (products.length) return products;
+
+    const fallbackResponse = await admin.graphql(graphqlQuery, { variables: { query: null } });
+    return mapProducts(await fallbackResponse.json()).filter(matchesLocally).slice(0, 8);
   } catch (error) {
-    console.error("[searchShopifyProducts] unauthenticated.admin failed:", error);
-    for (const shopifyQuery of searchQueries) {
-      const json = await directFetch(shopifyQuery);
-      console.log("[searchShopifyProducts] directFetch query:", shopifyQuery, "result:", json == null ? "null" : "got data");
-      const products = json ? (mapProducts(json) as ShopifySearchProduct[]).filter(matchesLocally) : [];
-      if (products.length) return products.slice(0, 20);
-    }
-    return collectLocalMatches((after) => directFetch(null, after));
+    console.error("Shopify product search failed", error);
+    const products = await directFetch(shopifyQuery);
+    if (products.length) return products;
+    return (await directFetch(null)).filter(matchesLocally).slice(0, 8);
   }
 }
 
