@@ -3513,7 +3513,7 @@ export default function PortalDashboard() {
   const widthFor = (columnId: string) => columnWidths[columnId] ?? defaultColumnWidth(columnId);
   const tableWidth = columns.reduce((sum, column) => sum + widthFor(column.id), 48);
   const updateParams = (updates: Record<string, string>) => {
-    const next = new URLSearchParams(searchParams);
+    const next = new URLSearchParams(typeof window === "undefined" ? searchParams : window.location.search);
     for (const [key, value] of Object.entries(updates)) {
       if (value) next.set(key, value);
       else next.delete(key);
