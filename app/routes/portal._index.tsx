@@ -99,6 +99,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ]),
     "portal base data",
   );
+  const samples = page === "samples"
+    ? await prisma.sample.findMany({
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
+        include: { iterations: { orderBy: { version: "asc" } } },
+      }).catch(() => [])
+    : [];
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = await prisma.activityLog.findMany({
       where: { createdAt: { gte: ninetyDaysAgo } },
@@ -286,6 +292,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     fabricSheets,
     selectedFabricTab,
     inrToAudRate,
+    samples,
   };
   } catch (error) {
     console.error("Portal loader error:", error);
@@ -1241,6 +1248,65 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!category) return null;
     category.styles = category.styles.filter((style) => style.id !== styleId);
     await saveProductInfo(productInfo);
+    return null;
+  }
+
+  if (intent === "add_sample") {
+    const name = String(form.get("name") ?? "").trim();
+    if (!name) return null;
+    await prisma.sample.create({ data: { name } });
+    return null;
+  }
+  if (intent === "rename_sample") {
+    const sampleId = Number(form.get("sampleId"));
+    const name = String(form.get("name") ?? "").trim();
+    if (!sampleId || !name) return null;
+    await prisma.sample.update({ where: { id: sampleId }, data: { name } });
+    return null;
+  }
+  if (intent === "delete_sample") {
+    const sampleId = Number(form.get("sampleId"));
+    if (!sampleId) return null;
+    await prisma.sample.delete({ where: { id: sampleId } });
+    return null;
+  }
+  if (intent === "reorder_samples") {
+    const ids = JSON.parse(String(form.get("sampleIds") ?? "[]")) as number[];
+    await Promise.all(ids.map((id, index) => prisma.sample.update({ where: { id }, data: { sortOrder: index } })));
+    return null;
+  }
+  if (intent === "add_sample_iteration") {
+    const sampleId = Number(form.get("sampleId"));
+    if (!sampleId) return null;
+    const existing = await prisma.sampleIteration.findMany({ where: { sampleId }, select: { version: true } });
+    const nextVersion = existing.length > 0 ? Math.max(...existing.map((i) => i.version)) + 1 : 1;
+    await prisma.sampleIteration.create({ data: { sampleId, version: nextVersion } });
+    return null;
+  }
+  if (intent === "update_sample_iteration") {
+    const iterationId = Number(form.get("iterationId"));
+    if (!iterationId) return null;
+    const iteration = await prisma.sampleIteration.findUnique({ where: { id: iterationId } });
+    if (!iteration) return null;
+    const updates: Record<string, unknown> = { updatedAt: new Date() };
+    if (form.has("notes")) updates.notes = String(form.get("notes") ?? "");
+    if (form.has("status")) updates.status = String(form.get("status") ?? "in_progress");
+    if (form.has("addImage")) {
+      const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+      updates.images = [...currentImages, String(form.get("addImage"))];
+    }
+    if (form.has("removeImageIndex")) {
+      const idx = Number(form.get("removeImageIndex"));
+      const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+      updates.images = currentImages.filter((_, i) => i !== idx);
+    }
+    await prisma.sampleIteration.update({ where: { id: iterationId }, data: updates });
+    return null;
+  }
+  if (intent === "delete_sample_iteration") {
+    const iterationId = Number(form.get("iterationId"));
+    if (!iterationId) return null;
+    await prisma.sampleIteration.delete({ where: { id: iterationId } });
     return null;
   }
 
@@ -3493,6 +3559,7 @@ export default function PortalDashboard() {
     fabricSheets,
     selectedFabricTab,
     inrToAudRate,
+    samples,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
@@ -3670,7 +3737,7 @@ export default function PortalDashboard() {
           </div>
           <div style={s.headerControls}>
             <div style={s.utilityBar}>
-              {(page === "restock" || page === "packing" || page === "fabric" || page === "productinfo") && (
+              {(page === "restock" || page === "packing" || page === "fabric" || page === "productinfo" || page === "samples") && (
                 <label style={s.filterLabel}>
                   Search
                   <input
@@ -3683,7 +3750,7 @@ export default function PortalDashboard() {
                       if (page !== "restock" && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
                     }}
                     style={s.searchInput}
-                    placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : page === "productinfo" ? "Style name" : "Product title"}
+                    placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : page === "productinfo" ? "Style name" : page === "samples" ? "Sample name" : "Product title"}
                   />
                 </label>
               )}
@@ -3789,6 +3856,11 @@ export default function PortalDashboard() {
             selectedCategoryId={searchParams.get("category") ?? ""}
             search={searchTitleInput}
             updateParams={updateParams}
+          />
+        ) : page === "samples" ? (
+          <SamplesPanel
+            samples={samples}
+            search={searchTitleInput}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -4405,6 +4477,381 @@ function CellHistoryMenu({
   );
 
   return createPortal(panel, document.body);
+}
+
+// ─── Samples ─────────────────────────────────────────────────────────────────
+
+type SampleIterationType = {
+  id: number;
+  sampleId: number;
+  version: number;
+  notes: string | null;
+  status: string;
+  images: unknown;
+  createdAt: Date;
+  updatedAt: Date;
+};
+type SampleType = {
+  id: number;
+  name: string;
+  sortOrder: number;
+  createdAt: Date;
+  updatedAt: Date;
+  iterations: SampleIterationType[];
+};
+
+function sampleStatusLabel(status: string) {
+  if (status === "approved") return "Approved";
+  if (status === "changes_requested") return "Changes Requested";
+  if (status === "in_progress") return "In Progress";
+  return "No versions yet";
+}
+
+function sampleStatusPillStyle(status: string): React.CSSProperties {
+  if (status === "approved") return { background: "#dcfce7", color: "#166534", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
+  if (status === "changes_requested") return { background: "#fef3c7", color: "#92400e", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
+  if (status === "in_progress") return { background: "#dbeafe", color: "#1e40af", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
+  return { background: "#f1f5f9", color: "#64748b", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
+}
+
+function SamplesPanel({
+  samples,
+  search,
+}: {
+  samples: SampleType[];
+  search: string;
+}) {
+  const fetcher = useFetcher();
+  const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
+  const [gridColumns, setGridColumns] = useState<3 | 4>(4);
+  const [dragSampleId, setDragSampleId] = useState<number | null>(null);
+  const [dragOverSampleId, setDragOverSampleId] = useState<number | null>(null);
+
+  const selectedSample = samples.find((s) => s.id === selectedSampleId) ?? null;
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleSamples = normalizedSearch
+    ? samples.filter((s) => s.name.toLowerCase().includes(normalizedSearch))
+    : samples;
+
+  const addSample = () => {
+    const name = window.prompt("Sample name");
+    if (!name?.trim()) return;
+    fetcher.submit({ intent: "add_sample", name: name.trim() }, { method: "post" });
+  };
+
+  const reorderSamples = (targetId: number) => {
+    if (!dragSampleId || dragSampleId === targetId || normalizedSearch) return;
+    const currentIds = samples.map((s) => s.id);
+    const fromIndex = currentIds.indexOf(dragSampleId);
+    const toIndex = currentIds.indexOf(targetId);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const nextIds = [...currentIds];
+    const [moved] = nextIds.splice(fromIndex, 1);
+    nextIds.splice(toIndex, 0, moved);
+    fetcher.submit({ intent: "reorder_samples", sampleIds: JSON.stringify(nextIds) }, { method: "post" });
+  };
+
+  return (
+    <div style={s.productInfoPage}>
+      <div style={s.productInfoToolbar}>
+        <div style={s.productInfoToolbarLeft}>
+          <div>
+            <h2 style={s.productInfoHeading}>Samples</h2>
+            <div style={s.productInfoMeta}>{visibleSamples.length} sample{visibleSamples.length !== 1 ? "s" : ""}</div>
+          </div>
+        </div>
+        <div style={s.productInfoActions}>
+          <div style={s.productInfoSegmented} aria-label="Cards per row">
+            {([3, 4] as const).map((count) => (
+              <button
+                key={count}
+                type="button"
+                style={gridColumns === count ? { ...s.productInfoSegmentButton, ...s.productInfoSegmentButtonActive } : s.productInfoSegmentButton}
+                onClick={() => setGridColumns(count)}
+              >{count}</button>
+            ))}
+          </div>
+          <button type="button" style={s.primaryActionButton} onClick={addSample}>
+            Add Sample
+          </button>
+        </div>
+      </div>
+
+      <div style={{ ...s.productInfoList, gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }}>
+        {visibleSamples.map((sample) => {
+          const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
+          const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
+          const thumbnailImage = images[0] ?? null;
+          const status = latestIteration?.status ?? "none";
+
+          return (
+            <div
+              key={sample.id}
+              draggable={!normalizedSearch}
+              style={{
+                ...s.productStyleCard,
+                ...(dragSampleId === sample.id ? s.productStyleCardDragging : {}),
+                ...(dragOverSampleId === sample.id && dragSampleId !== sample.id ? s.productStyleCardDropTarget : {}),
+                cursor: normalizedSearch ? "default" : "grab",
+              }}
+              onDragStart={(event) => {
+                if (normalizedSearch) { event.preventDefault(); return; }
+                setDragSampleId(sample.id);
+                event.dataTransfer.effectAllowed = "move";
+              }}
+              onDragOver={(event) => {
+                if (!dragSampleId || normalizedSearch) return;
+                event.preventDefault();
+                setDragOverSampleId(sample.id);
+              }}
+              onDragLeave={() => setDragOverSampleId((c) => c === sample.id ? null : c)}
+              onDrop={(event) => {
+                event.preventDefault();
+                reorderSamples(sample.id);
+                setDragSampleId(null);
+                setDragOverSampleId(null);
+              }}
+              onDragEnd={() => { setDragSampleId(null); setDragOverSampleId(null); }}
+            >
+              <span style={s.productStyleDragHandle} title="Drag to reorder">::</span>
+              <div style={s.productStyleImageWrap}>
+                <button type="button" style={s.productStyleImageButton} onClick={() => setSelectedSampleId(sample.id)}>
+                  {thumbnailImage ? (
+                    <img src={thumbnailImage} alt={sample.name} style={s.productStyleImage} loading="lazy" />
+                  ) : (
+                    <div style={s.productStyleImageEmpty}>No image yet</div>
+                  )}
+                </button>
+              </div>
+              <div style={s.productStyleCardBody}>
+                <span style={s.productStyleTitle}>{sample.name}</span>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
+                  <span style={sampleStatusPillStyle(status)}>{sampleStatusLabel(status)}</span>
+                  {sample.iterations.length > 0 && (
+                    <span style={s.sampleVersionBadge}>v{sample.iterations.length}</span>
+                  )}
+                </div>
+              </div>
+              <div style={s.productStyleCardActions}>
+                <button type="button" style={s.secondaryButton} onClick={() => setSelectedSampleId(sample.id)}>
+                  Open
+                </button>
+                <button
+                  type="button"
+                  style={s.removeUserButton}
+                  onClick={() => {
+                    if (window.confirm(`Delete "${sample.name}"? This cannot be undone.`)) {
+                      if (selectedSampleId === sample.id) setSelectedSampleId(null);
+                      fetcher.submit({ intent: "delete_sample", sampleId: String(sample.id) }, { method: "post" });
+                    }
+                  }}
+                >Delete</button>
+              </div>
+            </div>
+          );
+        })}
+        {visibleSamples.length === 0 && (
+          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+            {search ? "No samples match this search." : "No samples yet. Click Add Sample to create your first one."}
+          </div>
+        )}
+      </div>
+
+      {selectedSample && typeof document !== "undefined" && createPortal(
+        <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} />,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function SampleDetailPanel({
+  sample,
+  onClose,
+}: {
+  sample: SampleType;
+  onClose: () => void;
+}) {
+  const fetcher = useFetcher();
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(sample.name);
+
+  useEffect(() => {
+    setNameDraft(sample.name);
+  }, [sample.name]);
+
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
+  const saveName = () => {
+    setIsEditingName(false);
+    if (nameDraft.trim() && nameDraft.trim() !== sample.name) {
+      fetcher.submit({ intent: "rename_sample", sampleId: String(sample.id), name: nameDraft.trim() }, { method: "post" });
+    } else {
+      setNameDraft(sample.name);
+    }
+  };
+
+  const addIteration = () => {
+    fetcher.submit({ intent: "add_sample_iteration", sampleId: String(sample.id) }, { method: "post" });
+  };
+
+  const sortedIterations = [...sample.iterations].sort((a, b) => b.version - a.version);
+
+  return (
+    <>
+      <div style={s.samplePanelBackdrop} onClick={onClose} />
+      <div style={s.samplePanel}>
+        <div style={s.samplePanelHeader}>
+          <div style={s.samplePanelNameWrap}>
+            {isEditingName ? (
+              <input
+                autoFocus
+                style={s.samplePanelNameInput}
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={saveName}
+                onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(sample.name); setIsEditingName(false); } }}
+              />
+            ) : (
+              <h2 style={s.samplePanelName} onClick={() => setIsEditingName(true)} title="Click to rename">
+                {sample.name}
+              </h2>
+            )}
+            <span style={s.samplePanelVersionCount}>
+              {sample.iterations.length} version{sample.iterations.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+          <button type="button" style={s.samplePanelClose} onClick={onClose} aria-label="Close">×</button>
+        </div>
+
+        <div style={s.samplePanelTopActions}>
+          <button type="button" style={{ ...s.primaryActionButton, width: "100%" }} onClick={addIteration}>
+            + Add new version
+          </button>
+        </div>
+
+        <div style={s.samplePanelIterations}>
+          {sortedIterations.length === 0 && (
+            <div style={s.samplePanelEmpty}>
+              No versions yet. Click &ldquo;Add new version&rdquo; to record the first sample.
+            </div>
+          )}
+          {sortedIterations.map((iteration) => (
+            <SampleIterationBlock key={iteration.id} iteration={iteration} />
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function SampleIterationBlock({ iteration }: { iteration: SampleIterationType }) {
+  const fetcher = useFetcher();
+  const [notes, setNotes] = useState(iteration.notes ?? "");
+  const images = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+
+  useEffect(() => {
+    setNotes(iteration.notes ?? "");
+  }, [iteration.notes, iteration.id]);
+
+  const submitUpdate = (fields: Record<string, string>) => {
+    fetcher.submit({ intent: "update_sample_iteration", iterationId: String(iteration.id), ...fields }, { method: "post" });
+  };
+
+  const saveNotes = () => {
+    if (notes !== (iteration.notes ?? "")) submitUpdate({ notes });
+  };
+
+  const addImages = (files: FileList) => {
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => submitUpdate({ addImage: String(reader.result) });
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const removeImage = (index: number) => {
+    if (window.confirm("Remove this image?")) {
+      submitUpdate({ removeImageIndex: String(index) });
+    }
+  };
+
+  return (
+    <div style={s.sampleIterationBlock}>
+      <div style={s.sampleIterationHeader}>
+        <span style={s.sampleIterationVersion}>Version {iteration.version}</span>
+        <select
+          value={iteration.status}
+          onChange={(e) => submitUpdate({ status: e.target.value })}
+          style={{
+            ...sampleStatusPillStyle(iteration.status),
+            border: "1px solid rgba(0,0,0,0.12)",
+            cursor: "pointer",
+            appearance: "none" as const,
+            paddingRight: 22,
+            backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b7280'/%3E%3C/svg%3E")`,
+            backgroundRepeat: "no-repeat",
+            backgroundPosition: "right 6px center",
+            backgroundSize: "8px",
+          }}
+        >
+          <option value="in_progress">In Progress</option>
+          <option value="changes_requested">Changes Requested</option>
+          <option value="approved">Approved</option>
+        </select>
+        <span style={s.sampleIterationDate}>{formatPortalDate(iteration.createdAt)}</span>
+        <button
+          type="button"
+          style={s.removeUserButton}
+          onClick={() => {
+            if (window.confirm("Delete this version?")) {
+              fetcher.submit({ intent: "delete_sample_iteration", iterationId: String(iteration.id) }, { method: "post" });
+            }
+          }}
+        >Delete</button>
+      </div>
+
+      <div style={s.sampleIterationImages}>
+        {images.map((img, index) => (
+          <div key={index} style={s.sampleIterationImageWrap}>
+            <img src={img} alt={`v${iteration.version} image ${index + 1}`} style={s.sampleIterationImage} />
+            <button
+              type="button"
+              style={s.sampleIterationImageRemove}
+              onClick={() => removeImage(index)}
+              aria-label="Remove image"
+            >×</button>
+          </div>
+        ))}
+        <label style={s.sampleIterationAddImage}>
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => {
+              if (e.currentTarget.files) addImages(e.currentTarget.files);
+              e.currentTarget.value = "";
+            }}
+          />
+          <span>+ Add photos</span>
+        </label>
+      </div>
+
+      <textarea
+        style={s.sampleIterationNotes}
+        value={notes}
+        placeholder="Notes, change requests, measurements..."
+        onChange={(e) => setNotes(e.target.value)}
+        onBlur={saveNotes}
+        rows={3}
+      />
+    </div>
+  );
 }
 
 // ─── Fabric Sheets ───────────────────────────────────────────────────────────
@@ -11236,6 +11683,207 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 12,
     color: "#374151",
     whiteSpace: "nowrap" as const,
+  },
+  samplePanel: {
+    position: "fixed" as const,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 700,
+    maxWidth: "95vw",
+    background: "#fff",
+    boxShadow: "-4px 0 32px rgba(0,0,0,0.18)",
+    zIndex: 1200,
+    display: "flex",
+    flexDirection: "column" as const,
+    overflow: "hidden",
+  },
+  samplePanelBackdrop: {
+    position: "fixed" as const,
+    inset: 0,
+    background: "rgba(15,23,42,0.35)",
+    zIndex: 1199,
+  },
+  samplePanelHeader: {
+    display: "flex",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    padding: "20px 24px 16px",
+    borderBottom: "1px solid #e5e7eb",
+    flexShrink: 0,
+  },
+  samplePanelNameWrap: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 2,
+    flex: 1,
+    minWidth: 0,
+  },
+  samplePanelName: {
+    fontSize: 20,
+    fontWeight: 700,
+    color: "#111827",
+    margin: 0,
+    cursor: "pointer",
+    borderRadius: 4,
+    padding: "2px 4px",
+    marginLeft: -4,
+  },
+  samplePanelNameInput: {
+    fontSize: 20,
+    fontWeight: 700,
+    color: "#111827",
+    border: "2px solid #2563eb",
+    borderRadius: 6,
+    padding: "2px 8px",
+    outline: "none",
+    width: "100%",
+    background: "#fff",
+  },
+  samplePanelVersionCount: {
+    fontSize: 12,
+    color: "#9ca3af",
+    paddingLeft: 4,
+  },
+  samplePanelClose: {
+    flexShrink: 0,
+    width: 32,
+    height: 32,
+    border: "none",
+    background: "#f1f5f9",
+    borderRadius: 8,
+    cursor: "pointer",
+    fontSize: 20,
+    lineHeight: "32px",
+    textAlign: "center" as const,
+    color: "#6b7280",
+    padding: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  samplePanelTopActions: {
+    padding: "14px 24px",
+    borderBottom: "1px solid #f1f5f9",
+    flexShrink: 0,
+  },
+  samplePanelIterations: {
+    flex: 1,
+    overflowY: "auto" as const,
+    padding: "16px 24px 32px",
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 16,
+  },
+  samplePanelEmpty: {
+    color: "#9ca3af",
+    fontSize: 14,
+    textAlign: "center" as const,
+    padding: "48px 0",
+  },
+  sampleIterationBlock: {
+    border: "1px solid #e5e7eb",
+    borderRadius: 12,
+    overflow: "hidden",
+    background: "#fafafa",
+  },
+  sampleIterationHeader: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "12px 16px",
+    background: "#fff",
+    borderBottom: "1px solid #f1f5f9",
+  },
+  sampleIterationVersion: {
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#111827",
+    flex: 1,
+  },
+  sampleIterationDate: {
+    fontSize: 12,
+    color: "#9ca3af",
+  },
+  sampleIterationImages: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    gap: 10,
+    padding: "14px 16px",
+  },
+  sampleIterationImageWrap: {
+    position: "relative" as const,
+    width: 140,
+    height: 186,
+    borderRadius: 8,
+    overflow: "hidden",
+    background: "#f1f5f9",
+    flexShrink: 0,
+    border: "1px solid #e5e7eb",
+  },
+  sampleIterationImage: {
+    width: "100%",
+    height: "100%",
+    objectFit: "cover" as const,
+    display: "block",
+  },
+  sampleIterationImageRemove: {
+    position: "absolute" as const,
+    top: 4,
+    right: 4,
+    width: 22,
+    height: 22,
+    borderRadius: "50%",
+    background: "rgba(0,0,0,0.55)",
+    color: "#fff",
+    border: "none",
+    cursor: "pointer",
+    fontSize: 14,
+    lineHeight: "22px",
+    textAlign: "center" as const,
+    padding: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 2,
+  },
+  sampleIterationAddImage: {
+    width: 140,
+    height: 186,
+    borderRadius: 8,
+    border: "2px dashed #cbd5e1",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    color: "#94a3b8",
+    fontSize: 13,
+    fontWeight: 600,
+    flexShrink: 0,
+    background: "#f8fafc",
+  },
+  sampleIterationNotes: {
+    width: "100%",
+    border: "none",
+    borderTop: "1px solid #f1f5f9",
+    padding: "12px 16px",
+    fontSize: 13,
+    color: "#374151",
+    resize: "vertical" as const,
+    minHeight: 72,
+    background: "#fafafa",
+    fontFamily: "inherit",
+    boxSizing: "border-box" as const,
+    outline: "none",
+  },
+  sampleVersionBadge: {
+    fontSize: 11,
+    fontWeight: 700,
+    background: "#e0e7ef",
+    color: "#4b5563",
+    borderRadius: 99,
+    padding: "1px 7px",
   },
 };
 

@@ -146,3 +146,24 @@ model PackingListLine {
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 }
+
+model Sample {
+  id         Int               @id @default(autoincrement())
+  name       String
+  sortOrder  Int               @default(0)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  iterations SampleIteration[]
+}
+
+model SampleIteration {
+  id        Int      @id @default(autoincrement())
+  sampleId  Int
+  sample    Sample   @relation(fields: [sampleId], references: [id], onDelete: Cascade)
+  version   Int
+  notes     String?
+  status    String   @default("in_progress")
+  images    Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

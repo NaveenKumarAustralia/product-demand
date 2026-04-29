@@ -1,0 +1,25 @@
+CREATE TABLE "Sample" (
+  "id" SERIAL NOT NULL,
+  "name" TEXT NOT NULL,
+  "sortOrder" INTEGER NOT NULL DEFAULT 0,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  CONSTRAINT "Sample_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE "SampleIteration" (
+  "id" SERIAL NOT NULL,
+  "sampleId" INTEGER NOT NULL,
+  "version" INTEGER NOT NULL,
+  "notes" TEXT,
+  "status" TEXT NOT NULL DEFAULT 'in_progress',
+  "images" JSONB NOT NULL DEFAULT '[]',
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+  CONSTRAINT "SampleIteration_pkey" PRIMARY KEY ("id")
+);
+
+ALTER TABLE "SampleIteration" ADD CONSTRAINT "SampleIteration_sampleId_fkey"
+  FOREIGN KEY ("sampleId") REFERENCES "Sample"("id") ON DELETE CASCADE ON UPDATE CASCADE;
