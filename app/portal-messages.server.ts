@@ -50,6 +50,43 @@ export function taggedUsersFromText(text: string | null | undefined, users: Port
     .filter((user) => Array.from(aliasesForUser(user)).some((alias) => tags.has(alias)));
 }
 
+export async function syncSampleIterationMessages({
+  iterationId,
+  sampleName,
+  text,
+  fromName,
+}: {
+  iterationId: number;
+  sampleName: string;
+  text: string | null | undefined;
+  fromName?: string | null;
+}) {
+  const usersSetting = await prisma.portalSetting.findUnique({
+    where: { key: PORTAL_USERS_KEY },
+    select: { value: true },
+  });
+  const users = normalizePortalMessageUsers(usersSetting?.value);
+  const taggedUsers = taggedUsersFromText(text, users);
+
+  await prisma.portalMessage.deleteMany({
+    where: { orderId: iterationId, field: "sample_notes", readAt: null },
+  });
+
+  if (!taggedUsers.length) return;
+
+  await prisma.portalMessage.createMany({
+    data: taggedUsers.map((user) => ({
+      userId: user.id,
+      userName: user.name,
+      orderId: iterationId,
+      field: "sample_notes",
+      fromName: fromName || null,
+      productTitle: sampleName,
+      body: text?.trim() || "",
+    })),
+  });
+}
+
 export async function syncOrderNoteMessages({
   orderId,
   field,

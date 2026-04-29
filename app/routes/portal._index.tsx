@@ -4,7 +4,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { isRouteErrorResponse, useFetcher, useLoaderData, useRouteError, useSearchParams } from "react-router";
 import prisma from "../db.server";
 import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
-import { syncOrderNoteMessages } from "../portal-messages.server";
+import { syncOrderNoteMessages, syncSampleIterationMessages } from "../portal-messages.server";
 import { unauthenticated } from "../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -1289,9 +1289,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const iteration = await prisma.sampleIteration.findUnique({ where: { id: iterationId } });
     if (!iteration) return null;
     const updates: Record<string, unknown> = { updatedAt: new Date() };
-    if (form.has("notes")) updates.notes = String(form.get("notes") ?? "");
+    if (form.has("notes")) {
+      const notesText = String(form.get("notes") ?? "");
+      updates.notes = notesText;
+      const sample = await prisma.sample.findUnique({ where: { id: iteration.sampleId }, select: { name: true } });
+      await syncSampleIterationMessages({ iterationId, sampleName: sample?.name ?? "Sample", text: notesText });
+    }
     if (form.has("name")) updates.name = String(form.get("name") ?? "") || null;
-    if (form.has("taggedUsers")) updates.taggedUsers = JSON.parse(String(form.get("taggedUsers") ?? "[]"));
     if (form.has("status")) updates.status = String(form.get("status") ?? "under_consideration");
     if (form.has("addImage")) {
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
@@ -4138,11 +4142,11 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
           {messages.length ? messages.map((message) => (
             <div key={message.id} style={s.messageItem}>
               <a
-                href={`/portal?messageOrderId=${message.orderId}#order-${message.orderId}`}
+                href={message.field === "sample_notes" ? `/portal?page=samples` : `/portal?messageOrderId=${message.orderId}#order-${message.orderId}`}
                 style={s.messageLink}
               >
                 <strong>{message.productTitle || `Order #${message.orderId}`}</strong>
-                <span>{message.field === "factory_notes" ? "Factory notes" : "Notes"}</span>
+                <span>{message.field === "factory_notes" ? "Factory notes" : message.field === "sample_notes" ? "Sample notes" : "Notes"}</span>
                 <span style={s.messageBody}>{message.body}</span>
               </a>
               <fetcher.Form method="post">
@@ -4857,14 +4861,15 @@ function SampleDetailPanel({
 
 function SampleIterationBlock({ iteration, users }: { iteration: SampleIterationType; users: PortalUser[] }) {
   const fetcher = useFetcher();
+  const notesRef = useRef<HTMLTextAreaElement>(null);
   const [notes, setNotes] = useState(iteration.notes ?? "");
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(iteration.name ?? "");
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
-  const [tagMenuOpen, setTagMenuOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionStart, setMentionStart] = useState(-1);
   const images = Array.isArray(iteration.images) ? iteration.images as string[] : [];
-  const taggedUsers = Array.isArray(iteration.taggedUsers) ? iteration.taggedUsers as string[] : [];
 
   useEffect(() => { setNotes(iteration.notes ?? ""); }, [iteration.notes, iteration.id]);
   useEffect(() => { setNameDraft(iteration.name ?? ""); }, [iteration.name, iteration.id]);
@@ -4895,12 +4900,43 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
     if (window.confirm("Remove this image?")) submitUpdate({ removeImageIndex: String(index) });
   };
 
-  const toggleTag = (userName: string) => {
-    const next = taggedUsers.includes(userName)
-      ? taggedUsers.filter((u) => u !== userName)
-      : [...taggedUsers, userName];
-    submitUpdate({ taggedUsers: JSON.stringify(next) });
+  const handleNotesChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setNotes(val);
+    const pos = e.target.selectionStart ?? val.length;
+    const textBefore = val.slice(0, pos);
+    const match = textBefore.match(/@([a-zA-Z0-9._-]*)$/);
+    if (match) {
+      setMentionQuery(match[1]);
+      setMentionStart(pos - match[0].length);
+    } else {
+      setMentionQuery(null);
+      setMentionStart(-1);
+    }
   };
+
+  const selectMention = (user: PortalUser) => {
+    const tag = user.name.trim().split(/\s+/)[0].toLowerCase();
+    const before = notes.slice(0, mentionStart);
+    const after = notes.slice(mentionStart + 1 + (mentionQuery ?? "").length);
+    const inserted = `@${tag} `;
+    const newNotes = before + inserted + after;
+    setNotes(newNotes);
+    setMentionQuery(null);
+    setMentionStart(-1);
+    setTimeout(() => {
+      const ta = notesRef.current;
+      if (ta) {
+        const newPos = before.length + inserted.length;
+        ta.focus();
+        ta.setSelectionRange(newPos, newPos);
+      }
+    }, 0);
+  };
+
+  const filteredMentionUsers = mentionQuery !== null
+    ? users.filter((u) => u.name.toLowerCase().startsWith(mentionQuery!.toLowerCase()) || mentionQuery === "")
+    : [];
 
   const versionLabel = iteration.name
     ? `Version ${iteration.version} — ${iteration.name}`
@@ -4968,42 +5004,6 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
         >Delete</button>
       </div>
 
-      {/* Tagged users row */}
-      {users.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "8px 16px", borderBottom: "1px solid #f1f5f9", alignItems: "center" }}>
-          {taggedUsers.map((userName) => (
-            <span key={userName} style={{ background: "#e0e7ef", color: "#1e40af", borderRadius: 99, padding: "2px 10px", fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
-              @{userName}
-              <button type="button" onClick={() => toggleTag(userName)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280", fontSize: 13, lineHeight: 1, padding: "0 0 0 2px" }}>×</button>
-            </span>
-          ))}
-          <div style={{ position: "relative" }}>
-            <button
-              type="button"
-              onClick={() => setTagMenuOpen((o) => !o)}
-              style={{ background: "#f1f5f9", border: "1px dashed #cbd5e1", borderRadius: 99, padding: "2px 10px", fontSize: 12, fontWeight: 600, color: "#6b7280", cursor: "pointer" }}
-            >
-              @ Tag user
-            </button>
-            {tagMenuOpen && (
-              <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.12)", zIndex: 200, minWidth: 160, padding: 4 }}>
-                {users.map((user) => (
-                  <button
-                    key={user.id}
-                    type="button"
-                    onClick={() => { toggleTag(user.name); setTagMenuOpen(false); }}
-                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 10px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#111827", borderRadius: 5, textAlign: "left", fontWeight: taggedUsers.includes(user.name) ? 700 : 400 }}
-                  >
-                    {taggedUsers.includes(user.name) && <span style={{ color: "#2563eb" }}>✓</span>}
-                    {user.name}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Images */}
       <div style={s.sampleIterationImages}>
         {images.map((img, index) => (
@@ -5022,14 +5022,37 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
         </button>
       </div>
 
-      <textarea
-        style={s.sampleIterationNotes}
-        value={notes}
-        placeholder="Notes, change requests, measurements..."
-        onChange={(e) => setNotes(e.target.value)}
-        onBlur={saveNotes}
-        rows={3}
-      />
+      <div style={{ position: "relative" }}>
+        <textarea
+          ref={notesRef}
+          style={s.sampleIterationNotes}
+          value={notes}
+          placeholder="Notes, change requests, measurements… type @ to tag someone"
+          onChange={handleNotesChange}
+          onBlur={() => { setMentionQuery(null); saveNotes(); }}
+          onKeyDown={(e) => {
+            if (mentionQuery !== null && filteredMentionUsers.length > 0) {
+              if (e.key === "Escape") { e.preventDefault(); setMentionQuery(null); }
+            }
+          }}
+          rows={3}
+        />
+        {mentionQuery !== null && filteredMentionUsers.length > 0 && (
+          <div style={{ position: "absolute", bottom: "calc(100% + 4px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.14)", zIndex: 300, minWidth: 180, padding: 4 }}>
+            {filteredMentionUsers.map((user) => (
+              <button
+                key={user.id}
+                type="button"
+                onMouseDown={(e) => { e.preventDefault(); selectMention(user); }}
+                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 10px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#111827", borderRadius: 5, textAlign: "left" }}
+              >
+                <span style={{ fontWeight: 600, color: "#2563eb" }}>@{user.name.split(/\s+/)[0].toLowerCase()}</span>
+                <span style={{ color: "#6b7280" }}>{user.name}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {lightboxIndex !== null && typeof document !== "undefined" && createPortal(
         <ImageLightbox images={images} initialIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />,
