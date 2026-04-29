@@ -5938,7 +5938,7 @@ function VisionItemDrawer({
   const [editingHeader, setEditingHeader] = useState(false);
 
   return (
-    <div style={{ width: 800, flexShrink: 0, borderLeft: "1px solid #e5e7eb", background: "#fff", display: "flex", flexDirection: "column", overflowY: "auto" }}>
+    <div style={{ width: 800, flexShrink: 0, borderLeft: "1px solid #e5e7eb", background: "#fff", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid #e5e7eb", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
           {editingHeader ? (
@@ -5962,12 +5962,13 @@ function VisionItemDrawer({
         </div>
         <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#6b7280", lineHeight: 1, flexShrink: 0 }}>×</button>
       </div>
-      {item.type === "image" && item.imageData && (
-        <div style={{ padding: "16px 16px 0", display: "flex", justifyContent: "center" }}>
-          <img src={item.imageData} alt="" style={{ width: 115, height: 173, objectFit: "cover", borderRadius: 6, boxShadow: "0 2px 8px rgba(0,0,0,0.15)", display: "block" }} />
-        </div>
-      )}
-      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ display: "flex", gap: 0, flex: 1, minHeight: 0, overflow: "hidden" }}>
+        {item.type === "image" && item.imageData && (
+          <div style={{ padding: 16, flexShrink: 0 }}>
+            <img src={item.imageData} alt="" style={{ width: 115, height: 173, objectFit: "cover", borderRadius: 6, boxShadow: "0 2px 8px rgba(0,0,0,0.15)", display: "block" }} />
+          </div>
+        )}
+      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14, flex: 1, minWidth: 0, overflowY: "auto" }}>
         <div>
           <label style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Title</label>
           <input
@@ -6021,6 +6022,7 @@ function VisionItemDrawer({
             <button onClick={addField} style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 13, cursor: "pointer" }}>Add</button>
           </div>
         </div>
+      </div>
       </div>
     </div>
   );
