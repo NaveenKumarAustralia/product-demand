@@ -7184,7 +7184,7 @@ function PackingListDetail({
                     const frozenStyle: React.CSSProperties = colIdx < 4 ? {
                       position: "sticky",
                       left: packingFrozenOffsets[colIdx],
-                      zIndex: 23,
+                      zIndex: 40,
                       ...(isLastFrozen ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
                     } : {};
                     let content: React.ReactNode = null;
@@ -8697,7 +8697,7 @@ function Th({
 }) {
   const frozenStyle: React.CSSProperties = stickyLeft !== undefined ? {
     left: stickyLeft,
-    zIndex: 52,
+    zIndex: 55,
     ...(isLastFrozen ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
   } : {};
   return (
@@ -8749,7 +8749,7 @@ function Td({
   const frozenStyle: React.CSSProperties = stickyLeft !== undefined ? {
     position: "sticky",
     left: stickyLeft,
-    zIndex: 23,
+    zIndex: 40,
     ...(isLastFrozen ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
   } : {};
   return (
@@ -8803,7 +8803,7 @@ function PackingTd({
   const frozenStyle: React.CSSProperties = stickyLeft !== undefined ? {
     position: "sticky",
     left: stickyLeft,
-    zIndex: 23,
+    zIndex: 40,
     ...(isLastFrozen ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
   } : {};
   return (
@@ -10812,7 +10812,7 @@ const s: Record<string, React.CSSProperties> = {
     textAlign: "center",
     color: "#64748b",
     left: 0,
-    zIndex: 54,
+    zIndex: 57,
   },
   rowNumberCell: {
     width: 48,
@@ -10828,7 +10828,7 @@ const s: Record<string, React.CSSProperties> = {
     cursor: "context-menu",
     position: "sticky",
     left: 0,
-    zIndex: 24,
+    zIndex: 42,
   },
   rowResizeHandle: {
     position: "absolute",
