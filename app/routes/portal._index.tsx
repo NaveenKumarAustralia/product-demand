@@ -1,7 +1,7 @@
 import bcrypt from "bcryptjs";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
 import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams } from "react-router";
 import prisma from "../db.server";
 import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
@@ -1552,6 +1552,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     console.error("Portal action error:", error);
     return null;
   }
+};
+
+// Reorder is handled optimistically in the UI — skip the expensive full loader reload
+export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultShouldRevalidate }) => {
+  const intent = formData?.get("intent") as string | null;
+  if (intent === "reorder_samples" || intent === "rename_sample") return false;
+  return defaultShouldRevalidate;
 };
 
 // ─── Activity log helper ──────────────────────────────────────────────────────
@@ -4610,6 +4617,8 @@ function SamplesPanel({
   users: PortalUser[];
 }) {
   const fetcher = useFetcher();
+  // Local copy so delete/reorder feel instant (optimistic UI)
+  const [localSamples, setLocalSamples] = useState(samples);
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
   const [gridColumns, setGridColumns] = useState<3 | 4 | 5>(4);
   const [dragSampleId, setDragSampleId] = useState<number | null>(null);
@@ -4617,11 +4626,14 @@ function SamplesPanel({
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [addName, setAddName] = useState("");
 
-  const selectedSample = samples.find((s) => s.id === selectedSampleId) ?? null;
+  // Sync from server after add/rename/iteration changes
+  useEffect(() => { setLocalSamples(samples); }, [samples]);
+
+  const selectedSample = localSamples.find((s) => s.id === selectedSampleId) ?? null;
   const normalizedSearch = search.trim().toLowerCase();
   const visibleSamples = normalizedSearch
-    ? samples.filter((s) => s.name.toLowerCase().includes(normalizedSearch))
-    : samples;
+    ? localSamples.filter((s) => s.name.toLowerCase().includes(normalizedSearch))
+    : localSamples;
 
   const addSample = () => { setAddName(""); setAddModalOpen(true); };
   const submitAddSample = () => {
@@ -4631,16 +4643,24 @@ function SamplesPanel({
     setAddName("");
   };
 
+  const handleDelete = (sampleId: number) => {
+    // Optimistic: remove immediately, server confirms
+    setLocalSamples((prev) => prev.filter((s) => s.id !== sampleId));
+    if (selectedSampleId === sampleId) setSelectedSampleId(null);
+    fetcher.submit({ intent: "delete_sample", sampleId: String(sampleId) }, { method: "post" });
+  };
+
   const reorderSamples = (targetId: number) => {
     if (!dragSampleId || dragSampleId === targetId || normalizedSearch) return;
-    const currentIds = samples.map((s) => s.id);
-    const fromIndex = currentIds.indexOf(dragSampleId);
-    const toIndex = currentIds.indexOf(targetId);
+    const fromIndex = localSamples.findIndex((s) => s.id === dragSampleId);
+    const toIndex = localSamples.findIndex((s) => s.id === targetId);
     if (fromIndex < 0 || toIndex < 0) return;
-    const nextIds = [...currentIds];
-    const [moved] = nextIds.splice(fromIndex, 1);
-    nextIds.splice(toIndex, 0, moved);
-    fetcher.submit({ intent: "reorder_samples", sampleIds: JSON.stringify(nextIds) }, { method: "post" });
+    const next = [...localSamples];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+    // Optimistic: reorder immediately, loader skipped (shouldRevalidate)
+    setLocalSamples(next);
+    fetcher.submit({ intent: "reorder_samples", sampleIds: JSON.stringify(next.map((s) => s.id)) }, { method: "post" });
   };
 
   return (
@@ -4696,7 +4716,7 @@ function SamplesPanel({
               setDragOverSampleId(null);
             }}
             onDragEnd={() => { setDragSampleId(null); setDragOverSampleId(null); }}
-            onDelete={() => fetcher.submit({ intent: "delete_sample", sampleId: String(sample.id) }, { method: "post" })}
+            onDelete={() => handleDelete(sample.id)}
           />
         ))}
         {visibleSamples.length === 0 && (
