@@ -316,7 +316,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "portal_login") {
     const username = String(form.get("username") ?? "").trim().toLowerCase();
     const password = String(form.get("password") ?? "");
-    const user = users.find((u) => u.username.toLowerCase() === username && u.active);
+    const user = users.find((u) => u.name.toLowerCase() === username && u.active);
     if (!user || !user.passwordHash) return { loginError: "Invalid username or password" };
     const valid = await bcrypt.compare(password, user.passwordHash);
     if (!valid) return { loginError: "Invalid username or password" };
@@ -342,16 +342,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "add_portal_user") {
     if (!canManageUsers) return null;
     const name = String(form.get("name") ?? "").trim();
-    const username = String(form.get("username") ?? "").trim().toLowerCase();
     const password = String(form.get("password") ?? "");
     const roleRaw = String(form.get("role") ?? "user");
-    if (!name || !username || !password) return { userError: "Name, username and password are required" };
-    if (users.some((u) => u.username.toLowerCase() === username)) return { userError: "Username already taken" };
+    if (!name || !password) return { userError: "Name and password are required" };
+    if (users.some((u) => u.name.toLowerCase() === name.toLowerCase())) return { userError: "A user with that name already exists" };
     const allowedRoles: PortalUserRole[] = currentUser?.role === "superadmin" ? ["superadmin", "admin", "user"] : ["admin", "user"];
     const role = allowedRoles.includes(roleRaw as PortalUserRole) ? (roleRaw as PortalUserRole) : "user";
     const passwordHash = await bcrypt.hash(password, 10);
     const isAdmin = role === "superadmin" || role === "admin";
-    await savePortalUsers([...users, { id: crypto.randomUUID(), name, username, passwordHash, role, admin: isAdmin, canLoadInventory: isAdmin, active: true, pageAccess: {} }]);
+    await savePortalUsers([...users, { id: crypto.randomUUID(), name, username: name.toLowerCase(), passwordHash, role, admin: isAdmin, canLoadInventory: isAdmin, active: true, pageAccess: {} }]);
     return null;
   }
 
@@ -363,11 +362,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (target.role === "superadmin" && currentUser?.role !== "superadmin") return null;
     const updated: PortalUser = { ...target };
     const newName = String(form.get("name") ?? "").trim();
-    if (newName) updated.name = newName;
-    const newUsername = String(form.get("username") ?? "").trim().toLowerCase();
-    if (newUsername && newUsername !== target.username) {
-      if (users.some((u) => u.id !== userId && u.username.toLowerCase() === newUsername)) return { userError: "Username already taken" };
-      updated.username = newUsername;
+    if (newName) {
+      if (newName.toLowerCase() !== target.name.toLowerCase() && users.some((u) => u.id !== userId && u.name.toLowerCase() === newName.toLowerCase())) return { userError: "A user with that name already exists" };
+      updated.name = newName;
+      updated.username = newName.toLowerCase();
     }
     const newPassword = String(form.get("password") ?? "");
     if (newPassword) updated.passwordHash = await bcrypt.hash(newPassword, 10);
@@ -2198,7 +2196,7 @@ function normalizePortalUsers(value: unknown): PortalUser[] {
       return {
         id,
         name,
-        username: String(user.username ?? "").trim().toLowerCase() || id,
+        username: name.toLowerCase(),
         passwordHash: String(user.passwordHash ?? ""),
         role,
         admin: isAdmin,
@@ -4139,8 +4137,8 @@ function PortalLogin() {
           </div>
         )}
         <label style={s.loginLabel}>
-          Username
-          <input name="username" required autoComplete="username" style={s.loginInput} placeholder="Enter your username" />
+          Name
+          <input name="username" required autoComplete="username" style={s.loginInput} placeholder="Enter your name" />
         </label>
         <label style={s.loginLabel}>
           Password
@@ -6926,7 +6924,6 @@ const ROLE_LABELS: Record<PortalUserRole, string> = { superadmin: "Super Admin",
 
 function AddUserForm({ currentUser, onAdd }: { currentUser: PortalUser | null; onAdd: (f: Record<string, string>) => void }) {
   const [name, setName] = useState("");
-  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<PortalUserRole>("user");
   const allowedRoles: PortalUserRole[] = currentUser?.role === "superadmin" ? ["superadmin", "admin", "user"] : ["admin", "user"];
@@ -6934,14 +6931,13 @@ function AddUserForm({ currentUser, onAdd }: { currentUser: PortalUser | null; o
     <div style={{ background: "#f8fafc", border: "1px dashed #cbd5e1", borderRadius: 8, padding: 16, display: "flex", flexDirection: "column" as const, gap: 10 }}>
       <strong style={{ fontSize: 13 }}>Add new user</strong>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" style={s.addUserInput} />
-        <input value={username} onChange={(e) => setUsername(e.target.value.toLowerCase())} placeholder="Username" style={s.addUserInput} />
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name (used to log in)" style={s.addUserInput} />
         <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="Password" style={s.addUserInput} />
         <select value={role} onChange={(e) => setRole(e.target.value as PortalUserRole)} style={s.addUserInput}>
           {allowedRoles.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
         </select>
       </div>
-      <button type="button" style={s.loginButton} onClick={() => { if (!name || !username || !password) return; onAdd({ name, username, password, role }); setName(""); setUsername(""); setPassword(""); setRole("user"); }}>
+      <button type="button" style={s.loginButton} onClick={() => { if (!name || !password) return; onAdd({ name, password, role }); setName(""); setPassword(""); setRole("user"); }}>
         Add user
       </button>
     </div>
@@ -6957,7 +6953,6 @@ function UserEditForm({
   onSave: (fields: Record<string, string>) => void;
 }) {
   const [name, setName] = useState(user.name);
-  const [username, setUsername] = useState(user.username);
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<PortalUserRole>(user.role);
   const [pageAccess, setPageAccess] = useState<Record<string, boolean>>(user.pageAccess ?? {});
@@ -6968,12 +6963,8 @@ function UserEditForm({
     <div style={{ width: "100%", background: "#f8fafc", borderRadius: 8, padding: 14, display: "flex", flexDirection: "column" as const, gap: 12, marginTop: 4 }}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <label style={{ fontSize: 12, fontWeight: 600, display: "flex", flexDirection: "column" as const, gap: 4 }}>
-          Full name
+          Name <span style={{ fontWeight: 400, color: "#9ca3af" }}>(used to log in)</span>
           <input value={name} onChange={(e) => setName(e.target.value)} style={s.addUserInput} />
-        </label>
-        <label style={{ fontSize: 12, fontWeight: 600, display: "flex", flexDirection: "column" as const, gap: 4 }}>
-          Username
-          <input value={username} onChange={(e) => setUsername(e.target.value.toLowerCase())} style={s.addUserInput} />
         </label>
         <label style={{ fontSize: 12, fontWeight: 600, display: "flex", flexDirection: "column" as const, gap: 4 }}>
           New password <span style={{ fontWeight: 400, color: "#9ca3af" }}>(leave blank to keep)</span>
@@ -7014,7 +7005,7 @@ function UserEditForm({
         type="button"
         style={s.loginButton}
         onClick={() => {
-          const fields: Record<string, string> = { name, username, role, canLoadInventory: canLoadInventory ? "on" : "off", pageAccess: JSON.stringify(pageAccess) };
+          const fields: Record<string, string> = { name, role, canLoadInventory: canLoadInventory ? "on" : "off", pageAccess: JSON.stringify(pageAccess) };
           if (password) fields.password = password;
           onSave(fields);
         }}
@@ -7095,7 +7086,6 @@ function SettingsPanel({
                 <div key={user.id} style={{ ...s.userRow, flexWrap: "wrap" as const, gap: 8 }}>
                   <span style={s.activeUserBadge}>{initialsForName(user.name)}</span>
                   <span style={s.userName}>{user.name}</span>
-                  <span style={{ fontSize: 11, color: "#6b7280" }}>@{user.username}</span>
                   <span style={{ ...s.adminPill, background: user.role === "superadmin" ? "#fef3c7" : user.role === "admin" ? "#dbeafe" : "#f1f5f9", color: user.role === "superadmin" ? "#92400e" : user.role === "admin" ? "#1e40af" : "#374151" }}>{user.role}</span>
                   <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
                     {canEdit && (
