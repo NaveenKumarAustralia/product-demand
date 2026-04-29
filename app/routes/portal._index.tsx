@@ -1283,6 +1283,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       await syncSampleIterationMessages({ iterationId, sampleName: sample?.name ?? "Sample", text: notesText });
     }
     if (form.has("name")) updates.name = String(form.get("name") ?? "") || null;
+    if (form.has("fabricType")) updates.fabricType = String(form.get("fabricType") ?? "") || null;
+    if (form.has("sampleSize")) updates.sampleSize = String(form.get("sampleSize") ?? "") || null;
+    if (form.has("buttonType")) updates.buttonType = String(form.get("buttonType") ?? "") || null;
     if (form.has("status")) updates.status = String(form.get("status") ?? "under_consideration");
     if (form.has("addImage")) {
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
@@ -4531,6 +4534,9 @@ type SampleIterationType = {
   version: number;
   name: string | null;
   notes: string | null;
+  fabricType: string | null;
+  sampleSize: string | null;
+  buttonType: string | null;
   status: string;
   images: unknown;
   taggedUsers: unknown;
@@ -4852,10 +4858,16 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionStart, setMentionStart] = useState(-1);
+  const [fabricType, setFabricType] = useState(iteration.fabricType ?? "");
+  const [sampleSize, setSampleSize] = useState(iteration.sampleSize ?? "");
+  const [buttonType, setButtonType] = useState(iteration.buttonType ?? "");
   const images = Array.isArray(iteration.images) ? iteration.images as string[] : [];
 
   useEffect(() => { setNotes(iteration.notes ?? ""); }, [iteration.notes, iteration.id]);
   useEffect(() => { setNameDraft(iteration.name ?? ""); }, [iteration.name, iteration.id]);
+  useEffect(() => { setFabricType(iteration.fabricType ?? ""); }, [iteration.fabricType, iteration.id]);
+  useEffect(() => { setSampleSize(iteration.sampleSize ?? ""); }, [iteration.sampleSize, iteration.id]);
+  useEffect(() => { setButtonType(iteration.buttonType ?? ""); }, [iteration.buttonType, iteration.id]);
 
   const submitUpdate = (fields: Record<string, string>) => {
     fetcher.submit({ intent: "update_sample_iteration", iterationId: String(iteration.id), ...fields }, { method: "post" });
@@ -5003,6 +5015,26 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
         <button type="button" style={s.sampleIterationAddImage} onClick={() => setUploadModalOpen(true)}>
           <span>+ Add photos</span>
         </button>
+      </div>
+
+      {/* Fabric / Size / Button fields */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0, borderTop: "1px solid #f1f5f9" }}>
+        {([
+          { label: "Fabric type", value: fabricType, setter: setFabricType, field: "fabricType" },
+          { label: "Sample size", value: sampleSize, setter: setSampleSize, field: "sampleSize" },
+          { label: "Button type", value: buttonType, setter: setButtonType, field: "buttonType" },
+        ] as const).map(({ label, value, setter, field }, i) => (
+          <div key={field} style={{ borderRight: i < 2 ? "1px solid #f1f5f9" : "none", padding: "10px 14px" }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", marginBottom: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
+            <input
+              style={{ width: "100%", border: "none", outline: "none", fontSize: 13, color: "#111827", background: "transparent", fontFamily: "inherit", padding: 0 }}
+              value={value}
+              placeholder={`Enter ${label.toLowerCase()}`}
+              onChange={(e) => setter(e.target.value)}
+              onBlur={(e) => { const v = e.target.value; if (v !== (iteration[field as keyof SampleIterationType] ?? "")) submitUpdate({ [field]: v }); }}
+            />
+          </div>
+        ))}
       </div>
 
       <div style={{ position: "relative" }}>

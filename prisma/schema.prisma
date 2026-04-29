@@ -157,13 +157,18 @@ model Sample {
 }
 
 model SampleIteration {
-  id        Int      @id @default(autoincrement())
-  sampleId  Int
-  sample    Sample   @relation(fields: [sampleId], references: [id], onDelete: Cascade)
-  version   Int
-  notes     String?
-  status    String   @default("in_progress")
-  images    Json     @default("[]")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          Int      @id @default(autoincrement())
+  sampleId    Int
+  sample      Sample   @relation(fields: [sampleId], references: [id], onDelete: Cascade)
+  version     Int
+  name        String?
+  notes       String?
+  fabricType  String?
+  sampleSize  String?
+  buttonType  String?
+  status      String   @default("under_consideration")
+  images      Json     @default("[]")
+  taggedUsers Json     @default("[]")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
