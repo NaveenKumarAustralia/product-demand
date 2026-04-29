@@ -5705,7 +5705,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={!activeBoardId || activeBoardId < 0}
-          style={{ background: "#1f2937", color: "#fff", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, cursor: activeBoardId && activeBoardId > 0 ? "pointer" : "not-allowed", opacity: activeBoardId && activeBoardId > 0 ? 1 : 0.5 }}
+          style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, cursor: activeBoardId && activeBoardId > 0 ? "pointer" : "not-allowed", opacity: activeBoardId && activeBoardId > 0 ? 1 : 0.5 }}
         >
           + Add Image
         </button>
@@ -5716,7 +5716,6 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
         >
           + Add Text
         </button>
-        <span style={{ fontSize: 12, color: "#9ca3af", marginLeft: 8 }}>Drag &amp; drop images onto the canvas. Double-click a tab to rename it. Right-click an item to delete. Cmd+Z to undo.</span>
         <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFileInput} />
       </div>
 
@@ -5740,7 +5739,8 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
                 onMouseDown={(e) => startDrag(e, item.id)}
                 onResizeStart={(e) => startResize(e, item.id)}
                 onContextMenu={(e) => handleItemContextMenu(e, item.id)}
-                onClick={(e) => { e.stopPropagation(); setSelectedItemId(item.id); }}
+                onClick={(e) => { e.stopPropagation(); }}
+                onDoubleClick={(e) => { e.stopPropagation(); setSelectedItemId(item.id); }}
                 onContentChange={(content) => {
                   updateLocalItem(item.id, { content });
                   submitItemUpdate(item.id, { content });
@@ -5808,7 +5808,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
             />
             <div style={{ display: "flex", gap: 8, marginTop: 16, justifyContent: "flex-end" }}>
               <button onClick={() => setAddBoardOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "7px 16px", cursor: "pointer", fontSize: 13 }}>Cancel</button>
-              <button onClick={handleAddBoard} style={{ background: "#1f2937", color: "#fff", border: "none", borderRadius: 6, padding: "7px 16px", cursor: "pointer", fontSize: 13 }}>Add</button>
+              <button onClick={handleAddBoard} style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "7px 16px", cursor: "pointer", fontSize: 13 }}>Add</button>
             </div>
           </div>
         </div>,
@@ -5825,6 +5825,7 @@ function VisionCanvasItem({
   onResizeStart,
   onContextMenu,
   onClick,
+  onDoubleClick,
   onContentChange,
 }: {
   item: VisionBoardItemType;
@@ -5833,6 +5834,7 @@ function VisionCanvasItem({
   onResizeStart: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
   onClick: (e: React.MouseEvent) => void;
+  onDoubleClick: (e: React.MouseEvent) => void;
   onContentChange: (content: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -5843,6 +5845,7 @@ function VisionCanvasItem({
       onMouseDown={onMouseDown}
       onContextMenu={onContextMenu}
       onClick={onClick}
+      onDoubleClick={onDoubleClick}
     >
       {item.type === "image" && item.imageData ? (
         <img src={item.imageData} alt={item.title ?? ""} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 4, display: "block", pointerEvents: "none" }} draggable={false} />
@@ -5929,11 +5932,32 @@ function VisionItemDrawer({
     save({ fields: next });
   };
 
+  const [editingHeader, setEditingHeader] = useState(false);
+
   return (
     <div style={{ width: 800, flexShrink: 0, borderLeft: "1px solid #e5e7eb", background: "#fff", display: "flex", flexDirection: "column", overflowY: "auto" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid #e5e7eb" }}>
-        <span style={{ fontWeight: 600, fontSize: 14 }}>Item Details</span>
-        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#6b7280", lineHeight: 1 }}>×</button>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid #e5e7eb", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minWidth: 0 }}>
+          {editingHeader ? (
+            <input
+              autoFocus
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              onBlur={() => { setEditingHeader(false); save({ title: title || null }); }}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === "Escape") { setEditingHeader(false); save({ title: title || null }); } }}
+              placeholder="Item name..."
+              style={{ flex: 1, border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", fontSize: 14, fontWeight: 600, minWidth: 0 }}
+            />
+          ) : (
+            <>
+              <span style={{ fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title || "Item Details"}</span>
+              <button onClick={() => setEditingHeader(true)} style={{ background: "none", border: "none", cursor: "pointer", padding: 2, color: "#9ca3af", flexShrink: 0, display: "flex", alignItems: "center" }} title="Rename">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M11 2l3 3-9 9H2v-3L11 2z"/></svg>
+              </button>
+            </>
+          )}
+        </div>
+        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#6b7280", lineHeight: 1, flexShrink: 0 }}>×</button>
       </div>
       {item.type === "image" && item.imageData && (
         <div style={{ padding: "16px 16px 0", display: "flex", justifyContent: "center" }}>
@@ -5991,7 +6015,7 @@ function VisionItemDrawer({
               placeholder="Field label..."
               style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "5px 8px", fontSize: 13 }}
             />
-            <button onClick={addField} style={{ background: "#1f2937", color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 13, cursor: "pointer" }}>Add</button>
+            <button onClick={addField} style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 13, cursor: "pointer" }}>Add</button>
           </div>
         </div>
       </div>
