@@ -8513,8 +8513,6 @@ function PackingListDetail({
   const exportPackingList = () => {
     const headers = [
       "Box",
-      "Product image URL",
-      "Fabric image",
       "Name",
       "SKU",
       ...PACKING_SIZES,
@@ -8529,8 +8527,6 @@ function PackingListDetail({
       const price = line.priceRupees ?? 0;
       return [
         line.boxNumber ?? "",
-        line.productImageUrl ?? "",
-        line.fabricImageData ? "Image added" : "",
         line.productTitle,
         line.sku ?? "",
         ...PACKING_SIZES.map((size) => qtys[size] || ""),
