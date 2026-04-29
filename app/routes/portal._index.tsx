@@ -3804,17 +3804,27 @@ export default function PortalDashboard() {
               <thead>
                 <tr style={s.headerRow}>
                   <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
-                  {columns.map((column) => (
-                    <Th
-                      key={column.id}
-                      center={column.center}
-                      headerKey={`restock:${column.id}`}
-                      columnId={column.id}
-                      onResizeStart={(event) => startResize(column.id, event)}
-                    >
-                      {headerLabel(tableHeaderLabels, `restock:${column.id}`, column.label)}
-                    </Th>
-                  ))}
+                  {columns.map((column, colIdx) => {
+                    const restockFrozenLeft = [
+                      48,
+                      48 + widthFor("factoryNotes"),
+                      48 + widthFor("factoryNotes") + widthFor("orderDate"),
+                      48 + widthFor("factoryNotes") + widthFor("orderDate") + widthFor("picture"),
+                    ];
+                    return (
+                      <Th
+                        key={column.id}
+                        center={column.center}
+                        headerKey={`restock:${column.id}`}
+                        columnId={column.id}
+                        onResizeStart={(event) => startResize(column.id, event)}
+                        stickyLeft={colIdx < 4 ? restockFrozenLeft[colIdx] : undefined}
+                        isLastFrozen={colIdx === 3}
+                      >
+                        {headerLabel(tableHeaderLabels, `restock:${column.id}`, column.label)}
+                      </Th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody
@@ -3830,7 +3840,14 @@ export default function PortalDashboard() {
                   setHistoryMenu({ x: e.clientX, y: e.clientY, entity, entityId, field, entityName });
                 }}
               >
-                {visibleOrders.map((order, rowIndex) => (
+                {visibleOrders.map((order, rowIndex) => {
+                  const restockFrozenOffsets = [
+                    48,
+                    48 + widthFor("factoryNotes"),
+                    48 + widthFor("factoryNotes") + widthFor("orderDate"),
+                    48 + widthFor("factoryNotes") + widthFor("orderDate") + widthFor("picture"),
+                  ];
+                  return (
                   <OrderRow
                     key={order.id}
                     order={order}
@@ -3841,8 +3858,10 @@ export default function PortalDashboard() {
                     customColumns={customColumns.restock}
                     customCells={customCells}
                     rowHeights={rowHeights}
+                    frozenOffsets={restockFrozenOffsets}
                   />
-                ))}
+                  );
+                })}
                 {Array.from({ length: 10 }, (_, index) => (
                   <AddRestockOrderRow
                     key={`${addRowNonce}:${index}`}
@@ -7093,21 +7112,38 @@ function PackingListDetail({
           <thead>
             <tr style={s.headerRow}>
               <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
-              {packingColumns.map((column) => (
-                <Th
-                  key={column.id}
-                  center={column.center}
-                  headerKey={`packing:${column.id}`}
-                  columnId={column.id}
-                  onResizeStart={(event) => startPackingResize(column.id, event)}
-                >
-                  {headerLabel(tableHeaderLabels, `packing:${column.id}`, column.label)}
-                </Th>
-              ))}
+              {(() => {
+                const packingFrozenLeft = [
+                  48,
+                  48 + packingWidthFor("box"),
+                  48 + packingWidthFor("box") + packingWidthFor("picture"),
+                  48 + packingWidthFor("box") + packingWidthFor("picture") + packingWidthFor("fabric"),
+                ];
+                return packingColumns.map((column, colIdx) => (
+                  <Th
+                    key={column.id}
+                    center={column.center}
+                    headerKey={`packing:${column.id}`}
+                    columnId={column.id}
+                    onResizeStart={(event) => startPackingResize(column.id, event)}
+                    stickyLeft={colIdx < 4 ? packingFrozenLeft[colIdx] : undefined}
+                    isLastFrozen={colIdx === 3}
+                  >
+                    {headerLabel(tableHeaderLabels, `packing:${column.id}`, column.label)}
+                  </Th>
+                ));
+              })()}
             </tr>
           </thead>
           <tbody>
-            {visiblePackingLines.length ? visiblePackingLines.map((line, rowIndex) => (
+            {visiblePackingLines.length ? visiblePackingLines.map((line, rowIndex) => {
+              const packingFrozenOffsets = [
+                48,
+                48 + packingWidthFor("box"),
+                48 + packingWidthFor("box") + packingWidthFor("picture"),
+                48 + packingWidthFor("box") + packingWidthFor("picture") + packingWidthFor("fabric"),
+              ];
+              return (
               <PackingListLineRow
                 key={line.id}
                 line={line}
@@ -7116,8 +7152,10 @@ function PackingListDetail({
                 customColumns={customColumns}
                 customCells={customCells}
                 rowHeights={rowHeights}
+                frozenOffsets={packingFrozenOffsets}
               />
-            )) : (
+              );
+            }) : (
               <tr style={s.row}>
                 <td colSpan={packingColumns.length + 1} style={{ ...s.td, textAlign: "center", padding: 40 }}>
                   No packing list rows match this search.
@@ -7125,6 +7163,42 @@ function PackingListDetail({
               </tr>
             )}
           </tbody>
+          <tfoot>
+            {(() => {
+              const totalQty = visiblePackingLines.reduce((sum, line) => sum + packingTotal(normalizeQtys(line.qtys)), 0);
+              const totalValue = visiblePackingLines.reduce((sum, line) => {
+                const qty = packingTotal(normalizeQtys(line.qtys));
+                return sum + qty * (line.priceRupees ?? 0);
+              }, 0);
+              const packingFrozenOffsets = [
+                48,
+                48 + packingWidthFor("box"),
+                48 + packingWidthFor("box") + packingWidthFor("picture"),
+                48 + packingWidthFor("box") + packingWidthFor("picture") + packingWidthFor("fabric"),
+              ];
+              return (
+                <tr style={{ ...s.row, background: "#eef2f7" }}>
+                  <td style={{ ...s.rowNumberCell, background: "#e2e8f0" }}>—</td>
+                  {packingColumns.map((col, colIdx) => {
+                    const isLastFrozen = colIdx === 3;
+                    const frozenStyle: React.CSSProperties = colIdx < 4 ? {
+                      position: "sticky",
+                      left: packingFrozenOffsets[colIdx],
+                      zIndex: 23,
+                      ...(isLastFrozen ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
+                    } : {};
+                    let content: React.ReactNode = null;
+                    if (col.id === "name") content = <span style={{ fontWeight: 700, color: "#374151", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em" }}>Totals</span>;
+                    if (col.id === "total") content = <span style={s.total}>{totalQty || ""}</span>;
+                    if (col.id === "value") content = <span style={s.total}>{totalValue ? Math.round(totalValue) : ""}</span>;
+                    return (
+                      <td key={col.id} style={{ ...s.td, background: "#eef2f7", fontWeight: 700, textAlign: col.center ? "center" : "left", ...frozenStyle }}>{content}</td>
+                    );
+                  })}
+                </tr>
+              );
+            })()}
+          </tfoot>
         </table>
       </div>
 
@@ -7151,6 +7225,7 @@ function PackingListLineRow({
   customColumns,
   customCells,
   rowHeights,
+  frozenOffsets,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -7158,6 +7233,7 @@ function PackingListLineRow({
   customColumns: TableCustomColumn[];
   customCells: Record<string, string>;
   rowHeights: Record<string, number>;
+  frozenOffsets?: number[];
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -7177,10 +7253,10 @@ function PackingListLineRow({
         { label: "Move down", onClick: () => submitPortalCell(fetcher, { intent: "move_packing_line", lineId: line.id, direction: "down" }) },
         { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this packing row?")) submitPortalCell(fetcher, { intent: "delete_packing_line", lineId: line.id }); } },
       ]} heightKey={rowHeightKey} />
-      <PackingTd rowIndex={rowIndex} colIndex={0}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={1} center><PackingImageCell lineId={line.id} field="productImageUrl" value={line.productImageUrl ?? ""} /></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={2} center><PackingImageCell lineId={line.id} field="fabricImageData" value={line.fabricImageData ?? ""} /></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={3} overflowVisible>
+      <PackingTd rowIndex={rowIndex} colIndex={0} stickyLeft={frozenOffsets?.[0]}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]}><PackingImageCell lineId={line.id} field="productImageUrl" value={line.productImageUrl ?? ""} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={2} center stickyLeft={frozenOffsets?.[2]}><PackingImageCell lineId={line.id} field="fabricImageData" value={line.fabricImageData ?? ""} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={3} overflowVisible stickyLeft={frozenOffsets?.[3]} isLastFrozen>
         <PackingProductNameCell
           line={line}
           updateParams={updateParams}
@@ -7900,6 +7976,7 @@ function OrderRow({
   customColumns,
   customCells,
   rowHeights,
+  frozenOffsets,
 }: {
   order: Order;
   rowIndex: number;
@@ -7909,6 +7986,7 @@ function OrderRow({
   customColumns: TableCustomColumn[];
   customCells: Record<string, string>;
   rowHeights: Record<string, number>;
+  frozenOffsets?: number[];
 }) {
   const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
@@ -7961,13 +8039,13 @@ function OrderRow({
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
         {/* Factory notes */}
-        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
         {/* Order date */}
-        <Td rowIndex={rowIndex} colIndex={1} center><span style={s.dateText}>{orderDate}</span></Td>
+        <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]}><span style={s.dateText}>{orderDate}</span></Td>
 
         {/* Picture */}
-        <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle}>
+        <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[2]}>
           <div style={s.imageCell}>
             {order.productImageUrl
               ? <img src={order.productImageUrl} alt="" style={s.thumb} />
@@ -7976,7 +8054,7 @@ function OrderRow({
         </Td>
 
         {/* Name */}
-        <Td rowIndex={rowIndex} colIndex={3} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle}><span style={s.productName}>{order.productTitle}</span></Td>
+        <Td rowIndex={rowIndex} colIndex={3} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen><span style={s.productName}>{order.productTitle}</span></Td>
 
         {/* SKU */}
         <Td rowIndex={rowIndex} colIndex={4} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="SKU" historyEntityName={order.productTitle}>
@@ -8606,16 +8684,25 @@ function Th({
   headerKey,
   columnId,
   onResizeStart,
+  stickyLeft,
+  isLastFrozen,
 }: {
   children: React.ReactNode;
   center?: boolean;
   headerKey?: string;
   columnId?: string;
   onResizeStart: (event: React.MouseEvent<HTMLSpanElement>) => void;
+  stickyLeft?: number;
+  isLastFrozen?: boolean;
 }) {
+  const frozenStyle: React.CSSProperties = stickyLeft !== undefined ? {
+    left: stickyLeft,
+    zIndex: 52,
+    ...(isLastFrozen ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
+  } : {};
   return (
     <th
-      style={{ ...s.th, textAlign: center ? "center" : "left" }}
+      style={{ ...s.th, textAlign: center ? "center" : "left", ...frozenStyle }}
     >
       {headerKey && typeof children === "string"
         ? <EditableHeaderLabel headerKey={headerKey} value={children} />
@@ -8644,6 +8731,8 @@ function Td({
   historyEntityId,
   historyField,
   historyEntityName,
+  stickyLeft,
+  isLastFrozen,
 }: {
   children: React.ReactNode;
   center?: boolean;
@@ -8654,7 +8743,15 @@ function Td({
   historyEntityId?: string;
   historyField?: string;
   historyEntityName?: string;
+  stickyLeft?: number;
+  isLastFrozen?: boolean;
 }) {
+  const frozenStyle: React.CSSProperties = stickyLeft !== undefined ? {
+    position: "sticky",
+    left: stickyLeft,
+    zIndex: 23,
+    ...(isLastFrozen ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
+  } : {};
   return (
     <td
       data-grid-row={rowIndex}
@@ -8675,7 +8772,7 @@ function Td({
           }
         }, 0);
       }}
-      style={{ ...s.td, textAlign: center ? "center" : "left", ...(overflowVisible ? { overflow: "visible" } : {}) }}
+      style={{ ...s.td, textAlign: center ? "center" : "left", ...(overflowVisible ? { overflow: "visible" } : {}), ...frozenStyle }}
     >
       {children}
     </td>
@@ -8690,6 +8787,8 @@ function PackingTd({
   overflowVisible,
   style,
   onContextMenu,
+  stickyLeft,
+  isLastFrozen,
 }: {
   children: React.ReactNode;
   center?: boolean;
@@ -8698,7 +8797,15 @@ function PackingTd({
   overflowVisible?: boolean;
   style?: React.CSSProperties;
   onContextMenu?: (e: React.MouseEvent<HTMLTableCellElement>) => void;
+  stickyLeft?: number;
+  isLastFrozen?: boolean;
 }) {
+  const frozenStyle: React.CSSProperties = stickyLeft !== undefined ? {
+    position: "sticky",
+    left: stickyLeft,
+    zIndex: 23,
+    ...(isLastFrozen ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
+  } : {};
   return (
     <td
       data-grid-row={rowIndex}
@@ -8720,6 +8827,7 @@ function PackingTd({
         ...s.td,
         textAlign: center ? "center" : "left",
         ...(overflowVisible ? { overflow: "visible" } : {}),
+        ...frozenStyle,
         ...style,
       }}
     >
@@ -10703,6 +10811,8 @@ const s: Record<string, React.CSSProperties> = {
     minWidth: 48,
     textAlign: "center",
     color: "#64748b",
+    left: 0,
+    zIndex: 54,
   },
   rowNumberCell: {
     width: 48,
