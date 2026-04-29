@@ -4781,6 +4781,20 @@ function SampleCard({
   onDragEnd: () => void;
   onDelete: () => void;
 }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleDeleteClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (confirmDelete) {
+      if (confirmTimer.current) clearTimeout(confirmTimer.current);
+      onDelete();
+    } else {
+      setConfirmDelete(true);
+      confirmTimer.current = setTimeout(() => setConfirmDelete(false), 3000);
+    }
+  };
+
   const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
   const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
   const thumbnailImage = images[0] ?? null;
@@ -4810,13 +4824,21 @@ function SampleCard({
         onClick={(e) => e.stopPropagation()}
       >::</span>
 
-      {/* Delete button */}
+      {/* Delete button — two-step: first click arms it (turns red), second click deletes */}
       <button
         type="button"
-        title="Delete sample"
-        onClick={(e) => { e.stopPropagation(); if (window.confirm(`Delete "${sample.name}"?`)) onDelete(); }}
-        style={{ position: "absolute", top: 8, right: 8, width: 24, height: 24, borderRadius: "50%", border: "none", background: "rgba(0,0,0,0.12)", color: "#374151", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, lineHeight: 1, padding: 0, zIndex: 2 }}
-      >×</button>
+        title={confirmDelete ? "Click again to confirm delete" : "Delete sample"}
+        onClick={handleDeleteClick}
+        style={{
+          position: "absolute", top: 8, right: 8, height: 24, borderRadius: 12, border: "none",
+          background: confirmDelete ? "#ef4444" : "rgba(0,0,0,0.12)",
+          color: confirmDelete ? "#fff" : "#374151",
+          cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: confirmDelete ? 11 : 14, fontWeight: confirmDelete ? 600 : 400,
+          lineHeight: 1, padding: confirmDelete ? "0 8px" : 0, width: confirmDelete ? "auto" : 24,
+          zIndex: 2, whiteSpace: "nowrap" as const, transition: "all 0.15s",
+        }}
+      >{confirmDelete ? "Delete?" : "×"}</button>
 
       {/* Image */}
       <div style={s.productStyleImageWrap}>
