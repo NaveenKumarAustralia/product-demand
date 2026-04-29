@@ -1295,6 +1295,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
       updates.images = [...currentImages, String(form.get("addImage"))];
     }
+    if (form.has("thumbnailImage")) {
+      const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+      updates.images = [String(form.get("thumbnailImage")), ...currentImages.slice(1)];
+    }
     if (form.has("removeImageIndex")) {
       const idx = Number(form.get("removeImageIndex"));
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
@@ -4578,78 +4582,40 @@ function SamplesPanel({
       </div>
 
       <div style={{ ...s.productInfoList, gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }}>
-        {visibleSamples.map((sample) => {
-          const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
-          const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
-          const thumbnailImage = images[0] ?? null;
-          const status = latestIteration?.status ?? "none";
-
-          return (
-            <div
-              key={sample.id}
-              draggable={!normalizedSearch}
-              style={{
-                ...s.productStyleCard,
-                ...(dragSampleId === sample.id ? s.productStyleCardDragging : {}),
-                ...(dragOverSampleId === sample.id && dragSampleId !== sample.id ? s.productStyleCardDropTarget : {}),
-                cursor: normalizedSearch ? "default" : "grab",
-              }}
-              onDragStart={(event) => {
-                if (normalizedSearch) { event.preventDefault(); return; }
-                setDragSampleId(sample.id);
-                event.dataTransfer.effectAllowed = "move";
-              }}
-              onDragOver={(event) => {
-                if (!dragSampleId || normalizedSearch) return;
-                event.preventDefault();
-                setDragOverSampleId(sample.id);
-              }}
-              onDragLeave={() => setDragOverSampleId((c) => c === sample.id ? null : c)}
-              onDrop={(event) => {
-                event.preventDefault();
-                reorderSamples(sample.id);
-                setDragSampleId(null);
-                setDragOverSampleId(null);
-              }}
-              onDragEnd={() => { setDragSampleId(null); setDragOverSampleId(null); }}
-            >
-              <span style={s.productStyleDragHandle} title="Drag to reorder">::</span>
-              <div style={s.productStyleImageWrap}>
-                <button type="button" style={s.productStyleImageButton} onClick={() => setSelectedSampleId(sample.id)}>
-                  {thumbnailImage ? (
-                    <img src={thumbnailImage} alt={sample.name} style={s.productStyleImage} loading="lazy" />
-                  ) : (
-                    <div style={s.productStyleImageEmpty}>No image yet</div>
-                  )}
-                </button>
-              </div>
-              <div style={s.productStyleCardBody}>
-                <span style={s.productStyleTitle}>{sample.name}</span>
-                <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
-                  <span style={sampleStatusPillStyle(status)}>{sampleStatusLabel(status)}</span>
-                  {sample.iterations.length > 0 && (
-                    <span style={s.sampleVersionBadge}>v{sample.iterations.length}</span>
-                  )}
-                </div>
-              </div>
-              <div style={s.productStyleCardActions}>
-                <button type="button" style={s.secondaryButton} onClick={() => setSelectedSampleId(sample.id)}>
-                  Open
-                </button>
-                <button
-                  type="button"
-                  style={s.removeUserButton}
-                  onClick={() => {
-                    if (window.confirm(`Delete "${sample.name}"? This cannot be undone.`)) {
-                      if (selectedSampleId === sample.id) setSelectedSampleId(null);
-                      fetcher.submit({ intent: "delete_sample", sampleId: String(sample.id) }, { method: "post" });
-                    }
-                  }}
-                >Delete</button>
-              </div>
-            </div>
-          );
-        })}
+        {visibleSamples.map((sample) => (
+          <SampleCard
+            key={sample.id}
+            sample={sample}
+            isDragging={dragSampleId === sample.id}
+            isDragOver={dragOverSampleId === sample.id && dragSampleId !== sample.id}
+            draggable={!normalizedSearch}
+            onOpen={() => setSelectedSampleId(sample.id)}
+            onDelete={() => {
+              if (window.confirm(`Delete "${sample.name}"? This cannot be undone.`)) {
+                if (selectedSampleId === sample.id) setSelectedSampleId(null);
+                fetcher.submit({ intent: "delete_sample", sampleId: String(sample.id) }, { method: "post" });
+              }
+            }}
+            onDragStart={(event) => {
+              if (normalizedSearch) { event.preventDefault(); return; }
+              setDragSampleId(sample.id);
+              event.dataTransfer.effectAllowed = "move";
+            }}
+            onDragOver={(event) => {
+              if (!dragSampleId || normalizedSearch) return;
+              event.preventDefault();
+              setDragOverSampleId(sample.id);
+            }}
+            onDragLeave={() => setDragOverSampleId((c) => c === sample.id ? null : c)}
+            onDrop={(event) => {
+              event.preventDefault();
+              reorderSamples(sample.id);
+              setDragSampleId(null);
+              setDragOverSampleId(null);
+            }}
+            onDragEnd={() => { setDragSampleId(null); setDragOverSampleId(null); }}
+          />
+        ))}
         {visibleSamples.length === 0 && (
           <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
             {search ? "No samples match this search." : "No samples yet. Click Add Sample to create your first one."}
@@ -4661,6 +4627,121 @@ function SamplesPanel({
         <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} />,
         document.body,
       )}
+    </div>
+  );
+}
+
+function SampleCard({
+  sample,
+  isDragging,
+  isDragOver,
+  draggable,
+  onOpen,
+  onDelete,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onDragEnd,
+}: {
+  sample: SampleType;
+  isDragging: boolean;
+  isDragOver: boolean;
+  draggable: boolean;
+  onOpen: () => void;
+  onDelete: () => void;
+  onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragLeave: () => void;
+  onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+}) {
+  const fetcher = useFetcher();
+  const [hovered, setHovered] = useState(false);
+  const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
+  const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
+  const thumbnailImage = images[0] ?? null;
+  const status = latestIteration?.status ?? "none";
+  const lastUpdated = latestIteration?.updatedAt ?? null;
+
+  const uploadThumbnail = (file: File) => {
+    if (!latestIteration) { onOpen(); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      fetcher.submit(
+        { intent: "update_sample_iteration", iterationId: String(latestIteration.id), thumbnailImage: String(reader.result) },
+        { method: "post" },
+      );
+    };
+    reader.readAsDataURL(file);
+  };
+
+  return (
+    <div
+      draggable={draggable}
+      style={{
+        ...s.productStyleCard,
+        ...(isDragging ? s.productStyleCardDragging : {}),
+        ...(isDragOver ? s.productStyleCardDropTarget : {}),
+        cursor: draggable ? "grab" : "default",
+      }}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+    >
+      <span style={s.productStyleDragHandle} title="Drag to reorder">::</span>
+
+      {/* Image + hover overlay */}
+      <div
+        style={{ ...s.productStyleImageWrap, position: "relative" }}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+      >
+        {thumbnailImage ? (
+          <img src={thumbnailImage} alt={sample.name} style={s.productStyleImage} loading="lazy" />
+        ) : (
+          <div style={s.productStyleImageEmpty}>No image yet</div>
+        )}
+        {hovered && (
+          <div style={s.sampleCardOverlay}>
+            <button type="button" style={s.sampleCardOverlayBtn} onClick={onOpen}>Open</button>
+            <label style={s.sampleCardOverlayBtn}>
+              {thumbnailImage ? "Replace image" : "Upload image"}
+              <input
+                type="file"
+                accept="image/*"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.currentTarget.files?.[0];
+                  if (file) uploadThumbnail(file);
+                  e.currentTarget.value = "";
+                }}
+              />
+            </label>
+            <button type="button" style={{ ...s.sampleCardOverlayBtn, ...s.sampleCardOverlayBtnDanger }} onClick={onDelete}>
+              Delete sample
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Card body */}
+      <div style={{ ...s.productStyleCardBody, paddingBottom: 14 }}>
+        <span style={s.productStyleTitle}>{sample.name}</span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4, flexWrap: "wrap", justifyContent: "center" }}>
+          <span style={sampleStatusPillStyle(status)}>{sampleStatusLabel(status)}</span>
+          {sample.iterations.length > 0 && (
+            <span style={s.sampleVersionBadge}>v{sample.iterations.length}</span>
+          )}
+        </div>
+        {lastUpdated && (
+          <span style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
+            Updated {formatPortalDate(lastUpdated)}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -11884,6 +11965,34 @@ const s: Record<string, React.CSSProperties> = {
     color: "#4b5563",
     borderRadius: 99,
     padding: "1px 7px",
+  },
+  sampleCardOverlay: {
+    position: "absolute" as const,
+    inset: 0,
+    background: "rgba(0,0,0,0.52)",
+    display: "flex",
+    flexDirection: "column" as const,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    borderRadius: 0,
+  },
+  sampleCardOverlayBtn: {
+    background: "rgba(255,255,255,0.95)",
+    color: "#111827",
+    border: "none",
+    borderRadius: 7,
+    padding: "8px 0",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    width: 160,
+    textAlign: "center" as const,
+    display: "block",
+  },
+  sampleCardOverlayBtnDanger: {
+    color: "#dc2626",
+    background: "rgba(255,255,255,0.92)",
   },
 };
 
