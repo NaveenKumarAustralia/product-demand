@@ -4782,18 +4782,6 @@ function SampleCard({
   onDelete: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const handleDeleteClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (confirmDelete) {
-      if (confirmTimer.current) clearTimeout(confirmTimer.current);
-      onDelete();
-    } else {
-      setConfirmDelete(true);
-      confirmTimer.current = setTimeout(() => setConfirmDelete(false), 3000);
-    }
-  };
 
   const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
   const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
@@ -4824,21 +4812,35 @@ function SampleCard({
         onClick={(e) => e.stopPropagation()}
       >::</span>
 
-      {/* Delete button — two-step: first click arms it (turns red), second click deletes */}
+      {/* × button — first click shows overlay, overlay has the real Delete button */}
       <button
         type="button"
-        title={confirmDelete ? "Click again to confirm delete" : "Delete sample"}
-        onClick={handleDeleteClick}
-        style={{
-          position: "absolute", top: 8, right: 8, height: 24, borderRadius: 12, border: "none",
-          background: confirmDelete ? "#ef4444" : "rgba(0,0,0,0.12)",
-          color: confirmDelete ? "#fff" : "#374151",
-          cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: confirmDelete ? 11 : 14, fontWeight: confirmDelete ? 600 : 400,
-          lineHeight: 1, padding: confirmDelete ? "0 8px" : 0, width: confirmDelete ? "auto" : 24,
-          zIndex: 2, whiteSpace: "nowrap" as const, transition: "all 0.15s",
-        }}
-      >{confirmDelete ? "Delete?" : "×"}</button>
+        title="Delete sample"
+        onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
+        style={{ position: "absolute", top: 8, right: 8, width: 24, height: 24, borderRadius: "50%", border: "none", background: "rgba(0,0,0,0.12)", color: "#374151", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, lineHeight: 1, padding: 0, zIndex: 2 }}
+      >×</button>
+
+      {/* Confirmation overlay — appears on top of card */}
+      {confirmDelete && (
+        <div
+          style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 8 }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>Delete this sample?</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+            >Delete</button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setConfirmDelete(false); }}
+              style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}
+            >Cancel</button>
+          </div>
+        </div>
+      )}
 
       {/* Image */}
       <div style={s.productStyleImageWrap}>
