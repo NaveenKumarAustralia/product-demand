@@ -4696,6 +4696,7 @@ function SamplesPanel({
               setDragOverSampleId(null);
             }}
             onDragEnd={() => { setDragSampleId(null); setDragOverSampleId(null); }}
+            onDelete={() => fetcher.submit({ intent: "delete_sample", sampleId: String(sample.id) }, { method: "post" })}
           />
         ))}
         {visibleSamples.length === 0 && (
@@ -4758,6 +4759,7 @@ function SampleCard({
   onDragLeave: () => void;
   onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
+  onDelete: () => void;
 }) {
   const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
   const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
@@ -4787,6 +4789,14 @@ function SampleCard({
         onDragEnd={onDragEnd}
         onClick={(e) => e.stopPropagation()}
       >::</span>
+
+      {/* Delete button */}
+      <button
+        type="button"
+        title="Delete sample"
+        onClick={(e) => { e.stopPropagation(); if (window.confirm(`Delete "${sample.name}"?`)) onDelete(); }}
+        style={{ position: "absolute", top: 8, right: 8, width: 24, height: 24, borderRadius: "50%", border: "none", background: "rgba(0,0,0,0.12)", color: "#374151", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, lineHeight: 1, padding: 0, zIndex: 2 }}
+      >×</button>
 
       {/* Image */}
       <div style={s.productStyleImageWrap}>
@@ -5050,7 +5060,7 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
               fetcher.submit({ intent: "delete_sample_iteration", iterationId: String(iteration.id) }, { method: "post" });
             }
           }}
-        >Delete</button>
+        >Delete version</button>
       </div>
 
       {/* Images */}
