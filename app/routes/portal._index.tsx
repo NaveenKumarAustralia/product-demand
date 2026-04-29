@@ -5676,7 +5676,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
       {/* Tab bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "8px 16px 0", borderBottom: "1px solid #e5e7eb", background: "#fff", flexShrink: 0, flexWrap: "wrap" }}>
         {boards.map((board) => (
-          <div key={board.id} style={{ display: "flex", alignItems: "center", gap: 2, background: board.id === activeBoardId ? "#1f2937" : "#f3f4f6", color: board.id === activeBoardId ? "#fff" : "#374151", borderRadius: "6px 6px 0 0", padding: "4px 10px", cursor: "pointer", fontSize: 13, fontWeight: 500, border: "1px solid", borderColor: board.id === activeBoardId ? "#1f2937" : "#e5e7eb", borderBottom: board.id === activeBoardId ? "1px solid #fff" : "1px solid #e5e7eb", position: "relative", top: 1 }} onClick={() => setActiveBoardId(board.id)}>
+          <div key={board.id} style={{ display: "flex", alignItems: "center", gap: 2, background: board.id === activeBoardId ? "var(--portal-primary-button-bg, #111827)" : "#f3f4f6", color: board.id === activeBoardId ? "var(--portal-primary-button-color, #fff)" : "#374151", borderRadius: "6px 6px 0 0", padding: "4px 10px", cursor: "pointer", fontSize: 13, fontWeight: 500, border: "1px solid", borderColor: board.id === activeBoardId ? "var(--portal-primary-button-bg, #111827)" : "#e5e7eb", borderBottom: board.id === activeBoardId ? "1px solid #fff" : "1px solid #e5e7eb", position: "relative", top: 1 }} onClick={() => setActiveBoardId(board.id)}>
             {renamingBoardId === board.id ? (
               <input
                 autoFocus
