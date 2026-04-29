@@ -4916,14 +4916,17 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
               onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(iteration.name ?? ""); setNameEditing(false); } }}
             />
           ) : (
-            <button
-              type="button"
-              onClick={() => setNameEditing(true)}
-              style={{ background: "none", border: "none", padding: 0, cursor: "text", textAlign: "left", font: "inherit", fontSize: 13, fontWeight: 700, color: "#111827", width: "100%" }}
-              title="Click to add a name"
-            >
-              {versionLabel}
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>{versionLabel}</span>
+              <button
+                type="button"
+                onClick={() => setNameEditing(true)}
+                style={{ background: "none", border: "none", padding: "2px 4px", cursor: "pointer", color: "#9ca3af", lineHeight: 1, borderRadius: 4, display: "flex", alignItems: "center" }}
+                title="Edit version name"
+              >
+                <svg width="13" height="13" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/></svg>
+              </button>
+            </div>
           )}
         </div>
         <select
@@ -12213,7 +12216,7 @@ const s: Record<string, React.CSSProperties> = {
     position: "fixed" as const,
     inset: 0,
     background: "rgba(0,0,0,0.55)",
-    zIndex: 1100,
+    zIndex: 1400,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -12268,7 +12271,7 @@ const s: Record<string, React.CSSProperties> = {
     position: "fixed" as const,
     inset: 0,
     background: "rgba(0,0,0,0.88)",
-    zIndex: 1200,
+    zIndex: 1500,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
