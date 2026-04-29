@@ -129,6 +129,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
       })
     : [];
+  const visionBoards = page === "visionboard"
+    ? await prisma.visionBoard.findMany({
+        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+        include: { items: { orderBy: [{ zIndex: "asc" }, { createdAt: "asc" }] } },
+      }).catch(() => [] as { id: number; name: string; sortOrder: number; createdAt: Date; updatedAt: Date; items: { id: number; boardId: number; type: string; imageData: string | null; content: string | null; x: number; y: number; width: number; height: number; zIndex: number; title: string | null; notes: string | null; fields: unknown; createdAt: Date; updatedAt: Date }[] }[])
+    : [];
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = await prisma.activityLog.findMany({
       where: { createdAt: { gte: ninetyDaysAgo } },
@@ -316,6 +322,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     selectedFabricTab,
     inrToAudRate,
     samples,
+    visionBoards,
   };
   } catch (error) {
     console.error("Portal loader error:", error);
@@ -1341,6 +1348,83 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "add_vision_board") {
+    if (currentUser?.role !== "superadmin") return null;
+    const name = String(form.get("name") ?? "").trim() || "New Board";
+    const existing = await prisma.visionBoard.count();
+    await prisma.visionBoard.create({ data: { name, sortOrder: existing } });
+    return null;
+  }
+  if (intent === "rename_vision_board") {
+    if (currentUser?.role !== "superadmin") return null;
+    const boardId = Number(form.get("boardId"));
+    const name = String(form.get("name") ?? "").trim();
+    if (!boardId || !name) return null;
+    await prisma.visionBoard.update({ where: { id: boardId }, data: { name } });
+    return null;
+  }
+  if (intent === "delete_vision_board") {
+    if (currentUser?.role !== "superadmin") return null;
+    const boardId = Number(form.get("boardId"));
+    if (!boardId) return null;
+    await prisma.visionBoard.delete({ where: { id: boardId } });
+    return null;
+  }
+  if (intent === "reorder_vision_boards") {
+    if (currentUser?.role !== "superadmin") return null;
+    const ids = JSON.parse(String(form.get("boardIds") ?? "[]")) as number[];
+    await Promise.all(ids.map((id, index) => prisma.visionBoard.update({ where: { id }, data: { sortOrder: index } })));
+    return null;
+  }
+  if (intent === "add_vision_board_item") {
+    if (currentUser?.role !== "superadmin") return null;
+    const boardId = Number(form.get("boardId"));
+    const type = String(form.get("type") ?? "image");
+    if (!boardId) return null;
+    const existing = await prisma.visionBoardItem.findMany({ where: { boardId }, select: { zIndex: true } });
+    const maxZ = existing.length > 0 ? Math.max(...existing.map((i) => i.zIndex)) : 0;
+    const imageFile = type === "image" ? form.get("image") : null;
+    let imageData: string | null = null;
+    if (imageFile && typeof imageFile !== "string" && typeof imageFile.arrayBuffer === "function") {
+      if (imageFile.type.startsWith("image/") && imageFile.size <= 8 * 1024 * 1024) {
+        const buffer = Buffer.from(await imageFile.arrayBuffer());
+        imageData = `data:${imageFile.type};base64,${buffer.toString("base64")}`;
+      }
+    }
+    const x = Number(form.get("x") ?? 0);
+    const y = Number(form.get("y") ?? 0);
+    await prisma.visionBoardItem.create({
+      data: { boardId, type, imageData, content: type === "text" ? "Text" : null, x, y, width: type === "text" ? 200 : 200, height: type === "text" ? 80 : 200, zIndex: maxZ + 1 },
+    });
+    return null;
+  }
+  if (intent === "update_vision_board_item") {
+    if (currentUser?.role !== "superadmin") return null;
+    const itemId = Number(form.get("itemId"));
+    if (!itemId) return null;
+    const data: Record<string, unknown> = { updatedAt: new Date() };
+    if (form.has("x")) data.x = Number(form.get("x"));
+    if (form.has("y")) data.y = Number(form.get("y"));
+    if (form.has("width")) data.width = Number(form.get("width"));
+    if (form.has("height")) data.height = Number(form.get("height"));
+    if (form.has("zIndex")) data.zIndex = Number(form.get("zIndex"));
+    if (form.has("title")) data.title = String(form.get("title") ?? "") || null;
+    if (form.has("notes")) data.notes = String(form.get("notes") ?? "") || null;
+    if (form.has("content")) data.content = String(form.get("content") ?? "") || null;
+    if (form.has("fields")) {
+      try { data.fields = JSON.parse(String(form.get("fields"))); } catch { /* keep existing */ }
+    }
+    await prisma.visionBoardItem.update({ where: { id: itemId }, data });
+    return null;
+  }
+  if (intent === "delete_vision_board_item") {
+    if (currentUser?.role !== "superadmin") return null;
+    const itemId = Number(form.get("itemId"));
+    if (!itemId) return null;
+    await prisma.visionBoardItem.delete({ where: { id: itemId } });
+    return null;
+  }
+
   if (intent === "update_fabric_cell") {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
@@ -1562,6 +1646,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultShouldRevalidate }) => {
   const intent = formData?.get("intent") as string | null;
   if (intent === "reorder_samples" || intent === "rename_sample") return false;
+  if (intent === "update_vision_board_item" || intent === "reorder_vision_boards" || intent === "rename_vision_board") return false;
   return defaultShouldRevalidate;
 };
 
@@ -2102,9 +2187,10 @@ const ALL_NAV_ITEMS = [
   { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
   { id: "samples", label: "Samples", href: "/portal?page=samples" },
   { id: "newproduct", label: "New Product Orders", href: "/portal?page=newproduct" },
+  { id: "visionboard", label: "Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboard"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -3635,6 +3721,7 @@ export default function PortalDashboard() {
     selectedFabricTab,
     inrToAudRate,
     samples,
+    visionBoards,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
@@ -3718,12 +3805,16 @@ export default function PortalDashboard() {
     : page === "pricelist" ? "Price List"
     : page === "productinfo" ? "Product Information"
     : page === "samples" ? "Samples"
+    : page === "visionboard" ? "Vision Board"
     : page === "newproduct" ? "New Product Orders"
     : selectedProductGroup || "Existing Products Restock";
   const orderedNavItems = navOrder
     .map((id) => ALL_NAV_ITEMS.find((item) => item.id === id))
     .filter(Boolean)
-    .filter((item) => currentUser?.role === "superadmin" || Boolean(currentUser?.pageAccess[item!.id])) as typeof ALL_NAV_ITEMS[number][];
+    .filter((item) => {
+      if ((item as { superadminOnly?: boolean }).superadminOnly) return currentUser?.role === "superadmin";
+      return currentUser?.role === "superadmin" || Boolean(currentUser?.pageAccess[item!.id]);
+    }) as typeof ALL_NAV_ITEMS[number][];
 
   if (loginBlocked) {
     return <PortalLogin />;
@@ -3939,6 +4030,10 @@ export default function PortalDashboard() {
             samples={samples}
             search={searchTitleInput}
             users={users}
+          />
+        ) : page === "visionboard" ? (
+          <VisionBoardPanel
+            boards={visionBoards}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -5319,6 +5414,584 @@ function ImageLightbox({
         disabled={index === images.length - 1}
       >›</button>
       <div style={s.lightboxCounter}>{index + 1} / {images.length}</div>
+    </div>
+  );
+}
+
+// ─── Vision Board ─────────────────────────────────────────────────────────────
+
+type VisionBoardItemType = {
+  id: number;
+  boardId: number;
+  type: string;
+  imageData: string | null;
+  content: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  zIndex: number;
+  title: string | null;
+  notes: string | null;
+  fields: unknown;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type VisionBoardType = {
+  id: number;
+  name: string;
+  sortOrder: number;
+  createdAt: Date;
+  updatedAt: Date;
+  items: VisionBoardItemType[];
+};
+
+type VisionCustomField = { id: string; label: string; value: string };
+
+function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[] }) {
+  const fetcher = useFetcher();
+  const [boards, setBoards] = useState<VisionBoardType[]>(initialBoards);
+  const [activeBoardId, setActiveBoardId] = useState<number | null>(initialBoards[0]?.id ?? null);
+  const [addBoardOpen, setAddBoardOpen] = useState(false);
+  const [addBoardName, setAddBoardName] = useState("");
+  const [renamingBoardId, setRenamingBoardId] = useState<number | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [deletingBoardId, setDeletingBoardId] = useState<number | null>(null);
+  const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; itemId: number } | null>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const itemsRef = useRef<VisionBoardItemType[]>([]);
+
+  useEffect(() => { setBoards(initialBoards); }, [initialBoards]);
+
+  const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
+
+  useEffect(() => {
+    if (activeBoard) {
+      itemsRef.current = activeBoard.items;
+    }
+  }, [activeBoard]);
+
+  useEffect(() => {
+    if (!activeBoardId && boards.length > 0) setActiveBoardId(boards[0].id);
+  }, [boards, activeBoardId]);
+
+  const updateLocalItem = (itemId: number, patch: Partial<VisionBoardItemType>) => {
+    setBoards((prev) => prev.map((b) => b.id === activeBoardId
+      ? { ...b, items: b.items.map((it) => it.id === itemId ? { ...it, ...patch } : it) }
+      : b,
+    ));
+    itemsRef.current = itemsRef.current.map((it) => it.id === itemId ? { ...it, ...patch } : it);
+  };
+
+  const submitItemUpdate = (itemId: number, data: Record<string, string | number>) => {
+    fetcher.submit({ intent: "update_vision_board_item", itemId: String(itemId), ...Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])) }, { method: "post" });
+  };
+
+  // Drag to move
+  const startDrag = (e: React.MouseEvent, itemId: number) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setSelectedItemId(itemId);
+    const item = itemsRef.current.find((it) => it.id === itemId);
+    if (!item) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const origX = item.x;
+    const origY = item.y;
+    const handleMove = (ev: MouseEvent) => {
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      updateLocalItem(itemId, { x: Math.max(0, origX + dx), y: Math.max(0, origY + dy) });
+    };
+    const handleUp = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      const newX = Math.max(0, origX + dx);
+      const newY = Math.max(0, origY + dy);
+      submitItemUpdate(itemId, { x: newX, y: newY });
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  };
+
+  // Resize handle (bottom-right corner)
+  const startResize = (e: React.MouseEvent, itemId: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const item = itemsRef.current.find((it) => it.id === itemId);
+    if (!item) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const origW = item.width;
+    const origH = item.height;
+    const handleMove = (ev: MouseEvent) => {
+      const newW = Math.max(80, origW + ev.clientX - startX);
+      const newH = Math.max(40, origH + ev.clientY - startY);
+      updateLocalItem(itemId, { width: newW, height: newH });
+    };
+    const handleUp = (ev: MouseEvent) => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+      const newW = Math.max(80, origW + ev.clientX - startX);
+      const newH = Math.max(40, origH + ev.clientY - startY);
+      submitItemUpdate(itemId, { width: newW, height: newH });
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  };
+
+  const handleCanvasContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu(null);
+  };
+
+  const handleItemContextMenu = (e: React.MouseEvent, itemId: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY, itemId });
+  };
+
+  const bringToFront = (itemId: number) => {
+    const items = itemsRef.current;
+    const maxZ = Math.max(...items.map((it) => it.zIndex), 0);
+    updateLocalItem(itemId, { zIndex: maxZ + 1 });
+    submitItemUpdate(itemId, { zIndex: maxZ + 1 });
+    setContextMenu(null);
+  };
+
+  const sendToBack = (itemId: number) => {
+    const items = itemsRef.current;
+    const minZ = Math.min(...items.map((it) => it.zIndex), 0);
+    updateLocalItem(itemId, { zIndex: minZ - 1 });
+    submitItemUpdate(itemId, { zIndex: minZ - 1 });
+    setContextMenu(null);
+  };
+
+  const deleteItem = (itemId: number) => {
+    setBoards((prev) => prev.map((b) => b.id === activeBoardId
+      ? { ...b, items: b.items.filter((it) => it.id !== itemId) }
+      : b,
+    ));
+    itemsRef.current = itemsRef.current.filter((it) => it.id !== itemId);
+    fetcher.submit({ intent: "delete_vision_board_item", itemId: String(itemId) }, { method: "post" });
+    if (selectedItemId === itemId) setSelectedItemId(null);
+    setContextMenu(null);
+  };
+
+  const handleAddBoard = () => {
+    const name = addBoardName.trim() || "New Board";
+    const tempId = -Date.now();
+    setBoards((prev) => [...prev, { id: tempId, name, sortOrder: prev.length, createdAt: new Date(), updatedAt: new Date(), items: [] }]);
+    setActiveBoardId(tempId);
+    fetcher.submit({ intent: "add_vision_board", name }, { method: "post" });
+    setAddBoardOpen(false);
+    setAddBoardName("");
+  };
+
+  const handleDeleteBoard = (boardId: number) => {
+    setBoards((prev) => prev.filter((b) => b.id !== boardId));
+    if (activeBoardId === boardId) setActiveBoardId(boards.find((b) => b.id !== boardId)?.id ?? null);
+    fetcher.submit({ intent: "delete_vision_board", boardId: String(boardId) }, { method: "post" });
+    setDeletingBoardId(null);
+  };
+
+  const handleRenameBoard = (boardId: number) => {
+    const name = renameDraft.trim();
+    if (!name) { setRenamingBoardId(null); return; }
+    setBoards((prev) => prev.map((b) => b.id === boardId ? { ...b, name } : b));
+    fetcher.submit({ intent: "rename_vision_board", boardId: String(boardId), name }, { method: "post" });
+    setRenamingBoardId(null);
+  };
+
+  const handleDropImage = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (!file || !file.type.startsWith("image/") || !activeBoardId || activeBoardId < 0) return;
+    const canvasRect = canvasRef.current?.getBoundingClientRect();
+    const x = canvasRect ? e.clientX - canvasRect.left : 0;
+    const y = canvasRect ? e.clientY - canvasRect.top : 0;
+    const fd = new FormData();
+    fd.append("intent", "add_vision_board_item");
+    fd.append("boardId", String(activeBoardId));
+    fd.append("type", "image");
+    fd.append("image", file);
+    fd.append("x", String(Math.max(0, x - 100)));
+    fd.append("y", String(Math.max(0, y - 100)));
+    fetch("/portal", { method: "post", body: fd }).then(() => {
+      window.location.reload();
+    });
+  };
+
+  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !activeBoardId || activeBoardId < 0) return;
+    const fd = new FormData();
+    fd.append("intent", "add_vision_board_item");
+    fd.append("boardId", String(activeBoardId));
+    fd.append("type", "image");
+    fd.append("image", file);
+    fd.append("x", "20");
+    fd.append("y", String(20 + (activeBoard?.items.length ?? 0) * 20));
+    fetch("/portal", { method: "post", body: fd }).then(() => {
+      window.location.reload();
+    });
+    e.target.value = "";
+  };
+
+  const handleAddText = () => {
+    if (!activeBoardId || activeBoardId < 0) return;
+    const yOffset = 20 + (activeBoard?.items.length ?? 0) * 10;
+    fetcher.submit({ intent: "add_vision_board_item", boardId: String(activeBoardId), type: "text", x: "20", y: String(yOffset), }, { method: "post" });
+  };
+
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handler = () => setContextMenu(null);
+    window.addEventListener("mousedown", handler);
+    return () => window.removeEventListener("mousedown", handler);
+  }, [contextMenu]);
+
+  const selectedItem = activeBoard?.items.find((it) => it.id === selectedItemId) ?? null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      {/* Tab bar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "8px 16px 0", borderBottom: "1px solid #e5e7eb", background: "#fff", flexShrink: 0, flexWrap: "wrap" }}>
+        {boards.map((board) => (
+          <div key={board.id} style={{ display: "flex", alignItems: "center", gap: 2, background: board.id === activeBoardId ? "#1f2937" : "#f3f4f6", color: board.id === activeBoardId ? "#fff" : "#374151", borderRadius: "6px 6px 0 0", padding: "4px 10px", cursor: "pointer", fontSize: 13, fontWeight: 500, border: "1px solid", borderColor: board.id === activeBoardId ? "#1f2937" : "#e5e7eb", borderBottom: board.id === activeBoardId ? "1px solid #fff" : "1px solid #e5e7eb", position: "relative", top: 1 }} onClick={() => setActiveBoardId(board.id)}>
+            {renamingBoardId === board.id ? (
+              <input
+                autoFocus
+                value={renameDraft}
+                onChange={(e) => setRenameDraft(e.target.value)}
+                onBlur={() => handleRenameBoard(board.id)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleRenameBoard(board.id); if (e.key === "Escape") setRenamingBoardId(null); }}
+                onClick={(e) => e.stopPropagation()}
+                style={{ background: "transparent", border: "none", outline: "none", color: "inherit", fontSize: 13, fontWeight: 500, width: Math.max(60, renameDraft.length * 8) }}
+              />
+            ) : (
+              <span onDoubleClick={(e) => { e.stopPropagation(); setRenamingBoardId(board.id); setRenameDraft(board.name); }}>{board.name}</span>
+            )}
+            {deletingBoardId === board.id ? (
+              <span style={{ display: "flex", gap: 3, marginLeft: 6 }} onClick={(e) => e.stopPropagation()}>
+                <button onClick={() => handleDeleteBoard(board.id)} style={{ background: "#ef4444", color: "#fff", border: "none", borderRadius: 3, padding: "1px 6px", fontSize: 11, cursor: "pointer" }}>Delete</button>
+                <button onClick={() => setDeletingBoardId(null)} style={{ background: "#e5e7eb", color: "#374151", border: "none", borderRadius: 3, padding: "1px 6px", fontSize: 11, cursor: "pointer" }}>Cancel</button>
+              </span>
+            ) : (
+              <span onClick={(e) => { e.stopPropagation(); setDeletingBoardId(board.id); }} style={{ marginLeft: 6, opacity: 0.5, fontSize: 11, cursor: "pointer", lineHeight: 1 }}>×</span>
+            )}
+          </div>
+        ))}
+        <button onClick={() => { setAddBoardOpen(true); setAddBoardName(""); }} style={{ background: "none", border: "1px dashed #d1d5db", borderRadius: "6px 6px 0 0", padding: "4px 10px", fontSize: 13, cursor: "pointer", color: "#6b7280", position: "relative", top: 1 }}>+ Add</button>
+      </div>
+
+      {/* Toolbar */}
+      <div style={{ display: "flex", gap: 8, padding: "8px 16px", borderBottom: "1px solid #e5e7eb", background: "#f9fafb", flexShrink: 0, alignItems: "center" }}>
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={!activeBoardId || activeBoardId < 0}
+          style={{ background: "#1f2937", color: "#fff", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, cursor: activeBoardId && activeBoardId > 0 ? "pointer" : "not-allowed", opacity: activeBoardId && activeBoardId > 0 ? 1 : 0.5 }}
+        >
+          + Add Image
+        </button>
+        <button
+          onClick={handleAddText}
+          disabled={!activeBoardId || activeBoardId < 0}
+          style={{ background: "#fff", color: "#374151", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 14px", fontSize: 13, cursor: activeBoardId && activeBoardId > 0 ? "pointer" : "not-allowed", opacity: activeBoardId && activeBoardId > 0 ? 1 : 0.5 }}
+        >
+          + Add Text
+        </button>
+        <span style={{ fontSize: 12, color: "#9ca3af", marginLeft: 8 }}>Drag &amp; drop images onto the canvas. Double-click a tab to rename it. Right-click an item to bring forward/back/delete.</span>
+        <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFileInput} />
+      </div>
+
+      {/* Canvas + Drawer */}
+      <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
+        {/* Canvas */}
+        <div
+          ref={canvasRef}
+          style={{ flex: 1, overflowY: "auto", overflowX: "auto", position: "relative", background: "#f9fafb", backgroundImage: "radial-gradient(circle, #d1d5db 1px, transparent 1px)", backgroundSize: "20px 20px" }}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={handleDropImage}
+          onContextMenu={handleCanvasContextMenu}
+          onClick={() => { setSelectedItemId(null); setContextMenu(null); }}
+        >
+          <div style={{ position: "relative", width: 1600, minHeight: 900 }}>
+            {activeBoard?.items.map((item) => (
+              <VisionCanvasItem
+                key={item.id}
+                item={item}
+                selected={item.id === selectedItemId}
+                onMouseDown={(e) => startDrag(e, item.id)}
+                onResizeStart={(e) => startResize(e, item.id)}
+                onContextMenu={(e) => handleItemContextMenu(e, item.id)}
+                onClick={(e) => { e.stopPropagation(); setSelectedItemId(item.id); }}
+                onContentChange={(content) => {
+                  updateLocalItem(item.id, { content });
+                  submitItemUpdate(item.id, { content });
+                }}
+              />
+            ))}
+          </div>
+          {!activeBoard && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#9ca3af", fontSize: 15 }}>
+              Add a board using the tab bar above
+            </div>
+          )}
+          {activeBoard && activeBoard.items.length === 0 && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#9ca3af", fontSize: 15, pointerEvents: "none" }}>
+              Drop images here or click &quot;Add Image&quot; to start
+            </div>
+          )}
+        </div>
+
+        {/* Item drawer */}
+        {selectedItem && (
+          <VisionItemDrawer
+            item={selectedItem}
+            onUpdate={(patch) => {
+              updateLocalItem(selectedItem.id, patch);
+              const data: Record<string, string> = {};
+              if ("title" in patch) data.title = patch.title ?? "";
+              if ("notes" in patch) data.notes = patch.notes ?? "";
+              if ("fields" in patch) data.fields = JSON.stringify(patch.fields);
+              fetcher.submit({ intent: "update_vision_board_item", itemId: String(selectedItem.id), ...data }, { method: "post" });
+            }}
+            onClose={() => setSelectedItemId(null)}
+          />
+        )}
+      </div>
+
+      {/* Context menu */}
+      {contextMenu && createPortal(
+        <div
+          style={{ position: "fixed", top: contextMenu.y, left: contextMenu.x, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 4px 20px rgba(0,0,0,0.15)", zIndex: 9999, minWidth: 160, overflow: "hidden" }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          {[
+            { label: "Bring to Front", action: () => bringToFront(contextMenu.itemId) },
+            { label: "Send to Back", action: () => sendToBack(contextMenu.itemId) },
+            { label: "Delete", action: () => deleteItem(contextMenu.itemId), danger: true },
+          ].map((item) => (
+            <button
+              key={item.label}
+              onClick={item.action}
+              style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: "9px 16px", fontSize: 13, cursor: "pointer", color: item.danger ? "#ef4444" : "#111827" }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+
+      {/* Add board modal */}
+      {addBoardOpen && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setAddBoardOpen(false)}>
+          <div style={{ background: "#fff", borderRadius: 12, padding: 24, width: 340, boxShadow: "0 8px 32px rgba(0,0,0,0.2)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontWeight: 600, marginBottom: 12 }}>New Board</div>
+            <input
+              autoFocus
+              value={addBoardName}
+              onChange={(e) => setAddBoardName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleAddBoard(); if (e.key === "Escape") setAddBoardOpen(false); }}
+              placeholder="Board name"
+              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "8px 10px", fontSize: 14, boxSizing: "border-box" }}
+            />
+            <div style={{ display: "flex", gap: 8, marginTop: 16, justifyContent: "flex-end" }}>
+              <button onClick={() => setAddBoardOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "7px 16px", cursor: "pointer", fontSize: 13 }}>Cancel</button>
+              <button onClick={handleAddBoard} style={{ background: "#1f2937", color: "#fff", border: "none", borderRadius: 6, padding: "7px 16px", cursor: "pointer", fontSize: 13 }}>Add</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function VisionCanvasItem({
+  item,
+  selected,
+  onMouseDown,
+  onResizeStart,
+  onContextMenu,
+  onClick,
+  onContentChange,
+}: {
+  item: VisionBoardItemType;
+  selected: boolean;
+  onMouseDown: (e: React.MouseEvent) => void;
+  onResizeStart: (e: React.MouseEvent) => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+  onClick: (e: React.MouseEvent) => void;
+  onContentChange: (content: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(item.content ?? "");
+  return (
+    <div
+      style={{ position: "absolute", left: item.x, top: item.y, width: item.width, height: item.height, zIndex: item.zIndex, cursor: "grab", userSelect: "none", outline: selected ? "2px solid #3b82f6" : "none", borderRadius: 4, boxSizing: "border-box" }}
+      onMouseDown={onMouseDown}
+      onContextMenu={onContextMenu}
+      onClick={onClick}
+    >
+      {item.type === "image" && item.imageData ? (
+        <img src={item.imageData} alt={item.title ?? ""} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 4, display: "block", pointerEvents: "none" }} draggable={false} />
+      ) : item.type === "text" ? (
+        editing ? (
+          <textarea
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={() => { setEditing(false); onContentChange(draft); }}
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{ width: "100%", height: "100%", border: "1px solid #3b82f6", borderRadius: 4, padding: "4px 6px", fontSize: 14, resize: "none", background: "#fffde7", outline: "none", boxSizing: "border-box", cursor: "text" }}
+          />
+        ) : (
+          <div
+            onDoubleClick={(e) => { e.stopPropagation(); setDraft(item.content ?? ""); setEditing(true); }}
+            style={{ width: "100%", height: "100%", background: "#fffde7", border: "1px solid #e5e7eb", borderRadius: 4, padding: "4px 6px", fontSize: 14, whiteSpace: "pre-wrap", wordBreak: "break-word", overflow: "hidden", boxSizing: "border-box" }}
+          >
+            {item.content || <span style={{ color: "#9ca3af" }}>Double-click to edit</span>}
+          </div>
+        )
+      ) : (
+        <div style={{ width: "100%", height: "100%", background: "#f3f4f6", borderRadius: 4, border: "1px dashed #d1d5db", display: "flex", alignItems: "center", justifyContent: "center", color: "#9ca3af", fontSize: 12 }}>No image</div>
+      )}
+      {/* Resize handle */}
+      {selected && (
+        <div
+          onMouseDown={(e) => { e.stopPropagation(); onResizeStart(e); }}
+          style={{ position: "absolute", bottom: 0, right: 0, width: 14, height: 14, background: "#3b82f6", borderRadius: "2px 0 4px 0", cursor: "se-resize", zIndex: 10 }}
+        />
+      )}
+    </div>
+  );
+}
+
+function VisionItemDrawer({
+  item,
+  onUpdate,
+  onClose,
+}: {
+  item: VisionBoardItemType;
+  onUpdate: (patch: Partial<VisionBoardItemType & { fields: VisionCustomField[] }>) => void;
+  onClose: () => void;
+}) {
+  const [title, setTitle] = useState(item.title ?? "");
+  const [notes, setNotes] = useState(item.notes ?? "");
+  const [fields, setFields] = useState<VisionCustomField[]>(() => {
+    try {
+      const raw = Array.isArray(item.fields) ? item.fields : JSON.parse(typeof item.fields === "string" ? item.fields : "[]");
+      return raw as VisionCustomField[];
+    } catch { return []; }
+  });
+  const [newFieldLabel, setNewFieldLabel] = useState("");
+
+  useEffect(() => {
+    setTitle(item.title ?? "");
+    setNotes(item.notes ?? "");
+    try {
+      const raw = Array.isArray(item.fields) ? item.fields : JSON.parse(typeof item.fields === "string" ? item.fields : "[]");
+      setFields(raw as VisionCustomField[]);
+    } catch { setFields([]); }
+  }, [item.id, item.title, item.notes, item.fields]);
+
+  const save = (patch: Partial<VisionBoardItemType & { fields: VisionCustomField[] }>) => onUpdate(patch);
+
+  const addField = () => {
+    const label = newFieldLabel.trim();
+    if (!label) return;
+    const next = [...fields, { id: crypto.randomUUID(), label, value: "" }];
+    setFields(next);
+    setNewFieldLabel("");
+    save({ fields: next });
+  };
+
+  const updateField = (id: string, value: string) => {
+    const next = fields.map((f) => f.id === id ? { ...f, value } : f);
+    setFields(next);
+    save({ fields: next });
+  };
+
+  const removeField = (id: string) => {
+    const next = fields.filter((f) => f.id !== id);
+    setFields(next);
+    save({ fields: next });
+  };
+
+  return (
+    <div style={{ width: 300, flexShrink: 0, borderLeft: "1px solid #e5e7eb", background: "#fff", display: "flex", flexDirection: "column", overflowY: "auto" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid #e5e7eb" }}>
+        <span style={{ fontWeight: 600, fontSize: 14 }}>Item Details</span>
+        <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#6b7280", lineHeight: 1 }}>×</button>
+      </div>
+      {item.type === "image" && item.imageData && (
+        <img src={item.imageData} alt="" style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderBottom: "1px solid #e5e7eb" }} />
+      )}
+      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Title</label>
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onBlur={() => save({ title: title || null })}
+            placeholder="Add a title..."
+            style={{ width: "100%", marginTop: 4, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 8px", fontSize: 13, boxSizing: "border-box" }}
+          />
+        </div>
+        <div>
+          <label style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Notes</label>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            onBlur={() => save({ notes: notes || null })}
+            placeholder="Add notes..."
+            rows={3}
+            style={{ width: "100%", marginTop: 4, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 8px", fontSize: 13, resize: "vertical", boxSizing: "border-box" }}
+          />
+        </div>
+        {fields.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em" }}>Custom Fields</div>
+            {fields.map((field) => (
+              <div key={field.id} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  <label style={{ fontSize: 12, color: "#374151", fontWeight: 500 }}>{field.label}</label>
+                  <button onClick={() => removeField(field.id)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#9ca3af", padding: 0, lineHeight: 1 }}>×</button>
+                </div>
+                <input
+                  value={field.value}
+                  onChange={(e) => updateField(field.id, e.target.value)}
+                  onBlur={() => save({ fields })}
+                  style={{ border: "1px solid #e5e7eb", borderRadius: 6, padding: "5px 8px", fontSize: 13, boxSizing: "border-box" }}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Add Custom Field</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input
+              value={newFieldLabel}
+              onChange={(e) => setNewFieldLabel(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") addField(); }}
+              placeholder="Field label..."
+              style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "5px 8px", fontSize: 13 }}
+            />
+            <button onClick={addField} style={{ background: "#1f2937", color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 13, cursor: "pointer" }}>Add</button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
