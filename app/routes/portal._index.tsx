@@ -101,18 +101,31 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
         include: { iterations: { orderBy: { version: "asc" } } },
       }).catch(async () => {
-        // fabricType/sampleSize/buttonType columns may not exist yet — fall back to raw SQL
+        // Some migration columns may not exist yet — cascade through safe fallbacks
+        // Level 1: try without fabricType/sampleSize/buttonType (pre-000002)
         try {
           type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
-          type RawIter = { id: number; sampleId: number; version: number; name: string | null; notes: string | null; status: string; images: unknown; taggedUsers: unknown; createdAt: Date; updatedAt: Date };
+          type RawIter1 = { id: number; sampleId: number; version: number; name: string | null; notes: string | null; status: string; images: unknown; taggedUsers: unknown; createdAt: Date; updatedAt: Date };
           const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
-          const rawIters = await prisma.$queryRaw<RawIter[]>`SELECT id, "sampleId", version, name, notes, status, images, "taggedUsers", "createdAt", "updatedAt" FROM "SampleIteration" ORDER BY version ASC`;
+          const rawIters = await prisma.$queryRaw<RawIter1[]>`SELECT id, "sampleId", version, name, notes, status, images, "taggedUsers", "createdAt", "updatedAt" FROM "SampleIteration" ORDER BY version ASC`;
           return rawSamples.map((s) => ({
             ...s,
             iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({ ...it, fabricType: null, sampleSize: null, buttonType: null })),
           }));
         } catch {
-          return [];
+          // Level 2: try without name/taggedUsers either (pre-000001)
+          try {
+            type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
+            type RawIter0 = { id: number; sampleId: number; version: number; notes: string | null; status: string; images: unknown; createdAt: Date; updatedAt: Date };
+            const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
+            const rawIters = await prisma.$queryRaw<RawIter0[]>`SELECT id, "sampleId", version, notes, status, images, "createdAt", "updatedAt" FROM "SampleIteration" ORDER BY version ASC`;
+            return rawSamples.map((s) => ({
+              ...s,
+              iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({ ...it, name: null, taggedUsers: [], fabricType: null, sampleSize: null, buttonType: null })),
+            }));
+          } catch {
+            return [];
+          }
         }
       })
     : [];
@@ -4601,6 +4614,8 @@ function SamplesPanel({
   const [gridColumns, setGridColumns] = useState<3 | 4 | 5>(4);
   const [dragSampleId, setDragSampleId] = useState<number | null>(null);
   const [dragOverSampleId, setDragOverSampleId] = useState<number | null>(null);
+  const [addModalOpen, setAddModalOpen] = useState(false);
+  const [addName, setAddName] = useState("");
 
   const selectedSample = samples.find((s) => s.id === selectedSampleId) ?? null;
   const normalizedSearch = search.trim().toLowerCase();
@@ -4608,10 +4623,12 @@ function SamplesPanel({
     ? samples.filter((s) => s.name.toLowerCase().includes(normalizedSearch))
     : samples;
 
-  const addSample = () => {
-    const name = window.prompt("Sample name");
-    if (!name?.trim()) return;
-    fetcher.submit({ intent: "add_sample", name: name.trim() }, { method: "post" });
+  const addSample = () => { setAddName(""); setAddModalOpen(true); };
+  const submitAddSample = () => {
+    if (!addName.trim()) return;
+    fetcher.submit({ intent: "add_sample", name: addName.trim() }, { method: "post" });
+    setAddModalOpen(false);
+    setAddName("");
   };
 
   const reorderSamples = (targetId: number) => {
@@ -4690,6 +4707,29 @@ function SamplesPanel({
 
       {selectedSample && typeof document !== "undefined" && createPortal(
         <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} users={users} />,
+        document.body,
+      )}
+
+      {addModalOpen && typeof document !== "undefined" && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1400, display: "flex", alignItems: "center", justifyContent: "center" }}
+          onClick={(e) => { if (e.target === e.currentTarget) setAddModalOpen(false); }}
+        >
+          <div style={{ background: "#fff", borderRadius: 12, padding: "28px 28px 24px", width: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 16 }}>Add sample</div>
+            <input
+              autoFocus
+              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, outline: "none", boxSizing: "border-box" as const, fontFamily: "inherit" }}
+              placeholder="Sample name"
+              value={addName}
+              onChange={(e) => setAddName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submitAddSample(); if (e.key === "Escape") setAddModalOpen(false); }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+              <button type="button" onClick={() => setAddModalOpen(false)} style={{ padding: "8px 18px", borderRadius: 7, border: "1px solid #d1d5db", background: "#fff", fontSize: 14, cursor: "pointer", color: "#374151" }}>Cancel</button>
+              <button type="button" onClick={submitAddSample} style={{ padding: "8px 18px", borderRadius: 7, border: "none", background: "#111827", color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Add</button>
+            </div>
+          </div>
+        </div>,
         document.body,
       )}
     </div>
