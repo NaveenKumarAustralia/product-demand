@@ -5459,6 +5459,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
   const [renameDraft, setRenameDraft] = useState("");
   const [deletingBoardId, setDeletingBoardId] = useState<number | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
+  const [drawerItemId, setDrawerItemId] = useState<number | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; itemId: number } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -5589,6 +5590,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
     itemsRef.current = itemsRef.current.filter((it) => it.id !== itemId);
     fetcher.submit({ intent: "delete_vision_board_item", itemId: String(itemId) }, { method: "post" });
     if (selectedItemId === itemId) setSelectedItemId(null);
+    if (drawerItemId === itemId) setDrawerItemId(null);
     setContextMenu(null);
   };
 
@@ -5667,6 +5669,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
   }, [contextMenu]);
 
   const selectedItem = activeBoard?.items.find((it) => it.id === selectedItemId) ?? null;
+  const drawerItem = activeBoard?.items.find((it) => it.id === drawerItemId) ?? null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
@@ -5728,7 +5731,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
           onDragOver={(e) => e.preventDefault()}
           onDrop={handleDropImage}
           onContextMenu={handleCanvasContextMenu}
-          onClick={() => { setSelectedItemId(null); setContextMenu(null); }}
+          onClick={() => { setSelectedItemId(null); setDrawerItemId(null); setContextMenu(null); }}
         >
           <div style={{ position: "relative", width: 1600, minHeight: 900 }}>
             {activeBoard?.items.map((item) => (
@@ -5740,7 +5743,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
                 onResizeStart={(e) => startResize(e, item.id)}
                 onContextMenu={(e) => handleItemContextMenu(e, item.id)}
                 onClick={(e) => { e.stopPropagation(); }}
-                onDoubleClick={(e) => { e.stopPropagation(); setSelectedItemId(item.id); }}
+                onDoubleClick={(e) => { e.stopPropagation(); setDrawerItemId(item.id); }}
                 onContentChange={(content) => {
                   updateLocalItem(item.id, { content });
                   submitItemUpdate(item.id, { content });
@@ -5761,18 +5764,18 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
         </div>
 
         {/* Item drawer */}
-        {selectedItem && (
+        {drawerItem && (
           <VisionItemDrawer
-            item={selectedItem}
+            item={drawerItem}
             onUpdate={(patch) => {
-              updateLocalItem(selectedItem.id, patch);
+              updateLocalItem(drawerItem.id, patch);
               const data: Record<string, string> = {};
               if ("title" in patch) data.title = patch.title ?? "";
               if ("notes" in patch) data.notes = patch.notes ?? "";
               if ("fields" in patch) data.fields = JSON.stringify(patch.fields);
-              fetcher.submit({ intent: "update_vision_board_item", itemId: String(selectedItem.id), ...data }, { method: "post" });
+              fetcher.submit({ intent: "update_vision_board_item", itemId: String(drawerItem.id), ...data }, { method: "post" });
             }}
-            onClose={() => setSelectedItemId(null)}
+            onClose={() => setDrawerItemId(null)}
           />
         )}
       </div>
