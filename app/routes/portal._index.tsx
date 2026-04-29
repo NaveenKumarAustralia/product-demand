@@ -8536,7 +8536,24 @@ function PackingListDetail({
         line.weight ?? "",
       ];
     });
-    const csv = [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\n");
+    const totalsRow = [
+      "TOTAL",
+      "",
+      "",
+      ...PACKING_SIZES.map((size) => {
+        const sum = packingList.lines.reduce((acc, line) => acc + (normalizeQtys(line.qtys)[size] ?? 0), 0);
+        return sum || "";
+      }),
+      packingList.lines.reduce((acc, line) => acc + packingTotal(normalizeQtys(line.qtys)), 0) || "",
+      "",
+      packingList.lines.reduce((acc, line) => {
+        const total = packingTotal(normalizeQtys(line.qtys));
+        const price = line.priceRupees ?? 0;
+        return acc + (total && price ? Math.round(total * price) : 0);
+      }, 0) || "",
+      packingList.lines.reduce((acc, line) => acc + (line.weight ?? 0), 0) || "",
+    ];
+    const csv = [headers, ...rows, [], totalsRow].map((row) => (row as (string | number)[]).map(csvCell).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
