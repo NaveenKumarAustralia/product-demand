@@ -100,7 +100,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ? await prisma.sample.findMany({
         orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
         include: { iterations: { orderBy: { version: "asc" } } },
-      }).catch(() => [])
+      }).catch(async () => {
+        // fabricType/sampleSize/buttonType columns may not exist yet — fall back to raw SQL
+        try {
+          type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
+          type RawIter = { id: number; sampleId: number; version: number; name: string | null; notes: string | null; status: string; images: unknown; taggedUsers: unknown; createdAt: Date; updatedAt: Date };
+          const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
+          const rawIters = await prisma.$queryRaw<RawIter[]>`SELECT id, "sampleId", version, name, notes, status, images, "taggedUsers", "createdAt", "updatedAt" FROM "SampleIteration" ORDER BY version ASC`;
+          return rawSamples.map((s) => ({
+            ...s,
+            iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({ ...it, fabricType: null, sampleSize: null, buttonType: null })),
+          }));
+        } catch {
+          return [];
+        }
+      })
     : [];
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = await prisma.activityLog.findMany({
