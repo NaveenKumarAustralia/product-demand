@@ -4654,7 +4654,6 @@ function SamplesPanel({
     deletedIds.current.add(sampleId);
     setLocalSamples((prev) => prev.filter((s) => s.id !== sampleId));
     if (selectedSampleId === sampleId) setSelectedSampleId(null);
-    fetcher.submit({ intent: "delete_sample", sampleId: String(sampleId) }, { method: "post" });
   };
 
   const reorderSamples = (targetId: number) => {
@@ -4723,7 +4722,7 @@ function SamplesPanel({
               setDragOverSampleId(null);
             }}
             onDragEnd={() => { setDragSampleId(null); setDragOverSampleId(null); }}
-            onDelete={() => handleDelete(sample.id)}
+            onDeleted={(id) => handleDelete(id)}
           />
         ))}
         {visibleSamples.length === 0 && (
@@ -4775,6 +4774,7 @@ function SampleCard({
   onDragLeave,
   onDrop,
   onDragEnd,
+  onDeleted,
 }: {
   sample: SampleType;
   isDragging: boolean;
@@ -4786,9 +4786,13 @@ function SampleCard({
   onDragLeave: () => void;
   onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
-  onDelete: () => void;
+  onDeleted: (id: number) => void;
 }) {
+  const deleteFetcher = useFetcher();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [gone, setGone] = useState(false);
+
+  if (gone) return null;
 
   const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
   const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
@@ -4837,7 +4841,15 @@ function SampleCard({
           <div style={{ display: "flex", gap: 8 }}>
             <button
               type="button"
-              onClick={(e) => { e.stopPropagation(); onDelete(); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                setGone(true);
+                onDeleted(sample.id);
+                deleteFetcher.submit(
+                  { intent: "delete_sample", sampleId: String(sample.id) },
+                  { method: "post" },
+                );
+              }}
               style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
             >Delete</button>
             <button
