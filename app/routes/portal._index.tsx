@@ -5936,7 +5936,9 @@ function VisionItemDrawer({
         <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#6b7280", lineHeight: 1 }}>×</button>
       </div>
       {item.type === "image" && item.imageData && (
-        <img src={item.imageData} alt="" style={{ width: "100%", maxHeight: 180, objectFit: "cover", borderBottom: "1px solid #e5e7eb" }} />
+        <div style={{ padding: "16px 16px 0", display: "flex", justifyContent: "center" }}>
+          <img src={item.imageData} alt="" style={{ width: 192, height: 288, objectFit: "cover", borderRadius: 6, boxShadow: "0 2px 8px rgba(0,0,0,0.15)", display: "block" }} />
+        </div>
       )}
       <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
         <div>
