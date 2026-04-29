@@ -1,7 +1,8 @@
+import bcrypt from "bcryptjs";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { isRouteErrorResponse, useFetcher, useLoaderData, useRouteError, useSearchParams } from "react-router";
+import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams } from "react-router";
 import prisma from "../db.server";
 import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
 import { syncOrderNoteMessages, syncSampleIterationMessages } from "../portal-messages.server";
@@ -25,7 +26,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
   try {
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, fabricManualSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, productInfoSetting, loginRequiredSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await retryAsync(() => Promise.all([
+  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, fabricManualSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, productInfoSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await retryAsync(() => Promise.all([
       prisma.supplierOrder.findMany({
         where: { status: "open" },
         include: { lines: { orderBy: { id: "asc" } } },
@@ -80,10 +81,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         select: { value: true },
       }),
       prisma.portalSetting.findUnique({
-        where: { key: PORTAL_LOGIN_REQUIRED_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
         where: { key: PORTAL_USERS_KEY },
         select: { value: true },
       }),
@@ -119,9 +116,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
   const fabricSettings = normalizeFabricSettings(fabricSettingsSetting?.value);
   const productInfo = normalizeProductInfo(productInfoSetting?.value);
-  const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
-  const currentUser = getCurrentPortalUser(request, users);
-  const activeUsers = await recordAndGetActiveUsers(currentUser, users, activeUsersSetting?.value)
+  const usersWithSeed = await ensureSuperAdmin(users);
+  const currentUser = getCurrentPortalUser(request, usersWithSeed);
+  const activeUsers = await recordAndGetActiveUsers(currentUser, usersWithSeed, activeUsersSetting?.value)
     .catch((error) => {
       console.error("Active user tracking failed", error);
       return [] as ActivePortalUser[];
@@ -280,13 +277,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     packingSearchLineId,
     productResults,
     restockProductResults,
-    loginRequired,
-    users,
+    users: usersWithSeed,
     currentUser,
     activeUsers,
     messages,
     messageOrderId,
-    loginBlocked: loginRequired && users.length > 0 && !currentUser,
+    loginBlocked: !currentUser,
     activityLogs,
     navOrder,
     fabricSheets,
@@ -309,22 +305,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     where: { key: PORTAL_USERS_KEY },
     select: { value: true },
   });
-  const loginRequiredSetting = await prisma.portalSetting.findUnique({
-    where: { key: PORTAL_LOGIN_REQUIRED_KEY },
-    select: { value: true },
-  });
-  const users = normalizePortalUsers(usersSetting?.value);
-  const loginRequired = normalizeBooleanSetting(loginRequiredSetting?.value);
+  const rawUsers = normalizePortalUsers(usersSetting?.value);
+  const users = await ensureSuperAdmin(rawUsers);
   const currentUser = getCurrentPortalUser(request, users);
-  const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
-  const canLoadPackingInventory = canPortalUserLoadPackingInventory(loginRequired, users, currentUser);
+  const canManageUsers = currentUser?.role === "superadmin" || currentUser?.role === "admin";
+  const canLoadPackingInventory = canPortalUserLoadPackingInventory(users, currentUser);
 
   const updates: Record<string, unknown> = {};
 
   if (intent === "portal_login") {
-    const userId = String(form.get("userId") ?? "");
-    const user = users.find((item) => item.id === userId && item.active);
-    if (!user) return null;
+    const username = String(form.get("username") ?? "").trim().toLowerCase();
+    const password = String(form.get("password") ?? "");
+    const user = users.find((u) => u.username.toLowerCase() === username && u.active);
+    if (!user || !user.passwordHash) return { loginError: "Invalid username or password" };
+    const valid = await bcrypt.compare(password, user.passwordHash);
+    if (!valid) return { loginError: "Invalid username or password" };
     return new Response(null, {
       status: 303,
       headers: {
@@ -344,72 +339,66 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   }
 
-  if (intent === "update_login_required") {
-    if (!canManageUsers) return null;
-    await prisma.portalSetting.upsert({
-      where: { key: PORTAL_LOGIN_REQUIRED_KEY },
-      create: { key: PORTAL_LOGIN_REQUIRED_KEY, value: form.get("value") === "on" },
-      update: { value: form.get("value") === "on" },
-    });
-    return null;
-  }
-
   if (intent === "add_portal_user") {
     if (!canManageUsers) return null;
     const name = String(form.get("name") ?? "").trim();
-    if (!name) return null;
-    const nextUsers = [
-      ...users,
-      {
-        id: crypto.randomUUID(),
-        name,
-        admin: form.get("admin") === "on",
-        canLoadInventory: form.get("canLoadInventory") === "on",
-        active: true,
-      },
-    ];
-    await savePortalUsers(nextUsers);
+    const username = String(form.get("username") ?? "").trim().toLowerCase();
+    const password = String(form.get("password") ?? "");
+    const roleRaw = String(form.get("role") ?? "user");
+    if (!name || !username || !password) return { userError: "Name, username and password are required" };
+    if (users.some((u) => u.username.toLowerCase() === username)) return { userError: "Username already taken" };
+    const allowedRoles: PortalUserRole[] = currentUser?.role === "superadmin" ? ["superadmin", "admin", "user"] : ["admin", "user"];
+    const role = allowedRoles.includes(roleRaw as PortalUserRole) ? (roleRaw as PortalUserRole) : "user";
+    const passwordHash = await bcrypt.hash(password, 10);
+    const isAdmin = role === "superadmin" || role === "admin";
+    await savePortalUsers([...users, { id: crypto.randomUUID(), name, username, passwordHash, role, admin: isAdmin, canLoadInventory: isAdmin, active: true, pageAccess: {} }]);
+    return null;
+  }
+
+  if (intent === "update_portal_user") {
+    if (!canManageUsers) return null;
+    const userId = String(form.get("userId") ?? "");
+    const target = users.find((u) => u.id === userId);
+    if (!target) return null;
+    if (target.role === "superadmin" && currentUser?.role !== "superadmin") return null;
+    const updated: PortalUser = { ...target };
+    const newName = String(form.get("name") ?? "").trim();
+    if (newName) updated.name = newName;
+    const newUsername = String(form.get("username") ?? "").trim().toLowerCase();
+    if (newUsername && newUsername !== target.username) {
+      if (users.some((u) => u.id !== userId && u.username.toLowerCase() === newUsername)) return { userError: "Username already taken" };
+      updated.username = newUsername;
+    }
+    const newPassword = String(form.get("password") ?? "");
+    if (newPassword) updated.passwordHash = await bcrypt.hash(newPassword, 10);
+    const roleRaw = String(form.get("role") ?? "");
+    if (roleRaw) {
+      const allowedRoles: PortalUserRole[] = currentUser?.role === "superadmin" ? ["superadmin", "admin", "user"] : ["admin", "user"];
+      if (allowedRoles.includes(roleRaw as PortalUserRole)) {
+        updated.role = roleRaw as PortalUserRole;
+        updated.admin = updated.role === "superadmin" || updated.role === "admin";
+      }
+    }
+    if (form.has("pageAccess")) {
+      try { updated.pageAccess = JSON.parse(String(form.get("pageAccess"))); } catch { /* keep existing */ }
+    }
+    if (form.has("canLoadInventory")) updated.canLoadInventory = form.get("canLoadInventory") === "on";
+    await savePortalUsers(users.map((u) => u.id === userId ? updated : u));
     return null;
   }
 
   if (intent === "remove_portal_user") {
     if (!canManageUsers) return null;
     const userId = String(form.get("userId") ?? "");
-    await savePortalUsers(users.filter((user) => user.id !== userId));
+    const target = users.find((u) => u.id === userId);
+    if (!target) return null;
+    if (target.role === "superadmin" && currentUser?.role !== "superadmin") return null;
+    if (target.id === currentUser?.id) return null;
+    await savePortalUsers(users.filter((u) => u.id !== userId));
     return null;
   }
 
-  if (intent === "update_portal_user_inventory_access") {
-    if (!canManageUsers) return null;
-    const userId = String(form.get("userId") ?? "");
-    const canLoadInventory = form.get("value") === "on";
-    await savePortalUsers(users.map((user) => user.id === userId ? { ...user, canLoadInventory } : user));
-    return null;
-  }
-
-  if (intent === "update_portal_inventory_access") {
-    if (!canManageUsers) return null;
-    let accessByUser: Record<string, boolean> = {};
-    try {
-      const parsed = JSON.parse(String(form.get("value") ?? "{}"));
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        accessByUser = Object.fromEntries(
-          Object.entries(parsed).map(([userId, value]) => [userId, Boolean(value)]),
-        );
-      }
-    } catch {
-      accessByUser = {};
-    }
-    await savePortalUsers(users.map((user) => ({
-      ...user,
-      canLoadInventory: Boolean(accessByUser[user.id]),
-    })));
-    return null;
-  }
-
-  if (loginRequired && users.length > 0 && !currentUser) {
-    return null;
-  }
+  if (!currentUser) return null;
 
   if (intent === "create_packing_list") {
     const title = String(form.get("title") ?? "").trim() || `Shipment ${formatPortalDate(new Date())}`;
@@ -2107,7 +2096,18 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
 };
 
 type ColumnDef = { id: string; label: string; center?: boolean };
-type PortalUser = { id: string; name: string; admin: boolean; active: boolean; canLoadInventory: boolean };
+type PortalUserRole = "superadmin" | "admin" | "user";
+type PortalUser = {
+  id: string;
+  name: string;
+  username: string;
+  passwordHash: string;
+  role: PortalUserRole;
+  admin: boolean; // derived: true for superadmin/admin
+  active: boolean;
+  canLoadInventory: boolean;
+  pageAccess: Record<string, boolean>;
+};
 type ActivePortalUser = PortalUser & { initials: string; lastSeen: number };
 type RestockOption = { value: string; label: string; bg: string; color: string };
 type RestockSettings = {
@@ -2193,12 +2193,20 @@ function normalizePortalUsers(value: unknown): PortalUser[] {
       const id = String(user.id ?? "");
       const name = String(user.name ?? "").trim();
       if (!id || !name) return null;
+      const role = (["superadmin", "admin", "user"].includes(String(user.role)) ? user.role : "user") as PortalUserRole;
+      const isAdmin = role === "superadmin" || role === "admin";
       return {
         id,
         name,
-        admin: Boolean(user.admin),
-        canLoadInventory: "canLoadInventory" in user ? Boolean(user.canLoadInventory) : Boolean(user.admin),
+        username: String(user.username ?? "").trim().toLowerCase() || id,
+        passwordHash: String(user.passwordHash ?? ""),
+        role,
+        admin: isAdmin,
+        canLoadInventory: "canLoadInventory" in user ? Boolean(user.canLoadInventory) : isAdmin,
         active: user.active !== false,
+        pageAccess: (user.pageAccess && typeof user.pageAccess === "object" && !Array.isArray(user.pageAccess))
+          ? user.pageAccess as Record<string, boolean>
+          : {},
       };
     })
     .filter(Boolean) as PortalUser[];
@@ -2208,7 +2216,7 @@ function normalizeBooleanSetting(value: unknown) {
   return value === true;
 }
 
-function canPortalUserLoadPackingInventory(_loginRequired: boolean, users: PortalUser[], currentUser: PortalUser | null) {
+function canPortalUserLoadPackingInventory(users: PortalUser[], currentUser: PortalUser | null) {
   if (users.length === 0) return true;
   return Boolean(currentUser?.canLoadInventory);
 }
@@ -2818,6 +2826,25 @@ async function savePortalUsers(users: PortalUser[]) {
     create: { key: PORTAL_USERS_KEY, value: users },
     update: { value: users },
   });
+}
+
+async function ensureSuperAdmin(users: PortalUser[]) {
+  if (users.some((u) => u.role === "superadmin")) return users;
+  const passwordHash = await bcrypt.hash("Koku", 10);
+  const seed: PortalUser = {
+    id: crypto.randomUUID(),
+    name: "Koku",
+    username: "koku",
+    passwordHash,
+    role: "superadmin",
+    admin: true,
+    active: true,
+    canLoadInventory: true,
+    pageAccess: {},
+  };
+  const next = [...users, seed];
+  await savePortalUsers(next);
+  return next;
 }
 
 function normalizeQtys(value: unknown): Record<string, number> {
@@ -3557,7 +3584,6 @@ export default function PortalDashboard() {
     packingSearchLineId,
     productResults,
     restockProductResults,
-    loginRequired,
     users,
     currentUser,
     activeUsers,
@@ -3605,7 +3631,7 @@ export default function PortalDashboard() {
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
-  const canLoadPackingInventory = canPortalUserLoadPackingInventory(loginRequired, users, currentUser);
+  const canLoadPackingInventory = canPortalUserLoadPackingInventory(users, currentUser);
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
     { id: "orderDate", label: "Order Date" },
@@ -3655,10 +3681,13 @@ export default function PortalDashboard() {
     : page === "samples" ? "Samples"
     : page === "newproduct" ? "New Product Orders"
     : selectedProductGroup || "Existing Products Restock";
-  const orderedNavItems = navOrder.map((id) => ALL_NAV_ITEMS.find((item) => item.id === id)).filter(Boolean) as typeof ALL_NAV_ITEMS[number][];
+  const orderedNavItems = navOrder
+    .map((id) => ALL_NAV_ITEMS.find((item) => item.id === id))
+    .filter(Boolean)
+    .filter((item) => currentUser?.role === "superadmin" || Boolean(currentUser?.pageAccess[item!.id])) as typeof ALL_NAV_ITEMS[number][];
 
   if (loginBlocked) {
-    return <PortalLogin users={users} />;
+    return <PortalLogin />;
   }
 
   const startResize = (columnId: string, event: React.MouseEvent<HTMLSpanElement>) => {
@@ -3824,7 +3853,6 @@ export default function PortalDashboard() {
             <SettingsPanel
               users={users}
               currentUser={currentUser}
-              loginRequired={loginRequired}
               restockSettings={restockSettings}
               universalSettings={universalSettings}
             />
@@ -4098,20 +4126,27 @@ function RowNumberCell({
   );
 }
 
-function PortalLogin({ users }: { users: PortalUser[] }) {
+function PortalLogin() {
+  const actionData = useActionData<{ loginError?: string }>();
   return (
     <div style={s.loginShell}>
       <form method="post" style={s.loginCard}>
         <input type="hidden" name="intent" value="portal_login" />
         <h1 style={s.loginTitle}>Production Portal</h1>
-        <p style={s.loginText}>Select your name to enter the portal.</p>
-        <select name="userId" required style={s.loginSelect}>
-          <option value="">Select your name</option>
-          {users.filter((user) => user.active).map((user) => (
-            <option key={user.id} value={user.id}>{user.name}</option>
-          ))}
-        </select>
-        <button type="submit" style={s.loginButton}>Enter portal</button>
+        {actionData?.loginError && (
+          <div style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid #fca5a5", borderRadius: 6, padding: "8px 12px", fontSize: 13, marginBottom: 8 }}>
+            {actionData.loginError}
+          </div>
+        )}
+        <label style={s.loginLabel}>
+          Username
+          <input name="username" required autoComplete="username" style={s.loginInput} placeholder="Enter your username" />
+        </label>
+        <label style={s.loginLabel}>
+          Password
+          <input name="password" type="password" required autoComplete="current-password" style={s.loginInput} placeholder="Enter your password" />
+        </label>
+        <button type="submit" style={s.loginButton}>Sign in</button>
       </form>
     </div>
   );
@@ -6887,37 +6922,125 @@ function NavOrderSection({ canManageUsers, settingsFetcher }: { canManageUsers: 
   );
 }
 
+const ROLE_LABELS: Record<PortalUserRole, string> = { superadmin: "Super Admin", admin: "Admin", user: "User" };
+
+function AddUserForm({ currentUser, onAdd }: { currentUser: PortalUser | null; onAdd: (f: Record<string, string>) => void }) {
+  const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<PortalUserRole>("user");
+  const allowedRoles: PortalUserRole[] = currentUser?.role === "superadmin" ? ["superadmin", "admin", "user"] : ["admin", "user"];
+  return (
+    <div style={{ background: "#f8fafc", border: "1px dashed #cbd5e1", borderRadius: 8, padding: 16, display: "flex", flexDirection: "column" as const, gap: 10 }}>
+      <strong style={{ fontSize: 13 }}>Add new user</strong>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" style={s.addUserInput} />
+        <input value={username} onChange={(e) => setUsername(e.target.value.toLowerCase())} placeholder="Username" style={s.addUserInput} />
+        <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="Password" style={s.addUserInput} />
+        <select value={role} onChange={(e) => setRole(e.target.value as PortalUserRole)} style={s.addUserInput}>
+          {allowedRoles.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+        </select>
+      </div>
+      <button type="button" style={s.loginButton} onClick={() => { if (!name || !username || !password) return; onAdd({ name, username, password, role }); setName(""); setUsername(""); setPassword(""); setRole("user"); }}>
+        Add user
+      </button>
+    </div>
+  );
+}
+
+function UserEditForm({
+  user, currentUser, navItems, onSave,
+}: {
+  user: PortalUser;
+  currentUser: PortalUser | null;
+  navItems: typeof ALL_NAV_ITEMS;
+  onSave: (fields: Record<string, string>) => void;
+}) {
+  const [name, setName] = useState(user.name);
+  const [username, setUsername] = useState(user.username);
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState<PortalUserRole>(user.role);
+  const [pageAccess, setPageAccess] = useState<Record<string, boolean>>(user.pageAccess ?? {});
+  const [canLoadInventory, setCanLoadInventory] = useState(user.canLoadInventory);
+  const allowedRoles: PortalUserRole[] = currentUser?.role === "superadmin" ? ["superadmin", "admin", "user"] : ["admin", "user"];
+  const showPageAccess = role !== "superadmin";
+  return (
+    <div style={{ width: "100%", background: "#f8fafc", borderRadius: 8, padding: 14, display: "flex", flexDirection: "column" as const, gap: 12, marginTop: 4 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <label style={{ fontSize: 12, fontWeight: 600, display: "flex", flexDirection: "column" as const, gap: 4 }}>
+          Full name
+          <input value={name} onChange={(e) => setName(e.target.value)} style={s.addUserInput} />
+        </label>
+        <label style={{ fontSize: 12, fontWeight: 600, display: "flex", flexDirection: "column" as const, gap: 4 }}>
+          Username
+          <input value={username} onChange={(e) => setUsername(e.target.value.toLowerCase())} style={s.addUserInput} />
+        </label>
+        <label style={{ fontSize: 12, fontWeight: 600, display: "flex", flexDirection: "column" as const, gap: 4 }}>
+          New password <span style={{ fontWeight: 400, color: "#9ca3af" }}>(leave blank to keep)</span>
+          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" placeholder="••••••••" style={s.addUserInput} />
+        </label>
+        <label style={{ fontSize: 12, fontWeight: 600, display: "flex", flexDirection: "column" as const, gap: 4 }}>
+          Role
+          <select value={role} onChange={(e) => setRole(e.target.value as PortalUserRole)} style={s.addUserInput}>
+            {allowedRoles.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+          </select>
+        </label>
+      </div>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+        <input type="checkbox" checked={canLoadInventory} onChange={(e) => setCanLoadInventory(e.target.checked)} />
+        Can load Shopify inventory (Packing Lists)
+      </label>
+
+      {showPageAccess && (
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 8 }}>Page access</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))", gap: 6 }}>
+            {navItems.map((item) => (
+              <label key={item.id} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, cursor: "pointer", padding: "4px 0" }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(pageAccess[item.id])}
+                  onChange={(e) => setPageAccess((p) => ({ ...p, [item.id]: e.target.checked }))}
+                />
+                {item.label}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <button
+        type="button"
+        style={s.loginButton}
+        onClick={() => {
+          const fields: Record<string, string> = { name, username, role, canLoadInventory: canLoadInventory ? "on" : "off", pageAccess: JSON.stringify(pageAccess) };
+          if (password) fields.password = password;
+          onSave(fields);
+        }}
+      >
+        Save changes
+      </button>
+    </div>
+  );
+}
+
 function SettingsPanel({
   users,
   currentUser,
-  loginRequired,
   restockSettings,
   universalSettings,
 }: {
   users: PortalUser[];
   currentUser: PortalUser | null;
-  loginRequired: boolean;
   restockSettings: RestockSettings;
   universalSettings: UniversalSettings;
 }) {
   const settingsFetcher = useFetcher();
-  const canManageUsers = !loginRequired || users.length === 0 || currentUser?.admin;
+  const canManageUsers = currentUser?.role === "superadmin" || currentUser?.role === "admin";
   const [restockDraft, setRestockDraft] = useState<RestockSettings>(restockSettings);
   const [universalDraft, setUniversalDraft] = useState<UniversalSettings>(universalSettings);
-  const [inventoryAccessDraft, setInventoryAccessDraft] = useState<Record<string, boolean>>(
-    Object.fromEntries(users.map((user) => [user.id, user.canLoadInventory])),
-  );
-  const [inventoryAccessSaved, setInventoryAccessSaved] = useState(false);
-  useEffect(() => {
-    setInventoryAccessDraft(Object.fromEntries(users.map((user) => [user.id, user.canLoadInventory])));
-  }, [users]);
-  useEffect(() => {
-    if (settingsFetcher.state !== "idle") return;
-    if (settingsFetcher.formData?.get("intent") !== "update_portal_inventory_access") return;
-    setInventoryAccessSaved(true);
-    const timer = window.setTimeout(() => setInventoryAccessSaved(false), 2500);
-    return () => window.clearTimeout(timer);
-  }, [settingsFetcher.state, settingsFetcher.formData]);
+  const [editUserId, setEditUserId] = useState<string | null>(null);
   const saveRestockSettings = () => submitPortalCell(
     settingsFetcher,
     {
@@ -6934,127 +7057,77 @@ function SettingsPanel({
     },
     { label: "Undo universal settings", fields: { intent: "update_universal_settings", value: JSON.stringify(universalSettings) } },
   );
-  const saveInventoryAccess = () => submitPortalCell(
-    settingsFetcher,
-    {
-      intent: "update_portal_inventory_access",
-      value: JSON.stringify(inventoryAccessDraft),
-    },
-    {
-      label: "Undo Shopify inventory access",
-      fields: {
-        intent: "update_portal_inventory_access",
-        value: JSON.stringify(Object.fromEntries(users.map((user) => [user.id, user.canLoadInventory]))),
-      },
-    },
-  );
   return (
     <div style={s.settingsPanel}>
+
+      {/* ── Account ──────────────────────────────────────── */}
       <section style={s.settingsCard}>
         <div style={s.settingsHeader}>
           <div>
-            <h2 style={s.settingsTitle}>Portal access</h2>
-            <p style={s.settingsHint}>Use lightweight name access to see who is working in the portal.</p>
+            <h2 style={s.settingsTitle}>Your account</h2>
+            <p style={s.settingsHint}>Logged in as <strong>{currentUser?.name}</strong> ({currentUser?.role})</p>
           </div>
           {currentUser && (
             <form method="post">
               <input type="hidden" name="intent" value="portal_logout" />
-              <button type="submit" style={s.secondaryButton}>Log out {currentUser.name}</button>
+              <button type="submit" style={s.secondaryButton}>Sign out</button>
             </form>
           )}
         </div>
-
-        <label style={s.switchRow}>
-          <input
-            type="checkbox"
-            checked={loginRequired}
-            disabled={!canManageUsers}
-            onChange={(event) => submitPortalCell(
-              settingsFetcher,
-              {
-                intent: "update_login_required",
-                value: event.currentTarget.checked ? "on" : "off",
-              },
-              { label: "Undo portal access setting", fields: { intent: "update_login_required", value: loginRequired ? "on" : "off" } },
-            )}
-          />
-          Require users to select their name before entering
-        </label>
-
-        {!canManageUsers && (
-          <div style={s.settingsWarning}>Only an admin user can add/remove names or change portal access.</div>
-        )}
       </section>
 
-      <section style={s.settingsCard}>
-        <div style={s.settingsHeader}>
-          <div>
-            <h2 style={s.settingsTitle}>Allowed users</h2>
-            <p style={s.settingsHint}>Choose who can load packing list quantities into Shopify inventory.</p>
-          </div>
-          <div style={s.settingsSaveGroup}>
-            {inventoryAccessSaved && <span style={s.settingsSavedText}>Settings saved</span>}
-            <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveInventoryAccess}>
-              Save
-            </button>
-          </div>
-        </div>
-        <div style={s.userList}>
-          {users.length ? users.map((user) => (
-            <div key={user.id} style={s.userRow}>
-              <span style={s.activeUserBadge}>{initialsForName(user.name)}</span>
-              <span style={s.userName}>{user.name}</span>
-              {user.admin && <span style={s.adminPill}>Admin</span>}
-              <label style={s.inventoryAccessCheckbox}>
-                <input
-                  type="checkbox"
-                  checked={Boolean(inventoryAccessDraft[user.id])}
-                  disabled={!canManageUsers}
-                  onChange={(event) => {
-                    const checked = event.currentTarget.checked;
-                    setInventoryAccessSaved(false);
-                    setInventoryAccessDraft((current) => ({
-                      ...current,
-                      [user.id]: checked,
-                    }));
-                  }}
-                />
-                Load Shopify inventory
-              </label>
-              {canManageUsers && (
-                <button
-                  type="button"
-                  style={s.removeUserButton}
-                  onClick={() => submitPortalCell(settingsFetcher, {
-                    intent: "remove_portal_user",
-                    userId: user.id,
-                  })}
-                >
-                  Remove
-                </button>
-              )}
+      {/* ── User Management ──────────────────────────────── */}
+      {canManageUsers && (
+        <section style={s.settingsCard}>
+          <div style={s.settingsHeader}>
+            <div>
+              <h2 style={s.settingsTitle}>Users</h2>
+              <p style={s.settingsHint}>Manage who can access the portal and what they can see.</p>
             </div>
-          )) : (
-            <div style={s.settingsHint}>No names added yet.</div>
-          )}
-        </div>
+          </div>
 
-        {canManageUsers && (
-          <settingsFetcher.Form method="post" style={s.addUserForm}>
-            <input type="hidden" name="intent" value="add_portal_user" />
-            <input name="name" required placeholder="First and last name" style={s.addUserInput} />
-            <label style={s.adminCheckbox}>
-              <input type="checkbox" name="admin" />
-              Admin
-            </label>
-            <label style={s.adminCheckbox}>
-              <input type="checkbox" name="canLoadInventory" />
-              Load Shopify inventory
-            </label>
-            <button type="submit" style={s.loginButton}>Add user</button>
-          </settingsFetcher.Form>
-        )}
-      </section>
+          <div style={s.userList}>
+            {users.map((user) => {
+              const isEditing = editUserId === user.id;
+              const canEdit = currentUser?.role === "superadmin" || (currentUser?.role === "admin" && user.role !== "superadmin");
+              const canDelete = canEdit && user.id !== currentUser?.id;
+              return (
+                <div key={user.id} style={{ ...s.userRow, flexWrap: "wrap" as const, gap: 8 }}>
+                  <span style={s.activeUserBadge}>{initialsForName(user.name)}</span>
+                  <span style={s.userName}>{user.name}</span>
+                  <span style={{ fontSize: 11, color: "#6b7280" }}>@{user.username}</span>
+                  <span style={{ ...s.adminPill, background: user.role === "superadmin" ? "#fef3c7" : user.role === "admin" ? "#dbeafe" : "#f1f5f9", color: user.role === "superadmin" ? "#92400e" : user.role === "admin" ? "#1e40af" : "#374151" }}>{user.role}</span>
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                    {canEdit && (
+                      <button type="button" style={s.secondaryButton} onClick={() => setEditUserId(isEditing ? null : user.id)}>
+                        {isEditing ? "Cancel" : "Edit"}
+                      </button>
+                    )}
+                    {canDelete && (
+                      <button type="button" style={s.removeUserButton} onClick={() => {
+                        if (window.confirm(`Remove ${user.name}?`)) settingsFetcher.submit({ intent: "remove_portal_user", userId: user.id }, { method: "post" });
+                      }}>Remove</button>
+                    )}
+                  </div>
+
+                  {isEditing && (
+                    <UserEditForm
+                      user={user}
+                      currentUser={currentUser}
+                      navItems={ALL_NAV_ITEMS}
+                      onSave={(fields) => { settingsFetcher.submit({ intent: "update_portal_user", userId: user.id, ...fields }, { method: "post" }); setEditUserId(null); }}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <AddUserForm currentUser={currentUser} onAdd={(fields) => settingsFetcher.submit({ intent: "add_portal_user", ...fields }, { method: "post" })} />
+          </div>
+        </section>
+      )}
 
       <section style={s.settingsCard}>
         <div style={s.settingsHeader}>
@@ -7066,10 +7139,6 @@ function SettingsPanel({
             Save universal settings
           </button>
         </div>
-
-        {!canManageUsers && (
-          <div style={s.settingsWarning}>Only an admin user can change universal settings.</div>
-        )}
 
         <div style={s.settingsSubCard}>
           <h3 style={s.settingsSubTitle}>Buttons</h3>
@@ -9843,13 +9912,22 @@ const s: Record<string, React.CSSProperties> = {
   },
   loginTitle: { margin: 0, fontSize: 26, color: "#111827" },
   loginText: { margin: 0, color: "#6b7280", fontSize: 14, fontWeight: 600 },
-  loginSelect: {
+  loginLabel: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 5,
+    fontSize: 13,
+    fontWeight: 600,
+    color: "#374151",
+  },
+  loginInput: {
     border: "1px solid #b6c0cc",
     borderRadius: 8,
     padding: "10px 12px",
     fontSize: 15,
-    fontWeight: 700,
+    fontFamily: "inherit",
     background: "#fff",
+    outline: "none",
   },
   loginButton: {
     border: "1px solid var(--portal-primary-button-bg)",
