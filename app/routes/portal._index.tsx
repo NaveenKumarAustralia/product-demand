@@ -4693,20 +4693,26 @@ function SampleCard({
 
   return (
     <div
-      draggable={draggable}
       style={{
         ...s.productStyleCard,
         ...(isDragging ? s.productStyleCardDragging : {}),
         ...(isDragOver ? s.productStyleCardDropTarget : {}),
-        cursor: draggable ? "grab" : "default",
+        cursor: "pointer",
       }}
-      onDragStart={onDragStart}
+      onClick={onOpen}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
-      onDragEnd={onDragEnd}
     >
-      <span style={s.productStyleDragHandle} title="Drag to reorder">::</span>
+      {/* Drag handle — draggable only from here */}
+      <span
+        draggable={draggable}
+        style={{ ...s.productStyleDragHandle, pointerEvents: draggable ? "auto" : "none", cursor: draggable ? "grab" : "default" }}
+        title="Drag to reorder"
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onClick={(e) => e.stopPropagation()}
+      >::</span>
 
       {/* Image + hover overlay */}
       <div
@@ -4721,15 +4727,15 @@ function SampleCard({
         )}
         {hovered && (
           <div style={s.sampleCardOverlay}>
-            <button type="button" style={s.sampleCardOverlayBtn} onClick={onOpen}>Open</button>
+            <button type="button" style={s.sampleCardOverlayBtn} onClick={(e) => { e.stopPropagation(); onOpen(); }}>Open</button>
             <button
               type="button"
               style={s.sampleCardOverlayBtn}
-              onClick={() => { if (!latestIteration) { onOpen(); return; } setUploadModalOpen(true); }}
+              onClick={(e) => { e.stopPropagation(); if (!latestIteration) { onOpen(); return; } setUploadModalOpen(true); }}
             >
               {thumbnailImage ? "Replace image" : "Upload image"}
             </button>
-            <button type="button" style={{ ...s.sampleCardOverlayBtn, ...s.sampleCardOverlayBtnDanger }} onClick={onDelete}>
+            <button type="button" style={{ ...s.sampleCardOverlayBtn, ...s.sampleCardOverlayBtnDanger }} onClick={(e) => { e.stopPropagation(); onDelete(); }}>
               Delete sample
             </button>
           </div>
