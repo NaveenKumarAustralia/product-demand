@@ -5463,6 +5463,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
   const canvasRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const itemsRef = useRef<VisionBoardItemType[]>([]);
+  const undoStack = useRef<Array<{ itemId: number; patch: Partial<VisionBoardItemType>; serverData: Record<string, string | number> }>>([]);
 
   useEffect(() => { setBoards(initialBoards); }, [initialBoards]);
 
@@ -5490,6 +5491,25 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
     fetcher.submit({ intent: "update_vision_board_item", itemId: String(itemId), ...Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])) }, { method: "post" });
   };
 
+  const pushUndo = (itemId: number, prevPatch: Partial<VisionBoardItemType>, serverData: Record<string, string | number>) => {
+    undoStack.current = [...undoStack.current.slice(-19), { itemId, patch: prevPatch, serverData }];
+  };
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.key.toLowerCase() !== "z") return;
+      const entry = undoStack.current[undoStack.current.length - 1];
+      if (!entry) return;
+      e.preventDefault();
+      undoStack.current = undoStack.current.slice(0, -1);
+      updateLocalItem(entry.itemId, entry.patch);
+      submitItemUpdate(entry.itemId, entry.serverData);
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBoardId]);
+
   // Drag to move
   const startDrag = (e: React.MouseEvent, itemId: number) => {
     if (e.button !== 0) return;
@@ -5514,6 +5534,9 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
       const dy = ev.clientY - startY;
       const newX = Math.max(0, origX + dx);
       const newY = Math.max(0, origY + dy);
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+        pushUndo(itemId, { x: origX, y: origY }, { x: origX, y: origY });
+      }
       submitItemUpdate(itemId, { x: newX, y: newY });
     };
     window.addEventListener("mousemove", handleMove);
@@ -5540,6 +5563,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
       window.removeEventListener("mouseup", handleUp);
       const newW = Math.max(80, origW + ev.clientX - startX);
       const newH = Math.max(40, origH + ev.clientY - startY);
+      pushUndo(itemId, { width: origW, height: origH }, { width: origW, height: origH });
       submitItemUpdate(itemId, { width: newW, height: newH });
     };
     window.addEventListener("mousemove", handleMove);
@@ -5555,22 +5579,6 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
     e.preventDefault();
     e.stopPropagation();
     setContextMenu({ x: e.clientX, y: e.clientY, itemId });
-  };
-
-  const bringToFront = (itemId: number) => {
-    const items = itemsRef.current;
-    const maxZ = Math.max(...items.map((it) => it.zIndex), 0);
-    updateLocalItem(itemId, { zIndex: maxZ + 1 });
-    submitItemUpdate(itemId, { zIndex: maxZ + 1 });
-    setContextMenu(null);
-  };
-
-  const sendToBack = (itemId: number) => {
-    const items = itemsRef.current;
-    const minZ = Math.min(...items.map((it) => it.zIndex), 0);
-    updateLocalItem(itemId, { zIndex: minZ - 1 });
-    submitItemUpdate(itemId, { zIndex: minZ - 1 });
-    setContextMenu(null);
   };
 
   const deleteItem = (itemId: number) => {
@@ -5708,7 +5716,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
         >
           + Add Text
         </button>
-        <span style={{ fontSize: 12, color: "#9ca3af", marginLeft: 8 }}>Drag &amp; drop images onto the canvas. Double-click a tab to rename it. Right-click an item to bring forward/back/delete.</span>
+        <span style={{ fontSize: 12, color: "#9ca3af", marginLeft: 8 }}>Drag &amp; drop images onto the canvas. Double-click a tab to rename it. Right-click an item to delete. Cmd+Z to undo.</span>
         <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleFileInput} />
       </div>
 
@@ -5772,22 +5780,15 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
       {/* Context menu */}
       {contextMenu && createPortal(
         <div
-          style={{ position: "fixed", top: contextMenu.y, left: contextMenu.x, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 4px 20px rgba(0,0,0,0.15)", zIndex: 9999, minWidth: 160, overflow: "hidden" }}
+          style={{ position: "fixed", top: contextMenu.y, left: contextMenu.x, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 4px 20px rgba(0,0,0,0.15)", zIndex: 9999, minWidth: 140, overflow: "hidden" }}
           onMouseDown={(e) => e.stopPropagation()}
         >
-          {[
-            { label: "Bring to Front", action: () => bringToFront(contextMenu.itemId) },
-            { label: "Send to Back", action: () => sendToBack(contextMenu.itemId) },
-            { label: "Delete", action: () => deleteItem(contextMenu.itemId), danger: true },
-          ].map((item) => (
-            <button
-              key={item.label}
-              onClick={item.action}
-              style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: "9px 16px", fontSize: 13, cursor: "pointer", color: item.danger ? "#ef4444" : "#111827" }}
-            >
-              {item.label}
-            </button>
-          ))}
+          <button
+            onClick={() => deleteItem(contextMenu.itemId)}
+            style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: "9px 16px", fontSize: 13, cursor: "pointer", color: "#ef4444" }}
+          >
+            Delete
+          </button>
         </div>,
         document.body,
       )}
@@ -5929,7 +5930,7 @@ function VisionItemDrawer({
   };
 
   return (
-    <div style={{ width: 300, flexShrink: 0, borderLeft: "1px solid #e5e7eb", background: "#fff", display: "flex", flexDirection: "column", overflowY: "auto" }}>
+    <div style={{ width: 800, flexShrink: 0, borderLeft: "1px solid #e5e7eb", background: "#fff", display: "flex", flexDirection: "column", overflowY: "auto" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid #e5e7eb" }}>
         <span style={{ fontWeight: 600, fontSize: 14 }}>Item Details</span>
         <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, color: "#6b7280", lineHeight: 1 }}>×</button>
