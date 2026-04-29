@@ -423,6 +423,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  // Sample delete: move before auth guard and use raw SQL to avoid Prisma
+  // column introspection failing when migration 000002 hasn't applied yet
+  if (intent === "delete_sample") {
+    const sampleId = Number(form.get("sampleId"));
+    if (!sampleId) return null;
+    await prisma.$executeRaw`DELETE FROM "SampleIteration" WHERE "sampleId" = ${sampleId}`;
+    await prisma.$executeRaw`DELETE FROM "Sample" WHERE "id" = ${sampleId}`;
+    return null;
+  }
+
   if (!currentUser) return null;
 
   if (intent === "create_packing_list") {
@@ -1276,12 +1286,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const name = String(form.get("name") ?? "").trim();
     if (!sampleId || !name) return null;
     await prisma.sample.update({ where: { id: sampleId }, data: { name } });
-    return null;
-  }
-  if (intent === "delete_sample") {
-    const sampleId = Number(form.get("sampleId"));
-    if (!sampleId) return null;
-    await prisma.sample.delete({ where: { id: sampleId } });
     return null;
   }
   if (intent === "reorder_samples") {
@@ -4617,8 +4621,9 @@ function SamplesPanel({
   users: PortalUser[];
 }) {
   const fetcher = useFetcher();
-  // Local copy so delete/reorder feel instant (optimistic UI)
   const [localSamples, setLocalSamples] = useState(samples);
+  // Track IDs removed this session so loader re-runs can't restore them
+  const deletedIds = useRef<Set<number>>(new Set());
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
   const [gridColumns, setGridColumns] = useState<3 | 4 | 5>(4);
   const [dragSampleId, setDragSampleId] = useState<number | null>(null);
@@ -4626,8 +4631,10 @@ function SamplesPanel({
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [addName, setAddName] = useState("");
 
-  // Sync from server after add/rename/iteration changes
-  useEffect(() => { setLocalSamples(samples); }, [samples]);
+  // Sync from server but never restore items the user has deleted this session
+  useEffect(() => {
+    setLocalSamples(samples.filter((s) => !deletedIds.current.has(s.id)));
+  }, [samples]);
 
   const selectedSample = localSamples.find((s) => s.id === selectedSampleId) ?? null;
   const normalizedSearch = search.trim().toLowerCase();
@@ -4644,7 +4651,7 @@ function SamplesPanel({
   };
 
   const handleDelete = (sampleId: number) => {
-    // Optimistic: remove immediately, server confirms
+    deletedIds.current.add(sampleId);
     setLocalSamples((prev) => prev.filter((s) => s.id !== sampleId));
     if (selectedSampleId === sampleId) setSelectedSampleId(null);
     fetcher.submit({ intent: "delete_sample", sampleId: String(sampleId) }, { method: "post" });
