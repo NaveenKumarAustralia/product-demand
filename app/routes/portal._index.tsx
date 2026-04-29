@@ -4545,7 +4545,7 @@ function SamplesPanel({
 }) {
   const fetcher = useFetcher();
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
-  const [gridColumns, setGridColumns] = useState<3 | 4>(4);
+  const [gridColumns, setGridColumns] = useState<3 | 4 | 5>(4);
   const [dragSampleId, setDragSampleId] = useState<number | null>(null);
   const [dragOverSampleId, setDragOverSampleId] = useState<number | null>(null);
 
@@ -4584,7 +4584,7 @@ function SamplesPanel({
         </div>
         <div style={s.productInfoActions}>
           <div style={s.productInfoSegmented} aria-label="Cards per row">
-            {([3, 4] as const).map((count) => (
+            {([3, 4, 5] as const).map((count) => (
               <button
                 key={count}
                 type="button"
@@ -4608,12 +4608,6 @@ function SamplesPanel({
             isDragOver={dragOverSampleId === sample.id && dragSampleId !== sample.id}
             draggable={!normalizedSearch}
             onOpen={() => setSelectedSampleId(sample.id)}
-            onDelete={() => {
-              if (window.confirm(`Delete "${sample.name}"? This cannot be undone.`)) {
-                if (selectedSampleId === sample.id) setSelectedSampleId(null);
-                fetcher.submit({ intent: "delete_sample", sampleId: String(sample.id) }, { method: "post" });
-              }
-            }}
             onDragStart={(event) => {
               if (normalizedSearch) { event.preventDefault(); return; }
               setDragSampleId(sample.id);
@@ -4655,7 +4649,6 @@ function SampleCard({
   isDragOver,
   draggable,
   onOpen,
-  onDelete,
   onDragStart,
   onDragOver,
   onDragLeave,
@@ -4667,33 +4660,17 @@ function SampleCard({
   isDragOver: boolean;
   draggable: boolean;
   onOpen: () => void;
-  onDelete: () => void;
   onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragLeave: () => void;
   onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
 }) {
-  const fetcher = useFetcher();
-  const [hovered, setHovered] = useState(false);
-  const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
   const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
   const thumbnailImage = images[0] ?? null;
   const status = latestIteration?.status ?? "none";
   const lastUpdated = latestIteration?.updatedAt ?? null;
-
-  const uploadThumbnail = (file: File) => {
-    if (!latestIteration) { onOpen(); return; }
-    const reader = new FileReader();
-    reader.onload = () => {
-      fetcher.submit(
-        { intent: "update_sample_iteration", iterationId: String(latestIteration.id), thumbnailImage: String(reader.result) },
-        { method: "post" },
-      );
-    };
-    reader.readAsDataURL(file);
-  };
 
   return (
     <div
@@ -4718,39 +4695,12 @@ function SampleCard({
         onClick={(e) => e.stopPropagation()}
       >::</span>
 
-      {/* Image + hover overlay */}
-      <div
-        style={{ ...s.productStyleImageWrap, position: "relative" }}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-      >
+      {/* Image */}
+      <div style={s.productStyleImageWrap}>
         {thumbnailImage ? (
           <img src={thumbnailImage} alt={sample.name} style={s.productStyleImage} loading="lazy" />
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
-        )}
-        {hovered && (
-          <div style={s.sampleCardOverlay}>
-            <button type="button" style={s.sampleCardOverlayBtn} onClick={(e) => { e.stopPropagation(); onOpen(); }}>Open</button>
-            <button
-              type="button"
-              style={s.sampleCardOverlayBtn}
-              onClick={(e) => { e.stopPropagation(); if (!latestIteration) { onOpen(); return; } setUploadModalOpen(true); }}
-            >
-              {thumbnailImage ? "Replace image" : "Upload image"}
-            </button>
-            <button type="button" style={{ ...s.sampleCardOverlayBtn, ...s.sampleCardOverlayBtnDanger }} onClick={(e) => { e.stopPropagation(); onDelete(); }}>
-              Delete sample
-            </button>
-          </div>
-        )}
-        {uploadModalOpen && typeof document !== "undefined" && createPortal(
-          <ImageUploadModal
-            title={thumbnailImage ? "Replace thumbnail" : "Upload thumbnail"}
-            onImage={(file) => { uploadThumbnail(file); setUploadModalOpen(false); }}
-            onClose={() => setUploadModalOpen(false)}
-          />,
-          document.body,
         )}
       </div>
 
