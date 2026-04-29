@@ -1280,7 +1280,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!sampleId) return null;
     const existing = await prisma.sampleIteration.findMany({ where: { sampleId }, select: { version: true } });
     const nextVersion = existing.length > 0 ? Math.max(...existing.map((i) => i.version)) + 1 : 1;
-    await prisma.sampleIteration.create({ data: { sampleId, version: nextVersion } });
+    await prisma.sampleIteration.create({ data: { sampleId, version: nextVersion, status: "under_consideration" } });
     return null;
   }
   if (intent === "update_sample_iteration") {
@@ -1290,7 +1290,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!iteration) return null;
     const updates: Record<string, unknown> = { updatedAt: new Date() };
     if (form.has("notes")) updates.notes = String(form.get("notes") ?? "");
-    if (form.has("status")) updates.status = String(form.get("status") ?? "in_progress");
+    if (form.has("name")) updates.name = String(form.get("name") ?? "") || null;
+    if (form.has("taggedUsers")) updates.taggedUsers = JSON.parse(String(form.get("taggedUsers") ?? "[]"));
+    if (form.has("status")) updates.status = String(form.get("status") ?? "under_consideration");
     if (form.has("addImage")) {
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
       updates.images = [...currentImages, String(form.get("addImage"))];
@@ -3865,6 +3867,7 @@ export default function PortalDashboard() {
           <SamplesPanel
             samples={samples}
             search={searchTitleInput}
+            users={users}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -4489,9 +4492,11 @@ type SampleIterationType = {
   id: number;
   sampleId: number;
   version: number;
+  name: string | null;
   notes: string | null;
   status: string;
   images: unknown;
+  taggedUsers: unknown;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -4507,23 +4512,32 @@ type SampleType = {
 function sampleStatusLabel(status: string) {
   if (status === "approved") return "Approved";
   if (status === "changes_requested") return "Changes Requested";
+  if (status === "sample_in_production") return "Sample in Production";
+  if (status === "given_to_factory") return "Given to Factory";
+  if (status === "under_consideration") return "Under Consideration";
   if (status === "in_progress") return "In Progress";
   return "No versions yet";
 }
 
-function sampleStatusPillStyle(status: string): React.CSSProperties {
-  if (status === "approved") return { background: "#dcfce7", color: "#166534", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
-  if (status === "changes_requested") return { background: "#fef3c7", color: "#92400e", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
-  if (status === "in_progress") return { background: "#dbeafe", color: "#1e40af", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
-  return { background: "#f1f5f9", color: "#64748b", padding: "2px 9px", borderRadius: 99, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" };
+function sampleStatusPillStyle(status: string, large?: boolean): React.CSSProperties {
+  const base: React.CSSProperties = { borderRadius: 99, fontWeight: 700, whiteSpace: "nowrap", padding: large ? "4px 12px" : "2px 9px", fontSize: large ? 12 : 11 };
+  if (status === "approved") return { ...base, background: "#dcfce7", color: "#166534" };
+  if (status === "changes_requested") return { ...base, background: "#fef3c7", color: "#92400e" };
+  if (status === "sample_in_production") return { ...base, background: "#ffedd5", color: "#9a3412" };
+  if (status === "given_to_factory") return { ...base, background: "#dbeafe", color: "#1e40af" };
+  if (status === "under_consideration") return { ...base, background: "#ede9fe", color: "#5b21b6" };
+  if (status === "in_progress") return { ...base, background: "#dbeafe", color: "#1e40af" };
+  return { ...base, background: "#f1f5f9", color: "#64748b" };
 }
 
 function SamplesPanel({
   samples,
   search,
+  users,
 }: {
   samples: SampleType[];
   search: string;
+  users: PortalUser[];
 }) {
   const fetcher = useFetcher();
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
@@ -4624,7 +4638,7 @@ function SamplesPanel({
       </div>
 
       {selectedSample && typeof document !== "undefined" && createPortal(
-        <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} />,
+        <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} users={users} />,
         document.body,
       )}
     </div>
@@ -4658,6 +4672,7 @@ function SampleCard({
 }) {
   const fetcher = useFetcher();
   const [hovered, setHovered] = useState(false);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
   const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
   const thumbnailImage = images[0] ?? null;
@@ -4707,23 +4722,25 @@ function SampleCard({
         {hovered && (
           <div style={s.sampleCardOverlay}>
             <button type="button" style={s.sampleCardOverlayBtn} onClick={onOpen}>Open</button>
-            <label style={s.sampleCardOverlayBtn}>
+            <button
+              type="button"
+              style={s.sampleCardOverlayBtn}
+              onClick={() => { if (!latestIteration) { onOpen(); return; } setUploadModalOpen(true); }}
+            >
               {thumbnailImage ? "Replace image" : "Upload image"}
-              <input
-                type="file"
-                accept="image/*"
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  const file = e.currentTarget.files?.[0];
-                  if (file) uploadThumbnail(file);
-                  e.currentTarget.value = "";
-                }}
-              />
-            </label>
+            </button>
             <button type="button" style={{ ...s.sampleCardOverlayBtn, ...s.sampleCardOverlayBtnDanger }} onClick={onDelete}>
               Delete sample
             </button>
           </div>
+        )}
+        {uploadModalOpen && typeof document !== "undefined" && createPortal(
+          <ImageUploadModal
+            title={thumbnailImage ? "Replace thumbnail" : "Upload thumbnail"}
+            onImage={(file) => { uploadThumbnail(file); setUploadModalOpen(false); }}
+            onClose={() => setUploadModalOpen(false)}
+          />,
+          document.body,
         )}
       </div>
 
@@ -4731,7 +4748,7 @@ function SampleCard({
       <div style={{ ...s.productStyleCardBody, paddingBottom: 14 }}>
         <span style={s.productStyleTitle}>{sample.name}</span>
         <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4, flexWrap: "wrap", justifyContent: "center" }}>
-          <span style={sampleStatusPillStyle(status)}>{sampleStatusLabel(status)}</span>
+          <span style={sampleStatusPillStyle(status, true)}>{sampleStatusLabel(status)}</span>
           {sample.iterations.length > 0 && (
             <span style={s.sampleVersionBadge}>v{sample.iterations.length}</span>
           )}
@@ -4749,9 +4766,11 @@ function SampleCard({
 function SampleDetailPanel({
   sample,
   onClose,
+  users,
 }: {
   sample: SampleType;
   onClose: () => void;
+  users: PortalUser[];
 }) {
   const fetcher = useFetcher();
   const [isEditingName, setIsEditingName] = useState(false);
@@ -4822,7 +4841,7 @@ function SampleDetailPanel({
             </div>
           )}
           {sortedIterations.map((iteration) => (
-            <SampleIterationBlock key={iteration.id} iteration={iteration} />
+            <SampleIterationBlock key={iteration.id} iteration={iteration} users={users} />
           ))}
         </div>
       </div>
@@ -4830,25 +4849,36 @@ function SampleDetailPanel({
   );
 }
 
-function SampleIterationBlock({ iteration }: { iteration: SampleIterationType }) {
+function SampleIterationBlock({ iteration, users }: { iteration: SampleIterationType; users: PortalUser[] }) {
   const fetcher = useFetcher();
   const [notes, setNotes] = useState(iteration.notes ?? "");
+  const [nameEditing, setNameEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState(iteration.name ?? "");
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [tagMenuOpen, setTagMenuOpen] = useState(false);
   const images = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+  const taggedUsers = Array.isArray(iteration.taggedUsers) ? iteration.taggedUsers as string[] : [];
 
-  useEffect(() => {
-    setNotes(iteration.notes ?? "");
-  }, [iteration.notes, iteration.id]);
+  useEffect(() => { setNotes(iteration.notes ?? ""); }, [iteration.notes, iteration.id]);
+  useEffect(() => { setNameDraft(iteration.name ?? ""); }, [iteration.name, iteration.id]);
 
   const submitUpdate = (fields: Record<string, string>) => {
     fetcher.submit({ intent: "update_sample_iteration", iterationId: String(iteration.id), ...fields }, { method: "post" });
+  };
+
+  const saveName = () => {
+    setNameEditing(false);
+    const trimmed = nameDraft.trim();
+    if (trimmed !== (iteration.name ?? "")) submitUpdate({ name: trimmed });
   };
 
   const saveNotes = () => {
     if (notes !== (iteration.notes ?? "")) submitUpdate({ notes });
   };
 
-  const addImages = (files: FileList) => {
-    Array.from(files).forEach((file) => {
+  const addImages = (files: File[]) => {
+    files.forEach((file) => {
       const reader = new FileReader();
       reader.onload = () => submitUpdate({ addImage: String(reader.result) });
       reader.readAsDataURL(file);
@@ -4856,15 +4886,46 @@ function SampleIterationBlock({ iteration }: { iteration: SampleIterationType })
   };
 
   const removeImage = (index: number) => {
-    if (window.confirm("Remove this image?")) {
-      submitUpdate({ removeImageIndex: String(index) });
-    }
+    if (window.confirm("Remove this image?")) submitUpdate({ removeImageIndex: String(index) });
   };
+
+  const toggleTag = (userName: string) => {
+    const next = taggedUsers.includes(userName)
+      ? taggedUsers.filter((u) => u !== userName)
+      : [...taggedUsers, userName];
+    submitUpdate({ taggedUsers: JSON.stringify(next) });
+  };
+
+  const versionLabel = iteration.name
+    ? `Version ${iteration.version} — ${iteration.name}`
+    : `Version ${iteration.version}`;
 
   return (
     <div style={s.sampleIterationBlock}>
+      {/* Header row */}
       <div style={s.sampleIterationHeader}>
-        <span style={s.sampleIterationVersion}>Version {iteration.version}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {nameEditing ? (
+            <input
+              autoFocus
+              style={{ fontSize: 13, fontWeight: 700, color: "#111827", border: "2px solid #2563eb", borderRadius: 5, padding: "2px 7px", outline: "none", width: "100%", fontFamily: "inherit" }}
+              value={nameDraft}
+              placeholder={`Version ${iteration.version} name (optional)`}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onBlur={saveName}
+              onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(iteration.name ?? ""); setNameEditing(false); } }}
+            />
+          ) : (
+            <button
+              type="button"
+              onClick={() => setNameEditing(true)}
+              style={{ background: "none", border: "none", padding: 0, cursor: "text", textAlign: "left", font: "inherit", fontSize: 13, fontWeight: 700, color: "#111827", width: "100%" }}
+              title="Click to add a name"
+            >
+              {versionLabel}
+            </button>
+          )}
+        </div>
         <select
           value={iteration.status}
           onChange={(e) => submitUpdate({ status: e.target.value })}
@@ -4880,7 +4941,9 @@ function SampleIterationBlock({ iteration }: { iteration: SampleIterationType })
             backgroundSize: "8px",
           }}
         >
-          <option value="in_progress">In Progress</option>
+          <option value="under_consideration">Under Consideration</option>
+          <option value="given_to_factory">Given to Factory</option>
+          <option value="sample_in_production">Sample in Production</option>
           <option value="changes_requested">Changes Requested</option>
           <option value="approved">Approved</option>
         </select>
@@ -4896,31 +4959,58 @@ function SampleIterationBlock({ iteration }: { iteration: SampleIterationType })
         >Delete</button>
       </div>
 
+      {/* Tagged users row */}
+      {users.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "8px 16px", borderBottom: "1px solid #f1f5f9", alignItems: "center" }}>
+          {taggedUsers.map((userName) => (
+            <span key={userName} style={{ background: "#e0e7ef", color: "#1e40af", borderRadius: 99, padding: "2px 10px", fontSize: 12, fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+              @{userName}
+              <button type="button" onClick={() => toggleTag(userName)} style={{ background: "none", border: "none", cursor: "pointer", color: "#6b7280", fontSize: 13, lineHeight: 1, padding: "0 0 0 2px" }}>×</button>
+            </span>
+          ))}
+          <div style={{ position: "relative" }}>
+            <button
+              type="button"
+              onClick={() => setTagMenuOpen((o) => !o)}
+              style={{ background: "#f1f5f9", border: "1px dashed #cbd5e1", borderRadius: 99, padding: "2px 10px", fontSize: 12, fontWeight: 600, color: "#6b7280", cursor: "pointer" }}
+            >
+              @ Tag user
+            </button>
+            {tagMenuOpen && (
+              <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.12)", zIndex: 200, minWidth: 160, padding: 4 }}>
+                {users.map((user) => (
+                  <button
+                    key={user.id}
+                    type="button"
+                    onClick={() => { toggleTag(user.name); setTagMenuOpen(false); }}
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 10px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#111827", borderRadius: 5, textAlign: "left", fontWeight: taggedUsers.includes(user.name) ? 700 : 400 }}
+                  >
+                    {taggedUsers.includes(user.name) && <span style={{ color: "#2563eb" }}>✓</span>}
+                    {user.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Images */}
       <div style={s.sampleIterationImages}>
         {images.map((img, index) => (
           <div key={index} style={s.sampleIterationImageWrap}>
-            <img src={img} alt={`v${iteration.version} image ${index + 1}`} style={s.sampleIterationImage} />
-            <button
-              type="button"
-              style={s.sampleIterationImageRemove}
-              onClick={() => removeImage(index)}
-              aria-label="Remove image"
-            >×</button>
+            <img
+              src={img}
+              alt={`v${iteration.version} image ${index + 1}`}
+              style={{ ...s.sampleIterationImage, cursor: "zoom-in" }}
+              onClick={() => setLightboxIndex(index)}
+            />
+            <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeImage(index)} aria-label="Remove image">×</button>
           </div>
         ))}
-        <label style={s.sampleIterationAddImage}>
-          <input
-            type="file"
-            accept="image/*"
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => {
-              if (e.currentTarget.files) addImages(e.currentTarget.files);
-              e.currentTarget.value = "";
-            }}
-          />
+        <button type="button" style={s.sampleIterationAddImage} onClick={() => setUploadModalOpen(true)}>
           <span>+ Add photos</span>
-        </label>
+        </button>
       </div>
 
       <textarea
@@ -4931,6 +5021,130 @@ function SampleIterationBlock({ iteration }: { iteration: SampleIterationType })
         onBlur={saveNotes}
         rows={3}
       />
+
+      {lightboxIndex !== null && typeof document !== "undefined" && createPortal(
+        <ImageLightbox images={images} initialIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />,
+        document.body,
+      )}
+      {uploadModalOpen && typeof document !== "undefined" && createPortal(
+        <ImageUploadModal
+          title="Add photos"
+          onImage={(file) => addImages([file])}
+          onClose={() => setUploadModalOpen(false)}
+          multi
+        />,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function ImageUploadModal({
+  title,
+  onImage,
+  onClose,
+  multi,
+}: {
+  title: string;
+  onImage: (file: File) => void;
+  onClose: () => void;
+  multi?: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const handleFiles = (files: FileList | null) => {
+    if (!files) return;
+    if (multi) {
+      Array.from(files).forEach((f) => onImage(f));
+    } else {
+      onImage(files[0]);
+    }
+    onClose();
+  };
+
+  return (
+    <div style={s.imageUploadModalBackdrop} onClick={onClose}>
+      <div style={s.imageUploadModal} onClick={(e) => e.stopPropagation()}>
+        <div style={s.imageUploadModalHeader}>
+          <span style={{ fontWeight: 700, fontSize: 15 }}>{title}</span>
+          <button type="button" onClick={onClose} style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer", color: "#6b7280", lineHeight: 1 }}>×</button>
+        </div>
+        <div
+          style={{ ...s.imageUploadDropZone, ...(dragOver ? s.imageUploadDropZoneActive : {}) }}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
+          onClick={() => inputRef.current?.click()}
+        >
+          <div style={s.imageUploadDropIcon}>📷</div>
+          <div style={s.imageUploadDropText}>Drop {multi ? "images" : "an image"} here</div>
+          <div style={s.imageUploadDropSubtext}>or click to browse</div>
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/*"
+          multiple={!!multi}
+          style={{ display: "none" }}
+          onChange={(e) => handleFiles(e.target.files)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ImageLightbox({
+  images,
+  initialIndex,
+  onClose,
+}: {
+  images: string[];
+  initialIndex: number;
+  onClose: () => void;
+}) {
+  const [index, setIndex] = useState(initialIndex);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+      if (e.key === "ArrowLeft") setIndex((i) => Math.max(0, i - 1));
+      if (e.key === "ArrowRight") setIndex((i) => Math.min(images.length - 1, i + 1));
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose, images.length]);
+
+  return (
+    <div style={s.lightboxBackdrop} onClick={onClose}>
+      <button type="button" style={s.lightboxClose} onClick={onClose} aria-label="Close">×</button>
+      <button
+        type="button"
+        style={{ ...s.lightboxArrow, ...s.lightboxArrowLeft, opacity: index === 0 ? 0.25 : 1 }}
+        onClick={(e) => { e.stopPropagation(); setIndex((i) => Math.max(0, i - 1)); }}
+        aria-label="Previous"
+        disabled={index === 0}
+      >‹</button>
+      <img
+        src={images[index]}
+        alt={`${index + 1} of ${images.length}`}
+        style={s.lightboxImage}
+        onClick={(e) => e.stopPropagation()}
+      />
+      <button
+        type="button"
+        style={{ ...s.lightboxArrow, ...s.lightboxArrowRight, opacity: index === images.length - 1 ? 0.25 : 1 }}
+        onClick={(e) => { e.stopPropagation(); setIndex((i) => Math.min(images.length - 1, i + 1)); }}
+        aria-label="Next"
+        disabled={index === images.length - 1}
+      >›</button>
+      <div style={s.lightboxCounter}>{index + 1} / {images.length}</div>
     </div>
   );
 }
@@ -11770,7 +11984,7 @@ const s: Record<string, React.CSSProperties> = {
     top: 0,
     right: 0,
     bottom: 0,
-    width: 700,
+    width: 800,
     maxWidth: "95vw",
     background: "#fff",
     boxShadow: "-4px 0 32px rgba(0,0,0,0.18)",
@@ -11993,6 +12207,123 @@ const s: Record<string, React.CSSProperties> = {
   sampleCardOverlayBtnDanger: {
     color: "#dc2626",
     background: "rgba(255,255,255,0.92)",
+  },
+
+  imageUploadModalBackdrop: {
+    position: "fixed" as const,
+    inset: 0,
+    background: "rgba(0,0,0,0.55)",
+    zIndex: 1100,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  imageUploadModal: {
+    background: "#fff",
+    borderRadius: 12,
+    padding: "24px 28px",
+    width: 420,
+    maxWidth: "90vw",
+    boxShadow: "0 8px 40px rgba(0,0,0,0.22)",
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 16,
+  },
+  imageUploadModalHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  imageUploadDropZone: {
+    border: "2px dashed #d1d5db",
+    borderRadius: 10,
+    padding: "36px 24px",
+    display: "flex",
+    flexDirection: "column" as const,
+    alignItems: "center",
+    gap: 8,
+    cursor: "pointer",
+    transition: "border-color 0.15s, background 0.15s",
+    background: "#fafafa",
+  },
+  imageUploadDropZoneActive: {
+    borderColor: "#2563eb",
+    background: "#eff6ff",
+  },
+  imageUploadDropIcon: {
+    fontSize: 36,
+    lineHeight: 1,
+  },
+  imageUploadDropText: {
+    fontWeight: 600,
+    fontSize: 14,
+    color: "#374151",
+  },
+  imageUploadDropSubtext: {
+    fontSize: 12,
+    color: "#9ca3af",
+  },
+
+  lightboxBackdrop: {
+    position: "fixed" as const,
+    inset: 0,
+    background: "rgba(0,0,0,0.88)",
+    zIndex: 1200,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  lightboxImage: {
+    maxWidth: "88vw",
+    maxHeight: "88vh",
+    objectFit: "contain" as const,
+    borderRadius: 4,
+    pointerEvents: "none" as const,
+    userSelect: "none" as const,
+  },
+  lightboxClose: {
+    position: "absolute" as const,
+    top: 18,
+    right: 24,
+    background: "none",
+    border: "none",
+    color: "#fff",
+    fontSize: 36,
+    lineHeight: 1,
+    cursor: "pointer",
+    zIndex: 1,
+  },
+  lightboxArrow: {
+    position: "absolute" as const,
+    top: "50%",
+    transform: "translateY(-50%)",
+    background: "rgba(255,255,255,0.12)",
+    border: "none",
+    color: "#fff",
+    fontSize: 48,
+    lineHeight: 1,
+    cursor: "pointer",
+    borderRadius: 6,
+    padding: "4px 14px",
+    zIndex: 1,
+    transition: "background 0.15s",
+  },
+  lightboxArrowLeft: {
+    left: 18,
+  },
+  lightboxArrowRight: {
+    right: 18,
+  },
+  lightboxCounter: {
+    position: "absolute" as const,
+    bottom: 20,
+    left: "50%",
+    transform: "translateX(-50%)",
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 13,
+    fontWeight: 500,
+    letterSpacing: "0.04em",
+    pointerEvents: "none" as const,
   },
 };
 
