@@ -5712,9 +5712,14 @@ function VisionBoardCard({
           </div>
         </div>
       )}
-      <div style={{ ...s.productStyleImageWrap, width: "100%", maxWidth: "1.2in", aspectRatio: "2 / 3" }}>
+      <div style={{ ...s.productStyleImageWrap, width: "100%", maxWidth: "1.2in", aspectRatio: image ? "auto" : "2 / 3" }}>
         {image ? (
-          <img src={image} alt={item.title ?? ""} style={s.productStyleImage} loading="lazy" />
+          <img
+            src={image}
+            alt={item.title ?? ""}
+            style={{ ...s.productStyleImage, height: "auto", maxHeight: "1.8in", objectFit: "contain" }}
+            loading="lazy"
+          />
       ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
       )}
