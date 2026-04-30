@@ -132,8 +132,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const visionBoards = page === "visionboard"
     ? await prisma.visionBoard.findMany({
         orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-        include: { items: { orderBy: [{ zIndex: "asc" }, { createdAt: "asc" }] } },
-      }).catch(() => [] as { id: number; name: string; sortOrder: number; createdAt: Date; updatedAt: Date; items: { id: number; boardId: number; type: string; imageData: string | null; content: string | null; x: number; y: number; width: number; height: number; zIndex: number; title: string | null; notes: string | null; fields: unknown; createdAt: Date; updatedAt: Date }[] }[])
+        include: { items: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] } },
+      }).catch(() => [] as { id: number; name: string; sortOrder: number; createdAt: Date; updatedAt: Date; items: { id: number; boardId: number; name: string; sortOrder: number; images: unknown; fields: unknown; notes: string | null; createdAt: Date; updatedAt: Date }[] }[])
     : [];
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = await prisma.activityLog.findMany({
@@ -1379,43 +1379,36 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "add_vision_board_item") {
     if (currentUser?.role !== "superadmin") return null;
     const boardId = Number(form.get("boardId"));
-    const type = String(form.get("type") ?? "image");
     if (!boardId) return null;
-    const existing = await prisma.visionBoardItem.findMany({ where: { boardId }, select: { zIndex: true } });
-    const maxZ = existing.length > 0 ? Math.max(...existing.map((i) => i.zIndex)) : 0;
-    const imageFile = type === "image" ? form.get("image") : null;
-    let imageData: string | null = null;
-    if (imageFile && typeof imageFile !== "string" && typeof imageFile.arrayBuffer === "function") {
-      if (imageFile.type.startsWith("image/") && imageFile.size <= 8 * 1024 * 1024) {
-        const buffer = Buffer.from(await imageFile.arrayBuffer());
-        imageData = `data:${imageFile.type};base64,${buffer.toString("base64")}`;
-      }
-    }
-    const x = Number(form.get("x") ?? 0);
-    const y = Number(form.get("y") ?? 0);
-    const title = String(form.get("title") ?? "").trim() || null;
-    const fields = imageData ? { images: [imageData], rows: [] } : { images: [], rows: [] };
-    await prisma.visionBoardItem.create({
-      data: { boardId, type, imageData, content: type === "text" ? "Text" : null, x, y, width: 200, height: 300, zIndex: maxZ + 1, title, fields },
-    });
+    const name = String(form.get("name") ?? "").trim() || "Untitled";
+    const existing = await prisma.visionBoardItem.count({ where: { boardId } });
+    await prisma.visionBoardItem.create({ data: { boardId, name, sortOrder: existing } });
     return null;
   }
   if (intent === "update_vision_board_item") {
     if (currentUser?.role !== "superadmin") return null;
     const itemId = Number(form.get("itemId"));
     if (!itemId) return null;
+    const item = await prisma.visionBoardItem.findUnique({ where: { id: itemId } });
+    if (!item) return null;
     const data: Record<string, unknown> = { updatedAt: new Date() };
-    if (form.has("x")) data.x = Number(form.get("x"));
-    if (form.has("y")) data.y = Number(form.get("y"));
-    if (form.has("width")) data.width = Number(form.get("width"));
-    if (form.has("height")) data.height = Number(form.get("height"));
-    if (form.has("zIndex")) data.zIndex = Number(form.get("zIndex"));
-    if (form.has("title")) data.title = String(form.get("title") ?? "") || null;
+    if (form.has("name")) data.name = String(form.get("name") ?? "");
     if (form.has("notes")) data.notes = String(form.get("notes") ?? "") || null;
-    if (form.has("content")) data.content = String(form.get("content") ?? "") || null;
-    if (form.has("imageData")) data.imageData = String(form.get("imageData") ?? "") || null;
     if (form.has("fields")) {
       try { data.fields = JSON.parse(String(form.get("fields"))); } catch { /* keep existing */ }
+    }
+    if (form.has("addImage")) {
+      const currentImages = Array.isArray(item.images) ? (item.images as string[]) : [];
+      data.images = [...currentImages, String(form.get("addImage"))];
+    }
+    if (form.has("removeImageIndex")) {
+      const idx = Number(form.get("removeImageIndex"));
+      const currentImages = Array.isArray(item.images) ? (item.images as string[]) : [];
+      data.images = currentImages.filter((_, i) => i !== idx);
+    }
+    if (form.has("thumbnailImage")) {
+      const currentImages = Array.isArray(item.images) ? (item.images as string[]) : [];
+      data.images = [String(form.get("thumbnailImage")), ...currentImages.slice(1)];
     }
     await prisma.visionBoardItem.update({ where: { id: itemId }, data });
     return null;
@@ -1425,6 +1418,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const itemId = Number(form.get("itemId"));
     if (!itemId) return null;
     await prisma.visionBoardItem.delete({ where: { id: itemId } });
+    return null;
+  }
+  if (intent === "reorder_vision_board_items") {
+    if (currentUser?.role !== "superadmin") return null;
+    const ids = JSON.parse(String(form.get("itemIds") ?? "[]")) as number[];
+    await Promise.all(ids.map((id, index) => prisma.visionBoardItem.update({ where: { id }, data: { sortOrder: index } })));
     return null;
   }
 
@@ -1649,7 +1648,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultShouldRevalidate }) => {
   const intent = formData?.get("intent") as string | null;
   if (intent === "reorder_samples" || intent === "rename_sample") return false;
-  if (intent === "update_vision_board_item" || intent === "reorder_vision_boards" || intent === "rename_vision_board") return false;
+  if (intent === "update_vision_board_item" || intent === "reorder_vision_boards" || intent === "rename_vision_board" || intent === "reorder_vision_board_items") return false;
   return defaultShouldRevalidate;
 };
 
@@ -5426,17 +5425,11 @@ function ImageLightbox({
 type VisionBoardItemType = {
   id: number;
   boardId: number;
-  type: string;
-  imageData: string | null;
-  content: string | null;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  zIndex: number;
-  title: string | null;
-  notes: string | null;
+  name: string;
+  sortOrder: number;
+  images: unknown;
   fields: unknown;
+  notes: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -5450,31 +5443,99 @@ type VisionBoardType = {
   items: VisionBoardItemType[];
 };
 
-type VisionCustomField = { id: string; label: string; value: string };
-type VisionItemFields = { images: string[]; rows: VisionCustomField[] };
+type VisionField = { id: string; label: string; value: string };
+
+function visionImages(item: VisionBoardItemType): string[] {
+  return Array.isArray(item.images) ? (item.images as string[]) : [];
+}
+function visionFields(item: VisionBoardItemType): VisionField[] {
+  if (Array.isArray(item.fields)) return item.fields as VisionField[];
+  return [];
+}
 
 function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[] }) {
   const fetcher = useFetcher();
   const [boards, setBoards] = useState<VisionBoardType[]>(initialBoards);
   const [activeBoardId, setActiveBoardId] = useState<number | null>(initialBoards[0]?.id ?? null);
+  const [renamingBoardId, setRenamingBoardId] = useState<number | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [confirmDeleteBoardId, setConfirmDeleteBoardId] = useState<number | null>(null);
   const [addBoardOpen, setAddBoardOpen] = useState(false);
   const [addBoardName, setAddBoardName] = useState("");
   const [addItemOpen, setAddItemOpen] = useState(false);
   const [addItemName, setAddItemName] = useState("");
-  const [addItemFile, setAddItemFile] = useState<File | null>(null);
-  const [renamingBoardId, setRenamingBoardId] = useState<number | null>(null);
-  const [renameDraft, setRenameDraft] = useState("");
-  const [deletingBoardId, setDeletingBoardId] = useState<number | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
+  const [dragItemId, setDragItemId] = useState<number | null>(null);
+  const [dragOverItemId, setDragOverItemId] = useState<number | null>(null);
+  const deletedItemIds = useRef<Set<number>>(new Set());
 
-  useEffect(() => { setBoards(initialBoards); }, [initialBoards]);
-
-  const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
-  const selectedItem = activeBoard?.items.find((item) => item.id === selectedItemId) ?? null;
+  // Sync from server but never restore items the user just deleted this session
+  useEffect(() => {
+    setBoards(initialBoards.map((b) => ({
+      ...b,
+      items: b.items.filter((it) => !deletedItemIds.current.has(it.id)),
+    })));
+  }, [initialBoards]);
 
   useEffect(() => {
     if (!activeBoardId && boards.length > 0) setActiveBoardId(boards[0].id);
   }, [boards, activeBoardId]);
+
+  const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
+  const selectedItem = activeBoard?.items.find((it) => it.id === selectedItemId) ?? null;
+
+  const submitAddBoard = () => {
+    const name = addBoardName.trim() || "New Board";
+    fetcher.submit({ intent: "add_vision_board", name }, { method: "post" });
+    setAddBoardOpen(false);
+    setAddBoardName("");
+  };
+  const submitRenameBoard = (boardId: number) => {
+    const name = renameDraft.trim();
+    if (!name) { setRenamingBoardId(null); return; }
+    setBoards((prev) => prev.map((b) => b.id === boardId ? { ...b, name } : b));
+    fetcher.submit({ intent: "rename_vision_board", boardId: String(boardId), name }, { method: "post" });
+    setRenamingBoardId(null);
+  };
+  const submitDeleteBoard = (boardId: number) => {
+    setBoards((prev) => prev.filter((b) => b.id !== boardId));
+    if (activeBoardId === boardId) {
+      const next = boards.find((b) => b.id !== boardId);
+      setActiveBoardId(next?.id ?? null);
+    }
+    fetcher.submit({ intent: "delete_vision_board", boardId: String(boardId) }, { method: "post" });
+    setConfirmDeleteBoardId(null);
+  };
+
+  const submitAddItem = () => {
+    const name = addItemName.trim() || "Untitled";
+    if (!activeBoardId || activeBoardId < 0) return;
+    fetcher.submit({ intent: "add_vision_board_item", boardId: String(activeBoardId), name }, { method: "post" });
+    setAddItemOpen(false);
+    setAddItemName("");
+  };
+
+  const handleDeleteItem = (itemId: number) => {
+    deletedItemIds.current.add(itemId);
+    setBoards((prev) => prev.map((b) => b.id === activeBoardId
+      ? { ...b, items: b.items.filter((it) => it.id !== itemId) }
+      : b,
+    ));
+    if (selectedItemId === itemId) setSelectedItemId(null);
+    fetcher.submit({ intent: "delete_vision_board_item", itemId: String(itemId) }, { method: "post" });
+  };
+
+  const reorderItems = (targetId: number) => {
+    if (!dragItemId || dragItemId === targetId || !activeBoard) return;
+    const fromIndex = activeBoard.items.findIndex((it) => it.id === dragItemId);
+    const toIndex = activeBoard.items.findIndex((it) => it.id === targetId);
+    if (fromIndex < 0 || toIndex < 0) return;
+    const next = [...activeBoard.items];
+    const [moved] = next.splice(fromIndex, 1);
+    next.splice(toIndex, 0, moved);
+    setBoards((prev) => prev.map((b) => b.id === activeBoardId ? { ...b, items: next } : b));
+    fetcher.submit({ intent: "reorder_vision_board_items", itemIds: JSON.stringify(next.map((it) => it.id)) }, { method: "post" });
+  };
 
   const updateLocalItem = (itemId: number, patch: Partial<VisionBoardItemType>) => {
     setBoards((prev) => prev.map((b) => b.id === activeBoardId
@@ -5483,158 +5544,133 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
     ));
   };
 
-  const deleteItem = (itemId: number) => {
-    setBoards((prev) => prev.map((b) => b.id === activeBoardId
-      ? { ...b, items: b.items.filter((it) => it.id !== itemId) }
-      : b,
-    ));
-    fetcher.submit({ intent: "delete_vision_board_item", itemId: String(itemId) }, { method: "post" });
-    if (selectedItemId === itemId) setSelectedItemId(null);
-  };
-
-  const handleAddBoard = () => {
-    const name = addBoardName.trim() || "New Board";
-    const tempId = -Date.now();
-    setBoards((prev) => [...prev, { id: tempId, name, sortOrder: prev.length, createdAt: new Date(), updatedAt: new Date(), items: [] }]);
-    setActiveBoardId(tempId);
-    fetcher.submit({ intent: "add_vision_board", name }, { method: "post" });
-    setAddBoardOpen(false);
-    setAddBoardName("");
-  };
-
-  const handleDeleteBoard = (boardId: number) => {
-    setBoards((prev) => prev.filter((b) => b.id !== boardId));
-    if (activeBoardId === boardId) setActiveBoardId(boards.find((b) => b.id !== boardId)?.id ?? null);
-    fetcher.submit({ intent: "delete_vision_board", boardId: String(boardId) }, { method: "post" });
-    setDeletingBoardId(null);
-  };
-
-  const handleRenameBoard = (boardId: number) => {
-    const name = renameDraft.trim();
-    if (!name) { setRenamingBoardId(null); return; }
-    setBoards((prev) => prev.map((b) => b.id === boardId ? { ...b, name } : b));
-    fetcher.submit({ intent: "rename_vision_board", boardId: String(boardId), name }, { method: "post" });
-    setRenamingBoardId(null);
-  };
-
-  const submitAddItem = () => {
-    if (!activeBoardId || activeBoardId < 0) return;
-    const fd = new FormData();
-    fd.append("intent", "add_vision_board_item");
-    fd.append("boardId", String(activeBoardId));
-    fd.append("type", "image");
-    if (addItemFile) fd.append("image", addItemFile);
-    fd.append("title", addItemName.trim());
-    fetch("/portal", { method: "post", body: fd }).then(() => {
-      window.location.reload();
-    });
-    setAddItemOpen(false);
-    setAddItemName("");
-    setAddItemFile(null);
-  };
-
   return (
     <div style={s.productInfoPage}>
-      <div style={{ ...s.productInfoToolbar, alignItems: "stretch", flexDirection: "column" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+      {/* Top tab bar — categories */}
+      <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "0 4px 0", borderBottom: "1px solid #e5e7eb", flexWrap: "wrap" }}>
+        {boards.map((board) => {
+          const isActive = board.id === activeBoardId;
+          return (
+            <div
+              key={board.id}
+              onClick={() => setActiveBoardId(board.id)}
+              style={{ display: "flex", alignItems: "center", gap: 4, background: isActive ? "var(--portal-primary-button-bg, #111827)" : "#f3f4f6", color: isActive ? "var(--portal-primary-button-color, #fff)" : "#374151", borderRadius: "6px 6px 0 0", padding: "6px 12px", cursor: "pointer", fontSize: 13, fontWeight: 500, border: "1px solid", borderColor: isActive ? "var(--portal-primary-button-bg, #111827)" : "#e5e7eb", borderBottom: isActive ? "1px solid var(--portal-primary-button-bg, #111827)" : "1px solid #e5e7eb", position: "relative", top: 1 }}
+            >
+              {renamingBoardId === board.id ? (
+                <input
+                  autoFocus
+                  value={renameDraft}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  onBlur={() => submitRenameBoard(board.id)}
+                  onKeyDown={(e) => { if (e.key === "Enter") submitRenameBoard(board.id); if (e.key === "Escape") setRenamingBoardId(null); }}
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ background: "transparent", border: "none", outline: "none", color: "inherit", fontSize: 13, fontWeight: 500, width: Math.max(60, renameDraft.length * 8) }}
+                />
+              ) : (
+                <span onDoubleClick={(e) => { e.stopPropagation(); setRenamingBoardId(board.id); setRenameDraft(board.name); }}>{board.name}</span>
+              )}
+              {confirmDeleteBoardId === board.id ? (
+                <span style={{ display: "flex", gap: 3, marginLeft: 4 }} onClick={(e) => e.stopPropagation()}>
+                  <button onClick={() => submitDeleteBoard(board.id)} style={{ background: "#ef4444", color: "#fff", border: "none", borderRadius: 3, padding: "1px 6px", fontSize: 11, cursor: "pointer" }}>Delete</button>
+                  <button onClick={() => setConfirmDeleteBoardId(null)} style={{ background: "#e5e7eb", color: "#374151", border: "none", borderRadius: 3, padding: "1px 6px", fontSize: 11, cursor: "pointer" }}>Cancel</button>
+                </span>
+              ) : (
+                <span onClick={(e) => { e.stopPropagation(); setConfirmDeleteBoardId(board.id); }} style={{ marginLeft: 4, opacity: 0.6, fontSize: 13, cursor: "pointer", lineHeight: 1 }}>×</span>
+              )}
+            </div>
+          );
+        })}
+        <button onClick={() => { setAddBoardOpen(true); setAddBoardName(""); }} style={{ background: "none", border: "1px dashed #d1d5db", borderRadius: "6px 6px 0 0", padding: "6px 12px", fontSize: 13, cursor: "pointer", color: "#6b7280", position: "relative", top: 1 }}>+ Add menu</button>
+      </div>
+
+      {/* Toolbar */}
+      <div style={s.productInfoToolbar}>
+        <div style={s.productInfoToolbarLeft}>
           <div>
-            <h2 style={s.productInfoHeading}>Vision Board</h2>
-            <div style={s.productInfoMeta}>{activeBoard?.items.length ?? 0} image{activeBoard?.items.length === 1 ? "" : "s"}</div>
-          </div>
-          <div style={s.productInfoActions}>
-            <button type="button" style={s.primaryActionButton} onClick={() => setAddItemOpen(true)} disabled={!activeBoardId || activeBoardId < 0}>
-              Add Image
-            </button>
+            <h2 style={s.productInfoHeading}>{activeBoard?.name ?? "Vision Board"}</h2>
+            <div style={s.productInfoMeta}>{activeBoard?.items.length ?? 0} item{(activeBoard?.items.length ?? 0) !== 1 ? "s" : ""}</div>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, overflowX: "auto", paddingTop: 4 }}>
-        {boards.map((board) => (
-          <div key={board.id} style={{ display: "flex", alignItems: "center", gap: 6, background: board.id === activeBoardId ? "var(--portal-primary-button-bg, #111827)" : "#f8fafc", color: board.id === activeBoardId ? "var(--portal-primary-button-color, #fff)" : "#334155", borderRadius: 999, padding: "7px 10px", cursor: "pointer", fontSize: 13, fontWeight: 800, border: "1px solid #cbd5e1", whiteSpace: "nowrap" }} onClick={() => setActiveBoardId(board.id)}>
-            {renamingBoardId === board.id ? (
-              <input
-                autoFocus
-                value={renameDraft}
-                onChange={(e) => setRenameDraft(e.target.value)}
-                onBlur={() => handleRenameBoard(board.id)}
-                onKeyDown={(e) => { if (e.key === "Enter") handleRenameBoard(board.id); if (e.key === "Escape") setRenamingBoardId(null); }}
-                onClick={(e) => e.stopPropagation()}
-                style={{ background: "transparent", border: "none", outline: "none", color: "inherit", fontSize: 13, fontWeight: 800, width: Math.max(70, renameDraft.length * 8) }}
-              />
-            ) : (
-              <span onDoubleClick={(e) => { e.stopPropagation(); setRenamingBoardId(board.id); setRenameDraft(board.name); }}>{board.name}</span>
-            )}
-            {deletingBoardId === board.id ? (
-              <span style={{ display: "flex", gap: 3, marginLeft: 6 }} onClick={(e) => e.stopPropagation()}>
-                <button onClick={() => handleDeleteBoard(board.id)} style={{ background: "#ef4444", color: "#fff", border: "none", borderRadius: 3, padding: "1px 6px", fontSize: 11, cursor: "pointer" }}>Delete</button>
-                <button onClick={() => setDeletingBoardId(null)} style={{ background: "#e5e7eb", color: "#374151", border: "none", borderRadius: 3, padding: "1px 6px", fontSize: 11, cursor: "pointer" }}>Cancel</button>
-              </span>
-            ) : (
-              <span onClick={(e) => { e.stopPropagation(); setDeletingBoardId(board.id); }} style={{ opacity: 0.65, fontSize: 14, cursor: "pointer", lineHeight: 1 }}>×</span>
-            )}
-          </div>
-        ))}
-        <button onClick={() => { setAddBoardOpen(true); setAddBoardName(""); }} style={{ background: "#fff", border: "1px dashed #94a3b8", borderRadius: 999, padding: "7px 12px", fontSize: 13, fontWeight: 800, cursor: "pointer", color: "#475569", whiteSpace: "nowrap" }}>+ Add menu item</button>
+        <div style={s.productInfoActions}>
+          <button
+            type="button"
+            style={{ ...s.primaryActionButton, opacity: activeBoardId && activeBoardId > 0 ? 1 : 0.5, cursor: activeBoardId && activeBoardId > 0 ? "pointer" : "not-allowed" }}
+            disabled={!activeBoardId || activeBoardId < 0}
+            onClick={() => { setAddItemName(""); setAddItemOpen(true); }}
+          >
+            Add Item
+          </button>
         </div>
       </div>
 
-      <div
-        style={{
-          ...s.productInfoList,
-          gridTemplateColumns: activeBoard?.items.length
-            ? `repeat(${activeBoard.items.length}, minmax(0, 1.2in))`
-            : "1fr",
-          alignItems: "flex-start",
-        }}
-      >
+      {/* Grid of cards — fixed 5 columns, shrinks with screen instead of wrapping */}
+      <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
         {activeBoard?.items.map((item) => (
-          <VisionBoardCard
+          <VisionItemCard
             key={item.id}
             item={item}
+            isDragging={dragItemId === item.id}
+            isDragOver={dragOverItemId === item.id && dragItemId !== item.id}
             onOpen={() => setSelectedItemId(item.id)}
-            onDelete={() => deleteItem(item.id)}
+            onDragStart={(event) => {
+              setDragItemId(item.id);
+              event.dataTransfer.effectAllowed = "move";
+            }}
+            onDragOver={(event) => {
+              if (!dragItemId) return;
+              event.preventDefault();
+              setDragOverItemId(item.id);
+            }}
+            onDragLeave={() => setDragOverItemId((c) => c === item.id ? null : c)}
+            onDrop={(event) => {
+              event.preventDefault();
+              reorderItems(item.id);
+              setDragItemId(null);
+              setDragOverItemId(null);
+            }}
+            onDragEnd={() => { setDragItemId(null); setDragOverItemId(null); }}
+            onDelete={() => handleDeleteItem(item.id)}
           />
         ))}
-        {!activeBoard && (
-          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>Add a menu item to start.</div>
-        )}
         {activeBoard && activeBoard.items.length === 0 && (
-          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>No images yet.</div>
+          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+            No items yet. Click Add Item to create your first one.
+          </div>
+        )}
+        {!activeBoard && (
+          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+            Add a menu using the tab bar above.
+          </div>
         )}
       </div>
 
       {selectedItem && typeof document !== "undefined" && createPortal(
-        <VisionItemDrawer
+        <VisionItemDetailPanel
           item={selectedItem}
-          onUpdate={(patch) => {
-            updateLocalItem(selectedItem.id, patch);
-            const data: Record<string, string> = {};
-            if ("title" in patch) data.title = patch.title ?? "";
-            if ("notes" in patch) data.notes = patch.notes ?? "";
-            if ("imageData" in patch) data.imageData = patch.imageData ?? "";
-            if ("fields" in patch) data.fields = JSON.stringify(patch.fields);
-            fetcher.submit({ intent: "update_vision_board_item", itemId: String(selectedItem.id), ...data }, { method: "post" });
-          }}
           onClose={() => setSelectedItemId(null)}
+          onUpdateLocal={(patch) => updateLocalItem(selectedItem.id, patch)}
         />,
         document.body,
       )}
 
-      {/* Add board modal */}
-      {addBoardOpen && createPortal(
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 9000, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setAddBoardOpen(false)}>
-          <div style={{ background: "#fff", borderRadius: 12, padding: 24, width: 340, boxShadow: "0 8px 32px rgba(0,0,0,0.2)" }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ fontWeight: 600, marginBottom: 12 }}>New menu item</div>
+      {addBoardOpen && typeof document !== "undefined" && createPortal(
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1400, display: "flex", alignItems: "center", justifyContent: "center" }}
+          onClick={(e) => { if (e.target === e.currentTarget) setAddBoardOpen(false); }}
+        >
+          <div style={{ background: "#fff", borderRadius: 12, padding: "28px 28px 24px", width: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 16 }}>Add menu</div>
             <input
               autoFocus
+              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, outline: "none", boxSizing: "border-box" as const, fontFamily: "inherit" }}
+              placeholder="Menu name (e.g. Fabric Prints, Moods)"
               value={addBoardName}
               onChange={(e) => setAddBoardName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") handleAddBoard(); if (e.key === "Escape") setAddBoardOpen(false); }}
-              placeholder="Menu item name"
-              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "8px 10px", fontSize: 14, boxSizing: "border-box" }}
+              onKeyDown={(e) => { if (e.key === "Enter") submitAddBoard(); if (e.key === "Escape") setAddBoardOpen(false); }}
             />
-            <div style={{ display: "flex", gap: 8, marginTop: 16, justifyContent: "flex-end" }}>
-              <button onClick={() => setAddBoardOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "7px 16px", cursor: "pointer", fontSize: 13 }}>Cancel</button>
-              <button onClick={handleAddBoard} style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "7px 16px", cursor: "pointer", fontSize: 13 }}>Add</button>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
+              <button type="button" onClick={() => setAddBoardOpen(false)} style={{ padding: "8px 18px", borderRadius: 7, border: "1px solid #d1d5db", background: "#fff", fontSize: 14, cursor: "pointer", color: "#374151" }}>Cancel</button>
+              <button type="button" onClick={submitAddBoard} style={{ padding: "8px 18px", borderRadius: 7, border: "none", background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Add</button>
             </div>
           </div>
         </div>,
@@ -5642,21 +5678,23 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
       )}
 
       {addItemOpen && typeof document !== "undefined" && createPortal(
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1400, display: "flex", alignItems: "center", justifyContent: "center" }}
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1400, display: "flex", alignItems: "center", justifyContent: "center" }}
           onClick={(e) => { if (e.target === e.currentTarget) setAddItemOpen(false); }}
         >
-          <div style={{ background: "#fff", borderRadius: 12, padding: "28px 28px 24px", width: 420, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 16 }}>Add image</div>
+          <div style={{ background: "#fff", borderRadius: 12, padding: "28px 28px 24px", width: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 16 }}>Add item</div>
             <input
-              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, outline: "none", boxSizing: "border-box" as const, fontFamily: "inherit", marginBottom: 12 }}
-              placeholder="Name"
+              autoFocus
+              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, outline: "none", boxSizing: "border-box" as const, fontFamily: "inherit" }}
+              placeholder="Item name"
               value={addItemName}
               onChange={(e) => setAddItemName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submitAddItem(); if (e.key === "Escape") setAddItemOpen(false); }}
             />
-            <input type="file" accept="image/*" onChange={(e) => setAddItemFile(e.target.files?.[0] ?? null)} />
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
               <button type="button" onClick={() => setAddItemOpen(false)} style={{ padding: "8px 18px", borderRadius: 7, border: "1px solid #d1d5db", background: "#fff", fontSize: 14, cursor: "pointer", color: "#374151" }}>Cancel</button>
-              <button type="button" onClick={submitAddItem} style={{ padding: "8px 18px", borderRadius: 7, border: "none", background: "#111827", color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Add</button>
+              <button type="button" onClick={submitAddItem} style={{ padding: "8px 18px", borderRadius: 7, border: "none", background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Add</button>
             </div>
           </div>
         </div>,
@@ -5666,37 +5704,59 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
   );
 }
 
-function normalizeVisionItemFields(item: VisionBoardItemType): VisionItemFields {
-  try {
-    const raw = Array.isArray(item.fields) ? item.fields : JSON.parse(typeof item.fields === "string" ? item.fields : "{}");
-    if (Array.isArray(raw)) return { images: item.imageData ? [item.imageData] : [], rows: raw as VisionCustomField[] };
-    const images = Array.isArray(raw.images) ? raw.images.filter((image: unknown): image is string => typeof image === "string" && image) : [];
-    const rows = Array.isArray(raw.rows) ? raw.rows as VisionCustomField[] : [];
-    return { images: item.imageData && !images.includes(item.imageData) ? [item.imageData, ...images] : images, rows };
-  } catch {
-    return { images: item.imageData ? [item.imageData] : [], rows: [] };
-  }
-}
-
-function VisionBoardCard({
+function VisionItemCard({
   item,
+  isDragging,
+  isDragOver,
   onOpen,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onDragEnd,
   onDelete,
 }: {
   item: VisionBoardItemType;
+  isDragging: boolean;
+  isDragOver: boolean;
   onOpen: () => void;
+  onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragLeave: () => void;
+  onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
   onDelete: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const image = normalizeVisionItemFields(item).images[0] ?? item.imageData;
+  const [gone, setGone] = useState(false);
+  if (gone) return null;
+  const images = visionImages(item);
+  const thumb = images[0] ?? null;
+
   return (
     <div
-      style={{ ...s.productStyleCard, width: "100%", maxWidth: "1.2in", minWidth: 0, cursor: "pointer" }}
+      style={{
+        ...s.productStyleCard,
+        ...(isDragging ? s.productStyleCardDragging : {}),
+        ...(isDragOver ? s.productStyleCardDropTarget : {}),
+        cursor: "pointer",
+      }}
       onClick={onOpen}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
     >
+      <span
+        draggable
+        style={{ ...s.productStyleDragHandle, pointerEvents: "auto", cursor: "grab" }}
+        title="Drag to reorder"
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onClick={(e) => e.stopPropagation()}
+      >::</span>
       <button
         type="button"
-        title="Delete image"
+        title="Delete item"
         onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
         style={{ position: "absolute", top: 8, right: 8, width: 24, height: 24, borderRadius: "50%", border: "none", background: "rgba(0,0,0,0.12)", color: "#374151", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, lineHeight: 1, padding: 0, zIndex: 2 }}
       >×</button>
@@ -5705,90 +5765,117 @@ function VisionBoardCard({
           style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 8 }}
           onClick={(e) => e.stopPropagation()}
         >
-          <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>Delete this image?</div>
+          <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>Delete this item?</div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={onDelete} style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Delete</button>
-            <button type="button" onClick={() => setConfirmDelete(false)} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setGone(true); onDelete(); }}
+              style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+            >Delete</button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setConfirmDelete(false); }}
+              style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}
+            >Cancel</button>
           </div>
         </div>
       )}
-      <div style={{ ...s.productStyleImageWrap, width: "100%", maxWidth: "1.2in", aspectRatio: image ? "auto" : "2 / 3" }}>
-        {image ? (
-          <img
-            src={image}
-            alt={item.title ?? ""}
-            style={{ ...s.productStyleImage, height: "auto", maxHeight: "1.8in", objectFit: "contain" }}
-            loading="lazy"
-          />
-      ) : (
+      {/* Image — 1.3:1.8 max ratio */}
+      <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8" }}>
+        {thumb ? (
+          <img src={thumb} alt={item.name} style={s.productStyleImage} loading="lazy" />
+        ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
-      )}
+        )}
       </div>
       <div style={{ ...s.productStyleCardBody, paddingBottom: 14 }}>
-        <span style={s.productStyleTitle}>{item.title || "Untitled"}</span>
+        <span style={s.productStyleTitle}>{item.name || "Untitled"}</span>
       </div>
     </div>
   );
 }
 
-function VisionItemDrawer({
+function VisionItemDetailPanel({
   item,
-  onUpdate,
   onClose,
+  onUpdateLocal,
 }: {
   item: VisionBoardItemType;
-  onUpdate: (patch: Partial<VisionBoardItemType & { fields: VisionItemFields }>) => void;
   onClose: () => void;
+  onUpdateLocal: (patch: Partial<VisionBoardItemType>) => void;
 }) {
-  const [title, setTitle] = useState(item.title ?? "");
+  const fetcher = useFetcher();
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(item.name);
   const [notes, setNotes] = useState(item.notes ?? "");
-  const [fields, setFields] = useState<VisionItemFields>(() => normalizeVisionItemFields(item));
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [fields, setFields] = useState<VisionField[]>(() => visionFields(item));
+  const [newFieldLabel, setNewFieldLabel] = useState("");
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+
+  const images = visionImages(item);
+
+  useEffect(() => { setNameDraft(item.name); }, [item.name, item.id]);
+  useEffect(() => { setNotes(item.notes ?? ""); }, [item.notes, item.id]);
+  useEffect(() => { setFields(visionFields(item)); }, [item.fields, item.id]);
 
   useEffect(() => {
-    setTitle(item.title ?? "");
-    setNotes(item.notes ?? "");
-    setFields(normalizeVisionItemFields(item));
-  }, [item.id, item.title, item.notes, item.fields]);
+    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onClose]);
 
-  const save = (patch: Partial<VisionBoardItemType & { fields: VisionItemFields }>) => onUpdate(patch);
-
-  const addRow = () => {
-    const next = { ...fields, rows: [...fields.rows, { id: crypto.randomUUID(), label: "", value: "" }] };
-    setFields(next);
-    save({ fields: next });
+  const saveName = () => {
+    setIsEditingName(false);
+    const trimmed = nameDraft.trim();
+    if (trimmed && trimmed !== item.name) {
+      onUpdateLocal({ name: trimmed });
+      fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), name: trimmed }, { method: "post" });
+    } else {
+      setNameDraft(item.name);
+    }
   };
 
-  const updateRow = (id: string, patch: Partial<VisionCustomField>) => {
-    const next = { ...fields, rows: fields.rows.map((row) => row.id === id ? { ...row, ...patch } : row) };
-    setFields(next);
-    save({ fields: next });
+  const saveNotes = () => {
+    if (notes !== (item.notes ?? "")) {
+      onUpdateLocal({ notes: notes || null });
+      fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), notes }, { method: "post" });
+    }
   };
 
-  const removeRow = (id: string) => {
-    const next = { ...fields, rows: fields.rows.filter((row) => row.id !== id) };
-    setFields(next);
-    save({ fields: next });
-  };
-
-  const addImages = (files: File[]) => {
-    files.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const image = String(reader.result);
-        const next = { ...fields, images: [...fields.images, image] };
-        setFields(next);
-        save({ imageData: next.images[0] ?? null, fields: next });
-      };
-      reader.readAsDataURL(file);
-    });
+  const addImage = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result);
+      onUpdateLocal({ images: [...images, dataUrl] });
+      fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), addImage: dataUrl }, { method: "post" });
+    };
+    reader.readAsDataURL(file);
   };
 
   const removeImage = (index: number) => {
-    const nextImages = fields.images.filter((_, imageIndex) => imageIndex !== index);
-    const next = { ...fields, images: nextImages };
+    if (!window.confirm("Remove this image?")) return;
+    const nextImages = images.filter((_, i) => i !== index);
+    onUpdateLocal({ images: nextImages });
+    fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), removeImageIndex: String(index) }, { method: "post" });
+  };
+
+  const saveFields = (next: VisionField[]) => {
     setFields(next);
-    save({ imageData: nextImages[0] ?? null, fields: next });
+    onUpdateLocal({ fields: next });
+    fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), fields: JSON.stringify(next) }, { method: "post" });
+  };
+  const addField = () => {
+    const label = newFieldLabel.trim();
+    if (!label) return;
+    saveFields([...fields, { id: crypto.randomUUID(), label, value: "" }]);
+    setNewFieldLabel("");
+  };
+  const updateField = (id: string, patch: Partial<VisionField>) => {
+    saveFields(fields.map((f) => f.id === id ? { ...f, ...patch } : f));
+  };
+  const removeField = (id: string) => {
+    saveFields(fields.filter((f) => f.id !== id));
   };
 
   return (
@@ -5797,82 +5884,112 @@ function VisionItemDrawer({
       <div style={s.samplePanel}>
         <div style={s.samplePanelHeader}>
           <div style={s.samplePanelNameWrap}>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onBlur={() => save({ title: title || null })}
-              placeholder="Image name"
-              style={s.samplePanelNameInput}
-            />
-            <span style={s.samplePanelVersionCount}>{fields.images.length} image{fields.images.length === 1 ? "" : "s"}</span>
+            {isEditingName ? (
+              <input
+                autoFocus
+                style={s.samplePanelNameInput}
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={saveName}
+                onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(item.name); setIsEditingName(false); } }}
+              />
+            ) : (
+              <h2 style={s.samplePanelName} onClick={() => setIsEditingName(true)} title="Click to rename">{item.name || "Untitled"}</h2>
+            )}
           </div>
           <button type="button" style={s.samplePanelClose} onClick={onClose} aria-label="Close">×</button>
         </div>
 
         <div style={s.samplePanelIterations}>
           <div style={s.sampleIterationBlock}>
-            <div style={s.sampleIterationHeader}>
-              <span style={s.sampleIterationVersion}>Images</span>
-              <button type="button" style={s.primaryActionButton} onClick={() => fileInputRef.current?.click()}>Add images</button>
-              <input ref={fileInputRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(event) => addImages(Array.from(event.target.files ?? []))} />
-            </div>
+            {/* Images */}
             <div style={s.sampleIterationImages}>
-              {fields.images.map((image, index) => (
-                <div key={`${image.slice(0, 40)}-${index}`} style={s.sampleIterationImageWrap}>
-                  <img src={image} alt="" style={s.sampleIterationImage} />
+              {images.map((img, index) => (
+                <div key={index} style={s.sampleIterationImageWrap}>
+                  <img
+                    src={img}
+                    alt={`${item.name} ${index + 1}`}
+                    style={{ ...s.sampleIterationImage, cursor: "zoom-in" }}
+                    onClick={() => setLightboxIndex(index)}
+                  />
                   <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeImage(index)} aria-label="Remove image">×</button>
                 </div>
               ))}
-              <button type="button" style={s.sampleIterationAddImage} onClick={() => fileInputRef.current?.click()}>
+              <button type="button" style={s.sampleIterationAddImage} onClick={() => setUploadModalOpen(true)}>
                 <span>+ Add photos</span>
               </button>
             </div>
-          </div>
 
-          <div style={s.sampleIterationBlock}>
-            <div style={s.sampleIterationHeader}>
-              <span style={s.sampleIterationVersion}>Notes</span>
-            </div>
-            <textarea
-              style={s.sampleIterationNotes}
-              value={notes}
-              placeholder="Notes"
-              rows={5}
-              onChange={(e) => setNotes(e.target.value)}
-              onBlur={() => save({ notes: notes || null })}
-            />
-          </div>
-
-          <div style={s.sampleIterationBlock}>
-            <div style={s.sampleIterationHeader}>
-              <span style={s.sampleIterationVersion}>Rows</span>
-              <button type="button" style={s.primaryActionButton} onClick={addRow}>Add row</button>
-            </div>
-            <div style={{ display: "grid", gap: 0 }}>
-              {fields.rows.map((row) => (
-                <div key={row.id} style={{ display: "grid", gridTemplateColumns: "minmax(120px, 0.35fr) minmax(180px, 1fr) auto", gap: 10, alignItems: "center", padding: "10px 14px", borderTop: "1px solid #f1f5f9" }}>
+            {/* Form-like custom fields */}
+            <div style={{ borderTop: "1px solid #f1f5f9" }}>
+              {fields.map((field) => (
+                <div key={field.id} style={{ display: "grid", gridTemplateColumns: "minmax(120px, 0.35fr) minmax(180px, 1fr) auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid #f1f5f9" }}>
                   <input
-                    value={row.label}
-                    onChange={(e) => updateRow(row.id, { label: e.target.value })}
-                    placeholder="Label"
-                    style={{ border: "1px solid #dbe3ee", borderRadius: 7, padding: "8px 10px", fontSize: 13, fontFamily: "inherit" }}
+                    style={{ width: "100%", border: "none", outline: "none", fontSize: 12, fontWeight: 600, color: "#374151", background: "transparent", textTransform: "uppercase" as const, letterSpacing: "0.04em", fontFamily: "inherit", padding: 0 }}
+                    value={field.label}
+                    onChange={(e) => setFields((prev) => prev.map((f) => f.id === field.id ? { ...f, label: e.target.value } : f))}
+                    onBlur={(e) => updateField(field.id, { label: e.target.value })}
                   />
-                <input
-                    value={row.value}
-                    onChange={(e) => updateRow(row.id, { value: e.target.value })}
-                    placeholder="Value"
-                    style={{ border: "1px solid #dbe3ee", borderRadius: 7, padding: "8px 10px", fontSize: 13, fontFamily: "inherit" }}
-                />
-                  <button type="button" onClick={() => removeRow(row.id)} style={s.removeUserButton}>Remove</button>
+                  <input
+                    style={{ width: "100%", border: "none", outline: "none", fontSize: 13, color: "#111827", background: "transparent", fontFamily: "inherit", padding: 0 }}
+                    value={field.value}
+                    placeholder={`Enter ${field.label.toLowerCase()}`}
+                    onChange={(e) => setFields((prev) => prev.map((f) => f.id === field.id ? { ...f, value: e.target.value } : f))}
+                    onBlur={(e) => updateField(field.id, { value: e.target.value })}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeField(field.id)}
+                    style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", padding: 4, fontSize: 16, lineHeight: 1 }}
+                    title="Remove row"
+                  >×</button>
                 </div>
               ))}
-              {fields.rows.length === 0 && (
-                <div style={s.samplePanelEmpty}>No rows yet.</div>
-              )}
+              <div style={{ display: "flex", gap: 8, padding: "10px 14px" }}>
+                <input
+                  value={newFieldLabel}
+                  onChange={(e) => setNewFieldLabel(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") addField(); }}
+                  placeholder="Add row label (e.g. Supplier, Code, Colour)…"
+                  style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontSize: 13, fontFamily: "inherit" }}
+                />
+                <button
+                  type="button"
+                  onClick={addField}
+                  style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+                >Add row</button>
+              </div>
+            </div>
+
+            {/* Notes */}
+            <div style={{ borderTop: "1px solid #f1f5f9", padding: "10px 14px" }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", marginBottom: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>Notes</div>
+              <textarea
+                style={s.sampleIterationNotes}
+                value={notes}
+                placeholder="Notes…"
+                onChange={(e) => setNotes(e.target.value)}
+                onBlur={saveNotes}
+                rows={4}
+              />
             </div>
           </div>
         </div>
       </div>
+
+      {lightboxIndex !== null && typeof document !== "undefined" && createPortal(
+        <ImageLightbox images={images} initialIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />,
+        document.body,
+      )}
+      {uploadModalOpen && typeof document !== "undefined" && createPortal(
+        <ImageUploadModal
+          title="Add photos"
+          onImage={(file) => addImage(file)}
+          onClose={() => setUploadModalOpen(false)}
+          multi
+        />,
+        document.body,
+      )}
     </>
   );
 }

@@ -1,0 +1,17 @@
+DROP TABLE IF EXISTS "VisionBoardItem";
+
+CREATE TABLE "VisionBoardItem" (
+  "id" SERIAL NOT NULL,
+  "boardId" INTEGER NOT NULL,
+  "name" TEXT NOT NULL DEFAULT '',
+  "sortOrder" INTEGER NOT NULL DEFAULT 0,
+  "images" JSONB NOT NULL DEFAULT '[]',
+  "fields" JSONB NOT NULL DEFAULT '[]',
+  "notes" TEXT,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT "VisionBoardItem_pkey" PRIMARY KEY ("id")
+);
+
+ALTER TABLE "VisionBoardItem" ADD CONSTRAINT "VisionBoardItem_boardId_fkey"
+  FOREIGN KEY ("boardId") REFERENCES "VisionBoard"("id") ON DELETE CASCADE ON UPDATE CASCADE;
