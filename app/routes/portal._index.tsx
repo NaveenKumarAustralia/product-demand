@@ -3738,6 +3738,19 @@ export default function PortalDashboard() {
   const [newCategoryInput, setNewCategoryInput] = useState("");
   const [showNewCategoryInput, setShowNewCategoryInput] = useState(false);
   const [historyMenu, setHistoryMenu] = useState<{ x: number; y: number; entity: string; entityId: string; field: string; entityName: string } | null>(null);
+  // Mirror universal-settings CSS vars onto :root so portaled overlays (drawers, modals)
+  // can read them (the root container's style scope only covers in-tree descendants).
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const root = document.documentElement;
+    root.style.setProperty("--portal-panel-font-size", `${universalSettings.panelTextSize}px`);
+    root.style.setProperty("--portal-primary-button-bg", universalSettings.primaryButtonBg);
+    root.style.setProperty("--portal-primary-button-color", universalSettings.primaryButtonColor);
+    root.style.setProperty("--portal-table-font-size", `${universalSettings.tableTextSize}px`);
+    root.style.setProperty("--portal-table-text-color", universalSettings.tableTextColor);
+    root.style.setProperty("--portal-heading-font-size", `${universalSettings.headingTextSize}px`);
+    root.style.setProperty("--portal-heading-text-color", universalSettings.headingTextColor);
+  }, [universalSettings]);
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { x: number; y: number; entity: string; entityId: string; field: string; entityName: string };
@@ -5598,7 +5611,17 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
                   style={{ background: "transparent", border: "none", outline: "none", color: "inherit", fontSize: 13, fontWeight: 500, width: Math.max(60, renameDraft.length * 8) }}
                 />
               ) : (
-                <span onDoubleClick={(e) => { e.stopPropagation(); setRenamingBoardId(board.id); setRenameDraft(board.name); }}>{board.name}</span>
+                <>
+                  <span onDoubleClick={(e) => { e.stopPropagation(); setRenamingBoardId(board.id); setRenameDraft(board.name); }}>{board.name}</span>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setRenamingBoardId(board.id); setRenameDraft(board.name); }}
+                    title="Rename board"
+                    style={{ background: "none", border: "none", padding: "2px 4px", cursor: "pointer", color: "inherit", opacity: 0.6, lineHeight: 1, borderRadius: 4, display: "flex", alignItems: "center" }}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/></svg>
+                  </button>
+                </>
               )}
               {confirmDeleteBoardId === board.id ? (
                 <span style={{ display: "flex", gap: 3, marginLeft: 4 }} onClick={(e) => e.stopPropagation()}>
