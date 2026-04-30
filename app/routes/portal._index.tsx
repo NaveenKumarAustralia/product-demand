@@ -8130,20 +8130,23 @@ function SettingsPanel({
             <label style={s.settingsFieldLabel}>
               Text size
               <input
-                type="range"
+                type="number"
                 min={11}
                 max={22}
                 value={universalDraft.panelTextSize}
                 disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  panelTextSize: Number(event.currentTarget.value) || current.panelTextSize,
-                }))}
-                style={{ width: 200 }}
+                onChange={(event) => {
+                  const v = Number(event.target.value);
+                  setUniversalDraft((current) => ({
+                    ...current,
+                    panelTextSize: v || current.panelTextSize,
+                  }));
+                }}
+                style={s.settingsSmallInput}
               />
             </label>
-            <span style={{ fontSize: universalDraft.panelTextSize, color: "#111827" }}>
-              Panel text {universalDraft.panelTextSize}px
+            <span style={{ ...s.qtyPreview, fontSize: universalDraft.panelTextSize, color: "#111827" }}>
+              Panel text
             </span>
           </div>
         </div>
