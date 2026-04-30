@@ -5466,7 +5466,6 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
   const [renameDraft, setRenameDraft] = useState("");
   const [deletingBoardId, setDeletingBoardId] = useState<number | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
-  const [gridColumns, setGridColumns] = useState<3 | 4>(4);
 
   useEffect(() => { setBoards(initialBoards); }, [initialBoards]);
 
@@ -5543,16 +5542,6 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
             <div style={s.productInfoMeta}>{activeBoard?.items.length ?? 0} image{activeBoard?.items.length === 1 ? "" : "s"}</div>
           </div>
           <div style={s.productInfoActions}>
-            <div style={s.productInfoSegmented} aria-label="Cards per row">
-              {([3, 4] as const).map((count) => (
-                <button
-                  key={count}
-                  type="button"
-                  style={gridColumns === count ? { ...s.productInfoSegmentButton, ...s.productInfoSegmentButtonActive } : s.productInfoSegmentButton}
-                  onClick={() => setGridColumns(count)}
-                >{count}</button>
-              ))}
-            </div>
             <button type="button" style={s.primaryActionButton} onClick={() => setAddItemOpen(true)} disabled={!activeBoardId || activeBoardId < 0}>
               Add Image
             </button>
@@ -5588,7 +5577,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
         </div>
       </div>
 
-      <div style={{ ...s.productInfoList, gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }}>
+      <div style={{ ...s.productInfoList, display: "flex", flexWrap: "wrap", alignItems: "flex-start" }}>
         {activeBoard?.items.map((item) => (
           <VisionBoardCard
             key={item.id}
@@ -5694,7 +5683,7 @@ function VisionBoardCard({
   const image = normalizeVisionItemFields(item).images[0] ?? item.imageData;
   return (
     <div
-      style={{ ...s.productStyleCard, cursor: "pointer" }}
+      style={{ ...s.productStyleCard, width: "2in", cursor: "pointer" }}
       onClick={onOpen}
     >
       <button
@@ -5715,7 +5704,7 @@ function VisionBoardCard({
           </div>
         </div>
       )}
-      <div style={{ ...s.productStyleImageWrap, aspectRatio: "2 / 3" }}>
+      <div style={{ ...s.productStyleImageWrap, width: "2in", height: "3in", aspectRatio: "auto" }}>
         {image ? (
           <img src={image} alt={item.title ?? ""} style={s.productStyleImage} loading="lazy" />
       ) : (
