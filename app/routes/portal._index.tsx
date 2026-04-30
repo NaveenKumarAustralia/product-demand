@@ -5608,7 +5608,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
             </div>
           );
         })}
-        <button onClick={() => { setAddBoardOpen(true); setAddBoardName(""); }} style={{ background: "none", border: "1px dashed #d1d5db", borderRadius: "6px 6px 0 0", padding: "6px 12px", fontSize: 13, cursor: "pointer", color: "#6b7280", position: "relative", top: 1 }}>+ Add menu</button>
+        <button onClick={() => { setAddBoardOpen(true); setAddBoardName(""); }} style={{ background: "none", border: "1px dashed #d1d5db", borderRadius: "6px 6px 0 0", padding: "6px 12px", fontSize: 13, cursor: "pointer", color: "#6b7280", position: "relative", top: 1 }}>+ Add board</button>
       </div>
 
       {/* Toolbar */}
@@ -5685,11 +5685,11 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
           onClick={(e) => { if (e.target === e.currentTarget) setAddBoardOpen(false); }}
         >
           <div style={{ background: "#fff", borderRadius: 12, padding: "28px 28px 24px", width: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 16 }}>Add menu</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 16 }}>Add board</div>
             <input
               autoFocus
               style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, outline: "none", boxSizing: "border-box" as const, fontFamily: "inherit" }}
-              placeholder="Menu name (e.g. Fabric Prints, Moods)"
+              placeholder="Board name (e.g. Fabric Prints, Moods)"
               value={addBoardName}
               onChange={(e) => setAddBoardName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") submitAddBoard(); if (e.key === "Escape") setAddBoardOpen(false); }}
@@ -5799,6 +5799,7 @@ function VisionItemCard({
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [gone, setGone] = useState(false);
+  const [hover, setHover] = useState(false);
   if (gone) return null;
   const images = visionImages(item);
   const thumb = images[0] ?? null;
@@ -5812,24 +5813,28 @@ function VisionItemCard({
         cursor: "pointer",
       }}
       onClick={onOpen}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
       <span
         draggable
-        style={{ ...s.productStyleDragHandle, pointerEvents: "auto", cursor: "grab" }}
+        style={{ ...s.productStyleDragHandle, pointerEvents: "auto", cursor: "grab", opacity: hover ? 0.6 : 0.25, transition: "opacity 0.15s" }}
         title="Drag to reorder"
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         onClick={(e) => e.stopPropagation()}
       >::</span>
-      <button
-        type="button"
-        title="Delete item"
-        onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
-        style={{ position: "absolute", top: 8, right: 8, width: 24, height: 24, borderRadius: "50%", border: "none", background: "rgba(0,0,0,0.12)", color: "#374151", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, lineHeight: 1, padding: 0, zIndex: 2 }}
-      >×</button>
+      {(hover || confirmDelete) && (
+        <button
+          type="button"
+          title="Delete item"
+          onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
+          style={{ position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: "50%", border: "none", background: "#ef4444", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, lineHeight: 1, padding: 0, zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" }}
+        >×</button>
+      )}
       {confirmDelete && (
         <div
           style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 8 }}
@@ -5965,7 +5970,17 @@ function VisionItemDetailPanel({
                 onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(item.name); setIsEditingName(false); } }}
               />
             ) : (
-              <h2 style={s.samplePanelName} onClick={() => setIsEditingName(true)} title="Click to rename">{item.name || "Untitled"}</h2>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <h2 style={s.samplePanelName} onClick={() => setIsEditingName(true)} title="Click to rename">{item.name || "Untitled"}</h2>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingName(true)}
+                  title="Rename"
+                  style={{ background: "none", border: "none", padding: "4px 6px", cursor: "pointer", color: "#9ca3af", lineHeight: 1, borderRadius: 4, display: "flex", alignItems: "center" }}
+                >
+                  <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/></svg>
+                </button>
+              </div>
             )}
           </div>
           <button type="button" style={s.samplePanelClose} onClick={onClose} aria-label="Close">×</button>
