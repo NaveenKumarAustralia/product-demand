@@ -5603,8 +5603,8 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
         </div>
       </div>
 
-      {/* Grid of cards — fixed 5 columns, shrinks with screen instead of wrapping */}
-      <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
+      {/* Grid of cards — fixed 8 columns, shrinks with screen instead of wrapping */}
+      <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(8, minmax(0, 1fr))" }}>
         {activeBoard?.items.map((item) => (
           <VisionItemCard
             key={item.id}
