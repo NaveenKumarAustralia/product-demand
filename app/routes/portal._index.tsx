@@ -2298,6 +2298,7 @@ type UniversalSettings = {
   tableTextColor: string;
   headingTextSize: number;
   headingTextColor: string;
+  panelTextSize: number;
   menuBg: string;
   menuTextColor: string;
   pageBg: string;
@@ -2465,6 +2466,7 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
     tableTextColor: normalizeHexColor(settings.tableTextColor, "#374151"),
     headingTextSize: Math.min(34, Math.max(14, Number(settings.headingTextSize) || 24)),
     headingTextColor: normalizeHexColor(settings.headingTextColor, "#111827"),
+    panelTextSize: Math.min(22, Math.max(11, Number(settings.panelTextSize) || 13)),
     menuBg: normalizeHexColor(settings.menuBg, "#111827"),
     menuTextColor: normalizeHexColor(settings.menuTextColor, "#cbd5e1"),
     pageBg: normalizeHexColor(settings.pageBg, "#f3f4f6"),
@@ -3867,6 +3869,7 @@ export default function PortalDashboard() {
         "--portal-table-text-color": universalSettings.tableTextColor,
         "--portal-heading-font-size": `${universalSettings.headingTextSize}px`,
         "--portal-heading-text-color": universalSettings.headingTextColor,
+        "--portal-panel-font-size": `${universalSettings.panelTextSize}px`,
       } as React.CSSProperties}
     >
       <style>
@@ -5253,7 +5256,7 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
           <div key={field} style={{ borderRight: i < 2 ? "1px solid #f1f5f9" : "none", padding: "10px 14px" }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", marginBottom: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
             <input
-              style={{ width: "100%", border: "none", outline: "none", fontSize: 13, color: "#111827", background: "transparent", fontFamily: "inherit", padding: 0 }}
+              style={{ width: "100%", border: "none", outline: "none", fontSize: "var(--portal-panel-font-size, 13px)", color: "#111827", background: "transparent", fontFamily: "inherit", padding: 0 }}
               value={value}
               placeholder={`Enter ${label.toLowerCase()}`}
               onChange={(e) => setter(e.target.value)}
@@ -6039,11 +6042,11 @@ function VisionItemDetailPanel({
             <div style={{ borderTop: "1px solid #f1f5f9" }}>
               {fields.map((field) => (
                 <div key={field.id} style={{ display: "flex", gap: 8, padding: "10px 14px", borderBottom: "1px solid #f1f5f9", alignItems: "center" }}>
-                  <span style={{ flexShrink: 0, minWidth: 120, fontSize: 12, fontWeight: 600, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>
+                  <span style={{ flexShrink: 0, minWidth: 120, fontSize: "var(--portal-panel-font-size, 13px)", fontWeight: 600, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>
                     {field.label}
                   </span>
                   <input
-                    style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontSize: 13, color: "#111827", background: "#fff", fontFamily: "inherit" }}
+                    style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontSize: "var(--portal-panel-font-size, 13px)", color: "#111827", background: "#fff", fontFamily: "inherit" }}
                     value={field.value}
                     placeholder={`Enter ${field.label.toLowerCase()}`}
                     onChange={(e) => setFields((prev) => prev.map((f) => f.id === field.id ? { ...f, value: e.target.value } : f))}
@@ -8117,6 +8120,30 @@ function SettingsPanel({
             </label>
             <span style={{ ...s.qtyPreview, fontSize: universalDraft.tableTextSize, color: universalDraft.tableTextColor }}>
               Table text
+            </span>
+          </div>
+        </div>
+
+        <div style={s.settingsSubCard}>
+          <h3 style={s.settingsSubTitle}>Slide-out panel text (Samples / Vision Board)</h3>
+          <div style={s.settingsInlineFields}>
+            <label style={s.settingsFieldLabel}>
+              Text size
+              <input
+                type="range"
+                min={11}
+                max={22}
+                value={universalDraft.panelTextSize}
+                disabled={!canManageUsers}
+                onChange={(event) => setUniversalDraft((current) => ({
+                  ...current,
+                  panelTextSize: Number(event.currentTarget.value) || current.panelTextSize,
+                }))}
+                style={{ width: 200 }}
+              />
+            </label>
+            <span style={{ fontSize: universalDraft.panelTextSize, color: "#111827" }}>
+              Panel text {universalDraft.panelTextSize}px
             </span>
           </div>
         </div>
@@ -13169,7 +13196,7 @@ const s: Record<string, React.CSSProperties> = {
     border: "none",
     borderTop: "1px solid #f1f5f9",
     padding: "12px 16px",
-    fontSize: 13,
+    fontSize: "var(--portal-panel-font-size, 13px)" as unknown as number,
     color: "#374151",
     resize: "vertical" as const,
     minHeight: 72,
