@@ -1382,7 +1382,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!boardId) return null;
     const name = String(form.get("name") ?? "").trim() || "Untitled";
     const existing = await prisma.visionBoardItem.count({ where: { boardId } });
-    await prisma.visionBoardItem.create({ data: { boardId, name, sortOrder: existing } });
+    const initialImage = form.get("image");
+    const images = (typeof initialImage === "string" && initialImage.length > 0) ? [initialImage] : [];
+    await prisma.visionBoardItem.create({ data: { boardId, name, sortOrder: existing, images } });
     return null;
   }
   if (intent === "update_vision_board_item") {
@@ -5468,6 +5470,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
   const [dragItemId, setDragItemId] = useState<number | null>(null);
   const [dragOverItemId, setDragOverItemId] = useState<number | null>(null);
   const deletedItemIds = useRef<Set<number>>(new Set());
+  const maxIdBeforeAddRef = useRef<number | null>(null);
 
   // Sync from server but never restore items the user just deleted this session
   useEffect(() => {
@@ -5483,6 +5486,31 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
 
   const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
   const selectedItem = activeBoard?.items.find((it) => it.id === selectedItemId) ?? null;
+
+  // After we drop an image on the empty card, the new item arrives via revalidation —
+  // find the just-created item by id and open the drawer for it
+  useEffect(() => {
+    if (maxIdBeforeAddRef.current !== null && activeBoard) {
+      const threshold = maxIdBeforeAddRef.current;
+      const newItem = activeBoard.items.find((it) => it.id > threshold);
+      if (newItem) {
+        setSelectedItemId(newItem.id);
+        maxIdBeforeAddRef.current = null;
+      }
+    }
+  }, [boards, activeBoard]);
+
+  const handleDropImageOnEmptyCard = (file: File) => {
+    if (!activeBoardId || activeBoardId < 0) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result);
+      const items = activeBoard?.items ?? [];
+      maxIdBeforeAddRef.current = items.length > 0 ? Math.max(...items.map((it) => it.id)) : 0;
+      fetcher.submit({ intent: "add_vision_board_item", boardId: String(activeBoardId), image: dataUrl }, { method: "post" });
+    };
+    reader.readAsDataURL(file);
+  };
 
   const submitAddBoard = () => {
     const name = addBoardName.trim() || "New Board";
@@ -5632,10 +5660,8 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
             onDelete={() => handleDeleteItem(item.id)}
           />
         ))}
-        {activeBoard && activeBoard.items.length === 0 && (
-          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-            No items yet. Click Add Item to create your first one.
-          </div>
+        {activeBoard && activeBoard.id > 0 && (
+          <VisionEmptyDropCard onAddImage={handleDropImageOnEmptyCard} />
         )}
         {!activeBoard && (
           <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
@@ -5700,6 +5726,50 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
         </div>,
         document.body,
       )}
+    </div>
+  );
+}
+
+function VisionEmptyDropCard({ onAddImage }: { onAddImage: (file: File) => void }) {
+  const [dragOver, setDragOver] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <div
+      style={{
+        ...s.productStyleCard,
+        cursor: "pointer",
+        background: dragOver ? "#e0f2fe" : "#f8fafc",
+        borderStyle: "dashed",
+        borderColor: dragOver ? "#0284c7" : "#cbd5e1",
+        transition: "background 0.15s, border-color 0.15s",
+      }}
+      onClick={() => inputRef.current?.click()}
+      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragOver(false);
+        const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith("image/"));
+        if (file) onAddImage(file);
+      }}
+    >
+      <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8", fontSize: 13, fontWeight: 600, textAlign: "center", padding: 8 }}>
+        Drop image<br />or click
+      </div>
+      <div style={{ ...s.productStyleCardBody, paddingBottom: 14 }}>
+        <span style={{ ...s.productStyleTitle, color: "#94a3b8" }}>+ New</span>
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) onAddImage(file);
+          e.target.value = "";
+        }}
+      />
     </div>
   );
 }
@@ -5811,7 +5881,8 @@ function VisionItemDetailPanel({
   const [fields, setFields] = useState<VisionField[]>(() => visionFields(item));
   const [newFieldLabel, setNewFieldLabel] = useState("");
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
-  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const [imageDragOver, setImageDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const images = visionImages(item);
 
@@ -5915,23 +5986,49 @@ function VisionItemDetailPanel({
                   <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeImage(index)} aria-label="Remove image">×</button>
                 </div>
               ))}
-              <button type="button" style={s.sampleIterationAddImage} onClick={() => setUploadModalOpen(true)}>
+              <div
+                style={{
+                  ...s.sampleIterationAddImage,
+                  cursor: "pointer",
+                  background: imageDragOver ? "#e0f2fe" : (s.sampleIterationAddImage as React.CSSProperties).background,
+                  borderColor: imageDragOver ? "#0284c7" : (s.sampleIterationAddImage as React.CSSProperties).borderColor,
+                  transition: "background 0.15s, border-color 0.15s",
+                }}
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={(e) => { e.preventDefault(); setImageDragOver(true); }}
+                onDragLeave={() => setImageDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setImageDragOver(false);
+                  Array.from(e.dataTransfer.files)
+                    .filter((f) => f.type.startsWith("image/"))
+                    .forEach((f) => addImage(f));
+                }}
+              >
                 <span>+ Add photos</span>
-              </button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  Array.from(e.target.files ?? []).forEach((f) => addImage(f));
+                  e.target.value = "";
+                }}
+              />
             </div>
 
-            {/* Form-like custom fields */}
+            {/* Custom rows — fixed label, value input, delete button */}
             <div style={{ borderTop: "1px solid #f1f5f9" }}>
               {fields.map((field) => (
-                <div key={field.id} style={{ display: "grid", gridTemplateColumns: "minmax(120px, 0.35fr) minmax(180px, 1fr) auto", gap: 10, alignItems: "center", padding: "10px 14px", borderBottom: "1px solid #f1f5f9" }}>
+                <div key={field.id} style={{ display: "flex", gap: 8, padding: "10px 14px", borderBottom: "1px solid #f1f5f9", alignItems: "center" }}>
+                  <span style={{ flexShrink: 0, minWidth: 120, fontSize: 12, fontWeight: 600, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>
+                    {field.label}
+                  </span>
                   <input
-                    style={{ width: "100%", border: "none", outline: "none", fontSize: 12, fontWeight: 600, color: "#374151", background: "transparent", textTransform: "uppercase" as const, letterSpacing: "0.04em", fontFamily: "inherit", padding: 0 }}
-                    value={field.label}
-                    onChange={(e) => setFields((prev) => prev.map((f) => f.id === field.id ? { ...f, label: e.target.value } : f))}
-                    onBlur={(e) => updateField(field.id, { label: e.target.value })}
-                  />
-                  <input
-                    style={{ width: "100%", border: "none", outline: "none", fontSize: 13, color: "#111827", background: "transparent", fontFamily: "inherit", padding: 0 }}
+                    style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontSize: 13, color: "#111827", background: "#fff", fontFamily: "inherit" }}
                     value={field.value}
                     placeholder={`Enter ${field.label.toLowerCase()}`}
                     onChange={(e) => setFields((prev) => prev.map((f) => f.id === field.id ? { ...f, value: e.target.value } : f))}
@@ -5940,9 +6037,9 @@ function VisionItemDetailPanel({
                   <button
                     type="button"
                     onClick={() => removeField(field.id)}
-                    style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", padding: 4, fontSize: 16, lineHeight: 1 }}
-                    title="Remove row"
-                  >×</button>
+                    style={{ background: "#ef4444", color: "#fff", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+                    title="Delete row"
+                  >Delete</button>
                 </div>
               ))}
               <div style={{ display: "flex", gap: 8, padding: "10px 14px" }}>
@@ -5979,15 +6076,6 @@ function VisionItemDetailPanel({
 
       {lightboxIndex !== null && typeof document !== "undefined" && createPortal(
         <ImageLightbox images={images} initialIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />,
-        document.body,
-      )}
-      {uploadModalOpen && typeof document !== "undefined" && createPortal(
-        <ImageUploadModal
-          title="Add photos"
-          onImage={(file) => addImage(file)}
-          onClose={() => setUploadModalOpen(false)}
-          multi
-        />,
         document.body,
       )}
     </>
