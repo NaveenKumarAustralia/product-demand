@@ -5577,7 +5577,15 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
         </div>
       </div>
 
-      <div style={{ ...s.productInfoList, display: "flex", flexWrap: "wrap", alignItems: "flex-start" }}>
+      <div
+        style={{
+          ...s.productInfoList,
+          gridTemplateColumns: activeBoard?.items.length
+            ? `repeat(${activeBoard.items.length}, minmax(0, 1.2in))`
+            : "1fr",
+          alignItems: "flex-start",
+        }}
+      >
         {activeBoard?.items.map((item) => (
           <VisionBoardCard
             key={item.id}
@@ -5683,7 +5691,7 @@ function VisionBoardCard({
   const image = normalizeVisionItemFields(item).images[0] ?? item.imageData;
   return (
     <div
-      style={{ ...s.productStyleCard, width: "2in", cursor: "pointer" }}
+      style={{ ...s.productStyleCard, width: "100%", maxWidth: "1.2in", minWidth: 0, cursor: "pointer" }}
       onClick={onOpen}
     >
       <button
@@ -5704,7 +5712,7 @@ function VisionBoardCard({
           </div>
         </div>
       )}
-      <div style={{ ...s.productStyleImageWrap, width: "2in", height: "3in", aspectRatio: "auto" }}>
+      <div style={{ ...s.productStyleImageWrap, width: "100%", maxWidth: "1.2in", aspectRatio: "2 / 3" }}>
         {image ? (
           <img src={image} alt={item.title ?? ""} style={s.productStyleImage} loading="lazy" />
       ) : (
