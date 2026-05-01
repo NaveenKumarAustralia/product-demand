@@ -1729,6 +1729,7 @@ const PACKING_STATUS_OPTIONS = [
   { value: "still_packing", label: "Still packing" },
   { value: "on_the_way", label: "On the way" },
   { value: "arrived", label: "Arrived" },
+  { value: "partially_loaded", label: "Partially loaded" },
   { value: "loaded", label: "Inventory loaded" },
 ];
 const PACKING_SIZES = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
