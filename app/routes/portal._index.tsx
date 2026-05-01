@@ -243,9 +243,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         deletedSheetsValue: fabricDeletedSheetsSetting?.value,
       })
     : [];
-  const fabricStockByName: Record<string, number> = page === "restock"
-    ? buildFabricStockByName(manualFabricSheets)
-    : {};
+  const fabricStockIndex: FabricStockEntry[] = page === "restock"
+    ? buildFabricStockIndex(manualFabricSheets)
+    : [];
   const fabricSheets = page === "fabric" && selectedFabricTab
     ? getFabricSheets(
         undefined,
@@ -327,7 +327,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     inrToAudRate,
     samples,
     visionBoards,
-    fabricStockByName,
+    fabricStockIndex,
   };
   } catch (error) {
     console.error("Portal loader error:", error);
@@ -2771,11 +2771,14 @@ async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
   });
 }
 
-// Build a map of fabric name (lowercased) → total meters in stock, summed across
-// all stock sheets. Used by the restock page to show fabric availability per
-// product based on the fabric name appearing in the product title.
-function buildFabricStockByName(sheets: FabricStockSheet[]): Record<string, number> {
-  const map: Record<string, number> = {};
+// Build an index of fabric stock entries: one entry per row in any stock sheet.
+// Used by the restock page to show fabric availability per product based on the
+// fabric name appearing in the product title. Entries are kept separate (not summed)
+// so the same fabric name appearing in multiple sheets shows each individually.
+type FabricStockEntry = { name: string; meters: number; sheetName: string };
+
+function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
+  const out: FabricStockEntry[] = [];
   for (const sheet of sheets) {
     if (sheet.kind !== "stock") continue;
     const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
@@ -2784,29 +2787,31 @@ function buildFabricStockByName(sheets: FabricStockSheet[]): Record<string, numb
     for (const row of sheet.rows) {
       const name = (row[nameIdx] ?? "").trim();
       if (!name || name.length < 2) continue;
-      const cleaned = (row[metersIdx] ?? "").toString().split(/[^0-9.\-]/)[0];
+      const cleaned = (row[metersIdx] ?? "").toString().split(/[^0-9.]/)[0];
       const m = Number(cleaned);
-      if (!Number.isFinite(m) || m === 0) continue;
-      const key = name.toLowerCase();
-      map[key] = (map[key] ?? 0) + m;
+      if (!Number.isFinite(m)) continue;
+      out.push({ name, meters: m, sheetName: sheet.name });
     }
   }
-  return map;
+  return out;
 }
 
-// Find the longest fabric name from the map that appears as a whole-word substring
-// of the product title.
-function findFabricStockForTitle(title: string, fabricStockByName: Record<string, number>): { name: string; meters: number } | null {
-  if (!title) return null;
+// Find every stock entry whose fabric name appears as a whole word in the product title.
+// Multiple sheets may have the same fabric name (e.g. Morialta in 60x60 and Voil) — return
+// them all so the UI can show them separately rather than misleadingly summing.
+function findFabricStockMatches(title: string, index: FabricStockEntry[]): FabricStockEntry[] {
+  if (!title) return [];
   const lower = title.toLowerCase();
-  const names = Object.keys(fabricStockByName).sort((a, b) => b.length - a.length);
+  const names = Array.from(new Set(index.map((i) => i.name))).sort((a, b) => b.length - a.length);
   for (const name of names) {
     if (name.length < 3) continue;
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`\\b${escaped}\\b`, "i");
-    if (re.test(lower)) return { name, meters: fabricStockByName[name] };
+    if (re.test(lower)) {
+      return index.filter((i) => i.name.toLowerCase() === name.toLowerCase());
+    }
   }
-  return null;
+  return [];
 }
 
 async function getManualFabricSheets({
@@ -3771,7 +3776,7 @@ export default function PortalDashboard() {
     inrToAudRate,
     samples,
     visionBoards,
-    fabricStockByName,
+    fabricStockIndex,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
@@ -4169,7 +4174,7 @@ export default function PortalDashboard() {
                     customCells={customCells}
                     rowHeights={rowHeights}
                     frozenOffsets={restockFrozenOffsets}
-                    fabricStockByName={fabricStockByName}
+                    fabricStockIndex={fabricStockIndex}
                   />
                   );
                 })}
@@ -9815,7 +9820,7 @@ function OrderRow({
   customCells,
   rowHeights,
   frozenOffsets,
-  fabricStockByName,
+  fabricStockIndex,
 }: {
   order: Order;
   rowIndex: number;
@@ -9826,7 +9831,7 @@ function OrderRow({
   customCells: Record<string, string>;
   rowHeights: Record<string, number>;
   frozenOffsets?: number[];
-  fabricStockByName: Record<string, number>;
+  fabricStockIndex: FabricStockEntry[];
 }) {
   const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
@@ -9854,7 +9859,7 @@ function OrderRow({
   const priorityCol = totalCol + 3;
   const etaCol = totalCol + 4;
   const fabricStockCol = totalCol + 5;
-  const fabricMatch = findFabricStockForTitle(order.productTitle, fabricStockByName);
+  const fabricMatches = findFabricStockMatches(order.productTitle, fabricStockIndex);
   const rowHeightKey = `restock:${order.id}`;
   const shouldSkipDeleteConfirm = () => {
     if (typeof window === "undefined") return false;
@@ -9938,13 +9943,26 @@ function OrderRow({
 
         {/* Fabric in stock — looked up from the fabric name in the product title */}
         <Td rowIndex={rowIndex} colIndex={fabricStockCol} center>
-          {fabricMatch ? (
-            <span title={`Matched fabric: ${fabricMatch.name}`} style={{ fontWeight: 600, color: "#111827" }}>
-              {Math.round(fabricMatch.meters).toLocaleString()}
-              <span style={{ marginLeft: 4, color: "#6b7280", fontWeight: 400, fontSize: 11 }}>m</span>
-            </span>
+          {fabricMatches.length === 0 ? (
+            <span style={{ color: "#9ca3af", fontStyle: "italic", fontSize: 12 }}>Fabric not found</span>
           ) : (
-            <span style={{ color: "#cbd5e1" }}>—</span>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
+              {fabricMatches.map((match, idx) => (
+                <span key={idx} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12 }}>
+                  {match.meters === 0 ? (
+                    <span style={{ color: "#dc2626", fontWeight: 600 }}>Out of stock</span>
+                  ) : (
+                    <>
+                      <span style={{ fontWeight: 600, color: "#111827" }}>{Math.round(match.meters).toLocaleString()}</span>
+                      <span style={{ marginLeft: 3, color: "#6b7280", fontWeight: 400, fontSize: 11 }}>m</span>
+                    </>
+                  )}
+                  {fabricMatches.length > 1 && (
+                    <span style={{ marginLeft: 4, color: "#9ca3af", fontWeight: 400, fontSize: 10 }}>({match.sheetName})</span>
+                  )}
+                </span>
+              ))}
+            </div>
           )}
         </Td>
 
