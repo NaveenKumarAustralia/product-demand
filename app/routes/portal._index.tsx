@@ -207,32 +207,33 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         return [] as PortalMessageItem[];
       })
     : [];
-  const fabricCellOverridesSetting = page === "fabric"
+  const needsFabricSheets = page === "fabric" || page === "restock";
+  const fabricCellOverridesSetting = needsFabricSheets
     ? await prisma.portalSetting.findUnique({
         where: { key: FABRIC_CELL_OVERRIDES_KEY },
         select: { value: true },
       })
     : null;
-  const fabricCustomRowsSetting = page === "fabric"
+  const fabricCustomRowsSetting = needsFabricSheets
     ? await prisma.portalSetting.findUnique({
         where: { key: FABRIC_CUSTOM_ROWS_KEY },
         select: { value: true },
       })
     : null;
-  const fabricDeletedRowsSetting = page === "fabric"
+  const fabricDeletedRowsSetting = needsFabricSheets
     ? await prisma.portalSetting.findUnique({
         where: { key: FABRIC_DELETED_ROWS_KEY },
         select: { value: true },
       })
     : null;
-  const fabricDeletedSheetsSetting = page === "fabric"
+  const fabricDeletedSheetsSetting = needsFabricSheets
     ? await prisma.portalSetting.findUnique({
         where: { key: FABRIC_DELETED_SHEETS_KEY },
         select: { value: true },
       })
     : null;
   const inrToAudRate = page === "fabric" && !selectedFabricTab ? await getInrToAudRate() : null;
-  const manualFabricSheets = page === "fabric"
+  const manualFabricSheets = needsFabricSheets
     ? await getManualFabricSheets({
         savedValue: fabricManualSheetsSetting?.value,
         customSheetsValue: fabricCustomSheetsSetting?.value,
@@ -242,6 +243,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         deletedSheetsValue: fabricDeletedSheetsSetting?.value,
       })
     : [];
+  const fabricStockByName: Record<string, number> = page === "restock"
+    ? buildFabricStockByName(manualFabricSheets)
+    : {};
   const fabricSheets = page === "fabric" && selectedFabricTab
     ? getFabricSheets(
         undefined,
@@ -323,6 +327,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     inrToAudRate,
     samples,
     visionBoards,
+    fabricStockByName,
   };
   } catch (error) {
     console.error("Portal loader error:", error);
@@ -2766,6 +2771,44 @@ async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
   });
 }
 
+// Build a map of fabric name (lowercased) → total meters in stock, summed across
+// all stock sheets. Used by the restock page to show fabric availability per
+// product based on the fabric name appearing in the product title.
+function buildFabricStockByName(sheets: FabricStockSheet[]): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const sheet of sheets) {
+    if (sheet.kind !== "stock") continue;
+    const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
+    const metersIdx = sheet.headers.findIndex((h) => /meters?\s*in\s*stock/i.test(h));
+    if (nameIdx < 0 || metersIdx < 0) continue;
+    for (const row of sheet.rows) {
+      const name = (row[nameIdx] ?? "").trim();
+      if (!name || name.length < 2) continue;
+      const cleaned = (row[metersIdx] ?? "").toString().split(/[^0-9.\-]/)[0];
+      const m = Number(cleaned);
+      if (!Number.isFinite(m) || m === 0) continue;
+      const key = name.toLowerCase();
+      map[key] = (map[key] ?? 0) + m;
+    }
+  }
+  return map;
+}
+
+// Find the longest fabric name from the map that appears as a whole-word substring
+// of the product title.
+function findFabricStockForTitle(title: string, fabricStockByName: Record<string, number>): { name: string; meters: number } | null {
+  if (!title) return null;
+  const lower = title.toLowerCase();
+  const names = Object.keys(fabricStockByName).sort((a, b) => b.length - a.length);
+  for (const name of names) {
+    if (name.length < 3) continue;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`\\b${escaped}\\b`, "i");
+    if (re.test(lower)) return { name, meters: fabricStockByName[name] };
+  }
+  return null;
+}
+
 async function getManualFabricSheets({
   savedValue,
   customSheetsValue,
@@ -3728,6 +3771,7 @@ export default function PortalDashboard() {
     inrToAudRate,
     samples,
     visionBoards,
+    fabricStockByName,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
   const columnWidthsFetcher = useFetcher();
@@ -3789,6 +3833,7 @@ export default function PortalDashboard() {
     { id: "notes", label: "Notes" },
     { id: "priority", label: "Priority" },
     { id: "eta", label: "ETA" },
+    { id: "fabricStock", label: "Fabric in stock", center: true },
     ...customColumns.restock.map((column) => ({ id: column.id, label: column.label })),
   ];
 
@@ -4124,6 +4169,7 @@ export default function PortalDashboard() {
                     customCells={customCells}
                     rowHeights={rowHeights}
                     frozenOffsets={restockFrozenOffsets}
+                    fabricStockByName={fabricStockByName}
                   />
                   );
                 })}
@@ -9769,6 +9815,7 @@ function OrderRow({
   customCells,
   rowHeights,
   frozenOffsets,
+  fabricStockByName,
 }: {
   order: Order;
   rowIndex: number;
@@ -9779,6 +9826,7 @@ function OrderRow({
   customCells: Record<string, string>;
   rowHeights: Record<string, number>;
   frozenOffsets?: number[];
+  fabricStockByName: Record<string, number>;
 }) {
   const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
@@ -9805,6 +9853,8 @@ function OrderRow({
   const notesCol = totalCol + 2;
   const priorityCol = totalCol + 3;
   const etaCol = totalCol + 4;
+  const fabricStockCol = totalCol + 5;
+  const fabricMatch = findFabricStockForTitle(order.productTitle, fabricStockByName);
   const rowHeightKey = `restock:${order.id}`;
   const shouldSkipDeleteConfirm = () => {
     if (typeof window === "undefined") return false;
@@ -9886,8 +9936,20 @@ function OrderRow({
         {/* ETA */}
         <Td rowIndex={rowIndex} colIndex={etaCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="ETA" historyEntityName={order.productTitle}><EtaCell orderId={order.id} value={etaValue} /></Td>
 
+        {/* Fabric in stock — looked up from the fabric name in the product title */}
+        <Td rowIndex={rowIndex} colIndex={fabricStockCol} center>
+          {fabricMatch ? (
+            <span title={`Matched fabric: ${fabricMatch.name}`} style={{ fontWeight: 600, color: "#111827" }}>
+              {Math.round(fabricMatch.meters).toLocaleString()}
+              <span style={{ marginLeft: 4, color: "#6b7280", fontWeight: 400, fontSize: 11 }}>m</span>
+            </span>
+          ) : (
+            <span style={{ color: "#cbd5e1" }}>—</span>
+          )}
+        </Td>
+
         {customColumns.map((column, customIndex) => (
-          <Td key={column.id} rowIndex={rowIndex} colIndex={etaCol + 1 + customIndex}>
+          <Td key={column.id} rowIndex={rowIndex} colIndex={fabricStockCol + 1 + customIndex}>
             <TableCustomCell cellKey={`restock:${order.id}:${column.id}`} value={customCells[`restock:${order.id}:${column.id}`] ?? ""} />
           </Td>
         ))}
@@ -9895,7 +9957,7 @@ function OrderRow({
       </tr>
       {deleteConfirmOpen && (
         <tr>
-          <td colSpan={etaCol + customColumns.length + 2}>
+          <td colSpan={fabricStockCol + customColumns.length + 2}>
             <div style={s.deleteConfirm} onClick={() => setDeleteConfirmOpen(false)}>
               <div style={s.deleteConfirmCard} onClick={(event) => event.stopPropagation()}>
                 <div style={s.deleteConfirmTitle}>Delete this restock row?</div>
