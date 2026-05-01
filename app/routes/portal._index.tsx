@@ -3052,6 +3052,16 @@ function packingListTotal(list: PackingListWithLines | null) {
   return list.lines.reduce((sum, line) => sum + packingTotal(normalizeQtys(line.qtys)), 0);
 }
 
+function packingListBoxCount(list: PackingListWithLines | null) {
+  if (!list) return 0;
+  const boxes = new Set<string>();
+  for (const line of list.lines) {
+    const box = (line.boxNumber ?? "").trim();
+    if (box) boxes.add(box);
+  }
+  return boxes.size;
+}
+
 function packingLineMatchesSearch(line: PackingListWithLines["lines"][number], search: string) {
   const qtys = normalizeQtys(line.qtys);
   const searchable = [
@@ -8599,8 +8609,8 @@ function PackingListsOverview({
         <table style={{ ...s.table, width: "100%" }}>
           <thead>
             <tr style={s.headerRow}>
-              {["Invoice", "Total qty", "Estimated arrival", "Status", "Actions"].map((heading) => (
-                <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Actions" ? "center" : "left" }}>
+              {["Invoice", "Boxes", "Total qty", "Estimated arrival", "Status", "Actions"].map((heading) => (
+                <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Boxes" || heading === "Actions" ? "center" : "left" }}>
                   <span style={s.thContent}>{heading}</span>
                 </th>
               ))}
@@ -8629,6 +8639,7 @@ function PackingListsOverview({
                   >
                     <strong style={s.productName}>{list.invoiceNumber || `Packing list #${list.id}`}</strong>
                   </td>
+                  <td style={{ ...cellStyle, textAlign: "center" }}><span style={s.total}>{packingListBoxCount(list)}</span></td>
                   <td style={{ ...cellStyle, textAlign: "center" }}><span style={s.total}>{packingListTotal(list)}</span></td>
                   <td
                     style={cellStyle}
@@ -8657,7 +8668,7 @@ function PackingListsOverview({
               );
             }) : (
               <tr style={s.row}>
-                <td colSpan={5} style={{ ...s.td, textAlign: "center", padding: 40 }}>
+                <td colSpan={6} style={{ ...s.td, textAlign: "center", padding: 40 }}>
                   {showHidden ? "No hidden packing lists." : "No packing lists yet."}
                 </td>
               </tr>
