@@ -2777,14 +2777,18 @@ async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
 // Used by the restock page to show fabric availability per product based on the
 // fabric name appearing in the product title. Entries are kept separate (not summed)
 // so the same fabric name appearing in multiple sheets shows each individually.
-type FabricStockEntry = { name: string; meters: number; sheetName: string };
+type FabricStockEntry = { name: string; meters: number; sheetName: string; kind: "stock" | "order" };
 
 function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
   const out: FabricStockEntry[] = [];
   for (const sheet of sheets) {
-    if (sheet.kind !== "stock") continue;
+    const isStock = sheet.kind === "stock";
+    const isOrder = sheet.kind === "order";
+    if (!isStock && !isOrder) continue;
     const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
-    const metersIdx = sheet.headers.findIndex((h) => /meters?\s*in\s*stock/i.test(h));
+    const metersIdx = isStock
+      ? sheet.headers.findIndex((h) => /meters?\s*in\s*stock/i.test(h))
+      : sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered/i.test(h));
     if (nameIdx < 0 || metersIdx < 0) continue;
     for (const row of sheet.rows) {
       const name = (row[nameIdx] ?? "").trim();
@@ -2792,7 +2796,9 @@ function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
       const cleaned = (row[metersIdx] ?? "").toString().split(/[^0-9.]/)[0];
       const m = Number(cleaned);
       if (!Number.isFinite(m)) continue;
-      out.push({ name, meters: m, sheetName: sheet.name });
+      // Skip zero on-order rows so we don't clutter the cell with empty entries
+      if (isOrder && m === 0) continue;
+      out.push({ name, meters: m, sheetName: sheet.name, kind: isStock ? "stock" : "order" });
     }
   }
   return out;
@@ -9956,8 +9962,8 @@ function OrderRow({
             <span style={{ color: "#111827", fontWeight: 600, fontSize: 12 }}>Fabric not found</span>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
-              {fabricMatches.map((match, idx) => (
-                <span key={idx} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12, color: "#111827" }}>
+              {fabricMatches.filter((m) => m.kind === "stock").map((match, idx) => (
+                <span key={`s-${idx}`} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12, color: "#111827" }}>
                   {match.meters === 0 ? (
                     <span style={{ color: "#dc2626", fontWeight: 600 }}>Out of stock</span>
                   ) : (
@@ -9966,9 +9972,14 @@ function OrderRow({
                       <span style={{ marginLeft: 3, fontWeight: 500 }}>m</span>
                     </>
                   )}
-                  {fabricMatches.length > 1 && (
-                    <span style={{ marginLeft: 4, fontWeight: 500 }}>({match.sheetName})</span>
-                  )}
+                  <span style={{ marginLeft: 4, fontWeight: 500 }}>({match.sheetName})</span>
+                </span>
+              ))}
+              {fabricMatches.filter((m) => m.kind === "order").map((match, idx) => (
+                <span key={`o-${idx}`} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12, color: "#0369a1" }}>
+                  <span style={{ fontWeight: 600 }}>{Math.round(match.meters).toLocaleString()}</span>
+                  <span style={{ marginLeft: 3, fontWeight: 500 }}>m on order</span>
+                  <span style={{ marginLeft: 4, fontWeight: 500 }}>({match.sheetName})</span>
                 </span>
               ))}
             </div>
