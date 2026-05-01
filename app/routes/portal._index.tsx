@@ -1656,6 +1656,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   const intent = formData?.get("intent") as string | null;
   if (intent === "reorder_samples" || intent === "rename_sample") return false;
   if (intent === "update_vision_board_item" || intent === "reorder_vision_boards" || intent === "rename_vision_board" || intent === "reorder_vision_board_items") return false;
+  if (intent === "update_column_widths" || intent === "update_packing_column_widths") return false;
   return defaultShouldRevalidate;
 };
 
@@ -2226,6 +2227,7 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   notes: 150,
   priority: 160,
   eta: 145,
+  fabricStock: 170,
   delete: 104,
 };
 
@@ -3947,6 +3949,13 @@ export default function PortalDashboard() {
             appearance: textfield;
             -moz-appearance: textfield;
           }
+
+          /* Always-visible horizontal scrollbar on table wrappers (macOS overlay scrollbars auto-hide otherwise) */
+          .portal-table-scroll::-webkit-scrollbar { height: 12px; width: 12px; }
+          .portal-table-scroll::-webkit-scrollbar-track { background: #f1f5f9; }
+          .portal-table-scroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 6px; border: 2px solid #f1f5f9; }
+          .portal-table-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
+          .portal-table-scroll { scrollbar-color: #94a3b8 #f1f5f9; }
         `}
       </style>
       <aside style={{ ...s.sidebar, background: universalSettings.menuBg, color: universalSettings.menuTextColor }}>
@@ -4108,7 +4117,7 @@ export default function PortalDashboard() {
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : (
-          <div style={s.tableWrap}>
+          <div className="portal-table-scroll" style={s.tableWrap}>
             <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleTableGridKeyDown}>
               <colgroup>
                 <col style={{ width: 48 }} />
@@ -8944,7 +8953,7 @@ function PackingListDetail({
         </span>
       </div>
 
-      <div style={s.packingTableWrap}>
+      <div className="portal-table-scroll" style={s.packingTableWrap}>
         <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
           <colgroup>
             <col style={{ width: 48 }} />
@@ -9944,21 +9953,21 @@ function OrderRow({
         {/* Fabric in stock — looked up from the fabric name in the product title */}
         <Td rowIndex={rowIndex} colIndex={fabricStockCol} center>
           {fabricMatches.length === 0 ? (
-            <span style={{ color: "#9ca3af", fontStyle: "italic", fontSize: 12 }}>Fabric not found</span>
+            <span style={{ color: "#111827", fontWeight: 600, fontSize: 12 }}>Fabric not found</span>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
               {fabricMatches.map((match, idx) => (
-                <span key={idx} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12 }}>
+                <span key={idx} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12, color: "#111827" }}>
                   {match.meters === 0 ? (
                     <span style={{ color: "#dc2626", fontWeight: 600 }}>Out of stock</span>
                   ) : (
                     <>
-                      <span style={{ fontWeight: 600, color: "#111827" }}>{Math.round(match.meters).toLocaleString()}</span>
-                      <span style={{ marginLeft: 3, color: "#6b7280", fontWeight: 400, fontSize: 11 }}>m</span>
+                      <span style={{ fontWeight: 600 }}>{Math.round(match.meters).toLocaleString()}</span>
+                      <span style={{ marginLeft: 3, fontWeight: 500 }}>m</span>
                     </>
                   )}
                   {fabricMatches.length > 1 && (
-                    <span style={{ marginLeft: 4, color: "#9ca3af", fontWeight: 400, fontSize: 10 }}>({match.sheetName})</span>
+                    <span style={{ marginLeft: 4, fontWeight: 500 }}>({match.sheetName})</span>
                   )}
                 </span>
               ))}
@@ -11371,8 +11380,9 @@ const s: Record<string, React.CSSProperties> = {
   productResultText: { display: "grid", gap: 3, flex: 1, fontSize: 13, color: "#374151" },
   packingTableWrap: {
     maxHeight: "calc(100vh - 185px)",
-    overflowX: "auto",
+    overflowX: "scroll",
     overflowY: "visible",
+    scrollbarGutter: "stable",
     background: "#fff",
     border: "1px solid #cbd5e1",
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
@@ -12644,7 +12654,9 @@ const s: Record<string, React.CSSProperties> = {
   fabricLink: { color: "#2563eb", fontWeight: 800, textDecoration: "none" },
   tableWrap: {
     maxHeight: "calc(100vh - 118px)",
-    overflow: "auto",
+    overflowX: "scroll" as const,
+    overflowY: "auto" as const,
+    scrollbarGutter: "stable" as const,
     background: "#fff",
     border: "1px solid #cbd5e1",
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
