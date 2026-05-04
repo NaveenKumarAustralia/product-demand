@@ -26,127 +26,221 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
   const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
   try {
-  const [allOrders, columnWidthsSetting, packingColumnWidthsSetting, headerLabelsSetting, customColumnsSetting, customCellsSetting, rowHeightsSetting, fabricCustomSheetsSetting, fabricManualSheetsSetting, restockSettingsSetting, universalSettingsSetting, fabricSettingsSetting, productInfoSetting, usersSetting, activeUsersSetting, packingLists, navOrderSetting] = await retryAsync(() => Promise.all([
-      prisma.supplierOrder.findMany({
-        where: { status: "open" },
-        include: { lines: { orderBy: { id: "asc" } } },
-        orderBy: { createdAt: "desc" },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: COLUMN_WIDTHS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: PACKING_COLUMN_WIDTHS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: TABLE_HEADER_LABELS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: TABLE_CUSTOM_COLUMNS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: TABLE_CUSTOM_CELLS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: TABLE_ROW_HEIGHTS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: FABRIC_CUSTOM_SHEETS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: FABRIC_MANUAL_SHEETS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: RESTOCK_SETTINGS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: UNIVERSAL_SETTINGS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: FABRIC_SETTINGS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: PRODUCT_INFO_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: PORTAL_USERS_KEY },
-        select: { value: true },
-      }),
-      prisma.portalSetting.findUnique({
-        where: { key: PORTAL_ACTIVE_USERS_KEY },
-        select: { value: true },
-      }),
-      prisma.packingList.findMany({
-        orderBy: { createdAt: "desc" },
-        include: { lines: { orderBy: [{ sortOrder: "asc" }, { id: "asc" }] } },
-      }),
-      prisma.portalSetting.findUnique({ where: { key: PORTAL_NAV_ORDER_KEY }, select: { value: true } }),
+  const SETTING_KEYS = [
+    COLUMN_WIDTHS_KEY,
+    PACKING_COLUMN_WIDTHS_KEY,
+    TABLE_HEADER_LABELS_KEY,
+    TABLE_CUSTOM_COLUMNS_KEY,
+    TABLE_CUSTOM_CELLS_KEY,
+    TABLE_ROW_HEIGHTS_KEY,
+    FABRIC_CUSTOM_SHEETS_KEY,
+    FABRIC_MANUAL_SHEETS_KEY,
+    RESTOCK_SETTINGS_KEY,
+    UNIVERSAL_SETTINGS_KEY,
+    FABRIC_SETTINGS_KEY,
+    PRODUCT_INFO_KEY,
+    PORTAL_USERS_KEY,
+    PORTAL_ACTIVE_USERS_KEY,
+    PORTAL_NAV_ORDER_KEY,
+  ];
+  const needsOrders = page === "restock" || page === "packing";
+  const needsPackingLists = page === "packing" || packingId !== null;
+  const needsActivityLogs = page !== "visionboard" && page !== "samples";
+
+  const [settingsRows, allOrders, packingLists] = await retryAsync(() => Promise.all([
+      prisma.portalSetting.findMany({ where: { key: { in: SETTING_KEYS } }, select: { key: true, value: true } }),
+      needsOrders
+        ? prisma.supplierOrder.findMany({
+            where: { status: "open" },
+            include: { lines: { orderBy: { id: "asc" } } },
+            orderBy: { createdAt: "desc" },
+          })
+        : (Promise.resolve([]) as ReturnType<typeof prisma.supplierOrder.findMany<{ include: { lines: true } }>>),
+      needsPackingLists
+        ? prisma.packingList.findMany({
+            orderBy: { createdAt: "desc" },
+            include: { lines: { orderBy: [{ sortOrder: "asc" }, { id: "asc" }] } },
+          })
+        : (Promise.resolve([]) as ReturnType<typeof prisma.packingList.findMany<{ include: { lines: true } }>>),
     ]),
     "portal base data",
   );
+  const settingsMap = new Map(settingsRows.map((row) => [row.key, row.value as unknown]));
+  const wrap = (key: string) => {
+    const value = settingsMap.get(key);
+    return value === undefined ? null : { value };
+  };
+  const columnWidthsSetting = wrap(COLUMN_WIDTHS_KEY);
+  const packingColumnWidthsSetting = wrap(PACKING_COLUMN_WIDTHS_KEY);
+  const headerLabelsSetting = wrap(TABLE_HEADER_LABELS_KEY);
+  const customColumnsSetting = wrap(TABLE_CUSTOM_COLUMNS_KEY);
+  const customCellsSetting = wrap(TABLE_CUSTOM_CELLS_KEY);
+  const rowHeightsSetting = wrap(TABLE_ROW_HEIGHTS_KEY);
+  const fabricCustomSheetsSetting = wrap(FABRIC_CUSTOM_SHEETS_KEY);
+  const fabricManualSheetsSetting = wrap(FABRIC_MANUAL_SHEETS_KEY);
+  const restockSettingsSetting = wrap(RESTOCK_SETTINGS_KEY);
+  const universalSettingsSetting = wrap(UNIVERSAL_SETTINGS_KEY);
+  const fabricSettingsSetting = wrap(FABRIC_SETTINGS_KEY);
+  const productInfoSetting = wrap(PRODUCT_INFO_KEY);
+  const usersSetting = wrap(PORTAL_USERS_KEY);
+  const activeUsersSetting = wrap(PORTAL_ACTIVE_USERS_KEY);
+  const navOrderSetting = wrap(PORTAL_NAV_ORDER_KEY);
   const samples = page === "samples"
-    ? await prisma.sample.findMany({
-        orderBy: [{ sortOrder: "asc" }, { createdAt: "desc" }],
-        include: { iterations: { orderBy: { version: "asc" } } },
-      }).catch(async () => {
-        // Some migration columns may not exist yet — cascade through safe fallbacks
-        // Level 1: try without fabricType/sampleSize/buttonType (pre-000002)
+    ? await (async () => {
         try {
+          // Raw SQL: project only the first image per iteration (and image count)
+          // so the DB never ships full base64 payloads to Node on the listing.
           type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
-          type RawIter1 = { id: number; sampleId: number; version: number; name: string | null; notes: string | null; status: string; images: unknown; taggedUsers: unknown; createdAt: Date; updatedAt: Date };
+          type RawIterSlim = {
+            id: number; sampleId: number; version: number; name: string | null; notes: string | null;
+            fabricType: string | null; sampleSize: string | null; buttonType: string | null; status: string;
+            firstImage: string | null; imageCount: number; taggedUsers: unknown;
+            createdAt: Date; updatedAt: Date;
+          };
           const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
-          const rawIters = await prisma.$queryRaw<RawIter1[]>`SELECT id, "sampleId", version, name, notes, status, images, "taggedUsers", "createdAt", "updatedAt" FROM "SampleIteration" ORDER BY version ASC`;
+          const rawIters = await prisma.$queryRaw<RawIterSlim[]>`
+            SELECT id, "sampleId", version, name, notes, "fabricType", "sampleSize", "buttonType", status,
+              CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
+                THEN images ->> 0 ELSE NULL
+              END AS "firstImage",
+              CASE WHEN jsonb_typeof(images) = 'array'
+                THEN jsonb_array_length(images) ELSE 0
+              END AS "imageCount",
+              "taggedUsers", "createdAt", "updatedAt"
+            FROM "SampleIteration"
+            ORDER BY version ASC
+          `;
           return rawSamples.map((s) => ({
             ...s,
-            iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({ ...it, fabricType: null, sampleSize: null, buttonType: null })),
+            iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({
+              id: it.id, sampleId: it.sampleId, version: it.version,
+              name: it.name, notes: it.notes,
+              fabricType: it.fabricType, sampleSize: it.sampleSize, buttonType: it.buttonType,
+              status: it.status,
+              images: it.firstImage ? [it.firstImage] : [],
+              imageCount: Number(it.imageCount),
+              taggedUsers: it.taggedUsers,
+              createdAt: it.createdAt, updatedAt: it.updatedAt,
+            })),
           }));
         } catch {
-          // Level 2: try without name/taggedUsers either (pre-000001)
+          // Fallback path 1: legacy schema without fabricType/sampleSize/buttonType columns
           try {
             type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
-            type RawIter0 = { id: number; sampleId: number; version: number; notes: string | null; status: string; images: unknown; createdAt: Date; updatedAt: Date };
+            type RawIter1 = { id: number; sampleId: number; version: number; name: string | null; notes: string | null; status: string; firstImage: string | null; imageCount: number; taggedUsers: unknown; createdAt: Date; updatedAt: Date };
             const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
-            const rawIters = await prisma.$queryRaw<RawIter0[]>`SELECT id, "sampleId", version, notes, status, images, "createdAt", "updatedAt" FROM "SampleIteration" ORDER BY version ASC`;
+            const rawIters = await prisma.$queryRaw<RawIter1[]>`
+              SELECT id, "sampleId", version, name, notes, status,
+                CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
+                  THEN images ->> 0 ELSE NULL
+                END AS "firstImage",
+                CASE WHEN jsonb_typeof(images) = 'array'
+                  THEN jsonb_array_length(images) ELSE 0
+                END AS "imageCount",
+                "taggedUsers", "createdAt", "updatedAt"
+              FROM "SampleIteration" ORDER BY version ASC
+            `;
             return rawSamples.map((s) => ({
               ...s,
-              iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({ ...it, name: null, taggedUsers: [], fabricType: null, sampleSize: null, buttonType: null })),
+              iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({
+                id: it.id, sampleId: it.sampleId, version: it.version, name: it.name, notes: it.notes,
+                fabricType: null, sampleSize: null, buttonType: null, status: it.status,
+                images: it.firstImage ? [it.firstImage] : [], imageCount: Number(it.imageCount),
+                taggedUsers: it.taggedUsers, createdAt: it.createdAt, updatedAt: it.updatedAt,
+              })),
             }));
           } catch {
-            return [];
+            // Fallback path 2: legacy schema without name/taggedUsers (pre-000001)
+            try {
+              type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
+              type RawIter0 = { id: number; sampleId: number; version: number; notes: string | null; status: string; firstImage: string | null; imageCount: number; createdAt: Date; updatedAt: Date };
+              const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
+              const rawIters = await prisma.$queryRaw<RawIter0[]>`
+                SELECT id, "sampleId", version, notes, status,
+                  CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
+                    THEN images ->> 0 ELSE NULL
+                  END AS "firstImage",
+                  CASE WHEN jsonb_typeof(images) = 'array'
+                    THEN jsonb_array_length(images) ELSE 0
+                  END AS "imageCount",
+                  "createdAt", "updatedAt"
+                FROM "SampleIteration" ORDER BY version ASC
+              `;
+              return rawSamples.map((s) => ({
+                ...s,
+                iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({
+                  id: it.id, sampleId: it.sampleId, version: it.version, name: null, notes: it.notes,
+                  fabricType: null, sampleSize: null, buttonType: null, status: it.status,
+                  images: it.firstImage ? [it.firstImage] : [], imageCount: Number(it.imageCount),
+                  taggedUsers: [], createdAt: it.createdAt, updatedAt: it.updatedAt,
+                })),
+              }));
+            } catch {
+              return [];
+            }
           }
         }
-      })
+      })()
     : [];
   const visionBoards = page === "visionboard"
-    ? (await prisma.visionBoard.findMany({
-        orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-        include: { items: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] } },
-      }).catch(() => [] as { id: number; name: string; sortOrder: number; createdAt: Date; updatedAt: Date; items: { id: number; boardId: number; name: string; sortOrder: number; images: unknown; fields: unknown; notes: string | null; createdAt: Date; updatedAt: Date }[] }[])).map((board) => ({
-        ...board,
-        items: board.items.map((it) => {
-          const imgs = Array.isArray(it.images) ? (it.images as string[]) : [];
-          return { ...it, images: imgs.length > 0 ? [imgs[0]] : [], imageCount: imgs.length };
-        }),
-      }))
+    ? await (async () => {
+        try {
+          const boards = await prisma.visionBoard.findMany({
+            orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+          });
+          if (boards.length === 0) return [];
+          // Raw SQL: project only the first image (and image count) so the DB
+          // never ships full base64 payloads to Node.
+          const items = await prisma.$queryRaw<Array<{
+            id: number; boardId: number; name: string; sortOrder: number;
+            firstImage: string | null; imageCount: number;
+            fields: unknown; notes: string | null;
+            createdAt: Date; updatedAt: Date;
+          }>>`
+            SELECT
+              id, "boardId", name, "sortOrder",
+              CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
+                THEN images ->> 0
+                ELSE NULL
+              END AS "firstImage",
+              CASE WHEN jsonb_typeof(images) = 'array'
+                THEN jsonb_array_length(images)
+                ELSE 0
+              END AS "imageCount",
+              fields, notes, "createdAt", "updatedAt"
+            FROM "VisionBoardItem"
+            ORDER BY "sortOrder" ASC, "createdAt" ASC
+          `;
+          return boards.map((b) => ({
+            ...b,
+            items: items
+              .filter((it) => it.boardId === b.id)
+              .map((it) => ({
+                id: it.id,
+                boardId: it.boardId,
+                name: it.name,
+                sortOrder: it.sortOrder,
+                images: it.firstImage ? [it.firstImage] : [],
+                imageCount: Number(it.imageCount),
+                fields: it.fields,
+                notes: it.notes,
+                createdAt: it.createdAt,
+                updatedAt: it.updatedAt,
+              })),
+          }));
+        } catch {
+          return [] as { id: number; name: string; sortOrder: number; createdAt: Date; updatedAt: Date; items: { id: number; boardId: number; name: string; sortOrder: number; images: unknown; imageCount: number; fields: unknown; notes: string | null; createdAt: Date; updatedAt: Date }[] }[];
+        }
+      })()
     : [];
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-  const activityLogs = await prisma.activityLog.findMany({
-      where: { createdAt: { gte: ninetyDaysAgo } },
-      orderBy: { createdAt: "desc" },
-      take: 1000,
-    }).catch(() => [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[]);
+  const activityLogs = needsActivityLogs
+    ? await prisma.activityLog.findMany({
+        where: { createdAt: { gte: ninetyDaysAgo } },
+        orderBy: { createdAt: "desc" },
+        take: 1000,
+      }).catch(() => [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[])
+    : [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[];
   const users = normalizePortalUsers(usersSetting?.value);
   const customColumns = normalizeTableCustomColumns(customColumnsSetting?.value);
   const customCells = normalizeTableCustomCells(customCellsSetting?.value);
@@ -1299,6 +1393,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await prisma.sample.create({ data: { name } });
     return null;
   }
+  if (intent === "get_sample_full") {
+    const sampleId = Number(form.get("sampleId"));
+    if (!sampleId) return { sample: null };
+    const sample = await prisma.sample.findUnique({
+      where: { id: sampleId },
+      include: { iterations: { orderBy: { version: "asc" } } },
+    }).catch(() => null);
+    return { sample };
+  }
   if (intent === "rename_sample") {
     const sampleId = Number(form.get("sampleId"));
     const name = String(form.get("name") ?? "").trim();
@@ -1339,6 +1442,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (form.has("addImage")) {
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
       updates.images = [...currentImages, String(form.get("addImage"))];
+    }
+    if (form.has("addImages")) {
+      try {
+        const newImgs = JSON.parse(String(form.get("addImages"))) as string[];
+        if (Array.isArray(newImgs) && newImgs.length > 0) {
+          const base = Array.isArray(updates.images) ? (updates.images as string[]) : (Array.isArray(iteration.images) ? iteration.images as string[] : []);
+          updates.images = [...base, ...newImgs];
+        }
+      } catch { /* ignore */ }
     }
     if (form.has("thumbnailImage")) {
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
@@ -4790,6 +4902,7 @@ type SampleIterationType = {
   buttonType: string | null;
   status: string;
   images: unknown;
+  imageCount?: number;
   taggedUsers: unknown;
   createdAt: Date;
   updatedAt: Date;
@@ -5112,12 +5225,44 @@ function SampleDetailPanel({
   users: PortalUser[];
 }) {
   const fetcher = useFetcher();
+  const loadFetcher = useFetcher<{ sample: SampleType | null }>();
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(sample.name);
+  const [iterations, setIterations] = useState<SampleIterationType[]>(sample.iterations);
+  const [imagesLoaded, setImagesLoaded] = useState<boolean>(() => {
+    // If every iteration's image array length matches its imageCount, no fetch needed.
+    return sample.iterations.every((it) => {
+      const imgs = Array.isArray(it.images) ? (it.images as string[]) : [];
+      const total = typeof it.imageCount === "number" ? it.imageCount : imgs.length;
+      return imgs.length >= total;
+    });
+  });
 
   useEffect(() => {
     setNameDraft(sample.name);
   }, [sample.name]);
+
+  useEffect(() => {
+    setIterations(sample.iterations);
+  }, [sample.iterations]);
+
+  // Lazy-fetch full iterations (with all images) on drawer open.
+  useEffect(() => {
+    if (imagesLoaded) return;
+    loadFetcher.submit(
+      { intent: "get_sample_full", sampleId: String(sample.id) },
+      { method: "post" },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sample.id]);
+
+  useEffect(() => {
+    const fetched = loadFetcher.data?.sample;
+    if (fetched && fetched.id === sample.id && Array.isArray(fetched.iterations)) {
+      setIterations(fetched.iterations as SampleIterationType[]);
+      setImagesLoaded(true);
+    }
+  }, [loadFetcher.data, sample.id]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
@@ -5138,7 +5283,7 @@ function SampleDetailPanel({
     fetcher.submit({ intent: "add_sample_iteration", sampleId: String(sample.id) }, { method: "post" });
   };
 
-  const sortedIterations = [...sample.iterations].sort((a, b) => b.version - a.version);
+  const sortedIterations = [...iterations].sort((a, b) => b.version - a.version);
 
   return (
     <>
@@ -5161,7 +5306,7 @@ function SampleDetailPanel({
               </h2>
             )}
             <span style={s.samplePanelVersionCount}>
-              {sample.iterations.length} version{sample.iterations.length !== 1 ? "s" : ""}
+              {iterations.length} version{iterations.length !== 1 ? "s" : ""}
             </span>
           </div>
           <button type="button" style={s.samplePanelClose} onClick={onClose} aria-label="Close">×</button>
@@ -5223,12 +5368,10 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
     if (notes !== (iteration.notes ?? "")) submitUpdate({ notes });
   };
 
-  const addImages = (files: File[]) => {
-    files.forEach((file) => {
-      const reader = new FileReader();
-      reader.onload = () => submitUpdate({ addImage: String(reader.result) });
-      reader.readAsDataURL(file);
-    });
+  const addImages = async (files: File[]) => {
+    if (files.length === 0) return;
+    const dataUrls = await Promise.all(files.map((file) => compressImageToDataUrl(file)));
+    submitUpdate({ addImages: JSON.stringify(dataUrls) });
   };
 
   const removeImage = (index: number) => {
@@ -5562,6 +5705,48 @@ type VisionBoardType = {
 
 type VisionField = { id: string; text: string };
 
+// Compress an image File client-side: scale down to max 1600px on the long edge
+// and re-encode as JPEG q=0.82. Typical photos drop from several MB to ~100-300KB.
+// Returns a data URL. Falls back to the original file if anything fails.
+async function compressImageToDataUrl(file: File, maxDim = 1600, quality = 0.82): Promise<string> {
+  if (!file.type.startsWith("image/")) {
+    return await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result));
+      r.onerror = () => reject(r.error);
+      r.readAsDataURL(file);
+    });
+  }
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error("image decode failed"));
+      i.src = dataUrl;
+    });
+    const longEdge = Math.max(img.width, img.height);
+    if (longEdge <= maxDim && file.size <= 300_000) return dataUrl;
+    const scale = longEdge > maxDim ? maxDim / longEdge : 1;
+    const w = Math.round(img.width * scale);
+    const h = Math.round(img.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", quality);
+  } catch {
+    return dataUrl;
+  }
+}
+
 function visionImages(item: VisionBoardItemType): string[] {
   return Array.isArray(item.images) ? (item.images as string[]) : [];
 }
@@ -5627,16 +5812,12 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
     }
   }, [boards, activeBoard]);
 
-  const handleDropImageOnEmptyCard = (file: File) => {
+  const handleDropImageOnEmptyCard = async (file: File) => {
     if (!activeBoardId || activeBoardId < 0) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = String(reader.result);
-      const items = activeBoard?.items ?? [];
-      maxIdBeforeAddRef.current = items.length > 0 ? Math.max(...items.map((it) => it.id)) : 0;
-      fetcher.submit({ intent: "add_vision_board_item", boardId: String(activeBoardId), image: dataUrl }, { method: "post" });
-    };
-    reader.readAsDataURL(file);
+    const dataUrl = await compressImageToDataUrl(file);
+    const items = activeBoard?.items ?? [];
+    maxIdBeforeAddRef.current = items.length > 0 ? Math.max(...items.map((it) => it.id)) : 0;
+    fetcher.submit({ intent: "add_vision_board_item", boardId: String(activeBoardId), image: dataUrl }, { method: "post" });
   };
 
   const submitAddBoard = () => {
@@ -6087,14 +6268,7 @@ function VisionItemDetailPanel({
 
   const addImages = async (files: File[]) => {
     if (files.length === 0) return;
-    const dataUrls = await Promise.all(
-      files.map((file) => new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(file);
-      })),
-    );
+    const dataUrls = await Promise.all(files.map((file) => compressImageToDataUrl(file)));
     const next = [...images, ...dataUrls];
     setImages(next);
     pushThumbnailToParent(next);
