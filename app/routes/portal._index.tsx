@@ -130,10 +130,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       })
     : [];
   const visionBoards = page === "visionboard"
-    ? await prisma.visionBoard.findMany({
+    ? (await prisma.visionBoard.findMany({
         orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
         include: { items: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] } },
-      }).catch(() => [] as { id: number; name: string; sortOrder: number; createdAt: Date; updatedAt: Date; items: { id: number; boardId: number; name: string; sortOrder: number; images: unknown; fields: unknown; notes: string | null; createdAt: Date; updatedAt: Date }[] }[])
+      }).catch(() => [] as { id: number; name: string; sortOrder: number; createdAt: Date; updatedAt: Date; items: { id: number; boardId: number; name: string; sortOrder: number; images: unknown; fields: unknown; notes: string | null; createdAt: Date; updatedAt: Date }[] }[])).map((board) => ({
+        ...board,
+        items: board.items.map((it) => {
+          const imgs = Array.isArray(it.images) ? (it.images as string[]) : [];
+          return { ...it, images: imgs.length > 0 ? [imgs[0]] : [], imageCount: imgs.length };
+        }),
+      }))
     : [];
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = await prisma.activityLog.findMany({
@@ -1408,6 +1414,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const currentImages = Array.isArray(item.images) ? (item.images as string[]) : [];
       data.images = [...currentImages, String(form.get("addImage"))];
     }
+    if (form.has("addImages")) {
+      try {
+        const newImgs = JSON.parse(String(form.get("addImages"))) as string[];
+        if (Array.isArray(newImgs) && newImgs.length > 0) {
+          const base = Array.isArray(data.images) ? (data.images as string[]) : (Array.isArray(item.images) ? (item.images as string[]) : []);
+          data.images = [...base, ...newImgs];
+        }
+      } catch { /* ignore */ }
+    }
     if (form.has("removeImageIndex")) {
       const idx = Number(form.get("removeImageIndex"));
       const currentImages = Array.isArray(item.images) ? (item.images as string[]) : [];
@@ -1419,6 +1434,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     await prisma.visionBoardItem.update({ where: { id: itemId }, data });
     return null;
+  }
+  if (intent === "get_vision_board_item") {
+    const itemId = Number(form.get("itemId"));
+    if (!itemId) return { item: null };
+    const item = await prisma.visionBoardItem.findUnique({ where: { id: itemId } });
+    return { item };
   }
   if (intent === "delete_vision_board_item") {
     if (currentUser?.role !== "superadmin") return null;
@@ -5523,6 +5544,7 @@ type VisionBoardItemType = {
   name: string;
   sortOrder: number;
   images: unknown;
+  imageCount?: number;
   fields: unknown;
   notes: string | null;
   createdAt: Date;
@@ -5538,14 +5560,26 @@ type VisionBoardType = {
   items: VisionBoardItemType[];
 };
 
-type VisionField = { id: string; label: string; value: string };
+type VisionField = { id: string; text: string };
 
 function visionImages(item: VisionBoardItemType): string[] {
   return Array.isArray(item.images) ? (item.images as string[]) : [];
 }
+function newFieldId(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `f_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
 function visionFields(item: VisionBoardItemType): VisionField[] {
-  if (Array.isArray(item.fields)) return item.fields as VisionField[];
-  return [];
+  if (!Array.isArray(item.fields)) return [];
+  return (item.fields as Array<Record<string, unknown>>).map((f) => {
+    const id = typeof f?.id === "string" ? f.id : newFieldId();
+    if (typeof f?.text === "string") return { id, text: f.text };
+    const label = typeof f?.label === "string" ? f.label : "";
+    const value = typeof f?.value === "string" ? f.value : "";
+    const text = label && value ? `${label}: ${value}` : (label || value || "");
+    return { id, text };
+  });
 }
 
 function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[] }) {
@@ -5983,20 +6017,44 @@ function VisionItemDetailPanel({
   onUpdateLocal: (patch: Partial<VisionBoardItemType>) => void;
 }) {
   const fetcher = useFetcher();
+  const loadFetcher = useFetcher<{ item: VisionBoardItemType | null }>();
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(item.name);
   const [notes, setNotes] = useState(item.notes ?? "");
   const [fields, setFields] = useState<VisionField[]>(() => visionFields(item));
-  const [newFieldLabel, setNewFieldLabel] = useState("");
+  const [images, setImages] = useState<string[]>(() => visionImages(item));
+  const [imagesLoaded, setImagesLoaded] = useState<boolean>(() => {
+    // If we already have all images on the listing payload, no fetch needed.
+    const loaderImgs = visionImages(item);
+    const total = typeof item.imageCount === "number" ? item.imageCount : loaderImgs.length;
+    return loaderImgs.length >= total;
+  });
+  const expectedImageCount = typeof item.imageCount === "number" ? item.imageCount : visionImages(item).length;
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [imageDragOver, setImageDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const images = visionImages(item);
-
   useEffect(() => { setNameDraft(item.name); }, [item.name, item.id]);
   useEffect(() => { setNotes(item.notes ?? ""); }, [item.notes, item.id]);
   useEffect(() => { setFields(visionFields(item)); }, [item.fields, item.id]);
+
+  // Lazy-fetch full image set on drawer open (loader only ships first image as thumbnail).
+  useEffect(() => {
+    if (imagesLoaded) return;
+    loadFetcher.submit(
+      { intent: "get_vision_board_item", itemId: String(item.id) },
+      { method: "post" },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id]);
+
+  useEffect(() => {
+    const fetched = loadFetcher.data?.item;
+    if (fetched && fetched.id === item.id) {
+      setImages(visionImages(fetched));
+      setImagesLoaded(true);
+    }
+  }, [loadFetcher.data, item.id]);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -6022,20 +6080,35 @@ function VisionItemDetailPanel({
     }
   };
 
-  const addImage = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = String(reader.result);
-      onUpdateLocal({ images: [...images, dataUrl] });
-      fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), addImage: dataUrl }, { method: "post" });
-    };
-    reader.readAsDataURL(file);
+  // Listing only needs the first image as thumbnail — keep parent state slim.
+  const pushThumbnailToParent = (next: string[]) => {
+    onUpdateLocal({ images: next.length > 0 ? [next[0]] : [], imageCount: next.length });
+  };
+
+  const addImages = async (files: File[]) => {
+    if (files.length === 0) return;
+    const dataUrls = await Promise.all(
+      files.map((file) => new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      })),
+    );
+    const next = [...images, ...dataUrls];
+    setImages(next);
+    pushThumbnailToParent(next);
+    fetcher.submit(
+      { intent: "update_vision_board_item", itemId: String(item.id), addImages: JSON.stringify(dataUrls) },
+      { method: "post" },
+    );
   };
 
   const removeImage = (index: number) => {
     if (!window.confirm("Remove this image?")) return;
     const nextImages = images.filter((_, i) => i !== index);
-    onUpdateLocal({ images: nextImages });
+    setImages(nextImages);
+    pushThumbnailToParent(nextImages);
     fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), removeImageIndex: String(index) }, { method: "post" });
   };
 
@@ -6045,13 +6118,10 @@ function VisionItemDetailPanel({
     fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), fields: JSON.stringify(next) }, { method: "post" });
   };
   const addField = () => {
-    const label = newFieldLabel.trim();
-    if (!label) return;
-    saveFields([...fields, { id: crypto.randomUUID(), label, value: "" }]);
-    setNewFieldLabel("");
+    saveFields([...fields, { id: newFieldId(), text: "" }]);
   };
-  const updateField = (id: string, patch: Partial<VisionField>) => {
-    saveFields(fields.map((f) => f.id === id ? { ...f, ...patch } : f));
+  const updateFieldText = (id: string, text: string) => {
+    saveFields(fields.map((f) => f.id === id ? { ...f, text } : f));
   };
   const removeField = (id: string) => {
     saveFields(fields.filter((f) => f.id !== id));
@@ -6104,6 +6174,11 @@ function VisionItemDetailPanel({
                   <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeImage(index)} aria-label="Remove image">×</button>
                 </div>
               ))}
+              {!imagesLoaded && expectedImageCount > images.length && Array.from({ length: expectedImageCount - images.length }).map((_, i) => (
+                <div key={`skeleton-${i}`} style={{ ...s.sampleIterationImageWrap, background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8", fontSize: 11 }}>
+                  Loading…
+                </div>
+              ))}
               <div
                 style={{
                   ...s.sampleIterationAddImage,
@@ -6118,9 +6193,7 @@ function VisionItemDetailPanel({
                 onDrop={(e) => {
                   e.preventDefault();
                   setImageDragOver(false);
-                  Array.from(e.dataTransfer.files)
-                    .filter((f) => f.type.startsWith("image/"))
-                    .forEach((f) => addImage(f));
+                  void addImages(Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/")));
                 }}
               >
                 <span>+ Add photos</span>
@@ -6132,25 +6205,23 @@ function VisionItemDetailPanel({
                 multiple
                 style={{ display: "none" }}
                 onChange={(e) => {
-                  Array.from(e.target.files ?? []).forEach((f) => addImage(f));
+                  void addImages(Array.from(e.target.files ?? []));
                   e.target.value = "";
                 }}
               />
             </div>
 
-            {/* Custom rows — fixed label, value input, delete button */}
+            {/* Notes-style rows: free-form text per row, delete button */}
             <div style={{ borderTop: "1px solid #f1f5f9" }}>
               {fields.map((field) => (
-                <div key={field.id} style={{ display: "flex", gap: 8, padding: "10px 14px", borderBottom: "1px solid #f1f5f9", alignItems: "center" }}>
-                  <span style={{ flexShrink: 0, minWidth: 120, fontSize: "var(--portal-panel-font-size, 13px)", fontWeight: 600, color: "#374151", textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>
-                    {field.label}
-                  </span>
-                  <input
-                    style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontSize: "var(--portal-panel-font-size, 13px)", color: "#111827", background: "#fff", fontFamily: "inherit" }}
-                    value={field.value}
-                    placeholder={`Enter ${field.label.toLowerCase()}`}
-                    onChange={(e) => setFields((prev) => prev.map((f) => f.id === field.id ? { ...f, value: e.target.value } : f))}
-                    onBlur={(e) => updateField(field.id, { value: e.target.value })}
+                <div key={field.id} style={{ display: "flex", gap: 8, padding: "10px 14px", borderBottom: "1px solid #f1f5f9", alignItems: "flex-start" }}>
+                  <textarea
+                    style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontSize: "var(--portal-panel-font-size, 13px)", color: "#111827", background: "#fff", fontFamily: "inherit", resize: "vertical", minHeight: 36 }}
+                    value={field.text}
+                    placeholder="Type a note…"
+                    rows={1}
+                    onChange={(e) => setFields((prev) => prev.map((f) => f.id === field.id ? { ...f, text: e.target.value } : f))}
+                    onBlur={(e) => updateFieldText(field.id, e.target.value)}
                   />
                   <button
                     type="button"
@@ -6160,19 +6231,12 @@ function VisionItemDetailPanel({
                   >Delete</button>
                 </div>
               ))}
-              <div style={{ display: "flex", gap: 8, padding: "10px 14px" }}>
-                <input
-                  value={newFieldLabel}
-                  onChange={(e) => setNewFieldLabel(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") addField(); }}
-                  placeholder="Add row label (e.g. Supplier, Code, Colour)…"
-                  style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontSize: 13, fontFamily: "inherit" }}
-                />
+              <div style={{ padding: "10px 14px" }}>
                 <button
                   type="button"
                   onClick={addField}
                   style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-                >Add row</button>
+                >+ Add row</button>
               </div>
             </div>
 
