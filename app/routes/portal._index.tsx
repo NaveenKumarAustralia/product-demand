@@ -88,21 +88,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const samples = page === "samples"
     ? await (async () => {
         try {
-          // Raw SQL: project only the first image per iteration (and image count)
-          // so the DB never ships full base64 payloads to Node on the listing.
+          // Raw SQL: ship NO image bytes in the loader — only metadata + image
+          // count. Thumbnails are batch-fetched after first paint.
           type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
           type RawIterSlim = {
             id: number; sampleId: number; version: number; name: string | null; notes: string | null;
             fabricType: string | null; sampleSize: string | null; buttonType: string | null; status: string;
-            firstImage: string | null; imageCount: number; taggedUsers: unknown;
+            imageCount: number; taggedUsers: unknown;
             createdAt: Date; updatedAt: Date;
           };
           const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
           const rawIters = await prisma.$queryRaw<RawIterSlim[]>`
             SELECT id, "sampleId", version, name, notes, "fabricType", "sampleSize", "buttonType", status,
-              CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
-                THEN images ->> 0 ELSE NULL
-              END AS "firstImage",
               CASE WHEN jsonb_typeof(images) = 'array'
                 THEN jsonb_array_length(images) ELSE 0
               END AS "imageCount",
@@ -117,7 +114,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               name: it.name, notes: it.notes,
               fabricType: it.fabricType, sampleSize: it.sampleSize, buttonType: it.buttonType,
               status: it.status,
-              images: it.firstImage ? [it.firstImage] : [],
+              images: [] as string[],
               imageCount: Number(it.imageCount),
               taggedUsers: it.taggedUsers,
               createdAt: it.createdAt, updatedAt: it.updatedAt,
@@ -127,13 +124,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           // Fallback path 1: legacy schema without fabricType/sampleSize/buttonType columns
           try {
             type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
-            type RawIter1 = { id: number; sampleId: number; version: number; name: string | null; notes: string | null; status: string; firstImage: string | null; imageCount: number; taggedUsers: unknown; createdAt: Date; updatedAt: Date };
+            type RawIter1 = { id: number; sampleId: number; version: number; name: string | null; notes: string | null; status: string; imageCount: number; taggedUsers: unknown; createdAt: Date; updatedAt: Date };
             const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
             const rawIters = await prisma.$queryRaw<RawIter1[]>`
               SELECT id, "sampleId", version, name, notes, status,
-                CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
-                  THEN images ->> 0 ELSE NULL
-                END AS "firstImage",
                 CASE WHEN jsonb_typeof(images) = 'array'
                   THEN jsonb_array_length(images) ELSE 0
                 END AS "imageCount",
@@ -145,7 +139,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({
                 id: it.id, sampleId: it.sampleId, version: it.version, name: it.name, notes: it.notes,
                 fabricType: null, sampleSize: null, buttonType: null, status: it.status,
-                images: it.firstImage ? [it.firstImage] : [], imageCount: Number(it.imageCount),
+                images: [] as string[], imageCount: Number(it.imageCount),
                 taggedUsers: it.taggedUsers, createdAt: it.createdAt, updatedAt: it.updatedAt,
               })),
             }));
@@ -153,13 +147,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             // Fallback path 2: legacy schema without name/taggedUsers (pre-000001)
             try {
               type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
-              type RawIter0 = { id: number; sampleId: number; version: number; notes: string | null; status: string; firstImage: string | null; imageCount: number; createdAt: Date; updatedAt: Date };
+              type RawIter0 = { id: number; sampleId: number; version: number; notes: string | null; status: string; imageCount: number; createdAt: Date; updatedAt: Date };
               const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
               const rawIters = await prisma.$queryRaw<RawIter0[]>`
                 SELECT id, "sampleId", version, notes, status,
-                  CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
-                    THEN images ->> 0 ELSE NULL
-                  END AS "firstImage",
                   CASE WHEN jsonb_typeof(images) = 'array'
                     THEN jsonb_array_length(images) ELSE 0
                   END AS "imageCount",
@@ -171,7 +162,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({
                   id: it.id, sampleId: it.sampleId, version: it.version, name: null, notes: it.notes,
                   fabricType: null, sampleSize: null, buttonType: null, status: it.status,
-                  images: it.firstImage ? [it.firstImage] : [], imageCount: Number(it.imageCount),
+                  images: [] as string[], imageCount: Number(it.imageCount),
                   taggedUsers: [], createdAt: it.createdAt, updatedAt: it.updatedAt,
                 })),
               }));
@@ -189,20 +180,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
           });
           if (boards.length === 0) return [];
-          // Raw SQL: project only the first image (and image count) so the DB
-          // never ships full base64 payloads to Node.
+          // Raw SQL: ship NO image bytes in the loader at all. Thumbnails are
+          // batch-fetched after first paint so the initial page response stays tiny.
           const items = await prisma.$queryRaw<Array<{
             id: number; boardId: number; name: string; sortOrder: number;
-            firstImage: string | null; imageCount: number;
+            imageCount: number;
             fields: unknown; notes: string | null;
             createdAt: Date; updatedAt: Date;
           }>>`
             SELECT
               id, "boardId", name, "sortOrder",
-              CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
-                THEN images ->> 0
-                ELSE NULL
-              END AS "firstImage",
               CASE WHEN jsonb_typeof(images) = 'array'
                 THEN jsonb_array_length(images)
                 ELSE 0
@@ -220,7 +207,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 boardId: it.boardId,
                 name: it.name,
                 sortOrder: it.sortOrder,
-                images: it.firstImage ? [it.firstImage] : [],
+                images: [] as string[],
                 imageCount: Number(it.imageCount),
                 fields: it.fields,
                 notes: it.notes,
@@ -1564,6 +1551,44 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!itemId) return { item: null };
     const item = await prisma.visionBoardItem.findUnique({ where: { id: itemId } });
     return { item };
+  }
+  if (intent === "get_vision_thumbnails") {
+    let ids: number[] = [];
+    try {
+      const parsed = JSON.parse(String(form.get("ids") ?? "[]"));
+      if (Array.isArray(parsed)) ids = parsed.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && Number.isInteger(n));
+    } catch { /* ignore */ }
+    if (ids.length === 0) return { thumbs: {} as Record<string, string> };
+    const rows = await prisma.$queryRawUnsafe<Array<{ id: number; firstImage: string | null }>>(
+      `SELECT id,
+         CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
+           THEN images ->> 0 ELSE NULL
+         END AS "firstImage"
+       FROM "VisionBoardItem"
+       WHERE id IN (${ids.join(",")})`
+    ).catch(() => [] as Array<{ id: number; firstImage: string | null }>);
+    const thumbs: Record<string, string> = {};
+    for (const row of rows) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
+    return { thumbs };
+  }
+  if (intent === "get_sample_iteration_thumbnails") {
+    let ids: number[] = [];
+    try {
+      const parsed = JSON.parse(String(form.get("ids") ?? "[]"));
+      if (Array.isArray(parsed)) ids = parsed.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && Number.isInteger(n));
+    } catch { /* ignore */ }
+    if (ids.length === 0) return { thumbs: {} as Record<string, string> };
+    const rows = await prisma.$queryRawUnsafe<Array<{ id: number; firstImage: string | null }>>(
+      `SELECT id,
+         CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
+           THEN images ->> 0 ELSE NULL
+         END AS "firstImage"
+       FROM "SampleIteration"
+       WHERE id IN (${ids.join(",")})`
+    ).catch(() => [] as Array<{ id: number; firstImage: string | null }>);
+    const thumbs: Record<string, string> = {};
+    for (const row of rows) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
+    return { thumbs };
   }
   if (intent === "delete_vision_board_item") {
     if (currentUser?.role !== "superadmin") return null;
@@ -4959,6 +4984,9 @@ function SamplesPanel({
   users: PortalUser[];
 }) {
   const fetcher = useFetcher();
+  const thumbsFetcher = useFetcher<{ thumbs: Record<string, string> }>();
+  const [thumbnails, setThumbnails] = useState<Record<number, string>>({});
+  const fetchedThumbIdsRef = useRef<Set<number>>(new Set());
   const [localSamples, setLocalSamples] = useState(samples);
   // Track IDs removed this session so loader re-runs can't restore them
   const deletedIds = useRef<Set<number>>(new Set());
@@ -4979,6 +5007,37 @@ function SamplesPanel({
   const visibleSamples = normalizedSearch
     ? localSamples.filter((s) => s.name.toLowerCase().includes(normalizedSearch))
     : localSamples;
+
+  // Lazy-batch thumbnails: pick latest iteration per sample (the one shown on
+  // the card) and fetch their first images after first paint.
+  useEffect(() => {
+    const idsToFetch: number[] = [];
+    for (const s of visibleSamples) {
+      const latest = s.iterations.length > 0 ? s.iterations[s.iterations.length - 1] : null;
+      if (!latest) continue;
+      const count = latest.imageCount ?? (Array.isArray(latest.images) ? (latest.images as string[]).length : 0);
+      if (count > 0 && !thumbnails[latest.id] && !fetchedThumbIdsRef.current.has(latest.id)) {
+        fetchedThumbIdsRef.current.add(latest.id);
+        idsToFetch.push(latest.id);
+      }
+    }
+    if (idsToFetch.length === 0) return;
+    thumbsFetcher.submit(
+      { intent: "get_sample_iteration_thumbnails", ids: JSON.stringify(idsToFetch) },
+      { method: "post" },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleSamples.length, normalizedSearch]);
+
+  useEffect(() => {
+    const incoming = thumbsFetcher.data?.thumbs;
+    if (!incoming) return;
+    setThumbnails((prev) => {
+      const next = { ...prev };
+      for (const [id, url] of Object.entries(incoming)) next[Number(id)] = url;
+      return next;
+    });
+  }, [thumbsFetcher.data]);
 
   const addSample = () => { setAddName(""); setAddModalOpen(true); };
   const submitAddSample = () => {
@@ -5039,6 +5098,10 @@ function SamplesPanel({
           <SampleCard
             key={sample.id}
             sample={sample}
+            thumbnail={(() => {
+              const latest = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
+              return latest ? thumbnails[latest.id] ?? null : null;
+            })()}
             isDragging={dragSampleId === sample.id}
             isDragOver={dragOverSampleId === sample.id && dragSampleId !== sample.id}
             draggable={!normalizedSearch}
@@ -5104,6 +5167,7 @@ function SamplesPanel({
 
 function SampleCard({
   sample,
+  thumbnail,
   isDragging,
   isDragOver,
   draggable,
@@ -5116,6 +5180,7 @@ function SampleCard({
   onDeleted,
 }: {
   sample: SampleType;
+  thumbnail: string | null;
   isDragging: boolean;
   isDragOver: boolean;
   draggable: boolean;
@@ -5135,7 +5200,8 @@ function SampleCard({
 
   const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
   const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
-  const thumbnailImage = images[0] ?? null;
+  const thumbnailImage = thumbnail ?? images[0] ?? null;
+  const expectsImage = (latestIteration?.imageCount ?? images.length) > 0;
   const status = latestIteration?.status ?? "none";
   const lastUpdated = latestIteration?.updatedAt ?? null;
 
@@ -5204,6 +5270,8 @@ function SampleCard({
       <div style={s.productStyleImageWrap}>
         {thumbnailImage ? (
           <img src={thumbnailImage} alt={sample.name} style={s.productStyleImage} loading="lazy" />
+        ) : expectsImage ? (
+          <div style={{ ...s.productStyleImageEmpty, color: "#cbd5e1", fontSize: 11 }}>Loading…</div>
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
         )}
@@ -6006,6 +6074,9 @@ function visionFields(item: VisionBoardItemType): VisionField[] {
 
 function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[] }) {
   const fetcher = useFetcher();
+  const thumbsFetcher = useFetcher<{ thumbs: Record<string, string> }>();
+  const [thumbnails, setThumbnails] = useState<Record<number, string>>({});
+  const fetchedThumbIdsRef = useRef<Set<number>>(new Set());
   const [boards, setBoards] = useState<VisionBoardType[]>(initialBoards);
   const [activeBoardId, setActiveBoardId] = useState<number | null>(initialBoards[0]?.id ?? null);
   const [renamingBoardId, setRenamingBoardId] = useState<number | null>(null);
@@ -6035,6 +6106,37 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
 
   const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
   const selectedItem = activeBoard?.items.find((it) => it.id === selectedItemId) ?? null;
+
+  // Lazy-batch fetch thumbnails for items in the active board that have an
+  // image but haven't been fetched yet. Loader ships zero base64; this runs
+  // after first paint so the page renders fast.
+  useEffect(() => {
+    if (!activeBoard) return;
+    const idsToFetch: number[] = [];
+    for (const it of activeBoard.items) {
+      const hasImage = (it.imageCount ?? 0) > 0;
+      if (hasImage && !thumbnails[it.id] && !fetchedThumbIdsRef.current.has(it.id)) {
+        fetchedThumbIdsRef.current.add(it.id);
+        idsToFetch.push(it.id);
+      }
+    }
+    if (idsToFetch.length === 0) return;
+    thumbsFetcher.submit(
+      { intent: "get_vision_thumbnails", ids: JSON.stringify(idsToFetch) },
+      { method: "post" },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBoardId, activeBoard?.items.length]);
+
+  useEffect(() => {
+    const incoming = thumbsFetcher.data?.thumbs;
+    if (!incoming) return;
+    setThumbnails((prev) => {
+      const next = { ...prev };
+      for (const [id, url] of Object.entries(incoming)) next[Number(id)] = url;
+      return next;
+    });
+  }, [thumbsFetcher.data]);
 
   // After we drop an image on the empty card, the new item arrives via revalidation —
   // find the just-created item by id and open the drawer for it
@@ -6193,6 +6295,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
           <VisionItemCard
             key={item.id}
             item={item}
+            thumbnail={thumbnails[item.id] ?? null}
             isDragging={dragItemId === item.id}
             isDragOver={dragOverItemId === item.id && dragItemId !== item.id}
             onOpen={() => setSelectedItemId(item.id)}
@@ -6332,6 +6435,7 @@ function VisionEmptyDropCard({ onAddImage }: { onAddImage: (file: File) => void 
 
 function VisionItemCard({
   item,
+  thumbnail,
   isDragging,
   isDragOver,
   onOpen,
@@ -6343,6 +6447,7 @@ function VisionItemCard({
   onDelete,
 }: {
   item: VisionBoardItemType;
+  thumbnail: string | null;
   isDragging: boolean;
   isDragOver: boolean;
   onOpen: () => void;
@@ -6358,7 +6463,8 @@ function VisionItemCard({
   const [hover, setHover] = useState(false);
   if (gone) return null;
   const images = visionImages(item);
-  const thumb = images[0] ?? null;
+  const thumb = thumbnail ?? images[0] ?? null;
+  const expectsImage = (item.imageCount ?? images.length) > 0;
 
   return (
     <div
@@ -6415,6 +6521,8 @@ function VisionItemCard({
       <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8" }}>
         {thumb ? (
           <img src={thumb} alt={item.name} style={s.productStyleImage} loading="lazy" />
+        ) : expectsImage ? (
+          <div style={{ ...s.productStyleImageEmpty, color: "#cbd5e1", fontSize: 11 }}>Loading…</div>
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
         )}
