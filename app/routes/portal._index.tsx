@@ -422,6 +422,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 };
 
+// Return a raw JSON Response (bypasses React Router's single-fetch turbo-stream
+// encoding) so plain `fetch()` callers can JSON.parse the body. useFetcher
+// callers also work because they read .json() under the hood.
+function jsonResponse<T>(body: T): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+  });
+}
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   try {
   const form = await request.formData();
@@ -1382,12 +1392,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
   if (intent === "get_sample_full") {
     const sampleId = Number(form.get("sampleId"));
-    if (!sampleId) return { sample: null };
+    if (!sampleId) return jsonResponse({ sample: null });
     const sample = await prisma.sample.findUnique({
       where: { id: sampleId },
       include: { iterations: { orderBy: { version: "asc" } } },
     }).catch(() => null);
-    return { sample };
+    return jsonResponse({ sample });
   }
   if (intent === "rename_sample") {
     const sampleId = Number(form.get("sampleId"));
@@ -1548,9 +1558,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
   if (intent === "get_vision_board_item") {
     const itemId = Number(form.get("itemId"));
-    if (!itemId) return { item: null };
+    if (!itemId) return jsonResponse({ item: null });
     const item = await prisma.visionBoardItem.findUnique({ where: { id: itemId } });
-    return { item };
+    return jsonResponse({ item });
   }
   if (intent === "get_vision_thumbnails") {
     let ids: number[] = [];
@@ -1558,7 +1568,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const parsed = JSON.parse(String(form.get("ids") ?? "[]"));
       if (Array.isArray(parsed)) ids = parsed.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && Number.isInteger(n));
     } catch { /* ignore */ }
-    if (ids.length === 0) return { thumbs: {} as Record<string, string> };
+    if (ids.length === 0) return jsonResponse({ thumbs: {} as Record<string, string> });
     const rows = await prisma.$queryRawUnsafe<Array<{ id: number; firstImage: string | null }>>(
       `SELECT id,
          CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
@@ -1569,7 +1579,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     ).catch(() => [] as Array<{ id: number; firstImage: string | null }>);
     const thumbs: Record<string, string> = {};
     for (const row of rows) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
-    return { thumbs };
+    return jsonResponse({ thumbs });
   }
   if (intent === "get_sample_iteration_thumbnails") {
     let ids: number[] = [];
@@ -1577,7 +1587,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const parsed = JSON.parse(String(form.get("ids") ?? "[]"));
       if (Array.isArray(parsed)) ids = parsed.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && Number.isInteger(n));
     } catch { /* ignore */ }
-    if (ids.length === 0) return { thumbs: {} as Record<string, string> };
+    if (ids.length === 0) return jsonResponse({ thumbs: {} as Record<string, string> });
     const rows = await prisma.$queryRawUnsafe<Array<{ id: number; firstImage: string | null }>>(
       `SELECT id,
          CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
@@ -1588,7 +1598,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     ).catch(() => [] as Array<{ id: number; firstImage: string | null }>);
     const thumbs: Record<string, string> = {};
     for (const row of rows) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
-    return { thumbs };
+    return jsonResponse({ thumbs });
   }
   if (intent === "delete_vision_board_item") {
     if (currentUser?.role !== "superadmin") return null;
@@ -5786,9 +5796,10 @@ type VisionBoardType = {
 
 type VisionField = { id: string; text: string };
 
-// Compress an existing data URL (e.g. legacy stored base64) the same way as fresh
-// uploads: max 1600px on the long edge, JPEG q=0.82. Returns a (smaller) data URL.
-async function compressDataUrl(input: string, maxDim = 1600, quality = 0.82): Promise<string> {
+// Compress an existing data URL (e.g. legacy stored base64). Aggressive defaults
+// suited to a personal-use board: max 800px on the long edge, JPEG q=0.75.
+// Typical photos drop from several MB to ~50-100KB.
+async function compressDataUrl(input: string, maxDim = 800, quality = 0.75): Promise<string> {
   if (typeof input !== "string" || !input.startsWith("data:image/")) return input;
   try {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -6010,10 +6021,10 @@ function CompressExistingImagesButton({
   );
 }
 
-// Compress an image File client-side: scale down to max 1600px on the long edge
-// and re-encode as JPEG q=0.82. Typical photos drop from several MB to ~100-300KB.
+// Compress an image File client-side: scale down to max 800px on the long edge
+// and re-encode as JPEG q=0.75. Typical photos drop from several MB to ~50-100KB.
 // Returns a data URL. Falls back to the original file if anything fails.
-async function compressImageToDataUrl(file: File, maxDim = 1600, quality = 0.82): Promise<string> {
+async function compressImageToDataUrl(file: File, maxDim = 800, quality = 0.75): Promise<string> {
   if (!file.type.startsWith("image/")) {
     return await new Promise((resolve, reject) => {
       const r = new FileReader();
@@ -6036,7 +6047,7 @@ async function compressImageToDataUrl(file: File, maxDim = 1600, quality = 0.82)
       i.src = dataUrl;
     });
     const longEdge = Math.max(img.width, img.height);
-    if (longEdge <= maxDim && file.size <= 300_000) return dataUrl;
+    if (longEdge <= maxDim && file.size <= 120_000) return dataUrl;
     const scale = longEdge > maxDim ? maxDim / longEdge : 1;
     const w = Math.round(img.width * scale);
     const h = Math.round(img.height * scale);
