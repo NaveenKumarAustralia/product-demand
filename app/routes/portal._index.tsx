@@ -5035,9 +5035,6 @@ function SamplesPanel({
   users: PortalUser[];
 }) {
   const fetcher = useFetcher();
-  const thumbsFetcher = useFetcher<{ thumbs: Record<string, string> }>();
-  const [thumbnails, setThumbnails] = useState<Record<number, string>>({});
-  const fetchedThumbIdsRef = useRef<Set<number>>(new Set());
   const [localSamples, setLocalSamples] = useState(samples);
   // Track IDs removed this session so loader re-runs can't restore them
   const deletedIds = useRef<Set<number>>(new Set());
@@ -5061,37 +5058,6 @@ function SamplesPanel({
   const visibleSamples = normalizedSearch
     ? localSamples.filter((s) => s.name.toLowerCase().includes(normalizedSearch))
     : localSamples;
-
-  // Lazy-batch thumbnails: pick latest iteration per sample (the one shown on
-  // the card) and fetch their first images after first paint.
-  useEffect(() => {
-    const idsToFetch: number[] = [];
-    for (const s of visibleSamples) {
-      const latest = s.iterations.length > 0 ? s.iterations[s.iterations.length - 1] : null;
-      if (!latest) continue;
-      const count = latest.imageCount ?? (Array.isArray(latest.images) ? (latest.images as string[]).length : 0);
-      if (count > 0 && !thumbnails[latest.id] && !fetchedThumbIdsRef.current.has(latest.id)) {
-        fetchedThumbIdsRef.current.add(latest.id);
-        idsToFetch.push(latest.id);
-      }
-    }
-    if (idsToFetch.length === 0) return;
-    thumbsFetcher.submit(
-      { intent: "get_sample_iteration_thumbnails", ids: JSON.stringify(idsToFetch) },
-      { method: "post" },
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleSamples.length, normalizedSearch]);
-
-  useEffect(() => {
-    const incoming = thumbsFetcher.data?.thumbs;
-    if (!incoming) return;
-    setThumbnails((prev) => {
-      const next = { ...prev };
-      for (const [id, url] of Object.entries(incoming)) next[Number(id)] = url;
-      return next;
-    });
-  }, [thumbsFetcher.data]);
 
   const addSample = () => { setAddName(""); setAddModalOpen(true); };
   const submitAddSample = () => {
@@ -5151,10 +5117,6 @@ function SamplesPanel({
           <SampleCard
             key={sample.id}
             sample={sample}
-            thumbnail={(() => {
-              const latest = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
-              return latest ? thumbnails[latest.id] ?? null : null;
-            })()}
             isDragging={dragSampleId === sample.id}
             isDragOver={dragOverSampleId === sample.id && dragSampleId !== sample.id}
             draggable={!normalizedSearch}
@@ -5220,7 +5182,6 @@ function SamplesPanel({
 
 function SampleCard({
   sample,
-  thumbnail,
   isDragging,
   isDragOver,
   draggable,
@@ -5233,7 +5194,6 @@ function SampleCard({
   onDeleted,
 }: {
   sample: SampleType;
-  thumbnail: string | null;
   isDragging: boolean;
   isDragOver: boolean;
   draggable: boolean;
@@ -5253,7 +5213,6 @@ function SampleCard({
 
   const latestIteration = sample.iterations.length > 0 ? sample.iterations[sample.iterations.length - 1] : null;
   const images = Array.isArray(latestIteration?.images) ? latestIteration.images as string[] : [];
-  const thumbnailImage = thumbnail ?? images[0] ?? null;
   const expectsImage = (latestIteration?.imageCount ?? images.length) > 0;
   const status = latestIteration?.status ?? "none";
   const lastUpdated = latestIteration?.updatedAt ?? null;
@@ -5321,10 +5280,14 @@ function SampleCard({
 
       {/* Image */}
       <div style={s.productStyleImageWrap}>
-        {thumbnailImage ? (
-          <img src={thumbnailImage} alt={sample.name} style={s.productStyleImage} loading="lazy" />
-        ) : expectsImage ? (
-          <div style={{ ...s.productStyleImageEmpty, color: "#cbd5e1", fontSize: 11 }}>Loading…</div>
+        {expectsImage && latestIteration ? (
+          <img
+            src={`/portal/thumbnail/sample/${latestIteration.id}?v=${new Date(latestIteration.updatedAt).getTime()}`}
+            alt={sample.name}
+            style={s.productStyleImage}
+            loading="lazy"
+            decoding="async"
+          />
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
         )}
@@ -6142,9 +6105,6 @@ function visionFields(item: VisionBoardItemType): VisionField[] {
 
 function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[] }) {
   const fetcher = useFetcher();
-  const thumbsFetcher = useFetcher<{ thumbs: Record<string, string> }>();
-  const [thumbnails, setThumbnails] = useState<Record<number, string>>({});
-  const fetchedThumbIdsRef = useRef<Set<number>>(new Set());
   const [boards, setBoards] = useState<VisionBoardType[]>(initialBoards);
   const [activeBoardId, setActiveBoardId] = useState<number | null>(initialBoards[0]?.id ?? null);
   const [renamingBoardId, setRenamingBoardId] = useState<number | null>(null);
@@ -6177,37 +6137,6 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
 
   const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
   const selectedItem = activeBoard?.items.find((it) => it.id === selectedItemId) ?? null;
-
-  // Lazy-batch fetch thumbnails for items in the active board that have an
-  // image but haven't been fetched yet. Loader ships zero base64; this runs
-  // after first paint so the page renders fast.
-  useEffect(() => {
-    if (!activeBoard) return;
-    const idsToFetch: number[] = [];
-    for (const it of activeBoard.items) {
-      const hasImage = (it.imageCount ?? 0) > 0;
-      if (hasImage && !thumbnails[it.id] && !fetchedThumbIdsRef.current.has(it.id)) {
-        fetchedThumbIdsRef.current.add(it.id);
-        idsToFetch.push(it.id);
-      }
-    }
-    if (idsToFetch.length === 0) return;
-    thumbsFetcher.submit(
-      { intent: "get_vision_thumbnails", ids: JSON.stringify(idsToFetch) },
-      { method: "post" },
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeBoardId, activeBoard?.items.length]);
-
-  useEffect(() => {
-    const incoming = thumbsFetcher.data?.thumbs;
-    if (!incoming) return;
-    setThumbnails((prev) => {
-      const next = { ...prev };
-      for (const [id, url] of Object.entries(incoming)) next[Number(id)] = url;
-      return next;
-    });
-  }, [thumbsFetcher.data]);
 
   // After we drop an image on the empty card, the new item arrives via revalidation —
   // find the just-created item by id and open the drawer for it
@@ -6372,7 +6301,6 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
           <VisionItemCard
             key={item.id}
             item={item}
-            thumbnail={thumbnails[item.id] ?? null}
             isDragging={dragItemId === item.id}
             isDragOver={dragOverItemId === item.id && dragItemId !== item.id}
             onOpen={() => setSelectedItemId(item.id)}
@@ -6512,7 +6440,6 @@ function VisionEmptyDropCard({ onAddImage }: { onAddImage: (file: File) => void 
 
 function VisionItemCard({
   item,
-  thumbnail,
   isDragging,
   isDragOver,
   onOpen,
@@ -6524,7 +6451,6 @@ function VisionItemCard({
   onDelete,
 }: {
   item: VisionBoardItemType;
-  thumbnail: string | null;
   isDragging: boolean;
   isDragOver: boolean;
   onOpen: () => void;
@@ -6540,7 +6466,6 @@ function VisionItemCard({
   const [hover, setHover] = useState(false);
   if (gone) return null;
   const images = visionImages(item);
-  const thumb = thumbnail ?? images[0] ?? null;
   const expectsImage = (item.imageCount ?? images.length) > 0;
 
   return (
@@ -6596,10 +6521,14 @@ function VisionItemCard({
       )}
       {/* Image — 1.3:1.8 max ratio */}
       <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8" }}>
-        {thumb ? (
-          <img src={thumb} alt={item.name} style={s.productStyleImage} loading="lazy" />
-        ) : expectsImage ? (
-          <div style={{ ...s.productStyleImageEmpty, color: "#cbd5e1", fontSize: 11 }}>Loading…</div>
+        {expectsImage ? (
+          <img
+            src={`/portal/thumbnail/vision/${item.id}?v=${new Date(item.updatedAt).getTime()}`}
+            alt={item.name}
+            style={s.productStyleImage}
+            loading="lazy"
+            decoding="async"
+          />
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
         )}
