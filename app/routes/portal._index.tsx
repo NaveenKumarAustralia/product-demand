@@ -1452,6 +1452,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
       } catch { /* ignore */ }
     }
+    if (form.has("imagesReplace")) {
+      try {
+        const replaced = JSON.parse(String(form.get("imagesReplace"))) as string[];
+        if (Array.isArray(replaced)) updates.images = replaced;
+      } catch { /* ignore */ }
+    }
     if (form.has("thumbnailImage")) {
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
       updates.images = [String(form.get("thumbnailImage")), ...currentImages.slice(1)];
@@ -1533,6 +1539,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const base = Array.isArray(data.images) ? (data.images as string[]) : (Array.isArray(item.images) ? (item.images as string[]) : []);
           data.images = [...base, ...newImgs];
         }
+      } catch { /* ignore */ }
+    }
+    if (form.has("imagesReplace")) {
+      try {
+        const replaced = JSON.parse(String(form.get("imagesReplace"))) as string[];
+        if (Array.isArray(replaced)) data.images = replaced;
       } catch { /* ignore */ }
     }
     if (form.has("removeImageIndex")) {
@@ -5005,6 +5017,7 @@ function SamplesPanel({
           </div>
         </div>
         <div style={s.productInfoActions}>
+          <CompressExistingImagesButton mode="samples" samples={localSamples} />
           <div style={s.productInfoSegmented} aria-label="Cards per row">
             {([3, 4, 5] as const).map((count) => (
               <button
@@ -5705,6 +5718,230 @@ type VisionBoardType = {
 
 type VisionField = { id: string; text: string };
 
+// Compress an existing data URL (e.g. legacy stored base64) the same way as fresh
+// uploads: max 1600px on the long edge, JPEG q=0.82. Returns a (smaller) data URL.
+async function compressDataUrl(input: string, maxDim = 1600, quality = 0.82): Promise<string> {
+  if (typeof input !== "string" || !input.startsWith("data:image/")) return input;
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error("decode failed"));
+      i.src = input;
+    });
+    const longEdge = Math.max(img.width, img.height);
+    const scale = longEdge > maxDim ? maxDim / longEdge : 1;
+    const w = Math.round(img.width * scale);
+    const h = Math.round(img.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return input;
+    ctx.drawImage(img, 0, 0, w, h);
+    const out = canvas.toDataURL("image/jpeg", quality);
+    // Keep original if compression somehow produced something larger.
+    return out.length < input.length ? out : input;
+  } catch {
+    return input;
+  }
+}
+
+// POST a form to the current portal route's action and parse its JSON response.
+// Used by the one-shot image backfill workflow.
+async function postPortalAction<T = unknown>(data: Record<string, string>): Promise<T | null> {
+  const fd = new FormData();
+  for (const [k, v] of Object.entries(data)) fd.set(k, v);
+  const res = await fetch(window.location.pathname + window.location.search, {
+    method: "POST",
+    body: fd,
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) return null;
+  try {
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+type CompressTask =
+  | { kind: "vision"; itemId: number; label: string }
+  | { kind: "sample"; sampleId: number; iterationId: number; label: string };
+
+function CompressExistingImagesButton({
+  mode,
+  vision,
+  samples,
+}: {
+  mode: "vision" | "samples";
+  vision?: VisionBoardItemType[];
+  samples?: SampleType[];
+}) {
+  const [stage, setStage] = useState<"idle" | "confirm" | "running" | "done">("idle");
+  const [done, setDone] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [current, setCurrent] = useState("");
+  const [savedBytes, setSavedBytes] = useState(0);
+  const cancelRef = useRef(false);
+
+  const buildTasks = (): CompressTask[] => {
+    if (mode === "vision") {
+      return (vision ?? [])
+        .filter((it) => (it.imageCount ?? (Array.isArray(it.images) ? (it.images as string[]).length : 0)) > 0)
+        .map((it) => ({ kind: "vision", itemId: it.id, label: it.name || `Item ${it.id}` }));
+    }
+    const out: CompressTask[] = [];
+    for (const s of samples ?? []) {
+      for (const it of s.iterations) {
+        const count = it.imageCount ?? (Array.isArray(it.images) ? (it.images as string[]).length : 0);
+        if (count > 0) out.push({ kind: "sample", sampleId: s.id, iterationId: it.id, label: `${s.name} v${it.version}` });
+      }
+    }
+    return out;
+  };
+
+  const start = async () => {
+    const tasks = buildTasks();
+    setTotal(tasks.length);
+    setDone(0);
+    setSavedBytes(0);
+    cancelRef.current = false;
+    setStage("running");
+
+    // Cache full samples by sampleId so iterating multiple iterations of the
+    // same sample doesn't refetch.
+    const sampleCache = new Map<number, SampleType | null>();
+    let saved = 0;
+
+    for (let i = 0; i < tasks.length; i++) {
+      if (cancelRef.current) break;
+      const task = tasks[i];
+      setCurrent(task.label);
+      try {
+        if (task.kind === "vision") {
+          const r = await postPortalAction<{ item: { images?: unknown } | null }>({
+            intent: "get_vision_board_item",
+            itemId: String(task.itemId),
+          });
+          const images = Array.isArray(r?.item?.images) ? (r!.item!.images as string[]) : [];
+          if (images.length > 0) {
+            const before = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
+            const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
+            const after = compressed.reduce((sum, s) => sum + s.length, 0);
+            saved += Math.max(0, before - after);
+            setSavedBytes(saved);
+            await postPortalAction({
+              intent: "update_vision_board_item",
+              itemId: String(task.itemId),
+              imagesReplace: JSON.stringify(compressed),
+            });
+          }
+        } else {
+          let sample = sampleCache.get(task.sampleId);
+          if (sample === undefined) {
+            const r = await postPortalAction<{ sample: SampleType | null }>({
+              intent: "get_sample_full",
+              sampleId: String(task.sampleId),
+            });
+            sample = r?.sample ?? null;
+            sampleCache.set(task.sampleId, sample);
+          }
+          const iter = sample?.iterations?.find((it) => it.id === task.iterationId);
+          const images = Array.isArray(iter?.images) ? (iter!.images as string[]) : [];
+          if (images.length > 0) {
+            const before = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
+            const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
+            const after = compressed.reduce((sum, s) => sum + s.length, 0);
+            saved += Math.max(0, before - after);
+            setSavedBytes(saved);
+            await postPortalAction({
+              intent: "update_sample_iteration",
+              iterationId: String(task.iterationId),
+              imagesReplace: JSON.stringify(compressed),
+            });
+          }
+        }
+      } catch { /* keep going */ }
+      setDone(i + 1);
+    }
+    setStage("done");
+  };
+
+  if (stage === "idle") {
+    return (
+      <button
+        type="button"
+        title="Resize and re-compress all existing images. Safe to run more than once."
+        onClick={() => setStage("confirm")}
+        style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+      >Compress existing images</button>
+    );
+  }
+
+  if (stage === "confirm") {
+    const taskCount = buildTasks().length;
+    return createPortal(
+      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ background: "#fff", borderRadius: 10, padding: 24, maxWidth: 480, width: "90%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+          <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Compress existing images?</h3>
+          <p style={{ margin: "0 0 16px", fontSize: 13, color: "#4b5563", lineHeight: 1.5 }}>
+            This will resize every saved image down to 1600px on the long edge and re-encode as JPEG.
+            {taskCount > 0 ? ` ${taskCount} ${mode === "vision" ? "item" : "iteration"}${taskCount === 1 ? "" : "s"} will be processed.` : " Nothing to do — no images found."}
+            {" "}It can take a few minutes if there are many. Don't close the tab while it runs.
+          </p>
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button type="button" onClick={() => setStage("idle")} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+            <button type="button" onClick={start} disabled={taskCount === 0} style={{ background: "#111827", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: taskCount === 0 ? "not-allowed" : "pointer", opacity: taskCount === 0 ? 0.5 : 1 }}>Start</button>
+          </div>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
+  if (stage === "running") {
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    return createPortal(
+      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ background: "#fff", borderRadius: 10, padding: 24, maxWidth: 480, width: "90%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+          <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Compressing…</h3>
+          <div style={{ fontSize: 13, color: "#4b5563", marginBottom: 12 }}>{current || "Starting…"}</div>
+          <div style={{ background: "#e5e7eb", borderRadius: 999, height: 10, overflow: "hidden", marginBottom: 8 }}>
+            <div style={{ width: `${pct}%`, background: "#111827", height: "100%", transition: "width 0.2s" }} />
+          </div>
+          <div style={{ fontSize: 12, color: "#6b7280", display: "flex", justifyContent: "space-between" }}>
+            <span>{done} / {total}</span>
+            <span>Saved {(savedBytes / 1024 / 1024).toFixed(1)} MB so far</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+            <button type="button" onClick={() => { cancelRef.current = true; }} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>Stop after current</button>
+          </div>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
+  // done
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ background: "#fff", borderRadius: 10, padding: 24, maxWidth: 480, width: "90%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+        <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Done</h3>
+        <p style={{ margin: "0 0 16px", fontSize: 13, color: "#4b5563" }}>
+          Compressed {done} of {total}. Freed {(savedBytes / 1024 / 1024).toFixed(1)} MB.
+          Reload the page to see the speed improvement.
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button type="button" onClick={() => setStage("idle")} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Close</button>
+          <button type="button" onClick={() => window.location.reload()} style={{ background: "#111827", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Reload</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // Compress an image File client-side: scale down to max 1600px on the long edge
 // and re-encode as JPEG q=0.82. Typical photos drop from several MB to ~100-300KB.
 // Returns a data URL. Falls back to the original file if anything fails.
@@ -5938,6 +6175,7 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
           </div>
         </div>
         <div style={s.productInfoActions}>
+          <CompressExistingImagesButton mode="vision" vision={boards.flatMap((b) => b.items)} />
           <button
             type="button"
             style={{ ...s.primaryActionButton, opacity: activeBoardId && activeBoardId > 0 ? 1 : 0.5, cursor: activeBoardId && activeBoardId > 0 ? "pointer" : "not-allowed" }}
