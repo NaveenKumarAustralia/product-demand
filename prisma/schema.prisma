@@ -172,6 +172,7 @@ model VisionBoardItem {
   name      String       @default("")
   sortOrder Int          @default(0)
   images    Json         @default("[]")
+  thumbnail String?
   fields    Json         @default("[]")
   notes     String?
   createdAt DateTime     @default(now())
@@ -190,6 +191,7 @@ model SampleIteration {
   buttonType  String?
   status      String   @default("under_consideration")
   images      Json     @default("[]")
+  thumbnail   String?
   taggedUsers Json     @default("[]")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

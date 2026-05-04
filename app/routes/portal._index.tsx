@@ -1464,6 +1464,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
       updates.images = currentImages.filter((_, i) => i !== idx);
     }
+    // Optional client-supplied small thumbnail (~5–15 KB) for the card.
+    if (form.has("thumbnail")) {
+      const thumb = String(form.get("thumbnail") ?? "");
+      updates.thumbnail = thumb || null;
+    } else if ("images" in updates) {
+      // Images changed and client didn't supply a new thumbnail — clear it so
+      // the next viewing round generates a fresh one from the new first image.
+      updates.thumbnail = null;
+    }
     await prisma.sampleIteration.update({ where: { id: iterationId }, data: updates });
     return null;
   }
@@ -1510,7 +1519,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const existing = await prisma.visionBoardItem.count({ where: { boardId } });
     const initialImage = form.get("image");
     const images = (typeof initialImage === "string" && initialImage.length > 0) ? [initialImage] : [];
-    await prisma.visionBoardItem.create({ data: { boardId, name, sortOrder: existing, images } });
+    const initialThumbnail = form.get("thumbnail");
+    const thumbnail = typeof initialThumbnail === "string" && initialThumbnail.length > 0 ? initialThumbnail : null;
+    await prisma.visionBoardItem.create({ data: { boardId, name, sortOrder: existing, images, thumbnail } });
     return null;
   }
   if (intent === "update_vision_board_item") {
@@ -1553,6 +1564,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const currentImages = Array.isArray(item.images) ? (item.images as string[]) : [];
       data.images = [String(form.get("thumbnailImage")), ...currentImages.slice(1)];
     }
+    if (form.has("thumbnail")) {
+      const thumb = String(form.get("thumbnail") ?? "");
+      data.thumbnail = thumb || null;
+    } else if ("images" in data) {
+      data.thumbnail = null;
+    }
     await prisma.visionBoardItem.update({ where: { id: itemId }, data });
     return null;
   }
@@ -1569,16 +1586,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (Array.isArray(parsed)) ids = parsed.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && Number.isInteger(n));
     } catch { /* ignore */ }
     if (ids.length === 0) return jsonResponse({ thumbs: {} as Record<string, string> });
-    const rows = await prisma.$queryRawUnsafe<Array<{ id: number; firstImage: string | null }>>(
-      `SELECT id,
-         CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
-           THEN images ->> 0 ELSE NULL
-         END AS "firstImage"
-       FROM "VisionBoardItem"
-       WHERE id IN (${ids.join(",")})`
-    ).catch(() => [] as Array<{ id: number; firstImage: string | null }>);
+    // Read the small dedicated thumbnail column; fall back to images[0] only
+    // for items whose thumbnail hasn't been generated yet.
+    const small = await prisma.visionBoardItem.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, thumbnail: true },
+    }).catch(() => [] as Array<{ id: number; thumbnail: string | null }>);
     const thumbs: Record<string, string> = {};
-    for (const row of rows) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
+    const missingIds: number[] = [];
+    for (const row of small) {
+      if (row.thumbnail) thumbs[String(row.id)] = row.thumbnail;
+      else missingIds.push(row.id);
+    }
+    if (missingIds.length > 0) {
+      const fallback = await prisma.$queryRawUnsafe<Array<{ id: number; firstImage: string | null }>>(
+        `SELECT id,
+           CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
+             THEN images ->> 0 ELSE NULL
+           END AS "firstImage"
+         FROM "VisionBoardItem"
+         WHERE id IN (${missingIds.join(",")})`
+      ).catch(() => [] as Array<{ id: number; firstImage: string | null }>);
+      for (const row of fallback) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
+    }
     return jsonResponse({ thumbs });
   }
   if (intent === "get_sample_iteration_thumbnails") {
@@ -1588,16 +1618,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (Array.isArray(parsed)) ids = parsed.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && Number.isInteger(n));
     } catch { /* ignore */ }
     if (ids.length === 0) return jsonResponse({ thumbs: {} as Record<string, string> });
-    const rows = await prisma.$queryRawUnsafe<Array<{ id: number; firstImage: string | null }>>(
-      `SELECT id,
-         CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
-           THEN images ->> 0 ELSE NULL
-         END AS "firstImage"
-       FROM "SampleIteration"
-       WHERE id IN (${ids.join(",")})`
-    ).catch(() => [] as Array<{ id: number; firstImage: string | null }>);
+    const small = await prisma.sampleIteration.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, thumbnail: true },
+    }).catch(() => [] as Array<{ id: number; thumbnail: string | null }>);
     const thumbs: Record<string, string> = {};
-    for (const row of rows) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
+    const missingIds: number[] = [];
+    for (const row of small) {
+      if (row.thumbnail) thumbs[String(row.id)] = row.thumbnail;
+      else missingIds.push(row.id);
+    }
+    if (missingIds.length > 0) {
+      const fallback = await prisma.$queryRawUnsafe<Array<{ id: number; firstImage: string | null }>>(
+        `SELECT id,
+           CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
+             THEN images ->> 0 ELSE NULL
+           END AS "firstImage"
+         FROM "SampleIteration"
+         WHERE id IN (${missingIds.join(",")})`
+      ).catch(() => [] as Array<{ id: number; firstImage: string | null }>);
+      for (const row of fallback) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
+    }
     return jsonResponse({ thumbs });
   }
   if (intent === "delete_vision_board_item") {
@@ -5464,7 +5505,13 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
   const addImages = async (files: File[]) => {
     if (files.length === 0) return;
     const dataUrls = await Promise.all(files.map((file) => compressImageToDataUrl(file)));
-    submitUpdate({ addImages: JSON.stringify(dataUrls) });
+    const existing = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+    const payload: Record<string, string> = { addImages: JSON.stringify(dataUrls) };
+    if (existing.length === 0 && dataUrls.length > 0) {
+      const thumb = await generateThumbnail(dataUrls[0]);
+      if (thumb) payload.thumbnail = thumb;
+    }
+    submitUpdate(payload);
   };
 
   const removeImage = (index: number) => {
@@ -5798,6 +5845,33 @@ type VisionBoardType = {
 
 type VisionField = { id: string; text: string };
 
+// Generate a tiny thumbnail for the card grid (~5–15 KB). Re-uses the same
+// canvas pipeline as the full-image compressor but with smaller targets.
+async function generateThumbnail(input: string, maxDim = 240, quality = 0.62): Promise<string | null> {
+  if (typeof input !== "string" || !input.startsWith("data:image/")) return null;
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = () => reject(new Error("decode failed"));
+      i.src = input;
+    });
+    const longEdge = Math.max(img.width, img.height);
+    const scale = longEdge > maxDim ? maxDim / longEdge : 1;
+    const w = Math.max(1, Math.round(img.width * scale));
+    const h = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", quality);
+  } catch {
+    return null;
+  }
+}
+
 // Compress an existing data URL (e.g. legacy stored base64). Aggressive defaults
 // suited to a personal-use board: max 800px on the long edge, JPEG q=0.75.
 // Typical photos drop from several MB to ~50-100KB.
@@ -5849,8 +5923,11 @@ async function postPortalAction<T = unknown>(data: Record<string, string>): Prom
 // Silently re-compress legacy uncompressed images in the background after page
 // mount. Tracks done IDs in localStorage so each item is processed at most once
 // per browser. Skips items whose images are already small.
-const COMPRESSED_IDS_VISION_KEY = "portal-compressed-vision-items-v1";
-const COMPRESSED_IDS_SAMPLE_ITER_KEY = "portal-compressed-sample-iters-v1";
+// Bump these to v2 so any browser that already ran the v1 backfill (which
+// only re-compressed images and didn't generate the new dedicated thumbnail
+// column) re-runs and populates thumbnails for every item.
+const COMPRESSED_IDS_VISION_KEY = "portal-compressed-vision-items-v2";
+const COMPRESSED_IDS_SAMPLE_ITER_KEY = "portal-compressed-sample-iters-v2";
 
 function loadCompressedIds(key: string): Set<number> {
   try {
@@ -5879,26 +5956,44 @@ function useAutoCompressVisionItems(items: VisionBoardItemType[]): void {
         if (cancelled) return;
         if (done.has(item.id)) continue;
         try {
-          const r = await postPortalAction<{ item: { images?: unknown } | null }>({
+          const r = await postPortalAction<{ item: { images?: unknown; thumbnail?: string | null } | null }>({
             intent: "get_vision_board_item",
             itemId: String(item.id),
           });
           const images = Array.isArray(r?.item?.images) ? (r!.item!.images as string[]) : [];
-          // Already small? Mark done and skip the write.
+          const existingThumb = r?.item?.thumbnail ?? null;
           const totalBefore = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
-          if (totalBefore < 150_000 * Math.max(1, images.length)) {
-            done.add(item.id);
-            saveCompressedIds(COMPRESSED_IDS_VISION_KEY, done);
-            continue;
+          const imagesAlreadySmall = totalBefore < 150_000 * Math.max(1, images.length);
+
+          // Decide what work to do:
+          // 1. Generate the small thumbnail if it's missing (cheap, biggest perf win).
+          // 2. Re-compress full images only if they're still oversized.
+          let thumbToSend: string | null = null;
+          if (!existingThumb && images.length > 0) {
+            thumbToSend = await generateThumbnail(images[0]);
           }
-          const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
-          const totalAfter = compressed.reduce((sum, s) => sum + s.length, 0);
-          if (totalAfter < totalBefore * 0.95) {
-            await postPortalAction({
+          let compressedToSend: string[] | null = null;
+          if (!imagesAlreadySmall && images.length > 0) {
+            const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
+            const totalAfter = compressed.reduce((sum, s) => sum + s.length, 0);
+            if (totalAfter < totalBefore * 0.95) compressedToSend = compressed;
+          }
+
+          if (thumbToSend || compressedToSend) {
+            const payload: Record<string, string> = {
               intent: "update_vision_board_item",
               itemId: String(item.id),
-              imagesReplace: JSON.stringify(compressed),
-            });
+            };
+            if (compressedToSend) {
+              payload.imagesReplace = JSON.stringify(compressedToSend);
+              // If we re-compressed images and didn't already compute a thumb,
+              // make one from the new first compressed image.
+              if (!thumbToSend && compressedToSend.length > 0) {
+                thumbToSend = await generateThumbnail(compressedToSend[0]);
+              }
+            }
+            if (thumbToSend) payload.thumbnail = thumbToSend;
+            await postPortalAction(payload);
           }
           done.add(item.id);
           saveCompressedIds(COMPRESSED_IDS_VISION_KEY, done);
@@ -5925,7 +6020,7 @@ function useAutoCompressSampleIterations(samples: SampleType[]): void {
     if (candidates.length === 0) return;
     let cancelled = false;
     const done = loadCompressedIds(COMPRESSED_IDS_SAMPLE_ITER_KEY);
-    const sampleCache = new Map<number, SampleType | null>();
+    const sampleCache = new Map<number, { iterations?: Array<{ id: number; images?: unknown; thumbnail?: string | null }> } | null>();
 
     (async () => {
       for (const task of candidates) {
@@ -5934,7 +6029,7 @@ function useAutoCompressSampleIterations(samples: SampleType[]): void {
         try {
           let sample = sampleCache.get(task.sampleId);
           if (sample === undefined) {
-            const r = await postPortalAction<{ sample: SampleType | null }>({
+            const r = await postPortalAction<{ sample: { iterations?: Array<{ id: number; images?: unknown; thumbnail?: string | null }> } | null }>({
               intent: "get_sample_full",
               sampleId: String(task.sampleId),
             });
@@ -5943,20 +6038,34 @@ function useAutoCompressSampleIterations(samples: SampleType[]): void {
           }
           const iter = sample?.iterations?.find((it) => it.id === task.iterationId);
           const images = Array.isArray(iter?.images) ? (iter!.images as string[]) : [];
+          const existingThumb = iter?.thumbnail ?? null;
           const totalBefore = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
-          if (totalBefore < 150_000 * Math.max(1, images.length)) {
-            done.add(task.iterationId);
-            saveCompressedIds(COMPRESSED_IDS_SAMPLE_ITER_KEY, done);
-            continue;
+          const imagesAlreadySmall = totalBefore < 150_000 * Math.max(1, images.length);
+
+          let thumbToSend: string | null = null;
+          if (!existingThumb && images.length > 0) {
+            thumbToSend = await generateThumbnail(images[0]);
           }
-          const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
-          const totalAfter = compressed.reduce((sum, s) => sum + s.length, 0);
-          if (totalAfter < totalBefore * 0.95) {
-            await postPortalAction({
+          let compressedToSend: string[] | null = null;
+          if (!imagesAlreadySmall && images.length > 0) {
+            const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
+            const totalAfter = compressed.reduce((sum, s) => sum + s.length, 0);
+            if (totalAfter < totalBefore * 0.95) compressedToSend = compressed;
+          }
+
+          if (thumbToSend || compressedToSend) {
+            const payload: Record<string, string> = {
               intent: "update_sample_iteration",
               iterationId: String(task.iterationId),
-              imagesReplace: JSON.stringify(compressed),
-            });
+            };
+            if (compressedToSend) {
+              payload.imagesReplace = JSON.stringify(compressedToSend);
+              if (!thumbToSend && compressedToSend.length > 0) {
+                thumbToSend = await generateThumbnail(compressedToSend[0]);
+              }
+            }
+            if (thumbToSend) payload.thumbnail = thumbToSend;
+            await postPortalAction(payload);
           }
           done.add(task.iterationId);
           saveCompressedIds(COMPRESSED_IDS_SAMPLE_ITER_KEY, done);
@@ -6116,9 +6225,16 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
   const handleDropImageOnEmptyCard = async (file: File) => {
     if (!activeBoardId || activeBoardId < 0) return;
     const dataUrl = await compressImageToDataUrl(file);
+    const thumb = await generateThumbnail(dataUrl);
     const items = activeBoard?.items ?? [];
     maxIdBeforeAddRef.current = items.length > 0 ? Math.max(...items.map((it) => it.id)) : 0;
-    fetcher.submit({ intent: "add_vision_board_item", boardId: String(activeBoardId), image: dataUrl }, { method: "post" });
+    const payload: Record<string, string> = {
+      intent: "add_vision_board_item",
+      boardId: String(activeBoardId),
+      image: dataUrl,
+    };
+    if (thumb) payload.thumbnail = thumb;
+    fetcher.submit(payload, { method: "post" });
   };
 
   const submitAddBoard = () => {
@@ -6579,10 +6695,18 @@ function VisionItemDetailPanel({
     const next = [...images, ...dataUrls];
     setImages(next);
     pushThumbnailToParent(next);
-    fetcher.submit(
-      { intent: "update_vision_board_item", itemId: String(item.id), addImages: JSON.stringify(dataUrls) },
-      { method: "post" },
-    );
+    const payload: Record<string, string> = {
+      intent: "update_vision_board_item",
+      itemId: String(item.id),
+      addImages: JSON.stringify(dataUrls),
+    };
+    // If we just added the first image of this item, pre-generate the small
+    // thumbnail so the card paints fast on next load.
+    if (images.length === 0 && dataUrls.length > 0) {
+      const thumb = await generateThumbnail(dataUrls[0]);
+      if (thumb) payload.thumbnail = thumb;
+    }
+    fetcher.submit(payload, { method: "post" });
   };
 
   const removeImage = (index: number) => {
