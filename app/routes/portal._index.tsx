@@ -5012,6 +5012,9 @@ function SamplesPanel({
     setLocalSamples(samples.filter((s) => !deletedIds.current.has(s.id)));
   }, [samples]);
 
+  // Auto-compress legacy uncompressed images in the background.
+  useAutoCompressSampleIterations(localSamples);
+
   const selectedSample = localSamples.find((s) => s.id === selectedSampleId) ?? null;
   const normalizedSearch = search.trim().toLowerCase();
   const visibleSamples = normalizedSearch
@@ -5086,7 +5089,6 @@ function SamplesPanel({
           </div>
         </div>
         <div style={s.productInfoActions}>
-          <CompressExistingImagesButton mode="samples" samples={localSamples} />
           <div style={s.productInfoSegmented} aria-label="Cards per row">
             {([3, 4, 5] as const).map((count) => (
               <button
@@ -5844,79 +5846,92 @@ async function postPortalAction<T = unknown>(data: Record<string, string>): Prom
   }
 }
 
-type CompressTask =
-  | { kind: "vision"; itemId: number; label: string }
-  | { kind: "sample"; sampleId: number; iterationId: number; label: string };
+// Silently re-compress legacy uncompressed images in the background after page
+// mount. Tracks done IDs in localStorage so each item is processed at most once
+// per browser. Skips items whose images are already small.
+const COMPRESSED_IDS_VISION_KEY = "portal-compressed-vision-items-v1";
+const COMPRESSED_IDS_SAMPLE_ITER_KEY = "portal-compressed-sample-iters-v1";
 
-function CompressExistingImagesButton({
-  mode,
-  vision,
-  samples,
-}: {
-  mode: "vision" | "samples";
-  vision?: VisionBoardItemType[];
-  samples?: SampleType[];
-}) {
-  const [stage, setStage] = useState<"idle" | "confirm" | "running" | "done">("idle");
-  const [done, setDone] = useState(0);
-  const [total, setTotal] = useState(0);
-  const [current, setCurrent] = useState("");
-  const [savedBytes, setSavedBytes] = useState(0);
-  const cancelRef = useRef(false);
+function loadCompressedIds(key: string): Set<number> {
+  try {
+    const raw = typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? new Set(arr.filter((n: unknown): n is number => typeof n === "number")) : new Set();
+  } catch { return new Set(); }
+}
+function saveCompressedIds(key: string, ids: Set<number>): void {
+  try {
+    if (typeof window !== "undefined") window.localStorage.setItem(key, JSON.stringify(Array.from(ids)));
+  } catch { /* quota or private mode — fine to lose */ }
+}
 
-  const buildTasks = (): CompressTask[] => {
-    if (mode === "vision") {
-      return (vision ?? [])
-        .filter((it) => (it.imageCount ?? (Array.isArray(it.images) ? (it.images as string[]).length : 0)) > 0)
-        .map((it) => ({ kind: "vision", itemId: it.id, label: it.name || `Item ${it.id}` }));
-    }
-    const out: CompressTask[] = [];
-    for (const s of samples ?? []) {
-      for (const it of s.iterations) {
-        const count = it.imageCount ?? (Array.isArray(it.images) ? (it.images as string[]).length : 0);
-        if (count > 0) out.push({ kind: "sample", sampleId: s.id, iterationId: it.id, label: `${s.name} v${it.version}` });
-      }
-    }
-    return out;
-  };
+function useAutoCompressVisionItems(items: VisionBoardItemType[]): void {
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const candidates = items.filter((it) => (it.imageCount ?? 0) > 0);
+    if (candidates.length === 0) return;
+    let cancelled = false;
+    const done = loadCompressedIds(COMPRESSED_IDS_VISION_KEY);
 
-  const start = async () => {
-    const tasks = buildTasks();
-    setTotal(tasks.length);
-    setDone(0);
-    setSavedBytes(0);
-    cancelRef.current = false;
-    setStage("running");
-
-    // Cache full samples by sampleId so iterating multiple iterations of the
-    // same sample doesn't refetch.
-    const sampleCache = new Map<number, SampleType | null>();
-    let saved = 0;
-
-    for (let i = 0; i < tasks.length; i++) {
-      if (cancelRef.current) break;
-      const task = tasks[i];
-      setCurrent(task.label);
-      try {
-        if (task.kind === "vision") {
+    (async () => {
+      for (const item of candidates) {
+        if (cancelled) return;
+        if (done.has(item.id)) continue;
+        try {
           const r = await postPortalAction<{ item: { images?: unknown } | null }>({
             intent: "get_vision_board_item",
-            itemId: String(task.itemId),
+            itemId: String(item.id),
           });
           const images = Array.isArray(r?.item?.images) ? (r!.item!.images as string[]) : [];
-          if (images.length > 0) {
-            const before = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
-            const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
-            const after = compressed.reduce((sum, s) => sum + s.length, 0);
-            saved += Math.max(0, before - after);
-            setSavedBytes(saved);
+          // Already small? Mark done and skip the write.
+          const totalBefore = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
+          if (totalBefore < 150_000 * Math.max(1, images.length)) {
+            done.add(item.id);
+            saveCompressedIds(COMPRESSED_IDS_VISION_KEY, done);
+            continue;
+          }
+          const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
+          const totalAfter = compressed.reduce((sum, s) => sum + s.length, 0);
+          if (totalAfter < totalBefore * 0.95) {
             await postPortalAction({
               intent: "update_vision_board_item",
-              itemId: String(task.itemId),
+              itemId: String(item.id),
               imagesReplace: JSON.stringify(compressed),
             });
           }
-        } else {
+          done.add(item.id);
+          saveCompressedIds(COMPRESSED_IDS_VISION_KEY, done);
+        } catch { /* keep going */ }
+      }
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items.length]);
+}
+
+function useAutoCompressSampleIterations(samples: SampleType[]): void {
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    type Task = { sampleId: number; iterationId: number };
+    const candidates: Task[] = [];
+    for (const s of samples) {
+      for (const it of s.iterations) {
+        const count = it.imageCount ?? (Array.isArray(it.images) ? (it.images as string[]).length : 0);
+        if (count > 0) candidates.push({ sampleId: s.id, iterationId: it.id });
+      }
+    }
+    if (candidates.length === 0) return;
+    let cancelled = false;
+    const done = loadCompressedIds(COMPRESSED_IDS_SAMPLE_ITER_KEY);
+    const sampleCache = new Map<number, SampleType | null>();
+
+    (async () => {
+      for (const task of candidates) {
+        if (cancelled) return;
+        if (done.has(task.iterationId)) continue;
+        try {
           let sample = sampleCache.get(task.sampleId);
           if (sample === undefined) {
             const r = await postPortalAction<{ sample: SampleType | null }>({
@@ -5928,97 +5943,30 @@ function CompressExistingImagesButton({
           }
           const iter = sample?.iterations?.find((it) => it.id === task.iterationId);
           const images = Array.isArray(iter?.images) ? (iter!.images as string[]) : [];
-          if (images.length > 0) {
-            const before = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
-            const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
-            const after = compressed.reduce((sum, s) => sum + s.length, 0);
-            saved += Math.max(0, before - after);
-            setSavedBytes(saved);
+          const totalBefore = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
+          if (totalBefore < 150_000 * Math.max(1, images.length)) {
+            done.add(task.iterationId);
+            saveCompressedIds(COMPRESSED_IDS_SAMPLE_ITER_KEY, done);
+            continue;
+          }
+          const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
+          const totalAfter = compressed.reduce((sum, s) => sum + s.length, 0);
+          if (totalAfter < totalBefore * 0.95) {
             await postPortalAction({
               intent: "update_sample_iteration",
               iterationId: String(task.iterationId),
               imagesReplace: JSON.stringify(compressed),
             });
           }
-        }
-      } catch { /* keep going */ }
-      setDone(i + 1);
-    }
-    setStage("done");
-  };
+          done.add(task.iterationId);
+          saveCompressedIds(COMPRESSED_IDS_SAMPLE_ITER_KEY, done);
+        } catch { /* keep going */ }
+      }
+    })();
 
-  if (stage === "idle") {
-    return (
-      <button
-        type="button"
-        title="Resize and re-compress all existing images. Safe to run more than once."
-        onClick={() => setStage("confirm")}
-        style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
-      >Compress existing images</button>
-    );
-  }
-
-  if (stage === "confirm") {
-    const taskCount = buildTasks().length;
-    return createPortal(
-      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ background: "#fff", borderRadius: 10, padding: 24, maxWidth: 480, width: "90%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
-          <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Compress existing images?</h3>
-          <p style={{ margin: "0 0 16px", fontSize: 13, color: "#4b5563", lineHeight: 1.5 }}>
-            This will resize every saved image down to 1600px on the long edge and re-encode as JPEG.
-            {taskCount > 0 ? ` ${taskCount} ${mode === "vision" ? "item" : "iteration"}${taskCount === 1 ? "" : "s"} will be processed.` : " Nothing to do — no images found."}
-            {" "}It can take a few minutes if there are many. Don't close the tab while it runs.
-          </p>
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button type="button" onClick={() => setStage("idle")} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
-            <button type="button" onClick={start} disabled={taskCount === 0} style={{ background: "#111827", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: taskCount === 0 ? "not-allowed" : "pointer", opacity: taskCount === 0 ? 0.5 : 1 }}>Start</button>
-          </div>
-        </div>
-      </div>,
-      document.body,
-    );
-  }
-
-  if (stage === "running") {
-    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-    return createPortal(
-      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <div style={{ background: "#fff", borderRadius: 10, padding: 24, maxWidth: 480, width: "90%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
-          <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Compressing…</h3>
-          <div style={{ fontSize: 13, color: "#4b5563", marginBottom: 12 }}>{current || "Starting…"}</div>
-          <div style={{ background: "#e5e7eb", borderRadius: 999, height: 10, overflow: "hidden", marginBottom: 8 }}>
-            <div style={{ width: `${pct}%`, background: "#111827", height: "100%", transition: "width 0.2s" }} />
-          </div>
-          <div style={{ fontSize: 12, color: "#6b7280", display: "flex", justifyContent: "space-between" }}>
-            <span>{done} / {total}</span>
-            <span>Saved {(savedBytes / 1024 / 1024).toFixed(1)} MB so far</span>
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-            <button type="button" onClick={() => { cancelRef.current = true; }} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}>Stop after current</button>
-          </div>
-        </div>
-      </div>,
-      document.body,
-    );
-  }
-
-  // done
-  return createPortal(
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ background: "#fff", borderRadius: 10, padding: 24, maxWidth: 480, width: "90%", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
-        <h3 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Done</h3>
-        <p style={{ margin: "0 0 16px", fontSize: 13, color: "#4b5563" }}>
-          Compressed {done} of {total}. Freed {(savedBytes / 1024 / 1024).toFixed(1)} MB.
-          Reload the page to see the speed improvement.
-        </p>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button type="button" onClick={() => setStage("idle")} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Close</button>
-          <button type="button" onClick={() => window.location.reload()} style={{ background: "#111827", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Reload</button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [samples.length]);
 }
 
 // Compress an image File client-side: scale down to max 800px on the long edge
@@ -6110,6 +6058,9 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
       items: b.items.filter((it) => !deletedItemIds.current.has(it.id)),
     })));
   }, [initialBoards]);
+
+  // Auto-compress legacy uncompressed images in the background.
+  useAutoCompressVisionItems(boards.flatMap((b) => b.items));
 
   useEffect(() => {
     if (!activeBoardId && boards.length > 0) setActiveBoardId(boards[0].id);
@@ -6288,7 +6239,6 @@ function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[]
           </div>
         </div>
         <div style={s.productInfoActions}>
-          <CompressExistingImagesButton mode="vision" vision={boards.flatMap((b) => b.items)} />
           <button
             type="button"
             style={{ ...s.primaryActionButton, opacity: activeBoardId && activeBoardId > 0 ? 1 : 0.5, cursor: activeBoardId && activeBoardId > 0 ? "pointer" : "not-allowed" }}
