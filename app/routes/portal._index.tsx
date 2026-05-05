@@ -5146,7 +5146,7 @@ function SamplesPanel({
   // Track IDs removed this session so loader re-runs can't restore them
   const deletedIds = useRef<Set<number>>(new Set());
   const [selectedSampleId, setSelectedSampleId] = useState<number | null>(null);
-  const [gridColumns, setGridColumns] = useState<3 | 4 | 5>(4);
+  const [gridColumns, setGridColumns] = useState<3 | 4 | 5 | 6>(6);
   const [dragSampleId, setDragSampleId] = useState<number | null>(null);
   const [dragOverSampleId, setDragOverSampleId] = useState<number | null>(null);
   const [addModalOpen, setAddModalOpen] = useState(false);
@@ -5204,7 +5204,7 @@ function SamplesPanel({
         </div>
         <div style={s.productInfoActions}>
           <div style={s.productInfoSegmented} aria-label="Cards per row">
-            {([3, 4, 5] as const).map((count) => (
+            {([3, 4, 5, 6] as const).map((count) => (
               <button
                 key={count}
                 type="button"
