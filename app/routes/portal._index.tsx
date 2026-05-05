@@ -4449,6 +4449,7 @@ export default function PortalDashboard() {
             samples={samples}
             search={searchTitleInput}
             users={users}
+            currentUser={currentUser}
           />
         ) : page === "visionboard" ? (
           <VisionBoardPanel
@@ -5136,10 +5137,12 @@ function SamplesPanel({
   samples,
   search,
   users,
+  currentUser,
 }: {
   samples: SampleType[];
   search: string;
   users: PortalUser[];
+  currentUser: PortalUser | null;
 }) {
   const fetcher = useFetcher();
   const [localSamples, setLocalSamples] = useState(samples);
@@ -5257,7 +5260,7 @@ function SamplesPanel({
       </div>
 
       {selectedSample && typeof document !== "undefined" && createPortal(
-        <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} users={users} />,
+        <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} users={users} currentUser={currentUser} />,
         document.body,
       )}
 
@@ -5423,10 +5426,12 @@ function SampleDetailPanel({
   sample,
   onClose,
   users,
+  currentUser,
 }: {
   sample: SampleType;
   onClose: () => void;
   users: PortalUser[];
+  currentUser: PortalUser | null;
 }) {
   const fetcher = useFetcher();
   const [isEditingName, setIsEditingName] = useState(false);
@@ -5505,7 +5510,7 @@ function SampleDetailPanel({
             </div>
           )}
           {sortedIterations.map((iteration) => (
-            <SampleIterationBlock key={iteration.id} iteration={iteration} users={users} />
+            <SampleIterationBlock key={iteration.id} iteration={iteration} users={users} currentUser={currentUser} />
           ))}
         </div>
       </div>
@@ -5513,7 +5518,7 @@ function SampleDetailPanel({
   );
 }
 
-function SampleIterationBlock({ iteration, users }: { iteration: SampleIterationType; users: PortalUser[] }) {
+function SampleIterationBlock({ iteration, users, currentUser }: { iteration: SampleIterationType; users: PortalUser[]; currentUser: PortalUser | null }) {
   const fetcher = useFetcher();
   const notesRef = useRef<HTMLTextAreaElement>(null);
   const [notes, setNotes] = useState(iteration.notes ?? "");
@@ -5572,7 +5577,26 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
   };
 
   const saveNotes = () => {
-    if (notes !== (iteration.notes ?? "")) submitUpdate({ notes });
+    const previous = iteration.notes ?? "";
+    if (notes === previous) return;
+    // If the user appended new text at the end of the existing note, prefix
+    // that new text with their name so the next reader knows who wrote it.
+    // If they edited the middle (or wholly rewrote), save as-is — auto-
+    // prefixing would mangle their edits.
+    let toSave = notes;
+    const authorName = (currentUser?.name ?? "").trim().split(/\s+/)[0];
+    if (authorName && notes.startsWith(previous)) {
+      const addition = notes.slice(previous.length);
+      const trimmedAddition = addition.replace(/^\s+/, "");
+      if (trimmedAddition.length > 0) {
+        const sep = previous.length === 0 ? "" : (previous.endsWith("\n") ? "" : "\n");
+        toSave = previous + sep + `${authorName}: ${trimmedAddition}`;
+        // Reflect the saved value in local state so subsequent typing is
+        // treated as a further append (not a rewrite of the prefix).
+        setNotes(toSave);
+      }
+    }
+    submitUpdate({ notes: toSave });
   };
 
   const addImages = async (files: File[]) => {
@@ -5605,8 +5629,8 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
     });
   };
 
-  const removeSavedImage = async (index: number) => {
-    if (!window.confirm("Remove this image?")) return;
+  const [pendingDeleteIndex, setPendingDeleteIndex] = useState<number | null>(null);
+  const doRemoveSavedImage = async (index: number) => {
     setSavedCount((c) => Math.max(0, c - 1));
     await postPortalAction({
       intent: "update_sample_iteration",
@@ -5614,6 +5638,13 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
       removeImageIndex: String(index),
     });
     setVersion(Date.now());
+  };
+  const requestRemoveSavedImage = (index: number) => {
+    if (shouldSkipDeleteConfirm()) {
+      void doRemoveSavedImage(index);
+      return;
+    }
+    setPendingDeleteIndex(index);
   };
 
   const removePendingImage = (id: string) => {
@@ -5740,7 +5771,7 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
               decoding="async"
               onClick={() => setLightboxIndex(index)}
             />
-            <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeSavedImage(index)} aria-label="Remove image">×</button>
+            <button type="button" style={s.sampleIterationImageRemove} onClick={() => requestRemoveSavedImage(index)} aria-label="Remove image">×</button>
           </div>
         ))}
         {pendingImages.map((p, i) => (
@@ -5830,7 +5861,62 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
         />,
         document.body,
       )}
+      {pendingDeleteIndex !== null && (
+        <ConfirmDeleteModal
+          title="Are you sure you want to delete this image?"
+          subtitle={versionLabel}
+          onCancel={() => setPendingDeleteIndex(null)}
+          onConfirm={() => {
+            const idx = pendingDeleteIndex;
+            setPendingDeleteIndex(null);
+            void doRemoveSavedImage(idx);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// Cancel / OK / Don't show for 24 hours — the same modal shape used for
+// restock-row deletes. Reuses the existing DELETE_CONFIRM_SKIP_KEY so opting
+// out of confirmations in one place opts out everywhere.
+function shouldSkipDeleteConfirm(): boolean {
+  if (typeof window === "undefined") return false;
+  const skipUntil = Number(window.localStorage.getItem(DELETE_CONFIRM_SKIP_KEY) ?? 0);
+  return skipUntil > Date.now();
+}
+function skipDeleteConfirmForDay(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(DELETE_CONFIRM_SKIP_KEY, String(Date.now() + 24 * 60 * 60 * 1000));
+}
+
+function ConfirmDeleteModal({
+  title,
+  subtitle,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  subtitle?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div style={s.deleteConfirm} onClick={onCancel}>
+      <div style={s.deleteConfirmCard} onClick={(e) => e.stopPropagation()}>
+        <div style={s.deleteConfirmTitle}>{title}</div>
+        {subtitle ? <div style={s.deleteConfirmText}>{subtitle}</div> : null}
+        <div style={s.deleteConfirmActions}>
+          <button type="button" style={s.deleteConfirmButton} onClick={onCancel}>Cancel</button>
+          <button type="button" style={{ ...s.deleteConfirmButton, ...s.deleteConfirmDanger }} onClick={onConfirm}>OK</button>
+          <button type="button" style={s.deleteConfirmButton} onClick={() => { skipDeleteConfirmForDay(); onConfirm(); }}>
+            Don’t show for 24 hours
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -6813,8 +6899,8 @@ function VisionItemDetailPanel({
     onUpdateLocal({ imageCount: savedCount + previews.length });
   };
 
-  const removeSavedImage = async (index: number) => {
-    if (!window.confirm("Remove this image?")) return;
+  const [pendingDeleteIndex, setPendingDeleteIndex] = useState<number | null>(null);
+  const doRemoveSavedImage = async (index: number) => {
     setSavedCount((c) => Math.max(0, c - 1));
     onUpdateLocal({ imageCount: Math.max(0, savedCount - 1) });
     await postPortalAction({
@@ -6824,6 +6910,13 @@ function VisionItemDetailPanel({
     });
     // Bust browser cache for the now-shifted indices.
     setVersion(Date.now());
+  };
+  const requestRemoveSavedImage = (index: number) => {
+    if (shouldSkipDeleteConfirm()) {
+      void doRemoveSavedImage(index);
+      return;
+    }
+    setPendingDeleteIndex(index);
   };
 
   const removePendingImage = (id: string) => {
@@ -6895,7 +6988,7 @@ function VisionItemDetailPanel({
                     decoding="async"
                     onClick={() => setLightboxIndex(index)}
                   />
-                  <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeSavedImage(index)} aria-label="Remove image">×</button>
+                  <button type="button" style={s.sampleIterationImageRemove} onClick={() => requestRemoveSavedImage(index)} aria-label="Remove image">×</button>
                 </div>
               ))}
               {pendingImages.map((p, i) => (
@@ -6995,6 +7088,18 @@ function VisionItemDetailPanel({
           onClose={() => setLightboxIndex(null)}
         />,
         document.body,
+      )}
+      {pendingDeleteIndex !== null && (
+        <ConfirmDeleteModal
+          title="Are you sure you want to delete this image?"
+          subtitle={item.name || undefined}
+          onCancel={() => setPendingDeleteIndex(null)}
+          onConfirm={() => {
+            const idx = pendingDeleteIndex;
+            setPendingDeleteIndex(null);
+            void doRemoveSavedImage(idx);
+          }}
+        />
       )}
     </>
   );
