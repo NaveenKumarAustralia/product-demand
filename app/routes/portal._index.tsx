@@ -5114,7 +5114,7 @@ type SampleType = {
 
 function sampleStatusLabel(status: string) {
   if (status === "approved") return "Approved";
-  if (status === "approved_for_production") return "Approved for Production";
+  if (status === "approved_for_production") return "Approved on Production";
   if (status === "changes_requested") return "Changes Requested";
   if (status === "sample_in_production") return "Sample in Production";
   if (status === "given_to_factory") return "Given to Factory";
@@ -5533,6 +5533,7 @@ function SampleIterationBlock({ iteration, users, currentUser }: { iteration: Sa
   const [fabricType, setFabricType] = useState(iteration.fabricType ?? "");
   const [sampleSize, setSampleSize] = useState(iteration.sampleSize ?? "");
   const [buttonType, setButtonType] = useState(iteration.buttonType ?? "");
+  const [status, setStatus] = useState(iteration.status);
   // Saved-image count + cache-buster version. Each image is rendered as
   // <img src="/portal/image/sample/<id>/<i>?v=<version>"> so the browser
   // handles parallel download and forever-caches binary content.
@@ -5550,6 +5551,7 @@ function SampleIterationBlock({ iteration, users, currentUser }: { iteration: Sa
   useEffect(() => { setFabricType(iteration.fabricType ?? ""); }, [iteration.fabricType, iteration.id]);
   useEffect(() => { setSampleSize(iteration.sampleSize ?? ""); }, [iteration.sampleSize, iteration.id]);
   useEffect(() => { setButtonType(iteration.buttonType ?? ""); }, [iteration.buttonType, iteration.id]);
+  useEffect(() => { setStatus(iteration.status); }, [iteration.status, iteration.id]);
   useEffect(() => {
     // Sync savedCount up if the loader (or background hook) has written
     // more images than we know about. Don't reset down; our optimistic
@@ -5621,7 +5623,7 @@ function SampleIterationBlock({ iteration, users, currentUser }: { iteration: Sa
       iterationId: String(iteration.id),
       ...payload,
     });
-    if (result === null) return;
+    if (!result.ok) return;
     const promotedIds = new Set(previews.map((p) => p.id));
     setSavedCount((c) => c + previews.length);
     setVersion(Date.now());
@@ -5729,10 +5731,14 @@ function SampleIterationBlock({ iteration, users, currentUser }: { iteration: Sa
           )}
         </div>
         <select
-          value={iteration.status}
-          onChange={(e) => submitUpdate({ status: e.target.value })}
+          value={status}
+          onChange={(e) => {
+            const next = e.target.value;
+            setStatus(next); // optimistic — show immediately, no waiting on the POST
+            submitUpdate({ status: next });
+          }}
           style={{
-            ...sampleStatusPillStyle(iteration.status),
+            ...sampleStatusPillStyle(status),
             border: "1px solid rgba(0,0,0,0.12)",
             cursor: "pointer",
             appearance: "none" as const,
@@ -5748,7 +5754,7 @@ function SampleIterationBlock({ iteration, users, currentUser }: { iteration: Sa
           <option value="sample_in_production">Sample in Production</option>
           <option value="changes_requested">Changes Requested</option>
           <option value="approved">Approved</option>
-          <option value="approved_for_production">Approved for Production</option>
+          <option value="approved_for_production">Approved on Production</option>
         </select>
         <span style={s.sampleIterationDate}>{formatPortalDate(iteration.createdAt)}</span>
         <button
@@ -6118,24 +6124,35 @@ async function compressDataUrl(input: string, maxDim = 800, quality = 0.75): Pro
 }
 
 // POST a form to the current portal route's action and parse its JSON response.
-// Used by the silent background image-compression hook. Always passes
-// noRevalidate=1 so the call doesn't trigger a full route loader re-run on
-// top of the action — that's what was making the page feel sluggish during
-// background work.
-async function postPortalAction<T = unknown>(data: Record<string, string>): Promise<T | null> {
+// Used by background workflows (image compression, drawer uploads). Always
+// passes noRevalidate=1 so the call doesn't trigger a full route loader re-run
+// on top of the action.
+//
+// Returns { ok: false } only on a real HTTP failure. A 200 with an empty or
+// `null` JSON body (which is what most of the route's action handlers return)
+// is reported as { ok: true, data: null }. Callers should branch on `ok`,
+// not on `data`, otherwise success-with-null-body is mistaken for failure.
+type PortalActionResult<T> = { ok: boolean; data: T | null };
+async function postPortalAction<T = unknown>(data: Record<string, string>): Promise<PortalActionResult<T>> {
   const fd = new FormData();
   for (const [k, v] of Object.entries(data)) fd.set(k, v);
   if (!fd.has("noRevalidate")) fd.set("noRevalidate", "1");
-  const res = await fetch(window.location.pathname + window.location.search, {
-    method: "POST",
-    body: fd,
-    headers: { Accept: "application/json" },
-  });
-  if (!res.ok) return null;
+  let res: Response;
   try {
-    return (await res.json()) as T;
+    res = await fetch(window.location.pathname + window.location.search, {
+      method: "POST",
+      body: fd,
+      headers: { Accept: "application/json" },
+    });
   } catch {
-    return null;
+    return { ok: false, data: null };
+  }
+  if (!res.ok) return { ok: false, data: null };
+  try {
+    const body = await res.json();
+    return { ok: true, data: body as T | null };
+  } catch {
+    return { ok: true, data: null };
   }
 }
 
@@ -6181,8 +6198,9 @@ function useAutoCompressVisionItems(items: VisionBoardItemType[]): void {
             intent: "get_vision_board_item",
             itemId: String(item.id),
           });
-          const images = Array.isArray(r?.item?.images) ? (r!.item!.images as string[]) : [];
-          const existingThumb = r?.item?.thumbnail ?? null;
+          const fetched = r.data?.item ?? null;
+          const images = Array.isArray(fetched?.images) ? (fetched!.images as string[]) : [];
+          const existingThumb = fetched?.thumbnail ?? null;
           const totalBefore = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
           const imagesAlreadySmall = totalBefore < 150_000 * Math.max(1, images.length);
 
@@ -6255,7 +6273,7 @@ function useAutoCompressSampleIterations(samples: SampleType[]): void {
               intent: "get_sample_full",
               sampleId: String(task.sampleId),
             });
-            sample = r?.sample ?? null;
+            sample = r.data?.sample ?? null;
             sampleCache.set(task.sampleId, sample);
           }
           const iter = sample?.iterations?.find((it) => it.id === task.iterationId);
@@ -6887,7 +6905,7 @@ function VisionItemDetailPanel({
       if (thumb) payload.thumbnail = thumb;
     }
     const result = await postPortalAction<unknown>(payload);
-    if (result === null) {
+    if (!result.ok) {
       // Save failed — leave previews in place so the user knows to retry.
       return;
     }
