@@ -1968,7 +1968,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // sequential background POSTs from each triggering a full loader run.
   if (formData?.get("noRevalidate") === "1") return false;
   const intent = formData?.get("intent") as string | null;
-  if (intent === "reorder_samples" || intent === "rename_sample") return false;
+  if (intent === "reorder_samples" || intent === "rename_sample" || intent === "update_sample_iteration") return false;
   if (intent === "update_vision_board_item" || intent === "reorder_vision_boards" || intent === "rename_vision_board" || intent === "reorder_vision_board_items") return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths") return false;
@@ -5447,7 +5447,23 @@ function SampleDetailPanel({
   }, [sample.name]);
 
   useEffect(() => {
-    setIterations(sample.iterations);
+    // Preserve any iteration images we've already lazy-loaded — the loader
+    // ships a slim projection (images: []), so a naive setIterations would
+    // wipe them out and cause images to flicker/disappear after every action
+    // that triggers revalidation.
+    setIterations((prev) => {
+      const prevById = new Map(prev.map((p) => [p.id, p]));
+      return sample.iterations.map((newIt) => {
+        const existing = prevById.get(newIt.id);
+        if (!existing) return newIt;
+        const newImgs = Array.isArray(newIt.images) ? (newIt.images as string[]) : [];
+        const existingImgs = Array.isArray(existing.images) ? (existing.images as string[]) : [];
+        if (existingImgs.length > newImgs.length) {
+          return { ...newIt, images: existingImgs };
+        }
+        return newIt;
+      });
+    });
   }, [sample.iterations]);
 
   // Lazy-fetch full iterations (with all images) on drawer open.
@@ -5550,13 +5566,22 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
   const [fabricType, setFabricType] = useState(iteration.fabricType ?? "");
   const [sampleSize, setSampleSize] = useState(iteration.sampleSize ?? "");
   const [buttonType, setButtonType] = useState(iteration.buttonType ?? "");
-  const images = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+  const [images, setImages] = useState<string[]>(() =>
+    Array.isArray(iteration.images) ? iteration.images as string[] : [],
+  );
 
   useEffect(() => { setNotes(iteration.notes ?? ""); }, [iteration.notes, iteration.id]);
   useEffect(() => { setNameDraft(iteration.name ?? ""); }, [iteration.name, iteration.id]);
   useEffect(() => { setFabricType(iteration.fabricType ?? ""); }, [iteration.fabricType, iteration.id]);
   useEffect(() => { setSampleSize(iteration.sampleSize ?? ""); }, [iteration.sampleSize, iteration.id]);
   useEffect(() => { setButtonType(iteration.buttonType ?? ""); }, [iteration.buttonType, iteration.id]);
+  // Sync images from the prop, but only take the prop's array when it has at
+  // least as many images as our current state. The loader returns slim
+  // (images: []) so a naive sync would wipe lazy-loaded or just-added images.
+  useEffect(() => {
+    const propImgs = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+    setImages((cur) => (propImgs.length >= cur.length ? propImgs : cur));
+  }, [iteration.images, iteration.id]);
 
   const submitUpdate = (fields: Record<string, string>) => {
     fetcher.submit({ intent: "update_sample_iteration", iterationId: String(iteration.id), ...fields }, { method: "post" });
@@ -5575,9 +5600,11 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
   const addImages = async (files: File[]) => {
     if (files.length === 0) return;
     const dataUrls = await Promise.all(files.map((file) => compressImageToDataUrl(file)));
-    const existing = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+    // Optimistic — show new images immediately, before the POST completes.
+    setImages((cur) => [...cur, ...dataUrls]);
+    const wasEmpty = images.length === 0;
     const payload: Record<string, string> = { addImages: JSON.stringify(dataUrls) };
-    if (existing.length === 0 && dataUrls.length > 0) {
+    if (wasEmpty && dataUrls.length > 0) {
       const thumb = await generateThumbnail(dataUrls[0]);
       if (thumb) payload.thumbnail = thumb;
     }
@@ -5585,7 +5612,10 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
   };
 
   const removeImage = (index: number) => {
-    if (window.confirm("Remove this image?")) submitUpdate({ removeImageIndex: String(index) });
+    if (!window.confirm("Remove this image?")) return;
+    // Optimistic — drop it from the UI immediately.
+    setImages((cur) => cur.filter((_, i) => i !== index));
+    submitUpdate({ removeImageIndex: String(index) });
   };
 
   const handleNotesChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
