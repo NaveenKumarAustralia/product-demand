@@ -5429,60 +5429,20 @@ function SampleDetailPanel({
   users: PortalUser[];
 }) {
   const fetcher = useFetcher();
-  const loadFetcher = useFetcher<{ sample: SampleType | null }>();
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(sample.name);
   const [iterations, setIterations] = useState<SampleIterationType[]>(sample.iterations);
-  const [imagesLoaded, setImagesLoaded] = useState<boolean>(() => {
-    // If every iteration's image array length matches its imageCount, no fetch needed.
-    return sample.iterations.every((it) => {
-      const imgs = Array.isArray(it.images) ? (it.images as string[]) : [];
-      const total = typeof it.imageCount === "number" ? it.imageCount : imgs.length;
-      return imgs.length >= total;
-    });
-  });
 
   useEffect(() => {
     setNameDraft(sample.name);
   }, [sample.name]);
 
   useEffect(() => {
-    // Preserve any iteration images we've already lazy-loaded — the loader
-    // ships a slim projection (images: []), so a naive setIterations would
-    // wipe them out and cause images to flicker/disappear after every action
-    // that triggers revalidation.
-    setIterations((prev) => {
-      const prevById = new Map(prev.map((p) => [p.id, p]));
-      return sample.iterations.map((newIt) => {
-        const existing = prevById.get(newIt.id);
-        if (!existing) return newIt;
-        const newImgs = Array.isArray(newIt.images) ? (newIt.images as string[]) : [];
-        const existingImgs = Array.isArray(existing.images) ? (existing.images as string[]) : [];
-        if (existingImgs.length > newImgs.length) {
-          return { ...newIt, images: existingImgs };
-        }
-        return newIt;
-      });
-    });
+    // The loader ships slim iteration data (no full images, just metadata
+    // and counts). Each iteration block renders images via URL routes, so we
+    // just use whatever the prop gives us.
+    setIterations(sample.iterations);
   }, [sample.iterations]);
-
-  // Lazy-fetch full iterations (with all images) on drawer open.
-  useEffect(() => {
-    if (imagesLoaded) return;
-    loadFetcher.submit(
-      { intent: "get_sample_full", sampleId: String(sample.id) },
-      { method: "post" },
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sample.id]);
-
-  useEffect(() => {
-    const fetched = loadFetcher.data?.sample;
-    if (fetched && fetched.id === sample.id && Array.isArray(fetched.iterations)) {
-      setIterations(fetched.iterations as SampleIterationType[]);
-      setImagesLoaded(true);
-    }
-  }, [loadFetcher.data, sample.id]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
@@ -5566,22 +5526,40 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
   const [fabricType, setFabricType] = useState(iteration.fabricType ?? "");
   const [sampleSize, setSampleSize] = useState(iteration.sampleSize ?? "");
   const [buttonType, setButtonType] = useState(iteration.buttonType ?? "");
-  const [images, setImages] = useState<string[]>(() =>
-    Array.isArray(iteration.images) ? iteration.images as string[] : [],
-  );
+  // Saved-image count + cache-buster version. Each image is rendered as
+  // <img src="/portal/image/sample/<id>/<i>?v=<version>"> so the browser
+  // handles parallel download and forever-caches binary content.
+  const [savedCount, setSavedCount] = useState<number>(() => {
+    if (typeof iteration.imageCount === "number") return iteration.imageCount;
+    const imgs = Array.isArray(iteration.images) ? iteration.images as string[] : [];
+    return imgs.length;
+  });
+  const [version, setVersion] = useState<number>(() => new Date(iteration.updatedAt).getTime());
+  type PendingImage = { id: string; blobUrl: string };
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
 
   useEffect(() => { setNotes(iteration.notes ?? ""); }, [iteration.notes, iteration.id]);
   useEffect(() => { setNameDraft(iteration.name ?? ""); }, [iteration.name, iteration.id]);
   useEffect(() => { setFabricType(iteration.fabricType ?? ""); }, [iteration.fabricType, iteration.id]);
   useEffect(() => { setSampleSize(iteration.sampleSize ?? ""); }, [iteration.sampleSize, iteration.id]);
   useEffect(() => { setButtonType(iteration.buttonType ?? ""); }, [iteration.buttonType, iteration.id]);
-  // Sync images from the prop, but only take the prop's array when it has at
-  // least as many images as our current state. The loader returns slim
-  // (images: []) so a naive sync would wipe lazy-loaded or just-added images.
   useEffect(() => {
-    const propImgs = Array.isArray(iteration.images) ? iteration.images as string[] : [];
-    setImages((cur) => (propImgs.length >= cur.length ? propImgs : cur));
-  }, [iteration.images, iteration.id]);
+    // Sync savedCount up if the loader (or background hook) has written
+    // more images than we know about. Don't reset down; our optimistic
+    // adds shouldn't be wiped by a slim loader payload.
+    const propCount = typeof iteration.imageCount === "number"
+      ? iteration.imageCount
+      : (Array.isArray(iteration.images) ? (iteration.images as string[]).length : 0);
+    setSavedCount((cur) => (propCount > cur ? propCount : cur));
+  }, [iteration.imageCount, iteration.images, iteration.id]);
+
+  // Revoke pending blob URLs when the iteration changes / unmounts.
+  useEffect(() => () => {
+    setPendingImages((cur) => {
+      cur.forEach((p) => URL.revokeObjectURL(p.blobUrl));
+      return [];
+    });
+  }, [iteration.id]);
 
   const submitUpdate = (fields: Record<string, string>) => {
     fetcher.submit({ intent: "update_sample_iteration", iterationId: String(iteration.id), ...fields }, { method: "post" });
@@ -5599,23 +5577,51 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
 
   const addImages = async (files: File[]) => {
     if (files.length === 0) return;
+    const previews: PendingImage[] = files.map((f) => ({
+      id: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `p_${Date.now()}_${Math.random()}`,
+      blobUrl: URL.createObjectURL(f),
+    }));
+    setPendingImages((cur) => [...cur, ...previews]);
+
     const dataUrls = await Promise.all(files.map((file) => compressImageToDataUrl(file)));
-    // Optimistic — show new images immediately, before the POST completes.
-    setImages((cur) => [...cur, ...dataUrls]);
-    const wasEmpty = images.length === 0;
+    const wasEmpty = savedCount === 0;
     const payload: Record<string, string> = { addImages: JSON.stringify(dataUrls) };
     if (wasEmpty && dataUrls.length > 0) {
       const thumb = await generateThumbnail(dataUrls[0]);
       if (thumb) payload.thumbnail = thumb;
     }
-    submitUpdate(payload);
+    const result = await postPortalAction({
+      intent: "update_sample_iteration",
+      iterationId: String(iteration.id),
+      ...payload,
+    });
+    if (result === null) return;
+    const promotedIds = new Set(previews.map((p) => p.id));
+    setSavedCount((c) => c + previews.length);
+    setVersion(Date.now());
+    setPendingImages((cur) => {
+      cur.filter((p) => promotedIds.has(p.id)).forEach((p) => URL.revokeObjectURL(p.blobUrl));
+      return cur.filter((p) => !promotedIds.has(p.id));
+    });
   };
 
-  const removeImage = (index: number) => {
+  const removeSavedImage = async (index: number) => {
     if (!window.confirm("Remove this image?")) return;
-    // Optimistic — drop it from the UI immediately.
-    setImages((cur) => cur.filter((_, i) => i !== index));
-    submitUpdate({ removeImageIndex: String(index) });
+    setSavedCount((c) => Math.max(0, c - 1));
+    await postPortalAction({
+      intent: "update_sample_iteration",
+      iterationId: String(iteration.id),
+      removeImageIndex: String(index),
+    });
+    setVersion(Date.now());
+  };
+
+  const removePendingImage = (id: string) => {
+    setPendingImages((cur) => {
+      const found = cur.find((p) => p.id === id);
+      if (found) URL.revokeObjectURL(found.blobUrl);
+      return cur.filter((p) => p.id !== id);
+    });
   };
 
   const handleNotesChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -5724,15 +5730,27 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
 
       {/* Images */}
       <div style={s.sampleIterationImages}>
-        {images.map((img, index) => (
-          <div key={index} style={s.sampleIterationImageWrap}>
+        {Array.from({ length: savedCount }).map((_, index) => (
+          <div key={`saved-${index}`} style={s.sampleIterationImageWrap}>
             <img
-              src={img}
+              src={`/portal/image/sample/${iteration.id}/${index}?v=${version}`}
               alt={`v${iteration.version} image ${index + 1}`}
               style={{ ...s.sampleIterationImage, cursor: "zoom-in" }}
+              loading="lazy"
+              decoding="async"
               onClick={() => setLightboxIndex(index)}
             />
-            <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeImage(index)} aria-label="Remove image">×</button>
+            <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeSavedImage(index)} aria-label="Remove image">×</button>
+          </div>
+        ))}
+        {pendingImages.map((p, i) => (
+          <div key={`pending-${p.id}`} style={s.sampleIterationImageWrap}>
+            <img
+              src={p.blobUrl}
+              alt={`uploading ${i + 1}`}
+              style={{ ...s.sampleIterationImage, opacity: 0.6 }}
+            />
+            <button type="button" style={s.sampleIterationImageRemove} onClick={() => removePendingImage(p.id)} aria-label="Cancel upload">×</button>
           </div>
         ))}
         <button type="button" style={s.sampleIterationAddImage} onClick={() => setUploadModalOpen(true)}>
@@ -5793,7 +5811,14 @@ function SampleIterationBlock({ iteration, users }: { iteration: SampleIteration
       </div>
 
       {lightboxIndex !== null && typeof document !== "undefined" && createPortal(
-        <ImageLightbox images={images} initialIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />,
+        <ImageLightbox
+          images={[
+            ...Array.from({ length: savedCount }, (_, i) => `/portal/image/sample/${iteration.id}/${i}?v=${version}`),
+            ...pendingImages.map((p) => p.blobUrl),
+          ]}
+          initialIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+        />,
         document.body,
       )}
       {uploadModalOpen && typeof document !== "undefined" && createPortal(
@@ -6695,19 +6720,17 @@ function VisionItemDetailPanel({
   onUpdateLocal: (patch: Partial<VisionBoardItemType>) => void;
 }) {
   const fetcher = useFetcher();
-  const loadFetcher = useFetcher<{ item: VisionBoardItemType | null }>();
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(item.name);
   const [notes, setNotes] = useState(item.notes ?? "");
   const [fields, setFields] = useState<VisionField[]>(() => visionFields(item));
-  const [images, setImages] = useState<string[]>(() => visionImages(item));
-  const [imagesLoaded, setImagesLoaded] = useState<boolean>(() => {
-    // If we already have all images on the listing payload, no fetch needed.
-    const loaderImgs = visionImages(item);
-    const total = typeof item.imageCount === "number" ? item.imageCount : loaderImgs.length;
-    return loaderImgs.length >= total;
-  });
-  const expectedImageCount = typeof item.imageCount === "number" ? item.imageCount : visionImages(item).length;
+  // Server image state — count + cache-buster version. We render saved images
+  // via /portal/image/vision/<id>/<i>?v=<version> so the browser handles
+  // download + caching natively (no big base64-in-JSON drawer payload).
+  const [savedCount, setSavedCount] = useState<number>(item.imageCount ?? visionImages(item).length);
+  const [version, setVersion] = useState<number>(() => new Date(item.updatedAt).getTime());
+  type PendingImage = { id: string; blobUrl: string; dataUrl: string };
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [imageDragOver, setImageDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -6715,24 +6738,19 @@ function VisionItemDetailPanel({
   useEffect(() => { setNameDraft(item.name); }, [item.name, item.id]);
   useEffect(() => { setNotes(item.notes ?? ""); }, [item.notes, item.id]);
   useEffect(() => { setFields(visionFields(item)); }, [item.fields, item.id]);
-
-  // Lazy-fetch full image set on drawer open (loader only ships first image as thumbnail).
   useEffect(() => {
-    if (imagesLoaded) return;
-    loadFetcher.submit(
-      { intent: "get_vision_board_item", itemId: String(item.id) },
-      { method: "post" },
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // Keep savedCount in sync if a fresh prop arrives with a higher count.
+    const propCount = item.imageCount ?? visionImages(item).length;
+    setSavedCount((cur) => (propCount > cur ? propCount : cur));
+  }, [item.imageCount, item.images, item.id]);
+
+  // Cleanup pending blob URLs when the drawer closes / a new item is selected.
+  useEffect(() => () => {
+    setPendingImages((cur) => {
+      cur.forEach((p) => URL.revokeObjectURL(p.blobUrl));
+      return [];
+    });
   }, [item.id]);
-
-  useEffect(() => {
-    const fetched = loadFetcher.data?.item;
-    if (fetched && fetched.id === item.id) {
-      setImages(visionImages(fetched));
-      setImagesLoaded(true);
-    }
-  }, [loadFetcher.data, item.id]);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -6758,37 +6776,62 @@ function VisionItemDetailPanel({
     }
   };
 
-  // Listing only needs the first image as thumbnail — keep parent state slim.
-  const pushThumbnailToParent = (next: string[]) => {
-    onUpdateLocal({ images: next.length > 0 ? [next[0]] : [], imageCount: next.length });
-  };
-
   const addImages = async (files: File[]) => {
     if (files.length === 0) return;
+    // Show preview blobs immediately, before compression / upload.
+    const previews: PendingImage[] = files.map((f) => ({
+      id: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `p_${Date.now()}_${Math.random()}`,
+      blobUrl: URL.createObjectURL(f),
+      dataUrl: "",
+    }));
+    setPendingImages((cur) => [...cur, ...previews]);
+
     const dataUrls = await Promise.all(files.map((file) => compressImageToDataUrl(file)));
-    const next = [...images, ...dataUrls];
-    setImages(next);
-    pushThumbnailToParent(next);
+    const wasEmpty = savedCount === 0;
     const payload: Record<string, string> = {
       intent: "update_vision_board_item",
       itemId: String(item.id),
       addImages: JSON.stringify(dataUrls),
     };
-    // If we just added the first image of this item, pre-generate the small
-    // thumbnail so the card paints fast on next load.
-    if (images.length === 0 && dataUrls.length > 0) {
+    if (wasEmpty && dataUrls.length > 0) {
       const thumb = await generateThumbnail(dataUrls[0]);
       if (thumb) payload.thumbnail = thumb;
     }
-    fetcher.submit(payload, { method: "post" });
+    const result = await postPortalAction<unknown>(payload);
+    if (result === null) {
+      // Save failed — leave previews in place so the user knows to retry.
+      return;
+    }
+    // Promote previews to saved entries.
+    const promotedIds = new Set(previews.map((p) => p.id));
+    setSavedCount((c) => c + previews.length);
+    setVersion(Date.now());
+    setPendingImages((cur) => {
+      cur.filter((p) => promotedIds.has(p.id)).forEach((p) => URL.revokeObjectURL(p.blobUrl));
+      return cur.filter((p) => !promotedIds.has(p.id));
+    });
+    onUpdateLocal({ imageCount: savedCount + previews.length });
   };
 
-  const removeImage = (index: number) => {
+  const removeSavedImage = async (index: number) => {
     if (!window.confirm("Remove this image?")) return;
-    const nextImages = images.filter((_, i) => i !== index);
-    setImages(nextImages);
-    pushThumbnailToParent(nextImages);
-    fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), removeImageIndex: String(index) }, { method: "post" });
+    setSavedCount((c) => Math.max(0, c - 1));
+    onUpdateLocal({ imageCount: Math.max(0, savedCount - 1) });
+    await postPortalAction({
+      intent: "update_vision_board_item",
+      itemId: String(item.id),
+      removeImageIndex: String(index),
+    });
+    // Bust browser cache for the now-shifted indices.
+    setVersion(Date.now());
+  };
+
+  const removePendingImage = (id: string) => {
+    setPendingImages((cur) => {
+      const found = cur.find((p) => p.id === id);
+      if (found) URL.revokeObjectURL(found.blobUrl);
+      return cur.filter((p) => p.id !== id);
+    });
   };
 
   const saveFields = (next: VisionField[]) => {
@@ -6842,20 +6885,27 @@ function VisionItemDetailPanel({
           <div style={s.sampleIterationBlock}>
             {/* Images */}
             <div style={s.sampleIterationImages}>
-              {images.map((img, index) => (
-                <div key={index} style={s.sampleIterationImageWrap}>
+              {Array.from({ length: savedCount }).map((_, index) => (
+                <div key={`saved-${index}`} style={s.sampleIterationImageWrap}>
                   <img
-                    src={img}
+                    src={`/portal/image/vision/${item.id}/${index}?v=${version}`}
                     alt={`${item.name} ${index + 1}`}
                     style={{ ...s.sampleIterationImage, cursor: "zoom-in" }}
+                    loading="lazy"
+                    decoding="async"
                     onClick={() => setLightboxIndex(index)}
                   />
-                  <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeImage(index)} aria-label="Remove image">×</button>
+                  <button type="button" style={s.sampleIterationImageRemove} onClick={() => removeSavedImage(index)} aria-label="Remove image">×</button>
                 </div>
               ))}
-              {!imagesLoaded && expectedImageCount > images.length && Array.from({ length: expectedImageCount - images.length }).map((_, i) => (
-                <div key={`skeleton-${i}`} style={{ ...s.sampleIterationImageWrap, background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8", fontSize: 11 }}>
-                  Loading…
+              {pendingImages.map((p, i) => (
+                <div key={`pending-${p.id}`} style={s.sampleIterationImageWrap}>
+                  <img
+                    src={p.blobUrl}
+                    alt={`${item.name} uploading ${i + 1}`}
+                    style={{ ...s.sampleIterationImage, opacity: 0.6 }}
+                  />
+                  <button type="button" style={s.sampleIterationImageRemove} onClick={() => removePendingImage(p.id)} aria-label="Cancel upload">×</button>
                 </div>
               ))}
               <div
@@ -6936,7 +6986,14 @@ function VisionItemDetailPanel({
       </div>
 
       {lightboxIndex !== null && typeof document !== "undefined" && createPortal(
-        <ImageLightbox images={images} initialIndex={lightboxIndex} onClose={() => setLightboxIndex(null)} />,
+        <ImageLightbox
+          images={[
+            ...Array.from({ length: savedCount }, (_, i) => `/portal/image/vision/${item.id}/${i}?v=${version}`),
+            ...pendingImages.map((p) => p.blobUrl),
+          ]}
+          initialIndex={lightboxIndex}
+          onClose={() => setLightboxIndex(null)}
+        />,
         document.body,
       )}
     </>
