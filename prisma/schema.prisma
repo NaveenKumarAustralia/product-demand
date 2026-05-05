@@ -179,6 +179,17 @@ model VisionBoardItem {
   updatedAt DateTime     @updatedAt
 }
 
+model Collection {
+  id        Int      @id @default(autoincrement())
+  name      String   @default("Untitled collection")
+  sortOrder Int      @default(0)
+  thumbnail String?
+  columns   Json     @default("[]")
+  rows      Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 model SampleIteration {
   id          Int      @id @default(autoincrement())
   sampleId    Int

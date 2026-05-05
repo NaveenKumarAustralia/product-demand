@@ -226,6 +226,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
       })()
     : [];
+  // Collections listing — slim projection (no rows JSON, no thumbnail bytes).
+  // The drawer fetches the full collection (rows + columns) on open.
+  const collections = page === "collections"
+    ? await prisma.$queryRawUnsafe<Array<{
+        id: number; name: string; sortOrder: number;
+        hasThumbnail: boolean; rowCount: number;
+        createdAt: Date; updatedAt: Date;
+      }>>(`
+        SELECT id, name, "sortOrder",
+          (thumbnail IS NOT NULL) AS "hasThumbnail",
+          CASE WHEN jsonb_typeof(rows) = 'array' THEN jsonb_array_length(rows) ELSE 0 END AS "rowCount",
+          "createdAt", "updatedAt"
+        FROM "Collection"
+        ORDER BY "sortOrder" ASC, "createdAt" ASC
+      `).then((rows) => rows.map((r) => ({
+        id: r.id, name: r.name, sortOrder: r.sortOrder,
+        hasThumbnail: Boolean(r.hasThumbnail),
+        rowCount: Number(r.rowCount),
+        createdAt: r.createdAt, updatedAt: r.updatedAt,
+      }))).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date }>)
+    : [];
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = needsActivityLogs
     ? await prisma.activityLog.findMany({
@@ -420,6 +441,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     inrToAudRate,
     samples,
     visionBoards,
+    collections,
     fabricStockIndex,
   };
   } catch (error) {
@@ -1661,6 +1683,67 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  // ─── Collections ─────────────────────────────────────────────────────────────
+  if (intent === "add_collection") {
+    const name = String(form.get("name") ?? "").trim() || "Untitled collection";
+    const existing = await prisma.collection.count();
+    const initialThumb = form.get("thumbnail");
+    const thumbnail = typeof initialThumb === "string" && initialThumb.length > 0 ? initialThumb : null;
+    await prisma.collection.create({ data: { name, sortOrder: existing, thumbnail } });
+    return null;
+  }
+  if (intent === "rename_collection") {
+    const id = Number(form.get("collectionId"));
+    const name = String(form.get("name") ?? "").trim();
+    if (!id || !name) return null;
+    await prisma.collection.update({ where: { id }, data: { name } });
+    return null;
+  }
+  if (intent === "delete_collection") {
+    const id = Number(form.get("collectionId"));
+    if (!id) return null;
+    await prisma.collection.delete({ where: { id } });
+    return null;
+  }
+  if (intent === "reorder_collections") {
+    const ids = JSON.parse(String(form.get("collectionIds") ?? "[]")) as number[];
+    await Promise.all(ids.map((id, index) => prisma.collection.update({ where: { id }, data: { sortOrder: index } })));
+    return null;
+  }
+  if (intent === "get_collection_full") {
+    const id = Number(form.get("collectionId"));
+    if (!id) return jsonResponse({ collection: null });
+    const collection = await prisma.collection.findUnique({ where: { id } }).catch(() => null);
+    return jsonResponse({ collection });
+  }
+  if (intent === "update_collection") {
+    const id = Number(form.get("collectionId"));
+    if (!id) return null;
+    const data: Record<string, unknown> = { updatedAt: new Date() };
+    if (form.has("rows")) {
+      try {
+        const rows = JSON.parse(String(form.get("rows")));
+        if (Array.isArray(rows)) data.rows = rows;
+      } catch { /* keep existing */ }
+    }
+    if (form.has("columns")) {
+      try {
+        const columns = JSON.parse(String(form.get("columns")));
+        if (Array.isArray(columns)) data.columns = columns;
+      } catch { /* keep existing */ }
+    }
+    if (form.has("thumbnail")) {
+      const thumb = String(form.get("thumbnail") ?? "");
+      data.thumbnail = thumb || null;
+    }
+    if (form.has("name")) {
+      const name = String(form.get("name") ?? "").trim();
+      if (name) data.name = name;
+    }
+    await prisma.collection.update({ where: { id }, data });
+    return null;
+  }
+
   if (intent === "update_fabric_cell") {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
@@ -1887,11 +1970,13 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   const intent = formData?.get("intent") as string | null;
   if (intent === "reorder_samples" || intent === "rename_sample") return false;
   if (intent === "update_vision_board_item" || intent === "reorder_vision_boards" || intent === "rename_vision_board" || intent === "reorder_vision_board_items") return false;
+  if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths") return false;
   // Read-only fetchers used by drawers and background hooks don't change
   // any data the page renders, so the loader doesn't need to re-run.
   if (intent === "get_vision_board_item" || intent === "get_sample_full"
-    || intent === "get_vision_thumbnails" || intent === "get_sample_iteration_thumbnails") return false;
+    || intent === "get_vision_thumbnails" || intent === "get_sample_iteration_thumbnails"
+    || intent === "get_collection_full") return false;
   return defaultShouldRevalidate;
 };
 
@@ -2434,9 +2519,10 @@ const ALL_NAV_ITEMS = [
   { id: "samples", label: "Samples", href: "/portal?page=samples" },
   { id: "newproduct", label: "New Product Orders", href: "/portal?page=newproduct" },
   { id: "visionboard", label: "Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
+  { id: "collections", label: "Collections", href: "/portal?page=collections" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboard"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboard", "collections"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -4030,6 +4116,7 @@ export default function PortalDashboard() {
     inrToAudRate,
     samples,
     visionBoards,
+    collections,
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -4129,6 +4216,7 @@ export default function PortalDashboard() {
     : page === "productinfo" ? "Product Information"
     : page === "samples" ? "Samples"
     : page === "visionboard" ? "Vision Board"
+    : page === "collections" ? "Collections"
     : page === "newproduct" ? "New Product Orders"
     : selectedProductGroup || "Existing Products Restock";
   const orderedNavItems = navOrder
@@ -4365,6 +4453,10 @@ export default function PortalDashboard() {
         ) : page === "visionboard" ? (
           <VisionBoardPanel
             boards={visionBoards}
+          />
+        ) : page === "collections" ? (
+          <CollectionsPanel
+            collections={collections}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -6818,6 +6910,548 @@ function VisionItemDetailPanel({
         document.body,
       )}
     </>
+  );
+}
+
+// ─── Collections ─────────────────────────────────────────────────────────────
+
+type CollectionListItem = {
+  id: number;
+  name: string;
+  sortOrder: number;
+  hasThumbnail: boolean;
+  rowCount: number;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+};
+
+type CollectionColumnDef = {
+  id: string;
+  label: string;
+  type?: "text" | "number" | "date";
+  width?: number;
+};
+
+type CollectionFullType = {
+  id: number;
+  name: string;
+  sortOrder: number;
+  thumbnail: string | null;
+  columns: unknown;
+  rows: unknown;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+};
+
+// Default columns for a fresh collection — modelled after the spreadsheet
+// layout the user shared. Each column is just a string field for v1; image /
+// dropdown / date-picker cell types can be added per-column later.
+const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
+  { id: "release", label: "Release", width: 90 },
+  { id: "modelPicture", label: "Model PICTURE", width: 120 },
+  { id: "fabric", label: "FABRIC", width: 120 },
+  { id: "name", label: "Name", width: 160 },
+  { id: "notes", label: "Notes", width: 140 },
+  { id: "sku", label: "SKU", width: 80 },
+  { id: "xs", label: "XS", type: "number", width: 50 },
+  { id: "s", label: "S", type: "number", width: 50 },
+  { id: "m", label: "M", type: "number", width: 50 },
+  { id: "l", label: "L", type: "number", width: 50 },
+  { id: "xl", label: "XL", type: "number", width: 50 },
+  { id: "xxl", label: "2XL", type: "number", width: 50 },
+  { id: "xxxl", label: "3XL", type: "number", width: 50 },
+  { id: "sm", label: "S/M", type: "number", width: 50 },
+  { id: "ml", label: "M/L", type: "number", width: 50 },
+  { id: "lxl", label: "L/XL", type: "number", width: 50 },
+  { id: "totalOrdered", label: "TOTAL Ordered", type: "number", width: 100 },
+  { id: "status", label: "STATUS", width: 110 },
+  { id: "sample", label: "Sample", width: 110 },
+  { id: "sampleReceived", label: "Sample RECEIVED", type: "date", width: 120 },
+  { id: "price", label: "Price", type: "number", width: 70 },
+  { id: "cost", label: "Cost", type: "number", width: 70 },
+  { id: "eta", label: "ETA", type: "date", width: 90 },
+  { id: "maniPicsTaken", label: "mani Pics Taken", width: 130 },
+  { id: "loadingNotes", label: "Loading Notes", width: 140 },
+  { id: "duplicateFrom", label: "DUPLICATE FROM", width: 140 },
+  { id: "modelHeightSize", label: "Model height and size", width: 130 },
+  { id: "createdBy", label: "Created by", width: 100 },
+  { id: "link", label: "Link", width: 130 },
+  { id: "title", label: "Title", width: 120 },
+  { id: "description", label: "Description", width: 160 },
+  { id: "categories", label: "Categories", width: 110 },
+  { id: "productType", label: "Product type", width: 110 },
+  { id: "collectionsField", label: "Collections", width: 110 },
+  { id: "tags", label: "Tags", width: 100 },
+  { id: "variants", label: "Variants", width: 100 },
+  { id: "hsCode", label: "HS Code", width: 90 },
+  { id: "countryOfOrigin", label: "Country of Origin", width: 130 },
+  { id: "compareAtPrice", label: "Compare at price", type: "number", width: 110 },
+  { id: "complProducts", label: "Compl. products", width: 130 },
+  { id: "colour", label: "Colour", width: 90 },
+  { id: "sizeGuide", label: "Size guide", width: 110 },
+  { id: "seoTitleDesc", label: "SEO (title, desc)", width: 130 },
+  { id: "activation", label: "Activation", width: 100 },
+  { id: "schedules", label: "Schedules", width: 100 },
+  { id: "reviews", label: "Reviews", width: 90 },
+  { id: "swatches", label: "Swatches", width: 100 },
+];
+
+function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
+  if (!Array.isArray(value) || value.length === 0) return DEFAULT_COLLECTION_COLUMNS;
+  return (value as Array<Record<string, unknown>>).map((c, i) => ({
+    id: typeof c?.id === "string" ? c.id : `col_${i}`,
+    label: typeof c?.label === "string" ? c.label : `Column ${i + 1}`,
+    type: c?.type === "number" || c?.type === "date" ? c.type : "text",
+    width: typeof c?.width === "number" ? c.width : undefined,
+  }));
+}
+function normalizeCollectionRows(value: unknown): Record<string, string>[] {
+  if (!Array.isArray(value)) return [];
+  return (value as Array<Record<string, unknown>>).map((row) => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(row ?? {})) out[k] = v == null ? "" : String(v);
+    return out;
+  });
+}
+
+function CollectionsPanel({ collections: initialCollections }: { collections: CollectionListItem[] }) {
+  const fetcher = useFetcher();
+  const [collections, setCollections] = useState<CollectionListItem[]>(initialCollections);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [dragOverId, setDragOverId] = useState<number | null>(null);
+  const deletedRef = useRef<Set<number>>(new Set());
+  const [addOpen, setAddOpen] = useState(false);
+  const [addName, setAddName] = useState("");
+
+  useEffect(() => {
+    setCollections(initialCollections.filter((c) => !deletedRef.current.has(c.id)));
+  }, [initialCollections]);
+
+  const selectedCollection = collections.find((c) => c.id === selectedId) ?? null;
+
+  const submitAdd = () => {
+    const name = addName.trim() || "Untitled collection";
+    fetcher.submit({ intent: "add_collection", name }, { method: "post" });
+    setAddOpen(false);
+    setAddName("");
+  };
+
+  const handleDelete = (id: number) => {
+    deletedRef.current.add(id);
+    setCollections((prev) => prev.filter((c) => c.id !== id));
+    if (selectedId === id) setSelectedId(null);
+    fetcher.submit({ intent: "delete_collection", collectionId: String(id) }, { method: "post" });
+  };
+
+  const handleRename = (id: number, name: string) => {
+    setCollections((prev) => prev.map((c) => c.id === id ? { ...c, name } : c));
+    fetcher.submit({ intent: "rename_collection", collectionId: String(id), name }, { method: "post" });
+  };
+
+  const reorder = (targetId: number) => {
+    if (!dragId || dragId === targetId) return;
+    const fromIdx = collections.findIndex((c) => c.id === dragId);
+    const toIdx = collections.findIndex((c) => c.id === targetId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const next = [...collections];
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    setCollections(next);
+    fetcher.submit({ intent: "reorder_collections", collectionIds: JSON.stringify(next.map((c) => c.id)) }, { method: "post" });
+  };
+
+  return (
+    <div style={s.productInfoPage}>
+      <div style={s.productInfoToolbar}>
+        <div style={s.productInfoToolbarLeft}>
+          <div>
+            <h2 style={s.productInfoHeading}>Collections</h2>
+            <div style={s.productInfoMeta}>{collections.length} collection{collections.length !== 1 ? "s" : ""}</div>
+          </div>
+        </div>
+        <div style={s.productInfoActions}>
+          <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
+            Add Collection
+          </button>
+        </div>
+      </div>
+
+      <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
+        {collections.map((c) => (
+          <CollectionCard
+            key={c.id}
+            collection={c}
+            isDragging={dragId === c.id}
+            isDragOver={dragOverId === c.id && dragId !== c.id}
+            onOpen={() => setSelectedId(c.id)}
+            onRename={(name) => handleRename(c.id, name)}
+            onDelete={() => handleDelete(c.id)}
+            onDragStart={(e) => { setDragId(c.id); e.dataTransfer.effectAllowed = "move"; }}
+            onDragOver={(e) => { if (!dragId) return; e.preventDefault(); setDragOverId(c.id); }}
+            onDragLeave={() => setDragOverId((cur) => cur === c.id ? null : cur)}
+            onDrop={(e) => { e.preventDefault(); reorder(c.id); setDragId(null); setDragOverId(null); }}
+            onDragEnd={() => { setDragId(null); setDragOverId(null); }}
+          />
+        ))}
+        {collections.length === 0 && (
+          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+            No collections yet. Click Add Collection to create your first one.
+          </div>
+        )}
+      </div>
+
+      {addOpen && typeof document !== "undefined" && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ background: "#fff", borderRadius: 10, padding: 22, minWidth: 360, boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>New Collection</h3>
+            <input
+              autoFocus
+              value={addName}
+              onChange={(e) => setAddName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submitAdd(); if (e.key === "Escape") setAddOpen(false); }}
+              placeholder="Collection name"
+              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "8px 10px", fontSize: 14, boxSizing: "border-box" }}
+            />
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 14 }}>
+              <button type="button" onClick={() => setAddOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "8px 14px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+              <button type="button" onClick={submitAdd} style={{ background: "#111827", color: "#fff", border: "none", borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Create</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {selectedCollection && typeof document !== "undefined" && createPortal(
+        <CollectionDetailPanel
+          listItem={selectedCollection}
+          onClose={() => setSelectedId(null)}
+          onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
+        />,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function CollectionCard({
+  collection,
+  isDragging,
+  isDragOver,
+  onOpen,
+  onRename,
+  onDelete,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onDragEnd,
+}: {
+  collection: CollectionListItem;
+  isDragging: boolean;
+  isDragOver: boolean;
+  onOpen: () => void;
+  onRename: (name: string) => void;
+  onDelete: () => void;
+  onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragLeave: () => void;
+  onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+}) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [hover, setHover] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(collection.name);
+  useEffect(() => { setDraft(collection.name); }, [collection.name]);
+
+  return (
+    <div
+      style={{ ...s.productStyleCard, ...(isDragging ? s.productStyleCardDragging : {}), ...(isDragOver ? s.productStyleCardDropTarget : {}), cursor: "pointer" }}
+      onClick={() => { if (!editing) onOpen(); }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      <span
+        draggable
+        style={{ ...s.productStyleDragHandle, pointerEvents: "auto", cursor: "grab", opacity: hover ? 0.6 : 0.25, transition: "opacity 0.15s" }}
+        title="Drag to reorder"
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onClick={(e) => e.stopPropagation()}
+      >::</span>
+      {(hover || confirmDelete) && (
+        <button
+          type="button"
+          title="Delete collection"
+          onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
+          style={{ position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: "50%", border: "none", background: "#ef4444", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, lineHeight: 1, padding: 0, zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" }}
+        >×</button>
+      )}
+      {confirmDelete && (
+        <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 8 }} onClick={(e) => e.stopPropagation()}>
+          <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>Delete this collection?</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Delete</button>
+            <button type="button" onClick={(e) => { e.stopPropagation(); setConfirmDelete(false); }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+          </div>
+        </div>
+      )}
+      <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8" }}>
+        {collection.hasThumbnail ? (
+          <img
+            src={`/portal/thumbnail/collection/${collection.id}?v=${new Date(collection.updatedAt).getTime()}`}
+            alt={collection.name}
+            style={s.productStyleImage}
+            loading="lazy"
+            decoding="async"
+          />
+        ) : (
+          <div style={s.productStyleImageEmpty}>No image yet</div>
+        )}
+      </div>
+      <div style={{ ...s.productStyleCardBody, paddingBottom: 14 }}>
+        {editing ? (
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={() => { setEditing(false); const t = draft.trim(); if (t && t !== collection.name) onRename(t); else setDraft(collection.name); }}
+            onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setDraft(collection.name); setEditing(false); } }}
+            style={{ ...s.productStyleTitle, border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 6px", textAlign: "center", width: "90%" }}
+          />
+        ) : (
+          <span
+            style={s.productStyleTitle}
+            onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+            title="Click to rename"
+          >{collection.name || "Untitled"}</span>
+        )}
+        <span style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
+          {collection.rowCount} row{collection.rowCount !== 1 ? "s" : ""}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function CollectionDetailPanel({
+  listItem,
+  onClose,
+  onLocalNameChange,
+}: {
+  listItem: CollectionListItem;
+  onClose: () => void;
+  onLocalNameChange: (name: string) => void;
+}) {
+  const fetcher = useFetcher();
+  const loadFetcher = useFetcher<{ collection: CollectionFullType | null }>();
+  const [columns, setColumns] = useState<CollectionColumnDef[]>(DEFAULT_COLLECTION_COLUMNS);
+  const [rows, setRows] = useState<Record<string, string>[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [nameDraft, setNameDraft] = useState(listItem.name);
+  const [editingName, setEditingName] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    loadFetcher.submit(
+      { intent: "get_collection_full", collectionId: String(listItem.id) },
+      { method: "post" },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id]);
+
+  useEffect(() => {
+    const col = loadFetcher.data?.collection;
+    if (col && col.id === listItem.id) {
+      setColumns(normalizeCollectionColumns(col.columns));
+      setRows(normalizeCollectionRows(col.rows));
+      setLoaded(true);
+    }
+  }, [loadFetcher.data, listItem.id]);
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
+  const persistRows = (next: Record<string, string>[]) => {
+    fetcher.submit(
+      { intent: "update_collection", collectionId: String(listItem.id), rows: JSON.stringify(next) },
+      { method: "post" },
+    );
+  };
+
+  const updateCell = (rowIdx: number, colId: string, value: string) => {
+    setRows((prev) => {
+      const next = prev.map((r, i) => i === rowIdx ? { ...r, [colId]: value } : r);
+      persistRows(next);
+      return next;
+    });
+  };
+
+  const addRow = () => {
+    setRows((prev) => {
+      const next = [...prev, {} as Record<string, string>];
+      persistRows(next);
+      return next;
+    });
+  };
+
+  const removeRow = (idx: number) => {
+    if (!window.confirm("Delete this row?")) return;
+    setRows((prev) => {
+      const next = prev.filter((_, i) => i !== idx);
+      persistRows(next);
+      return next;
+    });
+  };
+
+  const saveName = () => {
+    setEditingName(false);
+    const t = nameDraft.trim();
+    if (t && t !== listItem.name) {
+      onLocalNameChange(t);
+      fetcher.submit({ intent: "rename_collection", collectionId: String(listItem.id), name: t }, { method: "post" });
+    } else {
+      setNameDraft(listItem.name);
+    }
+  };
+
+  const handleCoverUpload = async (file: File) => {
+    const dataUrl = await compressImageToDataUrl(file);
+    const thumb = await generateThumbnail(dataUrl);
+    fetcher.submit(
+      { intent: "update_collection", collectionId: String(listItem.id), thumbnail: thumb || dataUrl },
+      { method: "post" },
+    );
+  };
+
+  // Full-screen overlay (a thin sidebar wouldn't fit a 30-column spreadsheet).
+  return (
+    <>
+      <div style={{ position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.55)", zIndex: 1199 }} onClick={onClose} />
+      <div style={{ position: "fixed", inset: "24px 24px 24px 24px", background: "#fff", borderRadius: 12, zIndex: 1200, display: "flex", flexDirection: "column", boxShadow: "0 25px 60px rgba(0,0,0,0.35)", overflow: "hidden" }}>
+        <div style={{ padding: "14px 20px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {editingName ? (
+              <input
+                autoFocus
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onBlur={saveName}
+                onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(listItem.name); setEditingName(false); } }}
+                style={{ fontSize: 18, fontWeight: 700, border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px" }}
+              />
+            ) : (
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, cursor: "pointer" }} onClick={() => setEditingName(true)} title="Click to rename">
+                {listItem.name || "Untitled"}
+              </h2>
+            )}
+            <span style={{ fontSize: 12, color: "#6b7280" }}>{rows.length} row{rows.length !== 1 ? "s" : ""}</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+            >Set cover image</button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void handleCoverUpload(file);
+                e.target.value = "";
+              }}
+            />
+            <button type="button" onClick={onClose} aria-label="Close" style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 16, cursor: "pointer" }}>×</button>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflow: "auto", background: "#f9fafb" }}>
+          {!loaded ? (
+            <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
+          ) : (
+            <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: 12, fontFamily: "inherit", background: "#fff", minWidth: "100%" }}>
+              <thead>
+                <tr>
+                  <th style={{ position: "sticky", top: 0, left: 0, zIndex: 3, background: "#f3f4f6", borderBottom: "1px solid #d1d5db", borderRight: "1px solid #e5e7eb", padding: "6px 8px", fontWeight: 600, color: "#6b7280", minWidth: 40 }}>#</th>
+                  {columns.map((col) => (
+                    <th key={col.id} style={{ position: "sticky", top: 0, zIndex: 2, background: "#fde4d8", borderBottom: "1px solid #d1d5db", borderRight: "1px solid #e5e7eb", padding: "6px 8px", fontWeight: 700, color: "#7c2d12", textAlign: "center", whiteSpace: "nowrap", minWidth: col.width ?? 90 }}>
+                      {col.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, rIdx) => (
+                  <tr key={rIdx}>
+                    <td style={{ position: "sticky", left: 0, background: "#f9fafb", borderBottom: "1px solid #e5e7eb", borderRight: "1px solid #e5e7eb", padding: 0, textAlign: "center", color: "#9ca3af" }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: "2px 4px" }}>
+                        <span>{rIdx + 1}</span>
+                        <button type="button" title="Delete row" onClick={() => removeRow(rIdx)} style={{ background: "transparent", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: "2px 4px" }}>×</button>
+                      </div>
+                    </td>
+                    {columns.map((col) => (
+                      <td key={col.id} style={{ borderBottom: "1px solid #f1f5f9", borderRight: "1px solid #f1f5f9", padding: 0, minWidth: col.width ?? 90, verticalAlign: "top" }}>
+                        <CollectionCell
+                          value={row[col.id] ?? ""}
+                          type={col.type ?? "text"}
+                          onCommit={(v) => updateCell(rIdx, col.id, v)}
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={columns.length + 1} style={{ padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                      No rows yet. Click + Add row below to add one.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div style={{ padding: "10px 16px", borderTop: "1px solid #e5e7eb", flexShrink: 0, background: "#fff" }}>
+          <button type="button" onClick={addRow} style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>+ Add row</button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function CollectionCell({
+  value,
+  type,
+  onCommit,
+}: {
+  value: string;
+  type: "text" | "number" | "date";
+  onCommit: (next: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  const inputType = type === "number" ? "number" : type === "date" ? "date" : "text";
+  return (
+    <input
+      type={inputType}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => { if (draft !== value) onCommit(draft); }}
+      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+      style={{ width: "100%", border: "none", outline: "none", padding: "6px 8px", fontSize: 12, fontFamily: "inherit", background: "transparent", boxSizing: "border-box" }}
+    />
   );
 }
 
