@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
 import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams } from "react-router";
@@ -4123,11 +4123,16 @@ export default function PortalDashboard() {
   const columnWidthsFetcher = useFetcher();
   const undoFetcher = useFetcher();
   const [addRowNonce, setAddRowNonce] = useState(0);
+  // Reset the restock table's inner scroll BEFORE first paint — useEffect
+  // runs after paint, which made the page flash at the bottom and visibly
+  // jump up. Callback ref + useLayoutEffect run before paint so it renders
+  // at the top from the start.
   const restockTableScrollRef = useRef<HTMLDivElement | null>(null);
-  // Make sure the restock table opens scrolled to the top — without this it
-  // sometimes lands at the bottom (long table + browser scroll restoration on
-  // the inner overflow:auto container).
-  useEffect(() => {
+  const setRestockTableScrollRef = (node: HTMLDivElement | null) => {
+    restockTableScrollRef.current = node;
+    if (node) node.scrollTop = 0;
+  };
+  useLayoutEffect(() => {
     if (page !== "restock") return;
     const el = restockTableScrollRef.current;
     if (el) el.scrollTop = 0;
@@ -4471,7 +4476,7 @@ export default function PortalDashboard() {
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : (
-          <div className="portal-table-scroll" style={s.tableWrap} ref={restockTableScrollRef}>
+          <div className="portal-table-scroll" style={s.tableWrap} ref={setRestockTableScrollRef}>
             <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleTableGridKeyDown}>
               <colgroup>
                 <col style={{ width: 48 }} />
