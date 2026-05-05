@@ -94,7 +94,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           type RawIterSlim = {
             id: number; sampleId: number; version: number; name: string | null; notes: string | null;
             fabricType: string | null; sampleSize: string | null; buttonType: string | null; status: string;
-            imageCount: number; taggedUsers: unknown;
+            imageCount: number; hasThumbnail: boolean; taggedUsers: unknown;
             createdAt: Date; updatedAt: Date;
           };
           const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
@@ -103,6 +103,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               CASE WHEN jsonb_typeof(images) = 'array'
                 THEN jsonb_array_length(images) ELSE 0
               END AS "imageCount",
+              (thumbnail IS NOT NULL) AS "hasThumbnail",
               "taggedUsers", "createdAt", "updatedAt"
             FROM "SampleIteration"
             ORDER BY version ASC
@@ -116,6 +117,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               status: it.status,
               images: [] as string[],
               imageCount: Number(it.imageCount),
+              hasThumbnail: Boolean(it.hasThumbnail),
               taggedUsers: it.taggedUsers,
               createdAt: it.createdAt, updatedAt: it.updatedAt,
             })),
@@ -182,9 +184,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           if (boards.length === 0) return [];
           // Raw SQL: ship NO image bytes in the loader at all. Thumbnails are
           // batch-fetched after first paint so the initial page response stays tiny.
+          // hasThumbnail lets the silent backfill hook skip already-processed
+          // items without fetching their full image payload.
           const items = await prisma.$queryRaw<Array<{
             id: number; boardId: number; name: string; sortOrder: number;
-            imageCount: number;
+            imageCount: number; hasThumbnail: boolean;
             fields: unknown; notes: string | null;
             createdAt: Date; updatedAt: Date;
           }>>`
@@ -194,6 +198,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 THEN jsonb_array_length(images)
                 ELSE 0
               END AS "imageCount",
+              (thumbnail IS NOT NULL) AS "hasThumbnail",
               fields, notes, "createdAt", "updatedAt"
             FROM "VisionBoardItem"
             ORDER BY "sortOrder" ASC, "createdAt" ASC
@@ -209,6 +214,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 sortOrder: it.sortOrder,
                 images: [] as string[],
                 imageCount: Number(it.imageCount),
+                hasThumbnail: Boolean(it.hasThumbnail),
                 fields: it.fields,
                 notes: it.notes,
                 createdAt: it.createdAt,
@@ -1874,10 +1880,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 // Reorder is handled optimistically in the UI — skip the expensive full loader reload
 export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultShouldRevalidate }) => {
+  // Background callers (e.g. the silent image-compression hook) opt out of
+  // loader revalidation by setting noRevalidate=1. This stops dozens of
+  // sequential background POSTs from each triggering a full loader run.
+  if (formData?.get("noRevalidate") === "1") return false;
   const intent = formData?.get("intent") as string | null;
   if (intent === "reorder_samples" || intent === "rename_sample") return false;
   if (intent === "update_vision_board_item" || intent === "reorder_vision_boards" || intent === "rename_vision_board" || intent === "reorder_vision_board_items") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths") return false;
+  // Read-only fetchers used by drawers and background hooks don't change
+  // any data the page renders, so the loader doesn't need to re-run.
+  if (intent === "get_vision_board_item" || intent === "get_sample_full"
+    || intent === "get_vision_thumbnails" || intent === "get_sample_iteration_thumbnails") return false;
   return defaultShouldRevalidate;
 };
 
@@ -4991,6 +5005,7 @@ type SampleIterationType = {
   status: string;
   images: unknown;
   imageCount?: number;
+  hasThumbnail?: boolean;
   taggedUsers: unknown;
   createdAt: Date;
   updatedAt: Date;
@@ -5791,6 +5806,7 @@ type VisionBoardItemType = {
   sortOrder: number;
   images: unknown;
   imageCount?: number;
+  hasThumbnail?: boolean;
   fields: unknown;
   notes: string | null;
   createdAt: Date;
@@ -5866,10 +5882,14 @@ async function compressDataUrl(input: string, maxDim = 800, quality = 0.75): Pro
 }
 
 // POST a form to the current portal route's action and parse its JSON response.
-// Used by the one-shot image backfill workflow.
+// Used by the silent background image-compression hook. Always passes
+// noRevalidate=1 so the call doesn't trigger a full route loader re-run on
+// top of the action — that's what was making the page feel sluggish during
+// background work.
 async function postPortalAction<T = unknown>(data: Record<string, string>): Promise<T | null> {
   const fd = new FormData();
   for (const [k, v] of Object.entries(data)) fd.set(k, v);
+  if (!fd.has("noRevalidate")) fd.set("noRevalidate", "1");
   const res = await fetch(window.location.pathname + window.location.search, {
     method: "POST",
     body: fd,
@@ -5909,7 +5929,9 @@ function saveCompressedIds(key: string, ids: Set<number>): void {
 function useAutoCompressVisionItems(items: VisionBoardItemType[]): void {
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const candidates = items.filter((it) => (it.imageCount ?? 0) > 0);
+    // Skip items the loader has already told us are processed (thumbnail set).
+    // No fetch, no work, no server load.
+    const candidates = items.filter((it) => (it.imageCount ?? 0) > 0 && !it.hasThumbnail);
     if (candidates.length === 0) return;
     let cancelled = false;
     const done = loadCompressedIds(COMPRESSED_IDS_VISION_KEY);
@@ -5977,7 +5999,8 @@ function useAutoCompressSampleIterations(samples: SampleType[]): void {
     for (const s of samples) {
       for (const it of s.iterations) {
         const count = it.imageCount ?? (Array.isArray(it.images) ? (it.images as string[]).length : 0);
-        if (count > 0) candidates.push({ sampleId: s.id, iterationId: it.id });
+        // Skip iterations the loader has already told us are processed.
+        if (count > 0 && !it.hasThumbnail) candidates.push({ sampleId: s.id, iterationId: it.id });
       }
     }
     if (candidates.length === 0) return;
