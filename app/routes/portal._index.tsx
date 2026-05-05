@@ -5114,6 +5114,7 @@ type SampleType = {
 
 function sampleStatusLabel(status: string) {
   if (status === "approved") return "Approved";
+  if (status === "approved_for_production") return "Approved for Production";
   if (status === "changes_requested") return "Changes Requested";
   if (status === "sample_in_production") return "Sample in Production";
   if (status === "given_to_factory") return "Given to Factory";
@@ -5125,6 +5126,7 @@ function sampleStatusLabel(status: string) {
 function sampleStatusPillStyle(status: string, large?: boolean): React.CSSProperties {
   const base: React.CSSProperties = { borderRadius: 99, fontWeight: 700, whiteSpace: "nowrap", padding: large ? "4px 12px" : "2px 9px", fontSize: large ? 12 : 11 };
   if (status === "approved") return { ...base, background: "#dcfce7", color: "#166534" };
+  if (status === "approved_for_production") return { ...base, background: "#bbf7d0", color: "#14532d" };
   if (status === "changes_requested") return { ...base, background: "#fef3c7", color: "#92400e" };
   if (status === "sample_in_production") return { ...base, background: "#ffedd5", color: "#9a3412" };
   if (status === "given_to_factory") return { ...base, background: "#dbeafe", color: "#1e40af" };
@@ -5746,6 +5748,7 @@ function SampleIterationBlock({ iteration, users, currentUser }: { iteration: Sa
           <option value="sample_in_production">Sample in Production</option>
           <option value="changes_requested">Changes Requested</option>
           <option value="approved">Approved</option>
+          <option value="approved_for_production">Approved for Production</option>
         </select>
         <span style={s.sampleIterationDate}>{formatPortalDate(iteration.createdAt)}</span>
         <button
