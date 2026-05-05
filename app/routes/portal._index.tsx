@@ -4123,6 +4123,15 @@ export default function PortalDashboard() {
   const columnWidthsFetcher = useFetcher();
   const undoFetcher = useFetcher();
   const [addRowNonce, setAddRowNonce] = useState(0);
+  const restockTableScrollRef = useRef<HTMLDivElement | null>(null);
+  // Make sure the restock table opens scrolled to the top — without this it
+  // sometimes lands at the bottom (long table + browser scroll restoration on
+  // the inner overflow:auto container).
+  useEffect(() => {
+    if (page !== "restock") return;
+    const el = restockTableScrollRef.current;
+    if (el) el.scrollTop = 0;
+  }, [page]);
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const [selectedAddCategory, setSelectedAddCategory] = useState<string | null>(null);
   const [newCategoryInput, setNewCategoryInput] = useState("");
@@ -4462,7 +4471,7 @@ export default function PortalDashboard() {
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : (
-          <div className="portal-table-scroll" style={s.tableWrap}>
+          <div className="portal-table-scroll" style={s.tableWrap} ref={restockTableScrollRef}>
             <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleTableGridKeyDown}>
               <colgroup>
                 <col style={{ width: 48 }} />
@@ -5185,6 +5194,16 @@ function SamplesPanel({
     if (selectedSampleId === sampleId) setSelectedSampleId(null);
   };
 
+  // When the drawer mutates an iteration locally (status, notes, etc.),
+  // mirror the change into our localSamples so the listing card reflects it
+  // without waiting for a loader revalidation.
+  const handleIterationLocalUpdate = (iterationId: number, patch: Partial<SampleIterationType>) => {
+    setLocalSamples((prev) => prev.map((s) => ({
+      ...s,
+      iterations: s.iterations.map((it) => it.id === iterationId ? { ...it, ...patch } : it),
+    })));
+  };
+
   const reorderSamples = (targetId: number) => {
     if (!dragSampleId || dragSampleId === targetId || normalizedSearch) return;
     const fromIndex = localSamples.findIndex((s) => s.id === dragSampleId);
@@ -5262,7 +5281,7 @@ function SamplesPanel({
       </div>
 
       {selectedSample && typeof document !== "undefined" && createPortal(
-        <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} users={users} currentUser={currentUser} />,
+        <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} users={users} currentUser={currentUser} onIterationLocalUpdate={handleIterationLocalUpdate} />,
         document.body,
       )}
 
@@ -5429,11 +5448,13 @@ function SampleDetailPanel({
   onClose,
   users,
   currentUser,
+  onIterationLocalUpdate,
 }: {
   sample: SampleType;
   onClose: () => void;
   users: PortalUser[];
   currentUser: PortalUser | null;
+  onIterationLocalUpdate: (iterationId: number, patch: Partial<SampleIterationType>) => void;
 }) {
   const fetcher = useFetcher();
   const [isEditingName, setIsEditingName] = useState(false);
@@ -5512,7 +5533,7 @@ function SampleDetailPanel({
             </div>
           )}
           {sortedIterations.map((iteration) => (
-            <SampleIterationBlock key={iteration.id} iteration={iteration} users={users} currentUser={currentUser} />
+            <SampleIterationBlock key={iteration.id} iteration={iteration} users={users} currentUser={currentUser} onLocalUpdate={onIterationLocalUpdate} />
           ))}
         </div>
       </div>
@@ -5520,7 +5541,17 @@ function SampleDetailPanel({
   );
 }
 
-function SampleIterationBlock({ iteration, users, currentUser }: { iteration: SampleIterationType; users: PortalUser[]; currentUser: PortalUser | null }) {
+function SampleIterationBlock({
+  iteration,
+  users,
+  currentUser,
+  onLocalUpdate,
+}: {
+  iteration: SampleIterationType;
+  users: PortalUser[];
+  currentUser: PortalUser | null;
+  onLocalUpdate: (iterationId: number, patch: Partial<SampleIterationType>) => void;
+}) {
   const fetcher = useFetcher();
   const notesRef = useRef<HTMLTextAreaElement>(null);
   const [notes, setNotes] = useState(iteration.notes ?? "");
@@ -5735,6 +5766,7 @@ function SampleIterationBlock({ iteration, users, currentUser }: { iteration: Sa
           onChange={(e) => {
             const next = e.target.value;
             setStatus(next); // optimistic — show immediately, no waiting on the POST
+            onLocalUpdate(iteration.id, { status: next });
             submitUpdate({ status: next });
           }}
           style={{
