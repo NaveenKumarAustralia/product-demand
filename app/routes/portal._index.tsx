@@ -7016,8 +7016,10 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
 
 function CollectionsPanel({ collections: initialCollections }: { collections: CollectionListItem[] }) {
   const fetcher = useFetcher();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const collectionIdParam = searchParams.get("collectionId");
+  const selectedId = collectionIdParam ? Number(collectionIdParam) : null;
   const [collections, setCollections] = useState<CollectionListItem[]>(initialCollections);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [dragId, setDragId] = useState<number | null>(null);
   const [dragOverId, setDragOverId] = useState<number | null>(null);
   const deletedRef = useRef<Set<number>>(new Set());
@@ -7028,7 +7030,17 @@ function CollectionsPanel({ collections: initialCollections }: { collections: Co
     setCollections(initialCollections.filter((c) => !deletedRef.current.has(c.id)));
   }, [initialCollections]);
 
-  const selectedCollection = collections.find((c) => c.id === selectedId) ?? null;
+  const openCollection = (id: number) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("collectionId", String(id));
+    setSearchParams(next, { replace: false });
+  };
+  const closeCollection = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("collectionId");
+    setSearchParams(next, { replace: false });
+  };
+  const selectedCollection = selectedId ? collections.find((c) => c.id === selectedId) ?? null : null;
 
   const submitAdd = () => {
     const name = addName.trim() || "Untitled collection";
@@ -7040,7 +7052,7 @@ function CollectionsPanel({ collections: initialCollections }: { collections: Co
   const handleDelete = (id: number) => {
     deletedRef.current.add(id);
     setCollections((prev) => prev.filter((c) => c.id !== id));
-    if (selectedId === id) setSelectedId(null);
+    if (selectedId === id) closeCollection();
     fetcher.submit({ intent: "delete_collection", collectionId: String(id) }, { method: "post" });
   };
 
@@ -7060,6 +7072,18 @@ function CollectionsPanel({ collections: initialCollections }: { collections: Co
     setCollections(next);
     fetcher.submit({ intent: "reorder_collections", collectionIds: JSON.stringify(next.map((c) => c.id)) }, { method: "post" });
   };
+
+  // When a collection is selected via the URL, render the spreadsheet page
+  // instead of the tile grid — full inline view, not an overlay.
+  if (selectedCollection) {
+    return (
+      <CollectionSpreadsheetPage
+        listItem={selectedCollection}
+        onBack={closeCollection}
+        onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
+      />
+    );
+  }
 
   return (
     <div style={s.productInfoPage}>
@@ -7084,7 +7108,7 @@ function CollectionsPanel({ collections: initialCollections }: { collections: Co
             collection={c}
             isDragging={dragId === c.id}
             isDragOver={dragOverId === c.id && dragId !== c.id}
-            onOpen={() => setSelectedId(c.id)}
+            onOpen={() => openCollection(c.id)}
             onRename={(name) => handleRename(c.id, name)}
             onDelete={() => handleDelete(c.id)}
             onDragStart={(e) => { setDragId(c.id); e.dataTransfer.effectAllowed = "move"; }}
@@ -7119,15 +7143,6 @@ function CollectionsPanel({ collections: initialCollections }: { collections: Co
             </div>
           </div>
         </div>,
-        document.body,
-      )}
-
-      {selectedCollection && typeof document !== "undefined" && createPortal(
-        <CollectionDetailPanel
-          listItem={selectedCollection}
-          onClose={() => setSelectedId(null)}
-          onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
-        />,
         document.body,
       )}
     </div>
@@ -7239,13 +7254,13 @@ function CollectionCard({
   );
 }
 
-function CollectionDetailPanel({
+function CollectionSpreadsheetPage({
   listItem,
-  onClose,
+  onBack,
   onLocalNameChange,
 }: {
   listItem: CollectionListItem;
-  onClose: () => void;
+  onBack: () => void;
   onLocalNameChange: (name: string) => void;
 }) {
   const fetcher = useFetcher();
@@ -7273,12 +7288,6 @@ function CollectionDetailPanel({
       setLoaded(true);
     }
   }, [loadFetcher.data, listItem.id]);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
 
   const persistRows = (next: Record<string, string>[]) => {
     fetcher.submit(
@@ -7332,13 +7341,16 @@ function CollectionDetailPanel({
     );
   };
 
-  // Full-screen overlay (a thin sidebar wouldn't fit a 30-column spreadsheet).
   return (
-    <>
-      <div style={{ position: "fixed", inset: 0, background: "rgba(15, 23, 42, 0.55)", zIndex: 1199 }} onClick={onClose} />
-      <div style={{ position: "fixed", inset: "24px 24px 24px 24px", background: "#fff", borderRadius: 12, zIndex: 1200, display: "flex", flexDirection: "column", boxShadow: "0 25px 60px rgba(0,0,0,0.35)", overflow: "hidden" }}>
-        <div style={{ padding: "14px 20px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexShrink: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <div style={{ ...s.productInfoPage, display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      <div style={{ ...s.productInfoToolbar, flexShrink: 0 }}>
+        <div style={{ ...s.productInfoToolbarLeft, display: "flex", alignItems: "center", gap: 12 }}>
+          <button
+            type="button"
+            onClick={onBack}
+            style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+          >← Collections</button>
+          <div>
             {editingName ? (
               <input
                 autoFocus
@@ -7346,88 +7358,84 @@ function CollectionDetailPanel({
                 onChange={(e) => setNameDraft(e.target.value)}
                 onBlur={saveName}
                 onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(listItem.name); setEditingName(false); } }}
-                style={{ fontSize: 18, fontWeight: 700, border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px" }}
+                style={{ ...s.productInfoHeading, border: "1px solid #d1d5db", borderRadius: 6, padding: "2px 8px" }}
               />
             ) : (
-              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, cursor: "pointer" }} onClick={() => setEditingName(true)} title="Click to rename">
+              <h2 style={{ ...s.productInfoHeading, cursor: "pointer", margin: 0 }} onClick={() => setEditingName(true)} title="Click to rename">
                 {listItem.name || "Untitled"}
               </h2>
             )}
-            <span style={{ fontSize: 12, color: "#6b7280" }}>{rows.length} row{rows.length !== 1 ? "s" : ""}</span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
-            >Set cover image</button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void handleCoverUpload(file);
-                e.target.value = "";
-              }}
-            />
-            <button type="button" onClick={onClose} aria-label="Close" style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 16, cursor: "pointer" }}>×</button>
+            <div style={s.productInfoMeta}>{rows.length} row{rows.length !== 1 ? "s" : ""}</div>
           </div>
         </div>
-
-        <div style={{ flex: 1, overflow: "auto", background: "#f9fafb" }}>
-          {!loaded ? (
-            <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
-          ) : (
-            <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: 12, fontFamily: "inherit", background: "#fff", minWidth: "100%" }}>
-              <thead>
-                <tr>
-                  <th style={{ position: "sticky", top: 0, left: 0, zIndex: 3, background: "#f3f4f6", borderBottom: "1px solid #d1d5db", borderRight: "1px solid #e5e7eb", padding: "6px 8px", fontWeight: 600, color: "#6b7280", minWidth: 40 }}>#</th>
-                  {columns.map((col) => (
-                    <th key={col.id} style={{ position: "sticky", top: 0, zIndex: 2, background: "#fde4d8", borderBottom: "1px solid #d1d5db", borderRight: "1px solid #e5e7eb", padding: "6px 8px", fontWeight: 700, color: "#7c2d12", textAlign: "center", whiteSpace: "nowrap", minWidth: col.width ?? 90 }}>
-                      {col.label}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((row, rIdx) => (
-                  <tr key={rIdx}>
-                    <td style={{ position: "sticky", left: 0, background: "#f9fafb", borderBottom: "1px solid #e5e7eb", borderRight: "1px solid #e5e7eb", padding: 0, textAlign: "center", color: "#9ca3af" }}>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: "2px 4px" }}>
-                        <span>{rIdx + 1}</span>
-                        <button type="button" title="Delete row" onClick={() => removeRow(rIdx)} style={{ background: "transparent", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: "2px 4px" }}>×</button>
-                      </div>
-                    </td>
-                    {columns.map((col) => (
-                      <td key={col.id} style={{ borderBottom: "1px solid #f1f5f9", borderRight: "1px solid #f1f5f9", padding: 0, minWidth: col.width ?? 90, verticalAlign: "top" }}>
-                        <CollectionCell
-                          value={row[col.id] ?? ""}
-                          type={col.type ?? "text"}
-                          onCommit={(v) => updateCell(rIdx, col.id, v)}
-                        />
-                      </td>
-                    ))}
-                  </tr>
-                ))}
-                {rows.length === 0 && (
-                  <tr>
-                    <td colSpan={columns.length + 1} style={{ padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
-                      No rows yet. Click + Add row below to add one.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          )}
-        </div>
-
-        <div style={{ padding: "10px 16px", borderTop: "1px solid #e5e7eb", flexShrink: 0, background: "#fff" }}>
-          <button type="button" onClick={addRow} style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>+ Add row</button>
+        <div style={s.productInfoActions}>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+          >Set cover image</button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleCoverUpload(file);
+              e.target.value = "";
+            }}
+          />
+          <button type="button" onClick={addRow} style={s.primaryActionButton}>+ Add row</button>
         </div>
       </div>
-    </>
+
+      <div style={{ flex: 1, overflow: "auto", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, minHeight: 0 }}>
+        {!loaded ? (
+          <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
+        ) : (
+          <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: 12, fontFamily: "inherit", background: "#fff", minWidth: "100%" }}>
+            <thead>
+              <tr>
+                <th style={{ position: "sticky", top: 0, left: 0, zIndex: 3, background: "#f3f4f6", borderBottom: "1px solid #d1d5db", borderRight: "1px solid #e5e7eb", padding: "6px 8px", fontWeight: 600, color: "#6b7280", minWidth: 40 }}>#</th>
+                {columns.map((col) => (
+                  <th key={col.id} style={{ position: "sticky", top: 0, zIndex: 2, background: "#fde4d8", borderBottom: "1px solid #d1d5db", borderRight: "1px solid #e5e7eb", padding: "6px 8px", fontWeight: 700, color: "#7c2d12", textAlign: "center", whiteSpace: "nowrap", minWidth: col.width ?? 90 }}>
+                    {col.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rIdx) => (
+                <tr key={rIdx}>
+                  <td style={{ position: "sticky", left: 0, background: "#f9fafb", borderBottom: "1px solid #e5e7eb", borderRight: "1px solid #e5e7eb", padding: 0, textAlign: "center", color: "#9ca3af" }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: "2px 4px" }}>
+                      <span>{rIdx + 1}</span>
+                      <button type="button" title="Delete row" onClick={() => removeRow(rIdx)} style={{ background: "transparent", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: "2px 4px" }}>×</button>
+                    </div>
+                  </td>
+                  {columns.map((col) => (
+                    <td key={col.id} style={{ borderBottom: "1px solid #f1f5f9", borderRight: "1px solid #f1f5f9", padding: 0, minWidth: col.width ?? 90, verticalAlign: "top" }}>
+                      <CollectionCell
+                        value={row[col.id] ?? ""}
+                        type={col.type ?? "text"}
+                        onCommit={(v) => updateCell(rIdx, col.id, v)}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={columns.length + 1} style={{ padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                    No rows yet. Click + Add row above to add one.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
   );
 }
 
