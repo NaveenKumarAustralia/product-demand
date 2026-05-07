@@ -5948,8 +5948,11 @@ function ConfirmDeleteModal({
   onCancel: () => void;
 }) {
   if (typeof document === "undefined") return null;
+  // The shared deleteConfirm style sits at z-index 1000, but the sample /
+  // vision drawers sit at 1200 — without an override the confirm modal
+  // would be hidden behind the drawer it was opened from.
   return createPortal(
-    <div style={s.deleteConfirm} onClick={onCancel}>
+    <div style={{ ...s.deleteConfirm, zIndex: 1400 }} onClick={onCancel}>
       <div style={s.deleteConfirmCard} onClick={(e) => e.stopPropagation()}>
         <div style={s.deleteConfirmTitle}>{title}</div>
         {subtitle ? <div style={s.deleteConfirmText}>{subtitle}</div> : null}
