@@ -6136,8 +6136,61 @@ async function generateThumbnail(input: string, maxDim = 240, quality = 0.62): P
 // Compress an existing data URL (e.g. legacy stored base64). Aggressive defaults
 // suited to a personal-use board: max 800px on the long edge, JPEG q=0.75.
 // Typical photos drop from several MB to ~50-100KB.
+// Hard cap: every uploaded image (after compression) must be at most 500 KB
+// in binary form. Below the cap means the cards / drawer images load fast
+// and the DB stores small JSONB payloads.
+const IMAGE_TARGET_BYTES = 500 * 1024;
+
+// Estimate the decoded binary size of a data URL.
+function dataUrlBinaryBytes(url: string): number {
+  const idx = url.indexOf(",");
+  if (idx < 0) return url.length;
+  const b64 = url.slice(idx + 1);
+  let padding = 0;
+  if (b64.endsWith("==")) padding = 2;
+  else if (b64.endsWith("=")) padding = 1;
+  return Math.max(0, Math.floor((b64.length * 3) / 4) - padding);
+}
+
+function renderJpegToDataUrl(img: HTMLImageElement, maxDim: number, quality: number): string | null {
+  const longEdge = Math.max(img.width, img.height);
+  const scale = longEdge > maxDim ? maxDim / longEdge : 1;
+  const w = Math.max(1, Math.round(img.width * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.drawImage(img, 0, 0, w, h);
+  return canvas.toDataURL("image/jpeg", quality);
+}
+
+// Encode `img` as JPEG, then keep tightening (lower quality, then smaller
+// dimensions) until the result fits under IMAGE_TARGET_BYTES — or we hit
+// the floor (q 0.35 / 400px) and return whatever's smallest.
+async function compressBelowTarget(img: HTMLImageElement, startMaxDim: number, startQuality: number): Promise<string | null> {
+  let dim = startMaxDim;
+  let q = startQuality;
+  let attempt = renderJpegToDataUrl(img, dim, q);
+  if (!attempt) return null;
+  let attempts = 0;
+  while (dataUrlBinaryBytes(attempt) > IMAGE_TARGET_BYTES && attempts < 10) {
+    if (q > 0.4) q = Math.max(0.4, q - 0.1);
+    else if (dim > 400) dim = Math.max(400, dim - 150);
+    else break;
+    const next = renderJpegToDataUrl(img, dim, q);
+    if (!next) break;
+    attempt = next;
+    attempts++;
+  }
+  return attempt;
+}
+
 async function compressDataUrl(input: string, maxDim = 800, quality = 0.75): Promise<string> {
   if (typeof input !== "string" || !input.startsWith("data:image/")) return input;
+  // Already small enough — leave it alone.
+  if (dataUrlBinaryBytes(input) <= IMAGE_TARGET_BYTES * 0.7) return input;
   try {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const i = new Image();
@@ -6145,18 +6198,8 @@ async function compressDataUrl(input: string, maxDim = 800, quality = 0.75): Pro
       i.onerror = () => reject(new Error("decode failed"));
       i.src = input;
     });
-    const longEdge = Math.max(img.width, img.height);
-    const scale = longEdge > maxDim ? maxDim / longEdge : 1;
-    const w = Math.round(img.width * scale);
-    const h = Math.round(img.height * scale);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return input;
-    ctx.drawImage(img, 0, 0, w, h);
-    const out = canvas.toDataURL("image/jpeg", quality);
-    // Keep original if compression somehow produced something larger.
+    const out = await compressBelowTarget(img, maxDim, quality);
+    if (!out) return input;
     return out.length < input.length ? out : input;
   } catch {
     return input;
@@ -6376,6 +6419,8 @@ async function compressImageToDataUrl(file: File, maxDim = 800, quality = 0.75):
     r.onerror = () => reject(r.error);
     r.readAsDataURL(file);
   });
+  // Already small enough — skip the canvas round-trip entirely.
+  if (file.size <= IMAGE_TARGET_BYTES * 0.7) return dataUrl;
   try {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
       const i = new Image();
@@ -6383,18 +6428,8 @@ async function compressImageToDataUrl(file: File, maxDim = 800, quality = 0.75):
       i.onerror = () => reject(new Error("image decode failed"));
       i.src = dataUrl;
     });
-    const longEdge = Math.max(img.width, img.height);
-    if (longEdge <= maxDim && file.size <= 120_000) return dataUrl;
-    const scale = longEdge > maxDim ? maxDim / longEdge : 1;
-    const w = Math.round(img.width * scale);
-    const h = Math.round(img.height * scale);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return dataUrl;
-    ctx.drawImage(img, 0, 0, w, h);
-    return canvas.toDataURL("image/jpeg", quality);
+    const out = await compressBelowTarget(img, maxDim, quality);
+    return out ?? dataUrl;
   } catch {
     return dataUrl;
   }
