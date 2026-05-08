@@ -1,260 +1,15 @@
+// Vision Board V2 — UI components shared by the in-portal page render.
+// All intents posted by these components are prefixed `vb_` and handled by
+// the action in app/routes/portal._index.tsx.
+
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { Link, redirect, useFetcher, useLoaderData, useSearchParams } from "react-router";
-import prisma from "../db.server";
+import { useFetcher, useSearchParams } from "react-router";
 
-// ─── Server: auth helpers ────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────────────
 
-const PORTAL_USER_COOKIE = "supplier_portal_user";
-
-function getCookieValue(request: Request, name: string): string | null {
-  const cookieHeader = request.headers.get("cookie") ?? "";
-  for (const part of cookieHeader.split(";")) {
-    const [k, ...rest] = part.trim().split("=");
-    if (k === name) return rest.join("=");
-  }
-  return null;
-}
-
-async function requirePortalUser(request: Request) {
-  const userId = decodeURIComponent(getCookieValue(request, PORTAL_USER_COOKIE) ?? "");
-  if (!userId) throw redirect("/portal");
-  // We intentionally don't load the full user record here — the new route
-  // only needs to know "you're logged in." Other portal pages still drive
-  // the role-based UI, and we hand off there for sensitive flows.
-  return userId;
-}
-
-// ─── Server: one-time copy from V1 → V2 ──────────────────────────────────────
-// If the user has VisionBoard data but no VisionBoardV2 data, copy everything
-// across once. Idempotent: skips if V2 already has any board.
-
-async function copyV1IntoV2IfNeeded(): Promise<void> {
-  const v2Count = await prisma.visionBoardV2.count();
-  if (v2Count > 0) return;
-  const v1Count = await prisma.visionBoard.count();
-  if (v1Count === 0) return;
-  const v1Boards = await prisma.visionBoard.findMany({
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-    include: { items: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] } },
-  });
-  for (const b of v1Boards) {
-    const newBoard = await prisma.visionBoardV2.create({
-      data: { name: b.name, sortOrder: b.sortOrder },
-    });
-    if (b.items.length === 0) continue;
-    await prisma.visionBoardV2Item.createMany({
-      data: b.items.map((it) => ({
-        boardId: newBoard.id,
-        name: it.name,
-        sortOrder: it.sortOrder,
-        images: it.images as object,
-        thumbnail: it.thumbnail,
-        fields: it.fields as object,
-        notes: it.notes,
-      })),
-    });
-  }
-}
-
-// ─── Loader ──────────────────────────────────────────────────────────────────
-// Slim by design:
-// - Returns boards (id, name, sortOrder) only — no items per board.
-// - Returns the ACTIVE board's items with id, name, sortOrder, imageCount,
-//   hasThumbnail, updatedAt — no images, no fields, no notes.
-// - Drawer fetches full item details on open via the get_item action.
-
-export async function loader({ request }: LoaderFunctionArgs) {
-  await requirePortalUser(request);
-  await copyV1IntoV2IfNeeded();
-
-  const url = new URL(request.url);
-  const requestedBoardId = Number(url.searchParams.get("boardId") ?? 0) || null;
-
-  const boards = await prisma.visionBoardV2.findMany({
-    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-    select: { id: true, name: true, sortOrder: true },
-  });
-
-  const activeBoardId = requestedBoardId && boards.some((b) => b.id === requestedBoardId)
-    ? requestedBoardId
-    : boards[0]?.id ?? null;
-
-  let items: Array<{
-    id: number;
-    name: string;
-    sortOrder: number;
-    imageCount: number;
-    hasThumbnail: boolean;
-    updatedAt: Date;
-  }> = [];
-
-  if (activeBoardId) {
-    items = await prisma.$queryRaw<Array<{
-      id: number; name: string; sortOrder: number;
-      imageCount: number; hasThumbnail: boolean; updatedAt: Date;
-    }>>`
-      SELECT
-        id, name, "sortOrder",
-        CASE WHEN jsonb_typeof(images) = 'array'
-          THEN jsonb_array_length(images)
-          ELSE 0
-        END AS "imageCount",
-        (thumbnail IS NOT NULL) AS "hasThumbnail",
-        "updatedAt"
-      FROM "VisionBoardV2Item"
-      WHERE "boardId" = ${activeBoardId}
-      ORDER BY "sortOrder" ASC, "createdAt" ASC
-    `;
-    items = items.map((it) => ({ ...it, imageCount: Number(it.imageCount), hasThumbnail: Boolean(it.hasThumbnail) }));
-  }
-
-  return { boards, activeBoardId, items };
-}
-
-// ─── Action ──────────────────────────────────────────────────────────────────
-
-export async function action({ request }: ActionFunctionArgs) {
-  await requirePortalUser(request);
-  const form = await request.formData();
-  const intent = String(form.get("intent") ?? "");
-
-  if (intent === "add_board") {
-    const name = String(form.get("name") ?? "").trim() || "New Board";
-    const existing = await prisma.visionBoardV2.count();
-    const board = await prisma.visionBoardV2.create({ data: { name, sortOrder: existing } });
-    return { ok: true, boardId: board.id };
-  }
-  if (intent === "rename_board") {
-    const id = Number(form.get("boardId"));
-    const name = String(form.get("name") ?? "").trim();
-    if (!id || !name) return null;
-    await prisma.visionBoardV2.update({ where: { id }, data: { name } });
-    return null;
-  }
-  if (intent === "delete_board") {
-    const id = Number(form.get("boardId"));
-    if (!id) return null;
-    await prisma.visionBoardV2.delete({ where: { id } });
-    return null;
-  }
-  if (intent === "reorder_boards") {
-    try {
-      const ids = JSON.parse(String(form.get("ids") ?? "[]")) as number[];
-      await Promise.all(ids.map((id, i) => prisma.visionBoardV2.update({ where: { id }, data: { sortOrder: i } })));
-    } catch { /* ignore malformed */ }
-    return null;
-  }
-
-  if (intent === "add_item") {
-    const boardId = Number(form.get("boardId"));
-    if (!boardId) return null;
-    const name = String(form.get("name") ?? "").trim() || "Untitled";
-    const image = form.get("image");
-    const thumb = form.get("thumbnail");
-    const existing = await prisma.visionBoardV2Item.count({ where: { boardId } });
-    const images = typeof image === "string" && image.length ? [image] : [];
-    const thumbnail = typeof thumb === "string" && thumb.length ? thumb : null;
-    const item = await prisma.visionBoardV2Item.create({
-      data: { boardId, name, sortOrder: existing, images, thumbnail },
-    });
-    return { ok: true, itemId: item.id };
-  }
-  if (intent === "rename_item") {
-    const id = Number(form.get("itemId"));
-    const name = String(form.get("name") ?? "");
-    if (!id) return null;
-    await prisma.visionBoardV2Item.update({ where: { id }, data: { name } });
-    return null;
-  }
-  if (intent === "delete_item") {
-    const id = Number(form.get("itemId"));
-    if (!id) return null;
-    await prisma.visionBoardV2Item.delete({ where: { id } });
-    return null;
-  }
-  if (intent === "reorder_items") {
-    try {
-      const ids = JSON.parse(String(form.get("ids") ?? "[]")) as number[];
-      await Promise.all(ids.map((id, i) => prisma.visionBoardV2Item.update({ where: { id }, data: { sortOrder: i } })));
-    } catch { /* ignore */ }
-    return null;
-  }
-
-  if (intent === "get_item") {
-    const id = Number(form.get("itemId"));
-    if (!id) return { item: null };
-    const item = await prisma.visionBoardV2Item.findUnique({ where: { id } });
-    return { item };
-  }
-
-  if (intent === "update_item") {
-    const id = Number(form.get("itemId"));
-    if (!id) return null;
-    const data: Record<string, unknown> = {};
-    if (form.has("name")) data.name = String(form.get("name") ?? "");
-    if (form.has("notes")) data.notes = String(form.get("notes") ?? "");
-    if (form.has("fields")) {
-      try { data.fields = JSON.parse(String(form.get("fields") ?? "[]")); } catch { /* ignore */ }
-    }
-    if (form.has("imagesReplace")) {
-      try {
-        const next = JSON.parse(String(form.get("imagesReplace") ?? "[]")) as unknown[];
-        if (Array.isArray(next)) data.images = next;
-      } catch { /* ignore */ }
-    }
-    if (form.has("thumbnail")) {
-      const t = String(form.get("thumbnail") ?? "");
-      data.thumbnail = t || null;
-    }
-    if (Object.keys(data).length === 0) return null;
-    await prisma.visionBoardV2Item.update({ where: { id }, data });
-    return null;
-  }
-
-  if (intent === "append_item_image") {
-    const id = Number(form.get("itemId"));
-    const image = String(form.get("image") ?? "");
-    if (!id || !image) return null;
-    const cur = await prisma.visionBoardV2Item.findUnique({ where: { id }, select: { images: true, thumbnail: true } });
-    if (!cur) return null;
-    const arr = Array.isArray(cur.images) ? (cur.images as unknown[]).slice() : [];
-    arr.push(image);
-    const data: Record<string, unknown> = { images: arr };
-    if (!cur.thumbnail && form.has("thumbnail")) {
-      const t = String(form.get("thumbnail") ?? "");
-      if (t) data.thumbnail = t;
-    }
-    await prisma.visionBoardV2Item.update({ where: { id }, data });
-    return null;
-  }
-
-  if (intent === "remove_item_image") {
-    const id = Number(form.get("itemId"));
-    const index = Number(form.get("index"));
-    if (!id || !Number.isInteger(index) || index < 0) return null;
-    const cur = await prisma.visionBoardV2Item.findUnique({ where: { id }, select: { images: true, thumbnail: true } });
-    if (!cur) return null;
-    const arr = Array.isArray(cur.images) ? (cur.images as unknown[]).slice() : [];
-    if (index >= arr.length) return null;
-    const wasFirst = index === 0;
-    arr.splice(index, 1);
-    const data: Record<string, unknown> = { images: arr };
-    // If we removed the image the thumbnail was generated from, drop the thumb
-    // so the next page render falls back to the new first image.
-    if (wasFirst) data.thumbnail = null;
-    await prisma.visionBoardV2Item.update({ where: { id }, data });
-    return null;
-  }
-
-  return null;
-}
-
-// ─── Client: types, helpers, image utils ─────────────────────────────────────
-
-type BoardListItem = { id: number; name: string; sortOrder: number };
-type ItemListItem = {
+export type VisionBoardListItem = { id: number; name: string; sortOrder: number };
+export type VisionItemListItem = {
   id: number;
   name: string;
   sortOrder: number;
@@ -267,13 +22,16 @@ type VisionField = { id: string; text: string };
 const CARD_THUMB_BASE = "/portal/thumbnail/visionV2";
 const ITEM_IMAGE_BASE = "/portal/image/visionV2";
 
-// Higher quality than the old page: 1200px max dim, JPEG q=0.85, target 800 KB.
-// Visibly sharper on retina screens but still small enough for fast cards.
+// Higher quality than the legacy page: 1200 px max dim, JPEG q=0.85,
+// 800 KB target. Visibly sharper on retina screens, still small enough
+// for fast cards and drawer previews.
 const FULL_MAX_DIM = 1200;
 const FULL_QUALITY = 0.85;
 const FULL_TARGET_BYTES = 800 * 1024;
 const THUMB_MAX_DIM = 256;
 const THUMB_QUALITY = 0.7;
+
+// ─── Image helpers ───────────────────────────────────────────────────────────
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -315,10 +73,6 @@ function renderToJpeg(img: HTMLImageElement, maxDim: number, quality: number): s
   try { return canvas.toDataURL("image/jpeg", quality); } catch { return null; }
 }
 
-// Compress an uploaded file to a high-quality data URL. If the encoded result
-// still exceeds the target byte budget we step the dimensions and quality
-// down once. We bias toward keeping quality (sharpness) rather than aggressively
-// shrinking — the old page's 800 px / q=0.75 cap was the main quality regression.
 async function compressUpload(file: File): Promise<string> {
   if (!file.type.startsWith("image/")) return readFileAsDataUrl(file);
   const original = await readFileAsDataUrl(file);
@@ -326,12 +80,8 @@ async function compressUpload(file: File): Promise<string> {
   try {
     const img = await loadImage(original);
     let out = renderToJpeg(img, FULL_MAX_DIM, FULL_QUALITY);
-    if (out && dataUrlBytes(out) > FULL_TARGET_BYTES) {
-      out = renderToJpeg(img, 1024, 0.78) ?? out;
-    }
-    if (out && dataUrlBytes(out) > FULL_TARGET_BYTES) {
-      out = renderToJpeg(img, 900, 0.72) ?? out;
-    }
+    if (out && dataUrlBytes(out) > FULL_TARGET_BYTES) out = renderToJpeg(img, 1024, 0.78) ?? out;
+    if (out && dataUrlBytes(out) > FULL_TARGET_BYTES) out = renderToJpeg(img, 900, 0.72) ?? out;
     return out ?? original;
   } catch {
     return original;
@@ -360,16 +110,19 @@ function fieldsFromUnknown(value: unknown): VisionField[] {
   });
 }
 
-// ─── Page ────────────────────────────────────────────────────────────────────
+// ─── Panel ───────────────────────────────────────────────────────────────────
 
-export default function VisionBoardV2Page() {
-  const data = useLoaderData<typeof loader>();
+export function VisionBoardV2Panel({
+  boards,
+  activeBoardId,
+  items,
+}: {
+  boards: VisionBoardListItem[];
+  activeBoardId: number | null;
+  items: VisionItemListItem[];
+}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const fetcher = useFetcher();
-
-  const boards = data.boards as BoardListItem[];
-  const activeBoardId = data.activeBoardId as number | null;
-  const items = data.items as ItemListItem[];
 
   const [renamingBoardId, setRenamingBoardId] = useState<number | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -390,20 +143,18 @@ export default function VisionBoardV2Page() {
 
   const submitAddBoard = () => {
     const name = addBoardName.trim() || "New Board";
-    fetcher.submit({ intent: "add_board", name }, { method: "post" });
+    fetcher.submit({ intent: "vb_add_board", name }, { method: "post" });
     setAddBoardOpen(false);
     setAddBoardName("");
   };
-
   const submitRenameBoard = (boardId: number) => {
     const name = renameDraft.trim();
     if (!name) { setRenamingBoardId(null); return; }
-    fetcher.submit({ intent: "rename_board", boardId: String(boardId), name }, { method: "post" });
+    fetcher.submit({ intent: "vb_rename_board", boardId: String(boardId), name }, { method: "post" });
     setRenamingBoardId(null);
   };
-
   const submitDeleteBoard = (boardId: number) => {
-    fetcher.submit({ intent: "delete_board", boardId: String(boardId) }, { method: "post" });
+    fetcher.submit({ intent: "vb_delete_board", boardId: String(boardId) }, { method: "post" });
     setConfirmDeleteBoardId(null);
     if (activeBoardId === boardId) {
       const next = boards.find((b) => b.id !== boardId);
@@ -417,13 +168,13 @@ export default function VisionBoardV2Page() {
   const submitAddItem = () => {
     if (!activeBoardId) return;
     const name = addItemName.trim() || "Untitled";
-    fetcher.submit({ intent: "add_item", boardId: String(activeBoardId), name }, { method: "post" });
+    fetcher.submit({ intent: "vb_add_item", boardId: String(activeBoardId), name }, { method: "post" });
     setAddItemOpen(false);
     setAddItemName("");
   };
 
   const handleDeleteItem = (itemId: number) => {
-    fetcher.submit({ intent: "delete_item", itemId: String(itemId) }, { method: "post" });
+    fetcher.submit({ intent: "vb_delete_item", itemId: String(itemId) }, { method: "post" });
     if (selectedItemId === itemId) setSelectedItemId(null);
   };
 
@@ -435,7 +186,7 @@ export default function VisionBoardV2Page() {
     const next = [...items];
     const [moved] = next.splice(fromIdx, 1);
     next.splice(toIdx, 0, moved);
-    fetcher.submit({ intent: "reorder_items", ids: JSON.stringify(next.map((it) => it.id)) }, { method: "post" });
+    fetcher.submit({ intent: "vb_reorder_items", ids: JSON.stringify(next.map((it) => it.id)) }, { method: "post" });
   };
 
   const handleDropImageOnEmptyCard = async (file: File) => {
@@ -443,7 +194,7 @@ export default function VisionBoardV2Page() {
     const dataUrl = await compressUpload(file);
     const thumb = await makeThumb(dataUrl);
     const payload: Record<string, string> = {
-      intent: "add_item",
+      intent: "vb_add_item",
       boardId: String(activeBoardId),
       name: "Untitled",
       image: dataUrl,
@@ -459,12 +210,6 @@ export default function VisionBoardV2Page() {
 
   return (
     <div style={S.page}>
-      <header style={S.topBar}>
-        <Link to="/portal" style={S.backLink}>← Portal</Link>
-        <div style={S.title}>Vision Board</div>
-        <div style={{ flex: 1 }} />
-      </header>
-
       <div style={S.tabBar}>
         {boards.map((board) => {
           const isActive = board.id === activeBoardId;
@@ -563,10 +308,7 @@ export default function VisionBoardV2Page() {
       </div>
 
       {selectedItem && typeof document !== "undefined" && createPortal(
-        <ItemDrawer
-          itemList={selectedItem}
-          onClose={() => setSelectedItemId(null)}
-        />,
+        <ItemDrawer itemList={selectedItem} onClose={() => setSelectedItemId(null)} />,
         document.body,
       )}
 
@@ -597,7 +339,7 @@ const VisionCard = memo(function VisionCard({
   onDragEnd,
   onDelete,
 }: {
-  item: ItemListItem;
+  item: VisionItemListItem;
   isDragging: boolean;
   isDragOver: boolean;
   onOpen: () => void;
@@ -717,7 +459,7 @@ function ItemDrawer({
   itemList,
   onClose,
 }: {
-  itemList: ItemListItem;
+  itemList: VisionItemListItem;
   onClose: () => void;
 }) {
   const fetcher = useFetcher();
@@ -739,7 +481,7 @@ function ItemDrawer({
 
   // Fetch full item once on open. Slim list payload doesn't carry fields/notes.
   useEffect(() => {
-    fetcher.submit({ intent: "get_item", itemId: String(itemList.id) }, { method: "post" });
+    fetcher.submit({ intent: "vb_get_item", itemId: String(itemList.id) }, { method: "post" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemList.id]);
 
@@ -759,7 +501,6 @@ function ItemDrawer({
     }
   }, [fetcher.data, itemList.name, loaded]);
 
-  // Cleanup pending object URLs.
   useEffect(() => () => {
     setPending((cur) => {
       cur.forEach((p) => URL.revokeObjectURL(p.blobUrl));
@@ -769,13 +510,13 @@ function ItemDrawer({
 
   const saveName = (next: string) => {
     if (next === itemList.name) return;
-    updateFetcher.submit({ intent: "update_item", itemId: String(itemList.id), name: next }, { method: "post" });
+    updateFetcher.submit({ intent: "vb_update_item", itemId: String(itemList.id), name: next }, { method: "post" });
   };
   const saveNotes = (next: string) => {
-    updateFetcher.submit({ intent: "update_item", itemId: String(itemList.id), notes: next }, { method: "post" });
+    updateFetcher.submit({ intent: "vb_update_item", itemId: String(itemList.id), notes: next }, { method: "post" });
   };
   const saveFields = (next: VisionField[]) => {
-    updateFetcher.submit({ intent: "update_item", itemId: String(itemList.id), fields: JSON.stringify(next) }, { method: "post" });
+    updateFetcher.submit({ intent: "vb_update_item", itemId: String(itemList.id), fields: JSON.stringify(next) }, { method: "post" });
   };
 
   const handleAddImage = async (file: File) => {
@@ -786,7 +527,7 @@ function ItemDrawer({
     let thumb: string | null = null;
     if (savedCount === 0 && pending.length === 0) thumb = await makeThumb(dataUrl);
     const payload: Record<string, string> = {
-      intent: "append_item_image",
+      intent: "vb_append_item_image",
       itemId: String(itemList.id),
       image: dataUrl,
     };
@@ -801,7 +542,7 @@ function ItemDrawer({
   const handleRemoveImage = (idx: number) => {
     if (!window.confirm("Remove this image?")) return;
     updateFetcher.submit(
-      { intent: "remove_item_image", itemId: String(itemList.id), index: String(idx) },
+      { intent: "vb_remove_item_image", itemId: String(itemList.id), index: String(idx) },
       { method: "post" },
     );
     setSavedCount((c) => Math.max(0, c - 1));
@@ -828,7 +569,6 @@ function ItemDrawer({
         </div>
 
         <div style={S.drawerBody}>
-          {/* Images */}
           <section style={S.drawerSection}>
             <h3 style={S.drawerSectionTitle}>Images</h3>
             <div
@@ -885,7 +625,6 @@ function ItemDrawer({
             </div>
           </section>
 
-          {/* Fields */}
           <section style={S.drawerSection}>
             <h3 style={S.drawerSectionTitle}>Fields</h3>
             {fields.map((f, i) => (
@@ -903,7 +642,6 @@ function ItemDrawer({
             <button type="button" onClick={() => { const next = [...fields, { id: `f_${Math.random().toString(36).slice(2, 9)}`, text: "" }]; setFields(next); saveFields(next); }} style={S.drawerSmallButton}>+ Add field</button>
           </section>
 
-          {/* Notes */}
           <section style={S.drawerSection}>
             <h3 style={S.drawerSectionTitle}>Notes</h3>
             <textarea
@@ -972,17 +710,13 @@ function Modal({
   );
 }
 
-// ─── Styles (self-contained) ─────────────────────────────────────────────────
+// ─── Styles ──────────────────────────────────────────────────────────────────
 
 const S: Record<string, React.CSSProperties> = {
-  page: { padding: "16px 20px", maxWidth: 1600, margin: "0 auto", fontFamily: "system-ui, -apple-system, sans-serif" },
-  topBar: { display: "flex", alignItems: "center", gap: 16, marginBottom: 14 },
-  backLink: { color: "#374151", textDecoration: "none", fontSize: 13, fontWeight: 600 },
-  title: { fontSize: 13, color: "#6b7280", fontWeight: 600 },
-
+  page: { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 },
   tabBar: { display: "flex", alignItems: "center", gap: 4, padding: "0 4px", borderBottom: "1px solid #e5e7eb", flexWrap: "wrap" },
   tab: { display: "flex", alignItems: "center", gap: 4, background: "#f3f4f6", color: "#374151", borderRadius: "6px 6px 0 0", padding: "6px 12px", cursor: "pointer", fontSize: 13, fontWeight: 500, border: "1px solid #e5e7eb", position: "relative", top: 1 },
-  tabActive: { background: "#111827", color: "#fff", borderColor: "#111827" },
+  tabActive: { background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", borderColor: "var(--portal-primary-button-bg, #111827)" },
   tabRenameInput: { background: "transparent", border: "none", outline: "none", color: "inherit", fontSize: 13, fontWeight: 500, minWidth: 60 },
   tabIconButton: { background: "none", border: "none", padding: "2px 4px", cursor: "pointer", color: "inherit", opacity: 0.6, lineHeight: 1, borderRadius: 4, display: "flex", alignItems: "center" },
   tabConfirm: { display: "flex", gap: 3, marginLeft: 4 },
@@ -991,12 +725,12 @@ const S: Record<string, React.CSSProperties> = {
   tabClose: { marginLeft: 4, opacity: 0.6, fontSize: 13, cursor: "pointer", lineHeight: 1 },
   addTabButton: { background: "none", border: "1px dashed #d1d5db", borderRadius: "6px 6px 0 0", padding: "6px 12px", fontSize: 13, cursor: "pointer", color: "#6b7280", position: "relative", top: 1 },
 
-  toolbar: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", background: "#fff", border: "1px solid #dbe3ee", borderRadius: 10, marginTop: 12 },
+  toolbar: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", background: "#fff", border: "1px solid #dbe3ee", borderRadius: 10 },
   heading: { margin: 0, fontSize: 20, color: "#111827", fontWeight: 700 },
   meta: { fontSize: 12, color: "#6b7280", marginTop: 2 },
-  primary: { padding: "9px 18px", borderRadius: 7, border: "none", background: "#111827", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" },
+  primary: { padding: "9px 18px", borderRadius: 7, border: "none", background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", fontSize: 13, fontWeight: 700, cursor: "pointer" },
 
-  grid: { display: "grid", gridTemplateColumns: "repeat(8, minmax(0, 1fr))", gap: 12, padding: "14px 0", contentVisibility: "auto" as React.CSSProperties["contentVisibility"], containIntrinsicSize: "auto 280px" as unknown as React.CSSProperties["containIntrinsicSize"] },
+  grid: { display: "grid", gridTemplateColumns: "repeat(8, minmax(0, 1fr))", gap: 12, padding: "4px 0 14px", contentVisibility: "auto" as React.CSSProperties["contentVisibility"], containIntrinsicSize: "auto 280px" as unknown as React.CSSProperties["containIntrinsicSize"] },
   card: { position: "relative", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", cursor: "pointer", transition: "box-shadow 0.15s, transform 0.15s" },
   cardDragging: { opacity: 0.5 },
   cardDropTarget: { boxShadow: "0 0 0 2px #2563eb" },
@@ -1050,5 +784,5 @@ const S: Record<string, React.CSSProperties> = {
   modalInput: { width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, outline: "none", boxSizing: "border-box", fontFamily: "inherit" },
   modalButtons: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 },
   modalCancel: { padding: "8px 18px", borderRadius: 7, border: "1px solid #d1d5db", background: "#fff", fontSize: 14, cursor: "pointer", color: "#374151" },
-  modalConfirm: { padding: "8px 18px", borderRadius: 7, border: "none", background: "#111827", color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer" },
+  modalConfirm: { padding: "8px 18px", borderRadius: 7, border: "none", background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", fontSize: 14, fontWeight: 600, cursor: "pointer" },
 };

@@ -6,6 +6,7 @@ import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRout
 import prisma from "../db.server";
 import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
 import { syncOrderNoteMessages, syncSampleIterationMessages } from "../portal-messages.server";
+import { VisionBoardV2Panel } from "../portal-vision-board";
 import { unauthenticated } from "../shopify.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -175,57 +176,79 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
       })()
     : [];
-  const visionBoards = page === "visionboard"
+  // Vision Board V2 — slim loader that only ships the active board's items
+  // (id/name/sortOrder/imageCount/hasThumbnail/updatedAt). Drawer fetches the
+  // full item on open. One-time copy from the original VisionBoard tables
+  // happens automatically on first visit; idempotent thereafter.
+  const visionBoardData = page === "visionboard"
     ? await (async () => {
-        try {
-          const boards = await prisma.visionBoard.findMany({
-            orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
-          });
-          if (boards.length === 0) return [];
-          // Raw SQL: ship NO image bytes in the loader at all. Thumbnails are
-          // batch-fetched after first paint so the initial page response stays tiny.
-          // hasThumbnail lets the silent backfill hook skip already-processed
-          // items without fetching their full image payload.
-          const items = await prisma.$queryRaw<Array<{
-            id: number; boardId: number; name: string; sortOrder: number;
-            imageCount: number; hasThumbnail: boolean;
-            fields: unknown; notes: string | null;
-            createdAt: Date; updatedAt: Date;
+        const v2Count = await prisma.visionBoardV2.count();
+        if (v2Count === 0) {
+          const v1Count = await prisma.visionBoard.count();
+          if (v1Count > 0) {
+            const v1Boards = await prisma.visionBoard.findMany({
+              orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+              include: { items: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] } },
+            });
+            for (const b of v1Boards) {
+              const newBoard = await prisma.visionBoardV2.create({
+                data: { name: b.name, sortOrder: b.sortOrder },
+              });
+              if (b.items.length === 0) continue;
+              await prisma.visionBoardV2Item.createMany({
+                data: b.items.map((it) => ({
+                  boardId: newBoard.id,
+                  name: it.name,
+                  sortOrder: it.sortOrder,
+                  images: it.images as object,
+                  thumbnail: it.thumbnail,
+                  fields: it.fields as object,
+                  notes: it.notes,
+                })),
+              });
+            }
+          }
+        }
+
+        const requestedBoardId = Number(url.searchParams.get("boardId") ?? 0) || null;
+        const boards = await prisma.visionBoardV2.findMany({
+          orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+          select: { id: true, name: true, sortOrder: true },
+        });
+        const activeBoardId = requestedBoardId && boards.some((b) => b.id === requestedBoardId)
+          ? requestedBoardId
+          : boards[0]?.id ?? null;
+
+        let items: Array<{
+          id: number; name: string; sortOrder: number;
+          imageCount: number; hasThumbnail: boolean; updatedAt: Date;
+        }> = [];
+        if (activeBoardId) {
+          const raw = await prisma.$queryRaw<Array<{
+            id: number; name: string; sortOrder: number;
+            imageCount: number; hasThumbnail: boolean; updatedAt: Date;
           }>>`
             SELECT
-              id, "boardId", name, "sortOrder",
+              id, name, "sortOrder",
               CASE WHEN jsonb_typeof(images) = 'array'
                 THEN jsonb_array_length(images)
                 ELSE 0
               END AS "imageCount",
               (thumbnail IS NOT NULL) AS "hasThumbnail",
-              fields, notes, "createdAt", "updatedAt"
-            FROM "VisionBoardItem"
+              "updatedAt"
+            FROM "VisionBoardV2Item"
+            WHERE "boardId" = ${activeBoardId}
             ORDER BY "sortOrder" ASC, "createdAt" ASC
           `;
-          return boards.map((b) => ({
-            ...b,
-            items: items
-              .filter((it) => it.boardId === b.id)
-              .map((it) => ({
-                id: it.id,
-                boardId: it.boardId,
-                name: it.name,
-                sortOrder: it.sortOrder,
-                images: [] as string[],
-                imageCount: Number(it.imageCount),
-                hasThumbnail: Boolean(it.hasThumbnail),
-                fields: it.fields,
-                notes: it.notes,
-                createdAt: it.createdAt,
-                updatedAt: it.updatedAt,
-              })),
+          items = raw.map((it) => ({
+            ...it,
+            imageCount: Number(it.imageCount),
+            hasThumbnail: Boolean(it.hasThumbnail),
           }));
-        } catch {
-          return [] as { id: number; name: string; sortOrder: number; createdAt: Date; updatedAt: Date; items: { id: number; boardId: number; name: string; sortOrder: number; images: unknown; imageCount: number; fields: unknown; notes: string | null; createdAt: Date; updatedAt: Date }[] }[];
         }
+        return { boards, activeBoardId, items };
       })()
-    : [];
+    : { boards: [] as Array<{ id: number; name: string; sortOrder: number }>, activeBoardId: null as number | null, items: [] as Array<{ id: number; name: string; sortOrder: number; imageCount: number; hasThumbnail: boolean; updatedAt: Date }> };
   // Collections listing — slim projection (no rows JSON, no thumbnail bytes).
   // The drawer fetches the full collection (rows + columns) on open.
   const collections = page === "collections"
@@ -440,7 +463,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     selectedFabricTab,
     inrToAudRate,
     samples,
-    visionBoards,
+    visionBoardData,
     collections,
     fabricStockIndex,
   };
@@ -1511,133 +1534,134 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
-  if (intent === "add_vision_board") {
+  // ─── Vision Board V2 intents ──────────────────────────────────────────────
+  if (intent === "vb_add_board") {
     if (currentUser?.role !== "superadmin") return null;
     const name = String(form.get("name") ?? "").trim() || "New Board";
-    const existing = await prisma.visionBoard.count();
-    await prisma.visionBoard.create({ data: { name, sortOrder: existing } });
+    const existing = await prisma.visionBoardV2.count();
+    await prisma.visionBoardV2.create({ data: { name, sortOrder: existing } });
     return null;
   }
-  if (intent === "rename_vision_board") {
+  if (intent === "vb_rename_board") {
     if (currentUser?.role !== "superadmin") return null;
-    const boardId = Number(form.get("boardId"));
+    const id = Number(form.get("boardId"));
     const name = String(form.get("name") ?? "").trim();
-    if (!boardId || !name) return null;
-    await prisma.visionBoard.update({ where: { id: boardId }, data: { name } });
+    if (!id || !name) return null;
+    await prisma.visionBoardV2.update({ where: { id }, data: { name } });
     return null;
   }
-  if (intent === "delete_vision_board") {
+  if (intent === "vb_delete_board") {
     if (currentUser?.role !== "superadmin") return null;
-    const boardId = Number(form.get("boardId"));
-    if (!boardId) return null;
-    await prisma.visionBoard.delete({ where: { id: boardId } });
+    const id = Number(form.get("boardId"));
+    if (!id) return null;
+    await prisma.visionBoardV2.delete({ where: { id } });
     return null;
   }
-  if (intent === "reorder_vision_boards") {
+  if (intent === "vb_reorder_boards") {
     if (currentUser?.role !== "superadmin") return null;
-    const ids = JSON.parse(String(form.get("boardIds") ?? "[]")) as number[];
-    await Promise.all(ids.map((id, index) => prisma.visionBoard.update({ where: { id }, data: { sortOrder: index } })));
+    try {
+      const ids = JSON.parse(String(form.get("ids") ?? "[]")) as number[];
+      await Promise.all(ids.map((id, i) => prisma.visionBoardV2.update({ where: { id }, data: { sortOrder: i } })));
+    } catch { /* ignore */ }
     return null;
   }
-  if (intent === "add_vision_board_item") {
+  if (intent === "vb_add_item") {
     if (currentUser?.role !== "superadmin") return null;
     const boardId = Number(form.get("boardId"));
     if (!boardId) return null;
     const name = String(form.get("name") ?? "").trim() || "Untitled";
-    const existing = await prisma.visionBoardItem.count({ where: { boardId } });
-    const initialImage = form.get("image");
-    const images = (typeof initialImage === "string" && initialImage.length > 0) ? [initialImage] : [];
-    const initialThumbnail = form.get("thumbnail");
-    const thumbnail = typeof initialThumbnail === "string" && initialThumbnail.length > 0 ? initialThumbnail : null;
-    await prisma.visionBoardItem.create({ data: { boardId, name, sortOrder: existing, images, thumbnail } });
+    const existing = await prisma.visionBoardV2Item.count({ where: { boardId } });
+    const image = form.get("image");
+    const thumb = form.get("thumbnail");
+    const images = typeof image === "string" && image.length > 0 ? [image] : [];
+    const thumbnail = typeof thumb === "string" && thumb.length > 0 ? thumb : null;
+    await prisma.visionBoardV2Item.create({ data: { boardId, name, sortOrder: existing, images, thumbnail } });
     return null;
   }
-  if (intent === "update_vision_board_item") {
+  if (intent === "vb_rename_item") {
     if (currentUser?.role !== "superadmin") return null;
-    const itemId = Number(form.get("itemId"));
-    if (!itemId) return null;
-    const item = await prisma.visionBoardItem.findUnique({ where: { id: itemId } });
-    if (!item) return null;
-    const data: Record<string, unknown> = { updatedAt: new Date() };
+    const id = Number(form.get("itemId"));
+    if (!id) return null;
+    await prisma.visionBoardV2Item.update({ where: { id }, data: { name: String(form.get("name") ?? "") } });
+    return null;
+  }
+  if (intent === "vb_delete_item") {
+    if (currentUser?.role !== "superadmin") return null;
+    const id = Number(form.get("itemId"));
+    if (!id) return null;
+    await prisma.visionBoardV2Item.delete({ where: { id } });
+    return null;
+  }
+  if (intent === "vb_reorder_items") {
+    if (currentUser?.role !== "superadmin") return null;
+    try {
+      const ids = JSON.parse(String(form.get("ids") ?? "[]")) as number[];
+      await Promise.all(ids.map((id, i) => prisma.visionBoardV2Item.update({ where: { id }, data: { sortOrder: i } })));
+    } catch { /* ignore */ }
+    return null;
+  }
+  if (intent === "vb_get_item") {
+    const id = Number(form.get("itemId"));
+    if (!id) return jsonResponse({ item: null });
+    const item = await prisma.visionBoardV2Item.findUnique({ where: { id } });
+    return jsonResponse({ item });
+  }
+  if (intent === "vb_update_item") {
+    if (currentUser?.role !== "superadmin") return null;
+    const id = Number(form.get("itemId"));
+    if (!id) return null;
+    const data: Record<string, unknown> = {};
     if (form.has("name")) data.name = String(form.get("name") ?? "");
     if (form.has("notes")) data.notes = String(form.get("notes") ?? "") || null;
     if (form.has("fields")) {
-      try { data.fields = JSON.parse(String(form.get("fields"))); } catch { /* keep existing */ }
-    }
-    if (form.has("addImage")) {
-      const currentImages = Array.isArray(item.images) ? (item.images as string[]) : [];
-      data.images = [...currentImages, String(form.get("addImage"))];
-    }
-    if (form.has("addImages")) {
-      try {
-        const newImgs = JSON.parse(String(form.get("addImages"))) as string[];
-        if (Array.isArray(newImgs) && newImgs.length > 0) {
-          const base = Array.isArray(data.images) ? (data.images as string[]) : (Array.isArray(item.images) ? (item.images as string[]) : []);
-          data.images = [...base, ...newImgs];
-        }
-      } catch { /* ignore */ }
+      try { data.fields = JSON.parse(String(form.get("fields") ?? "[]")); } catch { /* ignore */ }
     }
     if (form.has("imagesReplace")) {
       try {
-        const replaced = JSON.parse(String(form.get("imagesReplace"))) as string[];
-        if (Array.isArray(replaced)) data.images = replaced;
+        const next = JSON.parse(String(form.get("imagesReplace") ?? "[]")) as unknown[];
+        if (Array.isArray(next)) data.images = next;
       } catch { /* ignore */ }
     }
-    if (form.has("removeImageIndex")) {
-      const idx = Number(form.get("removeImageIndex"));
-      const currentImages = Array.isArray(item.images) ? (item.images as string[]) : [];
-      data.images = currentImages.filter((_, i) => i !== idx);
-    }
-    if (form.has("thumbnailImage")) {
-      const currentImages = Array.isArray(item.images) ? (item.images as string[]) : [];
-      data.images = [String(form.get("thumbnailImage")), ...currentImages.slice(1)];
-    }
     if (form.has("thumbnail")) {
-      const thumb = String(form.get("thumbnail") ?? "");
-      data.thumbnail = thumb || null;
-    } else if ("images" in data) {
-      data.thumbnail = null;
+      const t = String(form.get("thumbnail") ?? "");
+      data.thumbnail = t || null;
     }
-    await prisma.visionBoardItem.update({ where: { id: itemId }, data });
+    if (Object.keys(data).length === 0) return null;
+    await prisma.visionBoardV2Item.update({ where: { id }, data });
     return null;
   }
-  if (intent === "get_vision_board_item") {
-    const itemId = Number(form.get("itemId"));
-    if (!itemId) return jsonResponse({ item: null });
-    const item = await prisma.visionBoardItem.findUnique({ where: { id: itemId } });
-    return jsonResponse({ item });
+  if (intent === "vb_append_item_image") {
+    if (currentUser?.role !== "superadmin") return null;
+    const id = Number(form.get("itemId"));
+    const image = String(form.get("image") ?? "");
+    if (!id || !image) return null;
+    const cur = await prisma.visionBoardV2Item.findUnique({ where: { id }, select: { images: true, thumbnail: true } });
+    if (!cur) return null;
+    const arr = Array.isArray(cur.images) ? (cur.images as unknown[]).slice() : [];
+    arr.push(image);
+    const data: Record<string, unknown> = { images: arr };
+    if (!cur.thumbnail && form.has("thumbnail")) {
+      const t = String(form.get("thumbnail") ?? "");
+      if (t) data.thumbnail = t;
+    }
+    await prisma.visionBoardV2Item.update({ where: { id }, data });
+    return null;
   }
-  if (intent === "get_vision_thumbnails") {
-    let ids: number[] = [];
-    try {
-      const parsed = JSON.parse(String(form.get("ids") ?? "[]"));
-      if (Array.isArray(parsed)) ids = parsed.filter((n): n is number => typeof n === "number" && Number.isFinite(n) && Number.isInteger(n));
-    } catch { /* ignore */ }
-    if (ids.length === 0) return jsonResponse({ thumbs: {} as Record<string, string> });
-    // Read the small dedicated thumbnail column; fall back to images[0] only
-    // for items whose thumbnail hasn't been generated yet.
-    const small = await prisma.visionBoardItem.findMany({
-      where: { id: { in: ids } },
-      select: { id: true, thumbnail: true },
-    }).catch(() => [] as Array<{ id: number; thumbnail: string | null }>);
-    const thumbs: Record<string, string> = {};
-    const missingIds: number[] = [];
-    for (const row of small) {
-      if (row.thumbnail) thumbs[String(row.id)] = row.thumbnail;
-      else missingIds.push(row.id);
-    }
-    if (missingIds.length > 0) {
-      const fallback = await prisma.$queryRawUnsafe<Array<{ id: number; firstImage: string | null }>>(
-        `SELECT id,
-           CASE WHEN jsonb_typeof(images) = 'array' AND jsonb_array_length(images) > 0
-             THEN images ->> 0 ELSE NULL
-           END AS "firstImage"
-         FROM "VisionBoardItem"
-         WHERE id IN (${missingIds.join(",")})`
-      ).catch(() => [] as Array<{ id: number; firstImage: string | null }>);
-      for (const row of fallback) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
-    }
-    return jsonResponse({ thumbs });
+  if (intent === "vb_remove_item_image") {
+    if (currentUser?.role !== "superadmin") return null;
+    const id = Number(form.get("itemId"));
+    const index = Number(form.get("index"));
+    if (!id || !Number.isInteger(index) || index < 0) return null;
+    const cur = await prisma.visionBoardV2Item.findUnique({ where: { id }, select: { images: true, thumbnail: true } });
+    if (!cur) return null;
+    const arr = Array.isArray(cur.images) ? (cur.images as unknown[]).slice() : [];
+    if (index >= arr.length) return null;
+    const wasFirst = index === 0;
+    arr.splice(index, 1);
+    const data: Record<string, unknown> = { images: arr };
+    if (wasFirst) data.thumbnail = null;
+    await prisma.visionBoardV2Item.update({ where: { id }, data });
+    return null;
   }
   if (intent === "get_sample_iteration_thumbnails") {
     let ids: number[] = [];
@@ -1668,19 +1692,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       for (const row of fallback) if (row.firstImage) thumbs[String(row.id)] = row.firstImage;
     }
     return jsonResponse({ thumbs });
-  }
-  if (intent === "delete_vision_board_item") {
-    if (currentUser?.role !== "superadmin") return null;
-    const itemId = Number(form.get("itemId"));
-    if (!itemId) return null;
-    await prisma.visionBoardItem.delete({ where: { id: itemId } });
-    return null;
-  }
-  if (intent === "reorder_vision_board_items") {
-    if (currentUser?.role !== "superadmin") return null;
-    const ids = JSON.parse(String(form.get("itemIds") ?? "[]")) as number[];
-    await Promise.all(ids.map((id, index) => prisma.visionBoardItem.update({ where: { id }, data: { sortOrder: index } })));
-    return null;
   }
 
   // ─── Collections ─────────────────────────────────────────────────────────────
@@ -1969,13 +1980,13 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (formData?.get("noRevalidate") === "1") return false;
   const intent = formData?.get("intent") as string | null;
   if (intent === "reorder_samples" || intent === "rename_sample" || intent === "update_sample_iteration") return false;
-  if (intent === "update_vision_board_item" || intent === "reorder_vision_boards" || intent === "rename_vision_board" || intent === "reorder_vision_board_items") return false;
+  if (intent === "vb_update_item" || intent === "vb_reorder_boards" || intent === "vb_rename_board" || intent === "vb_reorder_items" || intent === "vb_rename_item" || intent === "vb_append_item_image" || intent === "vb_remove_item_image") return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths") return false;
   // Read-only fetchers used by drawers and background hooks don't change
   // any data the page renders, so the loader doesn't need to re-run.
-  if (intent === "get_vision_board_item" || intent === "get_sample_full"
-    || intent === "get_vision_thumbnails" || intent === "get_sample_iteration_thumbnails"
+  if (intent === "vb_get_item" || intent === "get_sample_full"
+    || intent === "get_sample_iteration_thumbnails"
     || intent === "get_collection_full") return false;
   return defaultShouldRevalidate;
 };
@@ -2518,12 +2529,11 @@ const ALL_NAV_ITEMS = [
   { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
   { id: "samples", label: "Samples", href: "/portal?page=samples" },
   { id: "newproduct", label: "New Product Orders", href: "/portal?page=newproduct" },
-  { id: "visionboardv2", label: "Vision Board", href: "/portal/visionboard", superadminOnly: true },
-  { id: "visionboard", label: "Old Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
+  { id: "visionboard", label: "Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
   { id: "collections", label: "Collections", href: "/portal?page=collections" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboardv2", "visionboard", "collections"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboard", "collections"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -4118,7 +4128,7 @@ export default function PortalDashboard() {
     selectedFabricTab,
     inrToAudRate,
     samples,
-    visionBoards,
+    visionBoardData,
     collections,
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
@@ -4477,8 +4487,10 @@ export default function PortalDashboard() {
             currentUser={currentUser}
           />
         ) : page === "visionboard" ? (
-          <VisionBoardPanel
-            boards={visionBoards}
+          <VisionBoardV2Panel
+            boards={visionBoardData.boards}
+            activeBoardId={visionBoardData.activeBoardId}
+            items={visionBoardData.items}
           />
         ) : page === "collections" ? (
           <CollectionsPanel
@@ -6166,31 +6178,9 @@ function ImageLightbox({
 }
 
 // ─── Vision Board ─────────────────────────────────────────────────────────────
-
-type VisionBoardItemType = {
-  id: number;
-  boardId: number;
-  name: string;
-  sortOrder: number;
-  images: unknown;
-  imageCount?: number;
-  hasThumbnail?: boolean;
-  fields: unknown;
-  notes: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-};
-
-type VisionBoardType = {
-  id: number;
-  name: string;
-  sortOrder: number;
-  createdAt: Date;
-  updatedAt: Date;
-  items: VisionBoardItemType[];
-};
-
-type VisionField = { id: string; text: string };
+// V2 components live in app/portal-vision-board.tsx. The loader feeds them
+// slim data (active board's items, no fields/notes/images) and the action
+// handles the vb_* intents.
 
 // Generate a tiny thumbnail for the card grid (~5–15 KB). Re-uses the same
 // canvas pipeline as the full-image compressor but with smaller targets.
@@ -6348,72 +6338,6 @@ function saveCompressedIds(key: string, ids: Set<number>): void {
   } catch { /* quota or private mode — fine to lose */ }
 }
 
-function useAutoCompressVisionItems(items: VisionBoardItemType[]): void {
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    // Skip items the loader has already told us are processed (thumbnail set).
-    // No fetch, no work, no server load.
-    const candidates = items.filter((it) => (it.imageCount ?? 0) > 0 && !it.hasThumbnail);
-    if (candidates.length === 0) return;
-    let cancelled = false;
-    const done = loadCompressedIds(COMPRESSED_IDS_VISION_KEY);
-
-    (async () => {
-      for (const item of candidates) {
-        if (cancelled) return;
-        if (done.has(item.id)) continue;
-        try {
-          const r = await postPortalAction<{ item: { images?: unknown; thumbnail?: string | null } | null }>({
-            intent: "get_vision_board_item",
-            itemId: String(item.id),
-          });
-          const fetched = r.data?.item ?? null;
-          const images = Array.isArray(fetched?.images) ? (fetched!.images as string[]) : [];
-          const existingThumb = fetched?.thumbnail ?? null;
-          const totalBefore = images.reduce((sum, s) => sum + (typeof s === "string" ? s.length : 0), 0);
-          const imagesAlreadySmall = totalBefore < 150_000 * Math.max(1, images.length);
-
-          // Decide what work to do:
-          // 1. Generate the small thumbnail if it's missing (cheap, biggest perf win).
-          // 2. Re-compress full images only if they're still oversized.
-          let thumbToSend: string | null = null;
-          if (!existingThumb && images.length > 0) {
-            thumbToSend = await generateThumbnail(images[0]);
-          }
-          let compressedToSend: string[] | null = null;
-          if (!imagesAlreadySmall && images.length > 0) {
-            const compressed = await Promise.all(images.map((img) => compressDataUrl(img)));
-            const totalAfter = compressed.reduce((sum, s) => sum + s.length, 0);
-            if (totalAfter < totalBefore * 0.95) compressedToSend = compressed;
-          }
-
-          if (thumbToSend || compressedToSend) {
-            const payload: Record<string, string> = {
-              intent: "update_vision_board_item",
-              itemId: String(item.id),
-            };
-            if (compressedToSend) {
-              payload.imagesReplace = JSON.stringify(compressedToSend);
-              // If we re-compressed images and didn't already compute a thumb,
-              // make one from the new first compressed image.
-              if (!thumbToSend && compressedToSend.length > 0) {
-                thumbToSend = await generateThumbnail(compressedToSend[0]);
-              }
-            }
-            if (thumbToSend) payload.thumbnail = thumbToSend;
-            await postPortalAction(payload);
-          }
-          done.add(item.id);
-          saveCompressedIds(COMPRESSED_IDS_VISION_KEY, done);
-        } catch { /* keep going */ }
-      }
-    })();
-
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items.length]);
-}
-
 function useAutoCompressSampleIterations(samples: SampleType[]): void {
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -6521,771 +6445,6 @@ async function compressImageToDataUrl(file: File, maxDim = 800, quality = 0.75):
   }
 }
 
-function visionImages(item: VisionBoardItemType): string[] {
-  return Array.isArray(item.images) ? (item.images as string[]) : [];
-}
-function newFieldId(): string {
-  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-    ? crypto.randomUUID()
-    : `f_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-function visionFields(item: VisionBoardItemType): VisionField[] {
-  if (!Array.isArray(item.fields)) return [];
-  return (item.fields as Array<Record<string, unknown>>).map((f) => {
-    const id = typeof f?.id === "string" ? f.id : newFieldId();
-    if (typeof f?.text === "string") return { id, text: f.text };
-    const label = typeof f?.label === "string" ? f.label : "";
-    const value = typeof f?.value === "string" ? f.value : "";
-    const text = label && value ? `${label}: ${value}` : (label || value || "");
-    return { id, text };
-  });
-}
-
-function VisionBoardPanel({ boards: initialBoards }: { boards: VisionBoardType[] }) {
-  const fetcher = useFetcher();
-  const [boards, setBoards] = useState<VisionBoardType[]>(initialBoards);
-  const [activeBoardId, setActiveBoardId] = useState<number | null>(initialBoards[0]?.id ?? null);
-  const [renamingBoardId, setRenamingBoardId] = useState<number | null>(null);
-  const [renameDraft, setRenameDraft] = useState("");
-  const [confirmDeleteBoardId, setConfirmDeleteBoardId] = useState<number | null>(null);
-  const [addBoardOpen, setAddBoardOpen] = useState(false);
-  const [addBoardName, setAddBoardName] = useState("");
-  const [addItemOpen, setAddItemOpen] = useState(false);
-  const [addItemName, setAddItemName] = useState("");
-  const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
-  const [dragItemId, setDragItemId] = useState<number | null>(null);
-  const [dragOverItemId, setDragOverItemId] = useState<number | null>(null);
-  const deletedItemIds = useRef<Set<number>>(new Set());
-  const maxIdBeforeAddRef = useRef<number | null>(null);
-
-  // Sync from server but never restore items the user just deleted this session
-  useEffect(() => {
-    setBoards(initialBoards.map((b) => ({
-      ...b,
-      items: b.items.filter((it) => !deletedItemIds.current.has(it.id)),
-    })));
-  }, [initialBoards]);
-
-  // Auto-compress legacy uncompressed images in the background.
-  useAutoCompressVisionItems(boards.flatMap((b) => b.items));
-
-  useEffect(() => {
-    if (!activeBoardId && boards.length > 0) setActiveBoardId(boards[0].id);
-  }, [boards, activeBoardId]);
-
-  const activeBoard = boards.find((b) => b.id === activeBoardId) ?? null;
-  const selectedItem = activeBoard?.items.find((it) => it.id === selectedItemId) ?? null;
-
-  // After we drop an image on the empty card, the new item arrives via revalidation —
-  // find the just-created item by id and open the drawer for it
-  useEffect(() => {
-    if (maxIdBeforeAddRef.current !== null && activeBoard) {
-      const threshold = maxIdBeforeAddRef.current;
-      const newItem = activeBoard.items.find((it) => it.id > threshold);
-      if (newItem) {
-        setSelectedItemId(newItem.id);
-        maxIdBeforeAddRef.current = null;
-      }
-    }
-  }, [boards, activeBoard]);
-
-  const handleDropImageOnEmptyCard = async (file: File) => {
-    if (!activeBoardId || activeBoardId < 0) return;
-    const dataUrl = await compressImageToDataUrl(file);
-    const thumb = await generateThumbnail(dataUrl);
-    const items = activeBoard?.items ?? [];
-    maxIdBeforeAddRef.current = items.length > 0 ? Math.max(...items.map((it) => it.id)) : 0;
-    const payload: Record<string, string> = {
-      intent: "add_vision_board_item",
-      boardId: String(activeBoardId),
-      image: dataUrl,
-    };
-    if (thumb) payload.thumbnail = thumb;
-    fetcher.submit(payload, { method: "post" });
-  };
-
-  const submitAddBoard = () => {
-    const name = addBoardName.trim() || "New Board";
-    fetcher.submit({ intent: "add_vision_board", name }, { method: "post" });
-    setAddBoardOpen(false);
-    setAddBoardName("");
-  };
-  const submitRenameBoard = (boardId: number) => {
-    const name = renameDraft.trim();
-    if (!name) { setRenamingBoardId(null); return; }
-    setBoards((prev) => prev.map((b) => b.id === boardId ? { ...b, name } : b));
-    fetcher.submit({ intent: "rename_vision_board", boardId: String(boardId), name }, { method: "post" });
-    setRenamingBoardId(null);
-  };
-  const submitDeleteBoard = (boardId: number) => {
-    setBoards((prev) => prev.filter((b) => b.id !== boardId));
-    if (activeBoardId === boardId) {
-      const next = boards.find((b) => b.id !== boardId);
-      setActiveBoardId(next?.id ?? null);
-    }
-    fetcher.submit({ intent: "delete_vision_board", boardId: String(boardId) }, { method: "post" });
-    setConfirmDeleteBoardId(null);
-  };
-
-  const submitAddItem = () => {
-    const name = addItemName.trim() || "Untitled";
-    if (!activeBoardId || activeBoardId < 0) return;
-    fetcher.submit({ intent: "add_vision_board_item", boardId: String(activeBoardId), name }, { method: "post" });
-    setAddItemOpen(false);
-    setAddItemName("");
-  };
-
-  const handleDeleteItem = (itemId: number) => {
-    deletedItemIds.current.add(itemId);
-    setBoards((prev) => prev.map((b) => b.id === activeBoardId
-      ? { ...b, items: b.items.filter((it) => it.id !== itemId) }
-      : b,
-    ));
-    if (selectedItemId === itemId) setSelectedItemId(null);
-    fetcher.submit({ intent: "delete_vision_board_item", itemId: String(itemId) }, { method: "post" });
-  };
-
-  const reorderItems = (targetId: number) => {
-    if (!dragItemId || dragItemId === targetId || !activeBoard) return;
-    const fromIndex = activeBoard.items.findIndex((it) => it.id === dragItemId);
-    const toIndex = activeBoard.items.findIndex((it) => it.id === targetId);
-    if (fromIndex < 0 || toIndex < 0) return;
-    const next = [...activeBoard.items];
-    const [moved] = next.splice(fromIndex, 1);
-    next.splice(toIndex, 0, moved);
-    setBoards((prev) => prev.map((b) => b.id === activeBoardId ? { ...b, items: next } : b));
-    fetcher.submit({ intent: "reorder_vision_board_items", itemIds: JSON.stringify(next.map((it) => it.id)) }, { method: "post" });
-  };
-
-  const updateLocalItem = (itemId: number, patch: Partial<VisionBoardItemType>) => {
-    setBoards((prev) => prev.map((b) => b.id === activeBoardId
-      ? { ...b, items: b.items.map((it) => it.id === itemId ? { ...it, ...patch } : it) }
-      : b,
-    ));
-  };
-
-  return (
-    <div style={s.productInfoPage}>
-      {/* Top tab bar — categories */}
-      <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "0 4px 0", borderBottom: "1px solid #e5e7eb", flexWrap: "wrap" }}>
-        {boards.map((board) => {
-          const isActive = board.id === activeBoardId;
-          return (
-            <div
-              key={board.id}
-              onClick={() => setActiveBoardId(board.id)}
-              style={{ display: "flex", alignItems: "center", gap: 4, background: isActive ? "var(--portal-primary-button-bg, #111827)" : "#f3f4f6", color: isActive ? "var(--portal-primary-button-color, #fff)" : "#374151", borderRadius: "6px 6px 0 0", padding: "6px 12px", cursor: "pointer", fontSize: 13, fontWeight: 500, border: "1px solid", borderColor: isActive ? "var(--portal-primary-button-bg, #111827)" : "#e5e7eb", borderBottom: isActive ? "1px solid var(--portal-primary-button-bg, #111827)" : "1px solid #e5e7eb", position: "relative", top: 1 }}
-            >
-              {renamingBoardId === board.id ? (
-                <input
-                  autoFocus
-                  value={renameDraft}
-                  onChange={(e) => setRenameDraft(e.target.value)}
-                  onBlur={() => submitRenameBoard(board.id)}
-                  onKeyDown={(e) => { if (e.key === "Enter") submitRenameBoard(board.id); if (e.key === "Escape") setRenamingBoardId(null); }}
-                  onClick={(e) => e.stopPropagation()}
-                  style={{ background: "transparent", border: "none", outline: "none", color: "inherit", fontSize: 13, fontWeight: 500, width: Math.max(60, renameDraft.length * 8) }}
-                />
-              ) : (
-                <>
-                  <span onDoubleClick={(e) => { e.stopPropagation(); setRenamingBoardId(board.id); setRenameDraft(board.name); }}>{board.name}</span>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); setRenamingBoardId(board.id); setRenameDraft(board.name); }}
-                    title="Rename board"
-                    style={{ background: "none", border: "none", padding: "2px 4px", cursor: "pointer", color: "inherit", opacity: 0.6, lineHeight: 1, borderRadius: 4, display: "flex", alignItems: "center" }}
-                  >
-                    <svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/></svg>
-                  </button>
-                </>
-              )}
-              {confirmDeleteBoardId === board.id ? (
-                <span style={{ display: "flex", gap: 3, marginLeft: 4 }} onClick={(e) => e.stopPropagation()}>
-                  <button onClick={() => submitDeleteBoard(board.id)} style={{ background: "#ef4444", color: "#fff", border: "none", borderRadius: 3, padding: "1px 6px", fontSize: 11, cursor: "pointer" }}>Delete</button>
-                  <button onClick={() => setConfirmDeleteBoardId(null)} style={{ background: "#e5e7eb", color: "#374151", border: "none", borderRadius: 3, padding: "1px 6px", fontSize: 11, cursor: "pointer" }}>Cancel</button>
-                </span>
-              ) : (
-                <span onClick={(e) => { e.stopPropagation(); setConfirmDeleteBoardId(board.id); }} style={{ marginLeft: 4, opacity: 0.6, fontSize: 13, cursor: "pointer", lineHeight: 1 }}>×</span>
-              )}
-            </div>
-          );
-        })}
-        <button onClick={() => { setAddBoardOpen(true); setAddBoardName(""); }} style={{ background: "none", border: "1px dashed #d1d5db", borderRadius: "6px 6px 0 0", padding: "6px 12px", fontSize: 13, cursor: "pointer", color: "#6b7280", position: "relative", top: 1 }}>+ Add board</button>
-      </div>
-
-      {/* Toolbar */}
-      <div style={s.productInfoToolbar}>
-        <div style={s.productInfoToolbarLeft}>
-          <div>
-            <h2 style={s.productInfoHeading}>{activeBoard?.name ?? "Vision Board"}</h2>
-            <div style={s.productInfoMeta}>{activeBoard?.items.length ?? 0} item{(activeBoard?.items.length ?? 0) !== 1 ? "s" : ""}</div>
-          </div>
-        </div>
-        <div style={s.productInfoActions}>
-          <button
-            type="button"
-            style={{ ...s.primaryActionButton, opacity: activeBoardId && activeBoardId > 0 ? 1 : 0.5, cursor: activeBoardId && activeBoardId > 0 ? "pointer" : "not-allowed" }}
-            disabled={!activeBoardId || activeBoardId < 0}
-            onClick={() => { setAddItemName(""); setAddItemOpen(true); }}
-          >
-            Add Item
-          </button>
-        </div>
-      </div>
-
-      {/* Grid of cards — fixed 8 columns, shrinks with screen instead of wrapping */}
-      <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(8, minmax(0, 1fr))" }}>
-        {activeBoard?.items.map((item) => (
-          <VisionItemCard
-            key={item.id}
-            item={item}
-            isDragging={dragItemId === item.id}
-            isDragOver={dragOverItemId === item.id && dragItemId !== item.id}
-            onOpen={() => setSelectedItemId(item.id)}
-            onDragStart={(event) => {
-              setDragItemId(item.id);
-              event.dataTransfer.effectAllowed = "move";
-            }}
-            onDragOver={(event) => {
-              if (!dragItemId) return;
-              event.preventDefault();
-              setDragOverItemId(item.id);
-            }}
-            onDragLeave={() => setDragOverItemId((c) => c === item.id ? null : c)}
-            onDrop={(event) => {
-              event.preventDefault();
-              reorderItems(item.id);
-              setDragItemId(null);
-              setDragOverItemId(null);
-            }}
-            onDragEnd={() => { setDragItemId(null); setDragOverItemId(null); }}
-            onDelete={() => handleDeleteItem(item.id)}
-          />
-        ))}
-        {activeBoard && activeBoard.id > 0 && (
-          <VisionEmptyDropCard onAddImage={handleDropImageOnEmptyCard} />
-        )}
-        {!activeBoard && (
-          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-            Add a menu using the tab bar above.
-          </div>
-        )}
-      </div>
-
-      {selectedItem && typeof document !== "undefined" && createPortal(
-        <VisionItemDetailPanel
-          item={selectedItem}
-          onClose={() => setSelectedItemId(null)}
-          onUpdateLocal={(patch) => updateLocalItem(selectedItem.id, patch)}
-        />,
-        document.body,
-      )}
-
-      {addBoardOpen && typeof document !== "undefined" && createPortal(
-        <div
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1400, display: "flex", alignItems: "center", justifyContent: "center" }}
-          onClick={(e) => { if (e.target === e.currentTarget) setAddBoardOpen(false); }}
-        >
-          <div style={{ background: "#fff", borderRadius: 12, padding: "28px 28px 24px", width: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 16 }}>Add board</div>
-            <input
-              autoFocus
-              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, outline: "none", boxSizing: "border-box" as const, fontFamily: "inherit" }}
-              placeholder="Board name (e.g. Fabric Prints, Moods)"
-              value={addBoardName}
-              onChange={(e) => setAddBoardName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") submitAddBoard(); if (e.key === "Escape") setAddBoardOpen(false); }}
-            />
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
-              <button type="button" onClick={() => setAddBoardOpen(false)} style={{ padding: "8px 18px", borderRadius: 7, border: "1px solid #d1d5db", background: "#fff", fontSize: 14, cursor: "pointer", color: "#374151" }}>Cancel</button>
-              <button type="button" onClick={submitAddBoard} style={{ padding: "8px 18px", borderRadius: 7, border: "none", background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Add</button>
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
-
-      {addItemOpen && typeof document !== "undefined" && createPortal(
-        <div
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 1400, display: "flex", alignItems: "center", justifyContent: "center" }}
-          onClick={(e) => { if (e.target === e.currentTarget) setAddItemOpen(false); }}
-        >
-          <div style={{ background: "#fff", borderRadius: 12, padding: "28px 28px 24px", width: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.18)" }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: "#111827", marginBottom: 16 }}>Add item</div>
-            <input
-              autoFocus
-              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 7, padding: "9px 12px", fontSize: 14, outline: "none", boxSizing: "border-box" as const, fontFamily: "inherit" }}
-              placeholder="Item name"
-              value={addItemName}
-              onChange={(e) => setAddItemName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") submitAddItem(); if (e.key === "Escape") setAddItemOpen(false); }}
-            />
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}>
-              <button type="button" onClick={() => setAddItemOpen(false)} style={{ padding: "8px 18px", borderRadius: 7, border: "1px solid #d1d5db", background: "#fff", fontSize: 14, cursor: "pointer", color: "#374151" }}>Cancel</button>
-              <button type="button" onClick={submitAddItem} style={{ padding: "8px 18px", borderRadius: 7, border: "none", background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Add</button>
-            </div>
-          </div>
-        </div>,
-        document.body,
-      )}
-    </div>
-  );
-}
-
-function VisionEmptyDropCard({ onAddImage }: { onAddImage: (file: File) => void }) {
-  const [dragOver, setDragOver] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
-  return (
-    <div
-      style={{
-        ...s.productStyleCard,
-        cursor: "pointer",
-        background: dragOver ? "#e0f2fe" : "#f8fafc",
-        borderStyle: "dashed",
-        borderColor: dragOver ? "#0284c7" : "#cbd5e1",
-        transition: "background 0.15s, border-color 0.15s",
-      }}
-      onClick={() => inputRef.current?.click()}
-      onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith("image/"));
-        if (file) onAddImage(file);
-      }}
-    >
-      <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", display: "flex", alignItems: "center", justifyContent: "center", color: "#94a3b8", fontSize: 13, fontWeight: 600, textAlign: "center", padding: 8 }}>
-        Drop image<br />or click
-      </div>
-      <div style={{ ...s.productStyleCardBody, paddingBottom: 14 }}>
-        <span style={{ ...s.productStyleTitle, color: "#94a3b8" }}>+ New</span>
-      </div>
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        style={{ display: "none" }}
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) onAddImage(file);
-          e.target.value = "";
-        }}
-      />
-    </div>
-  );
-}
-
-function VisionItemCard({
-  item,
-  isDragging,
-  isDragOver,
-  onOpen,
-  onDragStart,
-  onDragOver,
-  onDragLeave,
-  onDrop,
-  onDragEnd,
-  onDelete,
-}: {
-  item: VisionBoardItemType;
-  isDragging: boolean;
-  isDragOver: boolean;
-  onOpen: () => void;
-  onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
-  onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
-  onDragLeave: () => void;
-  onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
-  onDragEnd: () => void;
-  onDelete: () => void;
-}) {
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [gone, setGone] = useState(false);
-  const [hover, setHover] = useState(false);
-  if (gone) return null;
-  const images = visionImages(item);
-  const expectsImage = (item.imageCount ?? images.length) > 0;
-
-  return (
-    <div
-      style={{
-        ...s.productStyleCard,
-        ...(isDragging ? s.productStyleCardDragging : {}),
-        ...(isDragOver ? s.productStyleCardDropTarget : {}),
-        cursor: "pointer",
-      }}
-      onClick={onOpen}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-      onDrop={onDrop}
-    >
-      <span
-        draggable
-        style={{ ...s.productStyleDragHandle, pointerEvents: "auto", cursor: "grab", opacity: hover ? 0.6 : 0.25, transition: "opacity 0.15s" }}
-        title="Drag to reorder"
-        onDragStart={onDragStart}
-        onDragEnd={onDragEnd}
-        onClick={(e) => e.stopPropagation()}
-      >::</span>
-      {(hover || confirmDelete) && (
-        <button
-          type="button"
-          title="Delete item"
-          onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
-          style={{ position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: "50%", border: "none", background: "#ef4444", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, lineHeight: 1, padding: 0, zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" }}
-        >×</button>
-      )}
-      {confirmDelete && (
-        <div
-          style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 8 }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>Delete this item?</div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setGone(true); onDelete(); }}
-              style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
-            >Delete</button>
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setConfirmDelete(false); }}
-              style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}
-            >Cancel</button>
-          </div>
-        </div>
-      )}
-      {/* Image — 1.3:1.8 max ratio */}
-      <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8" }}>
-        {expectsImage ? (
-          <img
-            src={`/portal/thumbnail/vision/${item.id}?v=${new Date(item.updatedAt).getTime()}`}
-            alt={item.name}
-            style={s.productStyleImage}
-            loading="lazy"
-            decoding="async"
-          />
-        ) : (
-          <div style={s.productStyleImageEmpty}>No image yet</div>
-        )}
-      </div>
-      <div style={{ ...s.productStyleCardBody, paddingBottom: 14 }}>
-        <span style={s.productStyleTitle}>{item.name || "Untitled"}</span>
-      </div>
-    </div>
-  );
-}
-
-function VisionItemDetailPanel({
-  item,
-  onClose,
-  onUpdateLocal,
-}: {
-  item: VisionBoardItemType;
-  onClose: () => void;
-  onUpdateLocal: (patch: Partial<VisionBoardItemType>) => void;
-}) {
-  const fetcher = useFetcher();
-  const [isEditingName, setIsEditingName] = useState(false);
-  const [nameDraft, setNameDraft] = useState(item.name);
-  const [notes, setNotes] = useState(item.notes ?? "");
-  const [fields, setFields] = useState<VisionField[]>(() => visionFields(item));
-  // Server image state — count + cache-buster version. We render saved images
-  // via /portal/image/vision/<id>/<i>?v=<version> so the browser handles
-  // download + caching natively (no big base64-in-JSON drawer payload).
-  const [savedCount, setSavedCount] = useState<number>(item.imageCount ?? visionImages(item).length);
-  const [version, setVersion] = useState<number>(() => new Date(item.updatedAt).getTime());
-  type PendingImage = { id: string; blobUrl: string; dataUrl: string };
-  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
-  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
-  const [imageDragOver, setImageDragOver] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => { setNameDraft(item.name); }, [item.name, item.id]);
-  useEffect(() => { setNotes(item.notes ?? ""); }, [item.notes, item.id]);
-  useEffect(() => { setFields(visionFields(item)); }, [item.fields, item.id]);
-  useEffect(() => {
-    // Keep savedCount in sync if a fresh prop arrives with a higher count.
-    const propCount = item.imageCount ?? visionImages(item).length;
-    setSavedCount((cur) => (propCount > cur ? propCount : cur));
-  }, [item.imageCount, item.images, item.id]);
-
-  // Cleanup pending blob URLs when the drawer closes / a new item is selected.
-  useEffect(() => () => {
-    setPendingImages((cur) => {
-      cur.forEach((p) => URL.revokeObjectURL(p.blobUrl));
-      return [];
-    });
-  }, [item.id]);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [onClose]);
-
-  const saveName = () => {
-    setIsEditingName(false);
-    const trimmed = nameDraft.trim();
-    if (trimmed && trimmed !== item.name) {
-      onUpdateLocal({ name: trimmed });
-      fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), name: trimmed }, { method: "post" });
-    } else {
-      setNameDraft(item.name);
-    }
-  };
-
-  const saveNotes = () => {
-    if (notes !== (item.notes ?? "")) {
-      onUpdateLocal({ notes: notes || null });
-      fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), notes }, { method: "post" });
-    }
-  };
-
-  const addImages = async (files: File[]) => {
-    if (files.length === 0) return;
-    // Show preview blobs immediately, before compression / upload.
-    const previews: PendingImage[] = files.map((f) => ({
-      id: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `p_${Date.now()}_${Math.random()}`,
-      blobUrl: URL.createObjectURL(f),
-      dataUrl: "",
-    }));
-    setPendingImages((cur) => [...cur, ...previews]);
-
-    const dataUrls = await Promise.all(files.map((file) => compressImageToDataUrl(file)));
-    const wasEmpty = savedCount === 0;
-    const payload: Record<string, string> = {
-      intent: "update_vision_board_item",
-      itemId: String(item.id),
-      addImages: JSON.stringify(dataUrls),
-    };
-    if (wasEmpty && dataUrls.length > 0) {
-      const thumb = await generateThumbnail(dataUrls[0]);
-      if (thumb) payload.thumbnail = thumb;
-    }
-    const result = await postPortalAction<unknown>(payload);
-    if (!result.ok) {
-      // Save failed — leave previews in place so the user knows to retry.
-      return;
-    }
-    // Promote previews to saved entries.
-    const promotedIds = new Set(previews.map((p) => p.id));
-    setSavedCount((c) => c + previews.length);
-    setVersion(Date.now());
-    setPendingImages((cur) => {
-      cur.filter((p) => promotedIds.has(p.id)).forEach((p) => URL.revokeObjectURL(p.blobUrl));
-      return cur.filter((p) => !promotedIds.has(p.id));
-    });
-    onUpdateLocal({ imageCount: savedCount + previews.length });
-  };
-
-  const [pendingDeleteIndex, setPendingDeleteIndex] = useState<number | null>(null);
-  const doRemoveSavedImage = async (index: number) => {
-    setSavedCount((c) => Math.max(0, c - 1));
-    onUpdateLocal({ imageCount: Math.max(0, savedCount - 1) });
-    await postPortalAction({
-      intent: "update_vision_board_item",
-      itemId: String(item.id),
-      removeImageIndex: String(index),
-    });
-    // Bust browser cache for the now-shifted indices.
-    setVersion(Date.now());
-  };
-  const requestRemoveSavedImage = (index: number) => {
-    if (shouldSkipDeleteConfirm()) {
-      void doRemoveSavedImage(index);
-      return;
-    }
-    setPendingDeleteIndex(index);
-  };
-
-  const removePendingImage = (id: string) => {
-    setPendingImages((cur) => {
-      const found = cur.find((p) => p.id === id);
-      if (found) URL.revokeObjectURL(found.blobUrl);
-      return cur.filter((p) => p.id !== id);
-    });
-  };
-
-  const saveFields = (next: VisionField[]) => {
-    setFields(next);
-    onUpdateLocal({ fields: next });
-    fetcher.submit({ intent: "update_vision_board_item", itemId: String(item.id), fields: JSON.stringify(next) }, { method: "post" });
-  };
-  const addField = () => {
-    saveFields([...fields, { id: newFieldId(), text: "" }]);
-  };
-  const updateFieldText = (id: string, text: string) => {
-    saveFields(fields.map((f) => f.id === id ? { ...f, text } : f));
-  };
-  const removeField = (id: string) => {
-    saveFields(fields.filter((f) => f.id !== id));
-  };
-
-  return (
-    <>
-      <div style={s.samplePanelBackdrop} onClick={onClose} />
-      <div style={s.samplePanel}>
-        <div style={s.samplePanelHeader}>
-          <div style={s.samplePanelNameWrap}>
-            {isEditingName ? (
-              <input
-                autoFocus
-                style={s.samplePanelNameInput}
-                value={nameDraft}
-                onChange={(e) => setNameDraft(e.target.value)}
-                onBlur={saveName}
-                onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(item.name); setIsEditingName(false); } }}
-              />
-            ) : (
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <h2 style={s.samplePanelName} onClick={() => setIsEditingName(true)} title="Click to rename">{item.name || "Untitled"}</h2>
-                <button
-                  type="button"
-                  onClick={() => setIsEditingName(true)}
-                  title="Rename"
-                  style={{ background: "none", border: "none", padding: "4px 6px", cursor: "pointer", color: "#9ca3af", lineHeight: 1, borderRadius: 4, display: "flex", alignItems: "center" }}
-                >
-                  <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/></svg>
-                </button>
-              </div>
-            )}
-          </div>
-          <button type="button" style={s.samplePanelClose} onClick={onClose} aria-label="Close">×</button>
-        </div>
-
-        <div style={s.samplePanelIterations}>
-          <div style={s.sampleIterationBlock}>
-            {/* Images */}
-            <div style={s.sampleIterationImages}>
-              {Array.from({ length: savedCount }).map((_, index) => (
-                <div key={`saved-${index}`} style={s.sampleIterationImageWrap}>
-                  <img
-                    src={`/portal/image/vision/${item.id}/${index}?v=${version}`}
-                    alt={`${item.name} ${index + 1}`}
-                    style={{ ...s.sampleIterationImage, cursor: "zoom-in" }}
-                    loading="lazy"
-                    decoding="async"
-                    onClick={() => setLightboxIndex(index)}
-                  />
-                  <button type="button" style={s.sampleIterationImageRemove} onClick={() => requestRemoveSavedImage(index)} aria-label="Remove image">×</button>
-                </div>
-              ))}
-              {pendingImages.map((p, i) => (
-                <div key={`pending-${p.id}`} style={s.sampleIterationImageWrap}>
-                  <img
-                    src={p.blobUrl}
-                    alt={`${item.name} uploading ${i + 1}`}
-                    style={{ ...s.sampleIterationImage, opacity: 0.6 }}
-                  />
-                  <button type="button" style={s.sampleIterationImageRemove} onClick={() => removePendingImage(p.id)} aria-label="Cancel upload">×</button>
-                </div>
-              ))}
-              <div
-                style={{
-                  ...s.sampleIterationAddImage,
-                  cursor: "pointer",
-                  background: imageDragOver ? "#e0f2fe" : (s.sampleIterationAddImage as React.CSSProperties).background,
-                  borderColor: imageDragOver ? "#0284c7" : (s.sampleIterationAddImage as React.CSSProperties).borderColor,
-                  transition: "background 0.15s, border-color 0.15s",
-                }}
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={(e) => { e.preventDefault(); setImageDragOver(true); }}
-                onDragLeave={() => setImageDragOver(false)}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  setImageDragOver(false);
-                  void addImages(Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith("image/")));
-                }}
-              >
-                <span>+ Add photos</span>
-              </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  void addImages(Array.from(e.target.files ?? []));
-                  e.target.value = "";
-                }}
-              />
-            </div>
-
-            {/* Notes-style rows: free-form text per row, delete button */}
-            <div style={{ borderTop: "1px solid #f1f5f9" }}>
-              {fields.map((field) => (
-                <div key={field.id} style={{ display: "flex", gap: 8, padding: "10px 14px", borderBottom: "1px solid #f1f5f9", alignItems: "flex-start" }}>
-                  <textarea
-                    style={{ flex: 1, border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontSize: "var(--portal-panel-font-size, 13px)", color: "#111827", background: "#fff", fontFamily: "inherit", resize: "vertical", minHeight: 36 }}
-                    value={field.text}
-                    placeholder="Type a note…"
-                    rows={1}
-                    onChange={(e) => setFields((prev) => prev.map((f) => f.id === field.id ? { ...f, text: e.target.value } : f))}
-                    onBlur={(e) => updateFieldText(field.id, e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeField(field.id)}
-                    style={{ background: "#ef4444", color: "#fff", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-                    title="Delete row"
-                  >Delete</button>
-                </div>
-              ))}
-              <div style={{ padding: "10px 14px" }}>
-                <button
-                  type="button"
-                  onClick={addField}
-                  style={{ background: "var(--portal-primary-button-bg, #111827)", color: "var(--portal-primary-button-color, #fff)", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-                >+ Add row</button>
-              </div>
-            </div>
-
-            {/* Notes */}
-            <div style={{ borderTop: "1px solid #f1f5f9", padding: "10px 14px" }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", marginBottom: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>Notes</div>
-              <textarea
-                style={s.sampleIterationNotes}
-                value={notes}
-                placeholder="Notes…"
-                onChange={(e) => setNotes(e.target.value)}
-                onBlur={saveNotes}
-                rows={4}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {lightboxIndex !== null && typeof document !== "undefined" && createPortal(
-        <ImageLightbox
-          images={[
-            ...Array.from({ length: savedCount }, (_, i) => `/portal/image/vision/${item.id}/${i}?v=${version}`),
-            ...pendingImages.map((p) => p.blobUrl),
-          ]}
-          initialIndex={lightboxIndex}
-          onClose={() => setLightboxIndex(null)}
-        />,
-        document.body,
-      )}
-      {pendingDeleteIndex !== null && (
-        <ConfirmDeleteModal
-          title="Are you sure you want to delete this image?"
-          subtitle={item.name || undefined}
-          onCancel={() => setPendingDeleteIndex(null)}
-          onConfirm={() => {
-            const idx = pendingDeleteIndex;
-            setPendingDeleteIndex(null);
-            void doRemoveSavedImage(idx);
-          }}
-        />
-      )}
-    </>
-  );
-}
 
 // ─── Collections ─────────────────────────────────────────────────────────────
 
