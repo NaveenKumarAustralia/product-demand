@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
-import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams } from "react-router";
+import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams, useSubmit } from "react-router";
 import prisma from "../db.server";
 import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
 import { syncOrderNoteMessages, syncSampleIterationMessages } from "../portal-messages.server";
@@ -4120,6 +4120,7 @@ export default function PortalDashboard() {
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
+  const submit = useSubmit();
   const columnWidthsFetcher = useFetcher();
   const undoFetcher = useFetcher();
   const [addRowNonce, setAddRowNonce] = useState(0);
@@ -4359,9 +4360,22 @@ export default function PortalDashboard() {
               <MessagesMenu messages={messages} />
               <div style={s.activeUsers} title="Currently active">
                 <span style={s.activeUsersLabel}>Active</span>
-                {activeUsers.length ? activeUsers.map((user) => (
-                  <span key={user.id} style={s.activeUserBadge} title={user.name}>{user.initials}</span>
-                )) : <span style={s.activeUserEmpty}>No active users</span>}
+                {activeUsers.length ? activeUsers.map((user) => {
+                  const isSelf = currentUser?.id === user.id;
+                  return (
+                    <span
+                      key={user.id}
+                      style={{ ...s.activeUserBadge, ...(isSelf ? { cursor: "context-menu" } : {}) }}
+                      title={isSelf ? `${user.name} (right-click to log out)` : user.name}
+                      onContextMenu={isSelf ? (event) => {
+                        event.preventDefault();
+                        if (window.confirm("Log out?")) {
+                          submit({ intent: "portal_logout" }, { method: "post" });
+                        }
+                      } : undefined}
+                    >{user.initials}</span>
+                  );
+                }) : <span style={s.activeUserEmpty}>No active users</span>}
               </div>
             </div>
             {page === "restock" && (
@@ -9871,10 +9885,13 @@ function SettingsPanel({
                 max={20}
                 value={universalDraft.tableTextSize}
                 disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  tableTextSize: Number(event.currentTarget.value) || current.tableTextSize,
-                }))}
+                onChange={(event) => {
+                  const v = Number(event.currentTarget.value);
+                  setUniversalDraft((current) => ({
+                    ...current,
+                    tableTextSize: v || current.tableTextSize,
+                  }));
+                }}
                 style={s.settingsSmallInput}
               />
             </label>
@@ -9927,10 +9944,13 @@ function SettingsPanel({
                 max={34}
                 value={universalDraft.headingTextSize}
                 disabled={!canManageUsers}
-                onChange={(event) => setUniversalDraft((current) => ({
-                  ...current,
-                  headingTextSize: Number(event.currentTarget.value) || current.headingTextSize,
-                }))}
+                onChange={(event) => {
+                  const v = Number(event.currentTarget.value);
+                  setUniversalDraft((current) => ({
+                    ...current,
+                    headingTextSize: v || current.headingTextSize,
+                  }));
+                }}
                 style={s.settingsSmallInput}
               />
             </label>
@@ -10053,10 +10073,13 @@ function SettingsPanel({
                 max={32}
                 value={restockDraft.quantityFontSize}
                 disabled={!canManageUsers}
-                onChange={(event) => setRestockDraft((current) => ({
-                  ...current,
-                  quantityFontSize: Number(event.currentTarget.value) || current.quantityFontSize,
-                }))}
+                onChange={(event) => {
+                  const v = Number(event.currentTarget.value);
+                  setRestockDraft((current) => ({
+                    ...current,
+                    quantityFontSize: v || current.quantityFontSize,
+                  }));
+                }}
                 style={s.settingsSmallInput}
               />
             </label>
