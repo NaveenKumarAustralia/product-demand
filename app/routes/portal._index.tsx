@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
 import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams } from "react-router";
@@ -4123,15 +4123,15 @@ export default function PortalDashboard() {
   const columnWidthsFetcher = useFetcher();
   const undoFetcher = useFetcher();
   const [addRowNonce, setAddRowNonce] = useState(0);
-  // Reset the restock table's inner scroll BEFORE first paint — useEffect
-  // runs after paint, which made the page flash at the bottom and visibly
-  // jump up. Callback ref + useLayoutEffect run before paint so it renders
-  // at the top from the start.
+  // Reset the restock table's inner scroll only when the user navigates TO
+  // the restock page (or when the scroll node first mounts). Inline callback
+  // refs re-fire on every render, which was forcing scrollTop=0 on every
+  // state update and bouncing the page back to the top mid-edit.
   const restockTableScrollRef = useRef<HTMLDivElement | null>(null);
-  const setRestockTableScrollRef = (node: HTMLDivElement | null) => {
+  const setRestockTableScrollRef = useCallback((node: HTMLDivElement | null) => {
     restockTableScrollRef.current = node;
     if (node) node.scrollTop = 0;
-  };
+  }, []);
   useLayoutEffect(() => {
     if (page !== "restock") return;
     const el = restockTableScrollRef.current;
