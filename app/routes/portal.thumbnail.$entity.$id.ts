@@ -11,7 +11,7 @@ import prisma from "../db.server";
 export async function loader({ params }: LoaderFunctionArgs) {
   const entity = params.entity;
   const id = Number(params.id);
-  if (!id || (entity !== "vision" && entity !== "sample" && entity !== "collection")) {
+  if (!id || (entity !== "vision" && entity !== "visionV2" && entity !== "sample" && entity !== "collection")) {
     return new Response("Not found", { status: 404 });
   }
 
@@ -19,6 +19,18 @@ export async function loader({ params }: LoaderFunctionArgs) {
   try {
     if (entity === "vision") {
       const item = await prisma.visionBoardItem.findUnique({
+        where: { id },
+        select: { thumbnail: true, images: true },
+      });
+      if (item) {
+        if (item.thumbnail) dataUrl = item.thumbnail;
+        else if (Array.isArray(item.images) && item.images.length > 0) {
+          const first = (item.images as unknown[])[0];
+          if (typeof first === "string") dataUrl = first;
+        }
+      }
+    } else if (entity === "visionV2") {
+      const item = await prisma.visionBoardV2Item.findUnique({
         where: { id },
         select: { thumbnail: true, images: true },
       });

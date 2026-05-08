@@ -2518,11 +2518,12 @@ const ALL_NAV_ITEMS = [
   { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
   { id: "samples", label: "Samples", href: "/portal?page=samples" },
   { id: "newproduct", label: "New Product Orders", href: "/portal?page=newproduct" },
-  { id: "visionboard", label: "Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
+  { id: "visionboardv2", label: "Vision Board", href: "/portal/visionboard", superadminOnly: true },
+  { id: "visionboard", label: "Old Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
   { id: "collections", label: "Collections", href: "/portal?page=collections" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboard", "collections"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboardv2", "visionboard", "collections"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";

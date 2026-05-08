@@ -179,6 +179,34 @@ model VisionBoardItem {
   updatedAt DateTime     @updatedAt
 }
 
+// Faster, isolated copy of the vision board. Data is seeded from VisionBoard
+// on first visit. Same JSONB-backed image storage but a slimmer loader path,
+// memoized rendering, and higher-quality client-side compression on upload.
+model VisionBoardV2 {
+  id        Int                  @id @default(autoincrement())
+  name      String
+  sortOrder Int                  @default(0)
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @updatedAt
+  items     VisionBoardV2Item[]
+}
+
+model VisionBoardV2Item {
+  id        Int           @id @default(autoincrement())
+  boardId   Int
+  board     VisionBoardV2 @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  name      String        @default("")
+  sortOrder Int           @default(0)
+  images    Json          @default("[]")
+  thumbnail String?
+  fields    Json          @default("[]")
+  notes     String?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([boardId, sortOrder])
+}
+
 model Collection {
   id        Int      @id @default(autoincrement())
   name      String   @default("Untitled collection")

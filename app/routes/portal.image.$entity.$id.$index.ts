@@ -16,14 +16,18 @@ export async function loader({ params }: LoaderFunctionArgs) {
   if (
     !id || !Number.isFinite(id) || !Number.isInteger(id)
     || !Number.isFinite(index) || !Number.isInteger(index) || index < 0
-    || (entity !== "vision" && entity !== "sample")
+    || (entity !== "vision" && entity !== "visionV2" && entity !== "sample")
   ) {
     return new Response("Not found", { status: 404 });
   }
 
   // Project ONLY the requested image from the JSONB array — no full row, no
   // multi-MB transfer from the DB to Node.
-  const table = entity === "vision" ? "VisionBoardItem" : "SampleIteration";
+  const table = entity === "vision"
+    ? "VisionBoardItem"
+    : entity === "visionV2"
+      ? "VisionBoardV2Item"
+      : "SampleIteration";
   let dataUrl: string | null = null;
   try {
     const rows = await prisma.$queryRawUnsafe<Array<{ image: string | null }>>(
