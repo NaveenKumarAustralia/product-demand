@@ -11427,7 +11427,6 @@ function AddRestockOrderRow({
           ) : (
             <input
               ref={inputRef}
-              autoFocus
               type="search"
               value={searchValue}
               onFocus={() => setFocused(true)}
