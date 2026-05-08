@@ -2797,7 +2797,7 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
     headingTextSize: Math.min(34, Math.max(14, Number(settings.headingTextSize) || 24)),
     headingTextColor: normalizeHexColor(settings.headingTextColor, "#111827"),
     panelTextSize: Math.min(22, Math.max(11, Number(settings.panelTextSize) || 13)),
-    inventoryFontSize: Math.min(20, Math.max(9, Number(settings.inventoryFontSize) || 13)),
+    inventoryFontSize: Math.min(32, Math.max(9, Number(settings.inventoryFontSize) || 13)),
     menuBg: normalizeHexColor(settings.menuBg, "#111827"),
     menuTextColor: normalizeHexColor(settings.menuTextColor, "#cbd5e1"),
     pageBg: normalizeHexColor(settings.pageBg, "#f3f4f6"),
@@ -9992,14 +9992,15 @@ function SettingsPanel({
         </div>
 
         <div style={s.settingsSubCard}>
-          <h3 style={s.settingsSubTitle}>Inventory row text</h3>
+          <h3 style={s.settingsSubTitle}>Quantity numbers</h3>
+          <p style={s.settingsHint}>Size of the per-size qty cells and TOTAL on restock and packing tables.</p>
           <div style={s.settingsInlineFields}>
             <label style={s.settingsFieldLabel}>
-              Text size
+              Font size
               <input
                 type="number"
                 min={9}
-                max={20}
+                max={32}
                 value={universalDraft.inventoryFontSize}
                 disabled={!canManageUsers}
                 onChange={(event) => {
@@ -10013,7 +10014,7 @@ function SettingsPanel({
               />
             </label>
             <span style={{ ...s.qtyPreview, fontSize: universalDraft.inventoryFontSize, color: "#374151" }}>
-              Inventory text
+              25
             </span>
           </div>
         </div>
@@ -12298,7 +12299,6 @@ function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; s
       style={{
         ...s.qtyInput,
         ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
-        fontSize: restockSettings.quantityFontSize,
         ...(numericCurrent > 0 ? { color: restockSettings.quantityFontColor } : {}),
       }}
     />
@@ -14693,20 +14693,20 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #d1d5db",
     background: "#f8fafc",
     color: "#374151",
-    fontSize: "var(--portal-inventory-font-size, 13px)",
+    fontSize: 13,
     fontWeight: 900,
   },
   inventoryQtyCell: {
     background: "#f8fafc",
     color: "#374151",
-    fontSize: "var(--portal-inventory-font-size, 13px)",
+    fontSize: 13,
     fontWeight: 900,
     textAlign: "center",
   },
   inventoryStatusCell: {
     background: "#f8fafc",
     color: "#374151",
-    fontSize: "var(--portal-inventory-font-size, 13px)",
+    fontSize: 13,
     fontWeight: 800,
   },
   addOrderHint: { color: "#6b7280", fontWeight: 800, fontSize: 12 },
@@ -14762,7 +14762,7 @@ const s: Record<string, React.CSSProperties> = {
   qty: { fontWeight: 700, color: "#111827" },
   qtyZero: { color: "#d1d5db" },
   dateText: { color: "#374151", fontWeight: 600, whiteSpace: "nowrap" },
-  total: { fontWeight: 700, fontSize: 14, color: "#111827" },
+  total: { fontWeight: 700, fontSize: "var(--portal-inventory-font-size, 14px)", color: "#111827" },
   noteText: { fontSize: 12, color: "#6b7280", maxWidth: 160, display: "block", whiteSpace: "pre-wrap" },
   select: {
     border: "1px solid #b6c0cc",
@@ -14842,7 +14842,7 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid transparent",
     borderRadius: 3,
     padding: "4px 0",
-    fontSize: 13,
+    fontSize: "var(--portal-inventory-font-size, 13px)",
     fontWeight: 700,
     textAlign: "center",
     outline: "none",
