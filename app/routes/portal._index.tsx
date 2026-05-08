@@ -7629,10 +7629,12 @@ function CollectionSpreadsheetPage({
     );
   };
 
+  const noopResize = () => {};
+
   return (
-    <div style={{ ...s.productInfoPage, display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 14 }}>
       <div style={{ ...s.productInfoToolbar, flexShrink: 0 }}>
-        <div style={{ ...s.productInfoToolbarLeft, display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={s.productInfoToolbarLeft}>
           <button
             type="button"
             onClick={onBack}
@@ -7677,44 +7679,56 @@ function CollectionSpreadsheetPage({
         </div>
       </div>
 
-      <div style={{ flex: 1, overflow: "auto", background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, minHeight: 0 }}>
+      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, maxHeight: "none", minHeight: 0 }}>
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
         ) : (
-          <table style={{ borderCollapse: "separate", borderSpacing: 0, fontSize: 12, fontFamily: "inherit", background: "#fff", minWidth: "100%" }}>
+          <table style={s.table}>
+            <colgroup>
+              <col style={{ width: 48 }} />
+              {columns.map((col) => (
+                <col key={col.id} style={{ width: col.width ?? 110 }} />
+              ))}
+            </colgroup>
             <thead>
-              <tr>
-                <th style={{ position: "sticky", top: 0, left: 0, zIndex: 3, background: "#f3f4f6", borderBottom: "1px solid #d1d5db", borderRight: "1px solid #e5e7eb", padding: "6px 8px", fontWeight: 600, color: "#6b7280", minWidth: 40 }}>#</th>
+              <tr style={s.headerRow}>
+                <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
                 {columns.map((col) => (
-                  <th key={col.id} style={{ position: "sticky", top: 0, zIndex: 2, background: "#fde4d8", borderBottom: "1px solid #d1d5db", borderRight: "1px solid #e5e7eb", padding: "6px 8px", fontWeight: 700, color: "#7c2d12", textAlign: "center", whiteSpace: "nowrap", minWidth: col.width ?? 90 }}>
+                  <Th
+                    key={col.id}
+                    headerKey={`collection:${col.id}`}
+                    columnId={col.id}
+                    onResizeStart={noopResize}
+                  >
                     {col.label}
-                  </th>
+                  </Th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {rows.map((row, rIdx) => (
-                <tr key={rIdx}>
-                  <td style={{ position: "sticky", left: 0, background: "#f9fafb", borderBottom: "1px solid #e5e7eb", borderRight: "1px solid #e5e7eb", padding: 0, textAlign: "center", color: "#9ca3af" }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, padding: "2px 4px" }}>
-                      <span>{rIdx + 1}</span>
-                      <button type="button" title="Delete row" onClick={() => removeRow(rIdx)} style={{ background: "transparent", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: "2px 4px" }}>×</button>
-                    </div>
-                  </td>
-                  {columns.map((col) => (
-                    <td key={col.id} style={{ borderBottom: "1px solid #f1f5f9", borderRight: "1px solid #f1f5f9", padding: 0, minWidth: col.width ?? 90, verticalAlign: "top" }}>
+                <tr key={rIdx} style={s.row}>
+                  <RowNumberCell
+                    rowNumber={rIdx + 1}
+                    actions={[
+                      { label: "Delete row", danger: true, onClick: () => removeRow(rIdx) },
+                    ]}
+                  />
+                  {columns.map((col, colIdx) => (
+                    <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
                       <CollectionCell
                         value={row[col.id] ?? ""}
                         type={col.type ?? "text"}
+                        columnId={col.id}
                         onCommit={(v) => updateCell(rIdx, col.id, v)}
                       />
-                    </td>
+                    </Td>
                   ))}
                 </tr>
               ))}
               {rows.length === 0 && (
-                <tr>
-                  <td colSpan={columns.length + 1} style={{ padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                <tr style={s.row}>
+                  <td colSpan={columns.length + 1} style={{ ...s.td, padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
                     No rows yet. Click + Add row above to add one.
                   </td>
                 </tr>
@@ -7730,12 +7744,18 @@ function CollectionSpreadsheetPage({
 function CollectionCell({
   value,
   type,
+  columnId,
   onCommit,
 }: {
   value: string;
   type: "text" | "number" | "date";
+  columnId: string;
   onCommit: (next: string) => void;
 }) {
+  const isImageColumn = columnId === "modelPicture" || columnId === "fabric";
+  if (isImageColumn) {
+    return <CollectionImageCell value={value} onCommit={onCommit} />;
+  }
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
   const inputType = type === "number" ? "number" : type === "date" ? "date" : "text";
@@ -7748,6 +7768,100 @@ function CollectionCell({
       onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
       style={{ width: "100%", border: "none", outline: "none", padding: "6px 8px", fontSize: 12, fontFamily: "inherit", background: "transparent", boxSizing: "border-box" }}
     />
+  );
+}
+
+function CollectionImageCell({
+  value,
+  onCommit,
+}: {
+  value: string;
+  onCommit: (next: string) => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const trimmed = value.trim();
+  const hasImage = isFabricImageValue(trimmed);
+
+  const handleFile = async (file: File | null | undefined) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    setBusy(true);
+    try {
+      const dataUrl = await compressImageToDataUrl(file);
+      onCommit(dataUrl);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={s.fabricImageEditCell}>
+      <div
+        tabIndex={0}
+        style={{
+          ...s.fabricImageDrop,
+          ...(dragOver ? { borderColor: "#2563eb", background: "#eff6ff" } : {}),
+        }}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        onFocus={() => setHover(true)}
+        onBlur={() => setHover(false)}
+        onPaste={(event) => {
+          const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
+          if (file) void handleFile(file);
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!dragOver) setDragOver(true);
+        }}
+        onDragEnter={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setDragOver(true);
+        }}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setDragOver(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setDragOver(false);
+          const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
+          if (file) void handleFile(file);
+        }}
+        title="Paste, drop, or click to upload image"
+      >
+        {hasImage
+          ? <img src={trimmed} alt="" style={s.fabricSheetImage} />
+          : <span>{busy ? "Uploading…" : "Paste, drop or upload"}</span>}
+        {hasImage && (
+          <button
+            type="button"
+            style={{ ...s.imageDeleteOverlay, ...(hover ? s.imageDeleteOverlayVisible : {}) }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onCommit("");
+            }}
+          >
+            Delete
+          </button>
+        )}
+        <input
+          type="file"
+          accept="image/*"
+          style={s.hiddenFileInput}
+          onChange={(event) => {
+            void handleFile(event.currentTarget.files?.[0] ?? null);
+            event.currentTarget.value = "";
+          }}
+        />
+      </div>
+    </div>
   );
 }
 
