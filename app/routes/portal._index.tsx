@@ -4360,22 +4360,14 @@ export default function PortalDashboard() {
               <MessagesMenu messages={messages} />
               <div style={s.activeUsers} title="Currently active">
                 <span style={s.activeUsersLabel}>Active</span>
-                {activeUsers.length ? activeUsers.map((user) => {
-                  const isSelf = currentUser?.id === user.id;
-                  return (
-                    <span
-                      key={user.id}
-                      style={{ ...s.activeUserBadge, ...(isSelf ? { cursor: "context-menu" } : {}) }}
-                      title={isSelf ? `${user.name} (right-click to log out)` : user.name}
-                      onContextMenu={isSelf ? (event) => {
-                        event.preventDefault();
-                        if (window.confirm("Log out?")) {
-                          submit({ intent: "portal_logout" }, { method: "post" });
-                        }
-                      } : undefined}
-                    >{user.initials}</span>
-                  );
-                }) : <span style={s.activeUserEmpty}>No active users</span>}
+                {activeUsers.length ? activeUsers.map((user) => (
+                  <ActiveUserBadge
+                    key={user.id}
+                    user={user}
+                    isSelf={currentUser?.id === user.id}
+                    onLogout={() => submit({ intent: "portal_logout" }, { method: "post" })}
+                  />
+                )) : <span style={s.activeUserEmpty}>No active users</span>}
               </div>
             </div>
             {page === "restock" && (
@@ -4598,6 +4590,81 @@ export default function PortalDashboard() {
         />
       )}
     </div>
+  );
+}
+
+function ActiveUserBadge({
+  user,
+  isSelf,
+  onLogout,
+}: {
+  user: ActivePortalUser;
+  isSelf: boolean;
+  onLogout: () => void;
+}) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const [hover, setHover] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null);
+
+  useEffect(() => {
+    if (!hover) { setTipPos(null); return; }
+    const rect = ref.current?.getBoundingClientRect();
+    if (!rect) return;
+    setTipPos({ left: rect.left + rect.width / 2, top: rect.bottom + 8 });
+  }, [hover]);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [menu]);
+
+  return (
+    <>
+      <span
+        ref={ref}
+        style={{ ...s.activeUserBadge, ...(isSelf ? { cursor: "context-menu" } : {}) }}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        onContextMenu={isSelf ? (event) => {
+          event.preventDefault();
+          setHover(false);
+          setMenu({ x: event.clientX, y: event.clientY });
+        } : undefined}
+      >
+        {user.initials}
+      </span>
+      {tipPos && typeof document !== "undefined" && createPortal(
+        <div style={{ ...s.activeUserTooltip, left: tipPos.left, top: tipPos.top }}>
+          {user.name}
+        </div>,
+        document.body,
+      )}
+      {menu && typeof document !== "undefined" && createPortal(
+        <div
+          style={{ ...s.contextMenu, left: menu.x, top: menu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            style={s.contextMenuButton}
+            onClick={() => {
+              setMenu(null);
+              onLogout();
+            }}
+          >
+            Log out
+          </button>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
@@ -12594,6 +12661,20 @@ const s: Record<string, React.CSSProperties> = {
     letterSpacing: "0.04em",
   },
   activeUserEmpty: { color: "#6b7280", fontSize: 12, fontWeight: 700 },
+  activeUserTooltip: {
+    position: "fixed",
+    transform: "translateX(-50%)",
+    zIndex: 1300,
+    padding: "8px 14px",
+    background: "#111827",
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: 700,
+    borderRadius: 8,
+    boxShadow: "0 18px 42px rgba(15,23,42,0.24)",
+    pointerEvents: "none",
+    whiteSpace: "nowrap",
+  },
   messagesWrap: { position: "relative" },
   messagesButton: {
     position: "relative",
