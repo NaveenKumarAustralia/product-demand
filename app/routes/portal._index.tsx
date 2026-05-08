@@ -2628,6 +2628,7 @@ type UniversalSettings = {
   headingTextSize: number;
   headingTextColor: string;
   panelTextSize: number;
+  inventoryFontSize: number;
   menuBg: string;
   menuTextColor: string;
   pageBg: string;
@@ -2796,6 +2797,7 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
     headingTextSize: Math.min(34, Math.max(14, Number(settings.headingTextSize) || 24)),
     headingTextColor: normalizeHexColor(settings.headingTextColor, "#111827"),
     panelTextSize: Math.min(22, Math.max(11, Number(settings.panelTextSize) || 13)),
+    inventoryFontSize: Math.min(20, Math.max(9, Number(settings.inventoryFontSize) || 13)),
     menuBg: normalizeHexColor(settings.menuBg, "#111827"),
     menuTextColor: normalizeHexColor(settings.menuTextColor, "#cbd5e1"),
     pageBg: normalizeHexColor(settings.pageBg, "#f3f4f6"),
@@ -4155,6 +4157,7 @@ export default function PortalDashboard() {
     root.style.setProperty("--portal-table-text-color", universalSettings.tableTextColor);
     root.style.setProperty("--portal-heading-font-size", `${universalSettings.headingTextSize}px`);
     root.style.setProperty("--portal-heading-text-color", universalSettings.headingTextColor);
+    root.style.setProperty("--portal-inventory-font-size", `${universalSettings.inventoryFontSize}px`);
   }, [universalSettings]);
   useEffect(() => {
     const handler = (e: Event) => {
@@ -4290,6 +4293,7 @@ export default function PortalDashboard() {
         "--portal-heading-font-size": `${universalSettings.headingTextSize}px`,
         "--portal-heading-text-color": universalSettings.headingTextColor,
         "--portal-panel-font-size": `${universalSettings.panelTextSize}px`,
+        "--portal-inventory-font-size": `${universalSettings.inventoryFontSize}px`,
       } as React.CSSProperties}
     >
       <style>
@@ -9824,6 +9828,12 @@ function SettingsPanel({
   const [restockDraft, setRestockDraft] = useState<RestockSettings>(restockSettings);
   const [universalDraft, setUniversalDraft] = useState<UniversalSettings>(universalSettings);
   const [editUserId, setEditUserId] = useState<string | null>(null);
+  const [universalJustSaved, setUniversalJustSaved] = useState(false);
+  useEffect(() => {
+    if (!universalJustSaved) return;
+    const timer = window.setTimeout(() => setUniversalJustSaved(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, [universalJustSaved]);
   const saveRestockSettings = () => submitPortalCell(
     settingsFetcher,
     {
@@ -9917,8 +9927,16 @@ function SettingsPanel({
             <h2 style={s.settingsTitle}>Universal Settings</h2>
             <p style={s.settingsHint}>Shared button, table text, and heading styling across restock and packing pages.</p>
           </div>
-          <button type="button" disabled={!canManageUsers} style={s.loginButton} onClick={saveUniversalSettings}>
-            Save universal settings
+          <button
+            type="button"
+            disabled={!canManageUsers}
+            style={s.loginButton}
+            onClick={() => {
+              saveUniversalSettings();
+              setUniversalJustSaved(true);
+            }}
+          >
+            {universalJustSaved ? "Settings saved" : "Save universal settings"}
           </button>
         </div>
 
@@ -9969,6 +9987,33 @@ function SettingsPanel({
             </label>
             <span style={{ ...s.qtyPreview, fontSize: universalDraft.tableTextSize, color: universalDraft.tableTextColor }}>
               Table text
+            </span>
+          </div>
+        </div>
+
+        <div style={s.settingsSubCard}>
+          <h3 style={s.settingsSubTitle}>Inventory row text</h3>
+          <div style={s.settingsInlineFields}>
+            <label style={s.settingsFieldLabel}>
+              Text size
+              <input
+                type="number"
+                min={9}
+                max={20}
+                value={universalDraft.inventoryFontSize}
+                disabled={!canManageUsers}
+                onChange={(event) => {
+                  const v = Number(event.currentTarget.value);
+                  setUniversalDraft((current) => ({
+                    ...current,
+                    inventoryFontSize: v || current.inventoryFontSize,
+                  }));
+                }}
+                style={s.settingsSmallInput}
+              />
+            </label>
+            <span style={{ ...s.qtyPreview, fontSize: universalDraft.inventoryFontSize, color: "#374151" }}>
+              Inventory text
             </span>
           </div>
         </div>
@@ -14648,20 +14693,20 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #d1d5db",
     background: "#f8fafc",
     color: "#374151",
-    fontSize: 13,
+    fontSize: "var(--portal-inventory-font-size, 13px)",
     fontWeight: 900,
   },
   inventoryQtyCell: {
     background: "#f8fafc",
     color: "#374151",
-    fontSize: 13,
+    fontSize: "var(--portal-inventory-font-size, 13px)",
     fontWeight: 900,
     textAlign: "center",
   },
   inventoryStatusCell: {
     background: "#f8fafc",
     color: "#374151",
-    fontSize: 13,
+    fontSize: "var(--portal-inventory-font-size, 13px)",
     fontWeight: 800,
   },
   addOrderHint: { color: "#6b7280", fontWeight: 800, fontSize: 12 },
