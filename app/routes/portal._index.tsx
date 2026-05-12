@@ -1980,7 +1980,11 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (formData?.get("noRevalidate") === "1") return false;
   const intent = formData?.get("intent") as string | null;
   if (intent === "reorder_samples" || intent === "rename_sample" || intent === "update_sample_iteration") return false;
-  if (intent === "vb_update_item" || intent === "vb_reorder_boards" || intent === "vb_rename_board" || intent === "vb_reorder_items" || intent === "vb_rename_item" || intent === "vb_append_item_image" || intent === "vb_remove_item_image") return false;
+  // Vision Board: only skip revalidation for in-drawer notes/fields saves
+  // (they don't affect the card grid). Anything that changes name, image
+  // count, ordering or board metadata must refresh the grid so the panel
+  // sees the new items prop.
+  if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths") return false;
   // Read-only fetchers used by drawers and background hooks don't change

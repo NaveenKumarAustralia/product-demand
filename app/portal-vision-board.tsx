@@ -4,7 +4,7 @@
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useFetcher, useSearchParams } from "react-router";
+import { useFetcher, useRevalidator, useSearchParams } from "react-router";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -51,14 +51,6 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function dataUrlBytes(url: string): number {
-  const i = url.indexOf(",");
-  if (i < 0) return url.length;
-  const b64 = url.slice(i + 1);
-  const pad = b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0;
-  return Math.max(0, Math.floor((b64.length * 3) / 4) - pad);
-}
-
 function renderToJpeg(img: HTMLImageElement, maxDim: number, quality: number): string | null {
   const longEdge = Math.max(img.width, img.height);
   const scale = longEdge > maxDim ? maxDim / longEdge : 1;
@@ -75,16 +67,20 @@ function renderToJpeg(img: HTMLImageElement, maxDim: number, quality: number): s
 
 async function compressUpload(file: File): Promise<string> {
   if (!file.type.startsWith("image/")) return readFileAsDataUrl(file);
-  const original = await readFileAsDataUrl(file);
-  if (file.size <= FULL_TARGET_BYTES) return original;
+  // Files already under the soft target ship untouched — fastest path.
+  if (file.size <= FULL_TARGET_BYTES) return readFileAsDataUrl(file);
+  // Use a blob URL to decode the image (skip the base64 round-trip we'd
+  // otherwise pay just to feed the <img> element).
+  const blobUrl = URL.createObjectURL(file);
   try {
-    const img = await loadImage(original);
-    let out = renderToJpeg(img, FULL_MAX_DIM, FULL_QUALITY);
-    if (out && dataUrlBytes(out) > FULL_TARGET_BYTES) out = renderToJpeg(img, 1024, 0.78) ?? out;
-    if (out && dataUrlBytes(out) > FULL_TARGET_BYTES) out = renderToJpeg(img, 900, 0.72) ?? out;
-    return out ?? original;
+    const img = await loadImage(blobUrl);
+    const out = renderToJpeg(img, FULL_MAX_DIM, FULL_QUALITY);
+    if (out) return out;
+    return await readFileAsDataUrl(file);
   } catch {
-    return original;
+    return await readFileAsDataUrl(file);
+  } finally {
+    URL.revokeObjectURL(blobUrl);
   }
 }
 
@@ -464,6 +460,7 @@ function ItemDrawer({
 }) {
   const fetcher = useFetcher();
   const updateFetcher = useFetcher();
+  const revalidator = useRevalidator();
   const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState(itemList.name);
   const [notes, setNotes] = useState("");
@@ -523,20 +520,32 @@ function ItemDrawer({
     const localId = `p_${Math.random().toString(36).slice(2, 9)}`;
     const blobUrl = URL.createObjectURL(file);
     setPending((cur) => [...cur, { id: localId, blobUrl, dataUrl: "" }]);
-    const dataUrl = await compressUpload(file);
-    let thumb: string | null = null;
-    if (savedCount === 0 && pending.length === 0) thumb = await makeThumb(dataUrl);
-    const payload: Record<string, string> = {
-      intent: "vb_append_item_image",
-      itemId: String(itemList.id),
-      image: dataUrl,
-    };
-    if (thumb) payload.thumbnail = thumb;
-    fetcher.submit(payload, { method: "post" });
-    setPending((cur) => cur.filter((p) => p.id !== localId));
-    URL.revokeObjectURL(blobUrl);
-    setSavedCount((c) => c + 1);
-    setVersion(Date.now());
+    try {
+      const dataUrl = await compressUpload(file);
+      let thumb: string | null = null;
+      if (savedCount === 0 && pending.length === 0) thumb = await makeThumb(dataUrl);
+
+      const fd = new FormData();
+      fd.set("intent", "vb_append_item_image");
+      fd.set("itemId", String(itemList.id));
+      fd.set("image", dataUrl);
+      if (thumb) fd.set("thumbnail", thumb);
+
+      // Direct fetch + manual revalidate gives us a real "await server" so
+      // the pending placeholder doesn't disappear before the image route
+      // can actually serve the new index (avoiding the broken-image flash).
+      await fetch(window.location.pathname + window.location.search, {
+        method: "POST",
+        body: fd,
+      });
+
+      setSavedCount((c) => c + 1);
+      setVersion(Date.now());
+      revalidator.revalidate();
+    } finally {
+      setPending((cur) => cur.filter((p) => p.id !== localId));
+      URL.revokeObjectURL(blobUrl);
+    }
   };
 
   const handleRemoveImage = (idx: number) => {
