@@ -505,9 +505,23 @@ function ItemDrawer({
     });
   }, []);
 
-  const saveName = (next: string) => {
+  // Name + notes/fields all hit the same vb_update_item intent, but only a
+  // name change affects the card title on the grid. For renames we use a
+  // raw fetch + explicit revalidate so the grid refreshes deterministically
+  // even if React Router's fetcher revalidation timing is racing the drawer
+  // unmounting. Notes/fields keep using updateFetcher.submit (skip revalidate
+  // via shouldRevalidate, since they don't appear on the card).
+  const saveName = async (next: string) => {
     if (next === itemList.name) return;
-    updateFetcher.submit({ intent: "vb_update_item", itemId: String(itemList.id), name: next }, { method: "post" });
+    const fd = new FormData();
+    fd.set("intent", "vb_update_item");
+    fd.set("itemId", String(itemList.id));
+    fd.set("name", next);
+    await fetch(window.location.pathname + window.location.search, {
+      method: "POST",
+      body: fd,
+    });
+    revalidator.revalidate();
   };
   const saveNotes = (next: string) => {
     updateFetcher.submit({ intent: "vb_update_item", itemId: String(itemList.id), notes: next }, { method: "post" });
@@ -548,14 +562,19 @@ function ItemDrawer({
     }
   };
 
-  const handleRemoveImage = (idx: number) => {
+  const handleRemoveImage = async (idx: number) => {
     if (!window.confirm("Remove this image?")) return;
-    updateFetcher.submit(
-      { intent: "vb_remove_item_image", itemId: String(itemList.id), index: String(idx) },
-      { method: "post" },
-    );
+    const fd = new FormData();
+    fd.set("intent", "vb_remove_item_image");
+    fd.set("itemId", String(itemList.id));
+    fd.set("index", String(idx));
+    await fetch(window.location.pathname + window.location.search, {
+      method: "POST",
+      body: fd,
+    });
     setSavedCount((c) => Math.max(0, c - 1));
     setVersion(Date.now());
+    revalidator.revalidate();
   };
 
   const allImageUrls = useMemo(() => [
