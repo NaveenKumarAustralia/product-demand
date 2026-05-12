@@ -383,16 +383,29 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const fabricStockIndex: FabricStockEntry[] = page === "restock"
     ? buildFabricStockIndex(manualFabricSheets)
     : [];
+  // Cache buster for the fabric image URLs we generate below. Using the
+  // blob's updatedAt means every edit invalidates every image URL, which is
+  // wasteful but correct — browsers refetch images via HTTP cache.
+  const fabricBlobUpdatedAt = page === "fabric" && selectedFabricTab
+    ? (await prisma.portalSetting.findUnique({
+        where: { key: FABRIC_MANUAL_SHEETS_KEY },
+        select: { updatedAt: true },
+      }))?.updatedAt
+    : null;
+  const fabricBlobVersion = fabricBlobUpdatedAt ? new Date(fabricBlobUpdatedAt).getTime() : 0;
   const fabricSheets = page === "fabric" && selectedFabricTab
-    ? getFabricSheets(
-        undefined,
-        undefined,
-        undefined,
-        fabricSettings.tileOrder,
-        [],
-        customColumns.fabric,
-        {},
-        manualFabricSheets,
+    ? replaceFabricImagesWithUrls(
+        getFabricSheets(
+          undefined,
+          undefined,
+          undefined,
+          fabricSettings.tileOrder,
+          [],
+          customColumns.fabric,
+          {},
+          manualFabricSheets,
+        ),
+        fabricBlobVersion,
       )
     : page === "fabric"
       ? getFabricSheetSummaries(manualFabricSheets, fabricSettings.tileOrder)
@@ -3296,6 +3309,31 @@ function getFabricSheets(
     };
   });
   return orderFabricSheets(sheets, tileOrder);
+}
+
+// Replace any `data:image/...;base64,...` cell values in the fabric sheets
+// with a URL pointing at the /portal/fabric-image route. The route reads the
+// single cell from the stored JSONB blob and streams it as binary, so the
+// loader response itself no longer carries multi-megabyte base64 strings.
+// The cache-buster comes from the blob's PortalSetting.updatedAt — any edit
+// to any cell mints fresh URLs that browsers will refetch.
+function replaceFabricImagesWithUrls(sheets: FabricSheetData[], version: number): FabricSheetData[] {
+  const buildUrl = (gid: string, row: number, col: number) =>
+    `/portal/fabric-image/${encodeURIComponent(gid)}/${row}/${col}.png?v=${version}`;
+  return sheets.map((sheet) => {
+    const swap = (cell: unknown, row: number, col: number): string => {
+      if (typeof cell !== "string") return String(cell ?? "");
+      return /^data:image\//i.test(cell) ? buildUrl(sheet.gid, row, col) : cell;
+    };
+    const rows = sheet.rows.map((row, displayIdx) => {
+      const sourceIdx = sheet.rowKeys?.[displayIdx] ?? displayIdx;
+      return row.map((cell, cIdx) => swap(cell, sourceIdx, cIdx));
+    });
+    const originalRows = sheet.originalRows
+      ? sheet.originalRows.map((row, sourceIdx) => row.map((cell, cIdx) => swap(cell, sourceIdx, cIdx)))
+      : sheet.originalRows;
+    return { ...sheet, rows, originalRows };
+  });
 }
 
 function getCookieValue(request: Request, key: string) {
