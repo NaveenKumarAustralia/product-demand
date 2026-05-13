@@ -325,6 +325,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const orders = page === "restock"
     ? await enrichOrdersWithShopifyVariants(filteredOrders)
     : filteredOrders;
+  // Defensive: hydrate shippingMethod from the DB in case the Prisma client
+  // wasn't regenerated on this environment to know about the field. The
+  // ADD COLUMN IF NOT EXISTS makes this safe on a stale schema too.
+  if ((page === "packing" || page === "restock") && packingLists.length) {
+    try {
+      await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "shippingMethod" TEXT`);
+      const shippingRows = await prisma.$queryRaw<Array<{ id: number; shippingMethod: string | null }>>`
+        SELECT id, "shippingMethod" FROM "PackingList"
+      `;
+      const map = new Map(shippingRows.map((row) => [row.id, row.shippingMethod]));
+      for (const list of packingLists) {
+        (list as { shippingMethod: string | null }).shippingMethod = map.get(list.id) ?? null;
+      }
+    } catch { /* never mind */ }
+  }
   const selectedPackingList = packingId
     ? packingLists.find((list) => list.id === packingId) ?? null
     : null;
@@ -701,9 +716,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       data.shipmentDate = parsedDate;
     }
     if (field === "notes") data.notes = value || null;
-    if (field === "shippingMethod") {
+    // Handle shippingMethod via raw SQL so the feature works even if the
+    // Prisma client / DB migration haven't caught up on this environment.
+    // `ADD COLUMN IF NOT EXISTS` is idempotent.
+    if (packingId && field === "shippingMethod") {
       const normalised = value.toLowerCase();
-      data.shippingMethod = (normalised === "sea" || normalised === "air") ? normalised : null;
+      const finalValue = (normalised === "sea" || normalised === "air") ? normalised : null;
+      try {
+        await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "shippingMethod" TEXT`);
+      } catch { /* column already exists, fine */ }
+      await prisma.$executeRaw`UPDATE "PackingList" SET "shippingMethod" = ${finalValue} WHERE id = ${packingId}`;
+      const existing = await prisma.packingList.findUnique({ where: { id: packingId }, select: { invoiceNumber: true, title: true } });
+      if (existing) {
+        await logActivity(currentUser?.name ?? "Unknown", "Updated", "Packing List", {
+          entityId: String(packingId),
+          entityName: existing.invoiceNumber || existing.title || `#${packingId}`,
+          field: "Shipping method",
+          toValue: finalValue ? finalValue.charAt(0).toUpperCase() + finalValue.slice(1) : "—",
+        });
+      }
+      return null;
     }
     if (packingId && Object.keys(data).length) {
       const existing = await prisma.packingList.findUnique({ where: { id: packingId }, select: { invoiceNumber: true, title: true } });
@@ -711,15 +743,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const logField = field === "invoiceNumber" ? "Invoice number"
         : field === "status" ? "Status"
         : field === "expectedLeaveFactoryDate" ? "Estimated arrival"
-        : field === "shippingMethod" ? "Shipping method"
         : field;
       const logValue = field === "status"
         ? (PACKING_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value)
         : field === "expectedLeaveFactoryDate"
           ? formatPortalDate(parsePortalDate(value))
-          : field === "shippingMethod"
-            ? (value ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : "—")
-            : value;
+          : value;
       if (logField && logValue) {
         await logActivity(currentUser?.name ?? "Unknown", "Updated", "Packing List", {
           entityId: String(packingId),
