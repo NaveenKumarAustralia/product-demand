@@ -104,6 +104,7 @@ model PackingList {
   invoiceNumber            String?
   shipmentDate             DateTime?
   expectedLeaveFactoryDate DateTime?
+  shippingMethod           String?
   status                   String            @default("still_packing")
   notes                    String?
   hiddenAt                 DateTime?

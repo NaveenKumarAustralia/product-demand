@@ -701,18 +701,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       data.shipmentDate = parsedDate;
     }
     if (field === "notes") data.notes = value || null;
+    if (field === "shippingMethod") {
+      const normalised = value.toLowerCase();
+      data.shippingMethod = (normalised === "sea" || normalised === "air") ? normalised : null;
+    }
     if (packingId && Object.keys(data).length) {
       const existing = await prisma.packingList.findUnique({ where: { id: packingId }, select: { invoiceNumber: true, title: true } });
       await prisma.packingList.update({ where: { id: packingId }, data });
       const logField = field === "invoiceNumber" ? "Invoice number"
         : field === "status" ? "Status"
         : field === "expectedLeaveFactoryDate" ? "Estimated arrival"
+        : field === "shippingMethod" ? "Shipping method"
         : field;
       const logValue = field === "status"
         ? (PACKING_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value)
         : field === "expectedLeaveFactoryDate"
           ? formatPortalDate(parsePortalDate(value))
-          : value;
+          : field === "shippingMethod"
+            ? (value ? value.charAt(0).toUpperCase() + value.slice(1).toLowerCase() : "—")
+            : value;
       if (logField && logValue) {
         await logActivity(currentUser?.name ?? "Unknown", "Updated", "Packing List", {
           entityId: String(packingId),
@@ -9613,7 +9620,7 @@ function PackingListsOverview({
         <table style={{ ...s.table, width: "100%" }}>
           <thead>
             <tr style={s.headerRow}>
-              {["Invoice", "Boxes", "Total qty", "Estimated arrival", "Status", "Actions"].map((heading) => (
+              {["Invoice", "Boxes", "Total qty", "Estimated arrival", "Shipping", "Status", "Actions"].map((heading) => (
                 <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Boxes" || heading === "Actions" ? "center" : "left" }}>
                   <span style={s.thContent}>{heading}</span>
                 </th>
@@ -9649,6 +9656,10 @@ function PackingListsOverview({
                     style={cellStyle}
                     onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List", entityId: String(list.id), field: "Estimated arrival", entityName: list.invoiceNumber || `Packing list #${list.id}` } })); }}
                   >{formatPortalDate(list.expectedLeaveFactoryDate ?? list.shipmentDate) || "—"}</td>
+                  <td
+                    style={cellStyle}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List", entityId: String(list.id), field: "Shipping method", entityName: list.invoiceNumber || `Packing list #${list.id}` } })); }}
+                  >{list.shippingMethod ? list.shippingMethod.charAt(0).toUpperCase() + list.shippingMethod.slice(1) : "—"}</td>
                   <td
                     style={cellStyle}
                     onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List", entityId: String(list.id), field: "Status", entityName: list.invoiceNumber || `Packing list #${list.id}` } })); }}
@@ -9919,6 +9930,28 @@ function PackingListDetail({
               {PACKING_STATUS_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
+            </select>
+          </label>
+          <label style={s.packingToolbarLabel}>
+            <span>Shipping method</span>
+            <select
+              key={packingList.shippingMethod ?? ""}
+              defaultValue={packingList.shippingMethod ?? ""}
+              onChange={(event) => submitPortalCell(
+                fetcher,
+                {
+                  intent: "update_packing_list",
+                  packingId: packingList.id,
+                  field: "shippingMethod",
+                  value: event.currentTarget.value,
+                },
+                { label: "Undo shipping method", fields: { intent: "update_packing_list", packingId: packingList.id, field: "shippingMethod", value: packingList.shippingMethod ?? "" } },
+              )}
+              style={{ ...s.packingInput, width: 120 }}
+            >
+              <option value="">—</option>
+              <option value="sea">Sea</option>
+              <option value="air">Air</option>
             </select>
           </label>
         </div>
