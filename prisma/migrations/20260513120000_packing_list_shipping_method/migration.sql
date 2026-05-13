@@ -1,1 +1,1 @@
-ALTER TABLE "PackingList" ADD COLUMN "shippingMethod" TEXT;
+ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "shippingMethod" TEXT;

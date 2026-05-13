@@ -331,14 +331,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if ((page === "packing" || page === "restock") && packingLists.length) {
     try {
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "shippingMethod" TEXT`);
-      const shippingRows = await prisma.$queryRaw<Array<{ id: number; shippingMethod: string | null }>>`
-        SELECT id, "shippingMethod" FROM "PackingList"
-      `;
+      const shippingRows = await prisma.$queryRawUnsafe<Array<{ id: number; shippingMethod: string | null }>>(
+        `SELECT id, "shippingMethod" FROM "PackingList"`,
+      );
       const map = new Map(shippingRows.map((row) => [row.id, row.shippingMethod]));
       for (const list of packingLists) {
         (list as { shippingMethod: string | null }).shippingMethod = map.get(list.id) ?? null;
       }
-    } catch { /* never mind */ }
+      const nonNullCount = shippingRows.filter((r) => r.shippingMethod).length;
+      if (nonNullCount > 0) {
+        console.log(`[shippingMethod] hydrated ${nonNullCount}/${shippingRows.length} packing lists with a value`);
+      }
+    } catch (e) {
+      console.warn("[shippingMethod] hydration failed:", e);
+    }
   }
   const selectedPackingList = packingId
     ? packingLists.find((list) => list.id === packingId) ?? null
@@ -721,11 +727,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // `ADD COLUMN IF NOT EXISTS` is idempotent.
     if (packingId && field === "shippingMethod") {
       const normalised = value.toLowerCase();
-      const finalValue = (normalised === "sea" || normalised === "air") ? normalised : null;
+      const finalValue: string | null = (normalised === "sea" || normalised === "air") ? normalised : null;
       try {
         await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "shippingMethod" TEXT`);
-      } catch { /* column already exists, fine */ }
-      await prisma.$executeRaw`UPDATE "PackingList" SET "shippingMethod" = ${finalValue} WHERE id = ${packingId}`;
+      } catch (e) {
+        console.warn("[shippingMethod] ALTER TABLE failed (column may already exist):", e);
+      }
+      try {
+        const rows = await prisma.$executeRawUnsafe(
+          `UPDATE "PackingList" SET "shippingMethod" = $1 WHERE id = $2`,
+          finalValue,
+          packingId,
+        );
+        console.log(`[shippingMethod] saved packingId=${packingId} value=${finalValue} rowsAffected=${rows}`);
+      } catch (e) {
+        console.error("[shippingMethod] UPDATE failed:", e);
+      }
       const existing = await prisma.packingList.findUnique({ where: { id: packingId }, select: { invoiceNumber: true, title: true } });
       if (existing) {
         await logActivity(currentUser?.name ?? "Unknown", "Updated", "Packing List", {
