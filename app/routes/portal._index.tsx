@@ -2872,9 +2872,12 @@ function ensureFabricTypeChipsForRows(options: RestockOption[], sheets: FabricSt
     if (!isCombinedFabricSource(sheet)) continue;
     const fabricTypeIdx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h.trim()) || /^type$/i.test(h.trim()));
     for (const row of sheet.rows) {
-      const raw = fabricTypeIdx >= 0 ? String(row[fabricTypeIdx] ?? "").trim() : "";
-      if (raw) addLabel(raw);
-      else addLabel(sheet.name);
+      if (fabricTypeIdx >= 0) {
+        const raw = String(row[fabricTypeIdx] ?? "").trim();
+        if (raw) addLabel(raw);
+      } else {
+        addLabel(sheet.name);
+      }
     }
   }
   return [...byLabel.values()];
@@ -7776,7 +7779,7 @@ function CombinedFabricStockPanel({
   const fabricTypeChoices = useMemo(() => {
     const rowLabels = new Set<string>();
     for (const entry of allRows) {
-      const raw = entry.cells.fabricType?.value.trim() || entry.sheet.name.trim();
+      const raw = entry.cells.fabricType ? entry.cells.fabricType.value.trim() : entry.sheet.name.trim();
       if (raw) rowLabels.add(canonicalizeFabricType(raw));
     }
     const labels = new Set<string>();
@@ -7792,7 +7795,7 @@ function CombinedFabricStockPanel({
     const typeFilter = canonicalizeFabricType(fabricTypeFilter).toLowerCase();
     return allRows.filter((entry) => {
       if (typeFilter) {
-        const raw = entry.cells.fabricType?.value.trim() || entry.sheet.name.trim();
+        const raw = entry.cells.fabricType ? entry.cells.fabricType.value.trim() : entry.sheet.name.trim();
         if (canonicalizeFabricType(raw).toLowerCase() !== typeFilter) return false;
       }
       if (search) {
