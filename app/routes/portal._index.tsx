@@ -431,7 +431,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           customColumns.fabric,
           {},
           manualFabricSheets,
-        ).filter((sheet) => isCombinedFabricSource(sheet)),
+        )
+          .filter((sheet) => isCombinedFabricSource(sheet))
+          .map(padCombinedFabricSheet),
         fabricBlobVersion,
       )
     : [];
@@ -2664,6 +2666,7 @@ type FabricSettings = {
   supplierOptions: RestockOption[];
   fabricTypeOptions: RestockOption[];
   tileOrder: string[];
+  combinedColumnOrder: string[];
 };
 type TableCustomColumn = { id: string; label: string };
 type TableCustomColumns = {
@@ -2926,6 +2929,9 @@ function normalizeFabricSettings(value: unknown): FabricSettings {
     tileOrder: Array.isArray(settings.tileOrder)
       ? settings.tileOrder.map((item) => String(item)).filter(Boolean)
       : [],
+    combinedColumnOrder: Array.isArray(settings.combinedColumnOrder)
+      ? settings.combinedColumnOrder.map((item) => String(item)).filter(Boolean)
+      : [],
   };
 }
 
@@ -3057,6 +3063,35 @@ function isCombinedFabricSource(sheet: { gid: string; kind: string; name: string
   if (isHiddenFabricSheet(sheet.name)) return false;
   if (sheet.gid === COMBINED_FABRIC_ON_ORDER_GID) return true;
   return sheet.kind === "stock" || sheet.kind === "simple-stock";
+}
+
+// Columns we want available for editing on every row in the combined view,
+// even when a source sheet doesn't include them. Order matters — appended
+// columns become stable colIndexes for the override store, so don't reorder
+// or remove entries; only add new ones at the end.
+const COMBINED_FABRIC_PAD_COLUMNS: Array<{ header: string; regex: RegExp }> = [
+  { header: "Collection", regex: /^collection$/ },
+  { header: "Cost per Meter", regex: /cost\s*per\s*meter|price\s*per\s*meter|^price$/ },
+  { header: "Cut Pieces", regex: /^cut\s*pieces?$/ },
+  { header: "Received / Date", regex: /received|^order\s*date$/ },
+  { header: "Products", regex: /^products?$/ },
+];
+
+function padCombinedFabricSheet(sheet: FabricSheetData): FabricSheetData {
+  const existing = sheet.headers.map((h) => h.trim().toLowerCase());
+  const missing: string[] = [];
+  for (const col of COMBINED_FABRIC_PAD_COLUMNS) {
+    if (existing.some((h) => col.regex.test(h))) continue;
+    missing.push(col.header);
+  }
+  if (!missing.length) return sheet;
+  const blanks = missing.map(() => "");
+  return {
+    ...sheet,
+    headers: [...sheet.headers, ...missing],
+    rows: sheet.rows.map((row) => [...row, ...blanks]),
+    originalRows: sheet.originalRows?.map((row) => [...row, ...blanks]),
+  };
 }
 
 function isFabricTotalsExcluded(name: string) {
@@ -7681,11 +7716,17 @@ const UNIFIED_FABRIC_COLUMNS = [
 ] as const;
 
 type UnifiedFabricKey = typeof UNIFIED_FABRIC_COLUMNS[number]["key"];
-type UnifiedFabricCell = { colIndex: number; header: string; value: string; originalValue: string };
-type UnifiedFabricRowEntry = {
-  sheet: FabricSheetData;
+type UnifiedFabricCell = {
+  gid: string;
   sourceRowIndex: number;
-  row: string[];
+  colIndex: number;
+  header: string;
+  value: string;
+  originalValue: string;
+};
+type UnifiedFabricRowEntry = {
+  primarySheet: FabricSheetData;
+  primaryRowIndex: number;
   cells: Record<UnifiedFabricKey, UnifiedFabricCell | null>;
 };
 
@@ -7707,18 +7748,21 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
   const productsIdx = find((h) => /^products?$/.test(h));
   const quantityIdx = find((h) => /meters?\s*in\s*stock|meters?\s*available|^meters?$|quantity\s*ordered/.test(h));
   const make = (idx: number, header: string): UnifiedFabricCell | null => idx < 0 ? null : {
+    gid: sheet.gid,
+    sourceRowIndex,
     colIndex: idx,
     header,
     value: row[idx] ?? "",
     originalValue: originalRow[idx] ?? "",
   };
   return {
-    sheet,
-    sourceRowIndex,
-    row,
+    primarySheet: sheet,
+    primaryRowIndex: sourceRowIndex,
     cells: {
       supplier: make(supplierIdx, "Supplier"),
       fabricType: fabricTypeIdx < 0 ? null : {
+        gid: sheet.gid,
+        sourceRowIndex,
         colIndex: fabricTypeIdx,
         header: "Fabric Type",
         value: canonicalizeFabricType(row[fabricTypeIdx] ?? ""),
@@ -7735,6 +7779,46 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
       onOrder: isOnOrderSheet ? make(quantityIdx, "Quantity Ordered") : null,
     },
   };
+}
+
+function mergeFabricRowEntries(rows: UnifiedFabricRowEntry[]): UnifiedFabricRowEntry[] {
+  const byKey = new Map<string, UnifiedFabricRowEntry>();
+  const merged: UnifiedFabricRowEntry[] = [];
+  for (const entry of rows) {
+    const fabricType = canonicalizeFabricType(entry.cells.fabricType?.value.trim() ?? "").toLowerCase();
+    const name = (entry.cells.name?.value ?? "").trim().toLowerCase();
+    if (!fabricType || !name) {
+      merged.push(entry);
+      continue;
+    }
+    const key = `${fabricType}|${name}`;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, entry);
+      merged.push(entry);
+      continue;
+    }
+    const existingIsOnOrder = existing.primarySheet.gid === COMBINED_FABRIC_ON_ORDER_GID;
+    const newIsOnOrder = entry.primarySheet.gid === COMBINED_FABRIC_ON_ORDER_GID;
+    if (existingIsOnOrder === newIsOnOrder) {
+      // Both are stock, or both are on-order — keep as separate rows
+      merged.push(entry);
+      continue;
+    }
+    const stockEntry = existingIsOnOrder ? entry : existing;
+    const orderEntry = existingIsOnOrder ? existing : entry;
+    const mergedCells: Record<UnifiedFabricKey, UnifiedFabricCell | null> = { ...stockEntry.cells };
+    mergedCells.onOrder = orderEntry.cells.onOrder ?? mergedCells.onOrder;
+    const mergedEntry: UnifiedFabricRowEntry = {
+      primarySheet: stockEntry.primarySheet,
+      primaryRowIndex: stockEntry.primaryRowIndex,
+      cells: mergedCells,
+    };
+    byKey.set(key, mergedEntry);
+    const index = merged.indexOf(existing);
+    if (index >= 0) merged[index] = mergedEntry;
+  }
+  return merged;
 }
 
 function parseFabricNumberCell(value: string | undefined) {
@@ -7773,13 +7857,13 @@ function CombinedFabricStockPanel({
         entries.push(unifyFabricRow(sheet, i));
       }
     }
-    return entries;
+    return mergeFabricRowEntries(entries);
   }, [sheets]);
 
   const fabricTypeChoices = useMemo(() => {
     const rowLabels = new Set<string>();
     for (const entry of allRows) {
-      const raw = entry.cells.fabricType ? entry.cells.fabricType.value.trim() : entry.sheet.name.trim();
+      const raw = entry.cells.fabricType ? entry.cells.fabricType.value.trim() : entry.primarySheet.name.trim();
       if (raw) rowLabels.add(canonicalizeFabricType(raw));
     }
     const labels = new Set<string>();
@@ -7795,7 +7879,7 @@ function CombinedFabricStockPanel({
     const typeFilter = canonicalizeFabricType(fabricTypeFilter).toLowerCase();
     return allRows.filter((entry) => {
       if (typeFilter) {
-        const raw = entry.cells.fabricType ? entry.cells.fabricType.value.trim() : entry.sheet.name.trim();
+        const raw = entry.cells.fabricType ? entry.cells.fabricType.value.trim() : entry.primarySheet.name.trim();
         if (canonicalizeFabricType(raw).toLowerCase() !== typeFilter) return false;
       }
       if (search) {
@@ -7805,6 +7889,39 @@ function CombinedFabricStockPanel({
       return true;
     });
   }, [allRows, nameSearch, fabricTypeFilter]);
+
+  const orderedColumns = useMemo(() => {
+    const map = new Map(UNIFIED_FABRIC_COLUMNS.map((column) => [column.key, column]));
+    const ordered: typeof UNIFIED_FABRIC_COLUMNS[number][] = [];
+    for (const key of fabricSettings.combinedColumnOrder) {
+      const column = map.get(key as UnifiedFabricKey);
+      if (column) {
+        ordered.push(column);
+        map.delete(key as UnifiedFabricKey);
+      }
+    }
+    for (const column of UNIFIED_FABRIC_COLUMNS) {
+      if (map.has(column.key)) ordered.push(column);
+    }
+    return ordered;
+  }, [fabricSettings.combinedColumnOrder]);
+
+  const [localColumns, setLocalColumns] = useState(orderedColumns);
+  useEffect(() => setLocalColumns(orderedColumns), [orderedColumns]);
+  const [dragKey, setDragKey] = useState<UnifiedFabricKey | null>(null);
+  const saveColumnOrder = (next: typeof UNIFIED_FABRIC_COLUMNS[number][]) => {
+    submitPortalCell(
+      fetcher,
+      {
+        intent: "update_fabric_settings",
+        value: JSON.stringify({ ...fabricSettings, combinedColumnOrder: next.map((column) => column.key) }),
+      },
+      {
+        label: "Undo column order",
+        fields: { intent: "update_fabric_settings", value: JSON.stringify(fabricSettings) },
+      },
+    );
+  };
 
   const totalInStock = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.inStock?.value), 0);
   const totalOnOrder = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.onOrder?.value), 0);
@@ -7851,17 +7968,50 @@ function CombinedFabricStockPanel({
             <thead>
               <tr>
                 <th style={{ ...s.fabricTh, ...s.rowNumberHeader }}>#</th>
-                {UNIFIED_FABRIC_COLUMNS.map((column) => (
-                  <th key={column.key} style={s.fabricTh}>{column.label}</th>
+                {localColumns.map((column) => (
+                  <th
+                    key={column.key}
+                    draggable
+                    onDragStart={(event) => {
+                      setDragKey(column.key);
+                      event.dataTransfer.effectAllowed = "move";
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      if (!dragKey || dragKey === column.key) return;
+                      const from = localColumns.findIndex((item) => item.key === dragKey);
+                      const to = localColumns.findIndex((item) => item.key === column.key);
+                      if (from < 0 || to < 0) return;
+                      const next = [...localColumns];
+                      const [moved] = next.splice(from, 1);
+                      next.splice(to, 0, moved);
+                      setLocalColumns(next);
+                    }}
+                    onDragEnd={() => {
+                      setDragKey(null);
+                      if (localColumns.map((c) => c.key).join("|") !== orderedColumns.map((c) => c.key).join("|")) {
+                        saveColumnOrder(localColumns);
+                      }
+                    }}
+                    style={{
+                      ...s.fabricTh,
+                      cursor: "grab",
+                      ...(dragKey === column.key ? { opacity: 0.55 } : {}),
+                    }}
+                    title="Drag to reorder"
+                  >
+                    {column.label}
+                  </th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filteredRows.map((entry, displayIdx) => (
                 <CombinedFabricRow
-                  key={`${entry.sheet.gid}:${entry.sourceRowIndex}`}
+                  key={`${entry.primarySheet.gid}:${entry.primaryRowIndex}`}
                   entry={entry}
                   displayIndex={displayIdx}
+                  columns={localColumns}
                   fetcher={fetcher}
                   fabricSettings={fabricSettings}
                   productInfo={productInfo}
@@ -7872,7 +8022,7 @@ function CombinedFabricStockPanel({
               ))}
               {!filteredRows.length && (
                 <tr>
-                  <td colSpan={UNIFIED_FABRIC_COLUMNS.length + 1} style={{ ...s.fabricTd, padding: 24, textAlign: "center" }}>
+                  <td colSpan={localColumns.length + 1} style={{ ...s.fabricTd, padding: 24, textAlign: "center" }}>
                     No fabric rows match the current filters.
                   </td>
                 </tr>
@@ -7888,6 +8038,7 @@ function CombinedFabricStockPanel({
 function CombinedFabricRow({
   entry,
   displayIndex,
+  columns,
   fetcher,
   fabricSettings,
   productInfo,
@@ -7897,6 +8048,7 @@ function CombinedFabricRow({
 }: {
   entry: UnifiedFabricRowEntry;
   displayIndex: number;
+  columns: typeof UNIFIED_FABRIC_COLUMNS[number][];
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
   productInfo: ProductInfo;
@@ -7904,35 +8056,36 @@ function CombinedFabricRow({
   rowHeights: Record<string, number>;
   sheets: FabricSheetData[];
 }) {
-  const { sheet, sourceRowIndex } = entry;
-  const rowHeightKey = `fabric:${sheet.gid}:${sourceRowIndex}`;
+  const primaryGid = entry.primarySheet.gid;
+  const primaryRowIndex = entry.primaryRowIndex;
+  const rowHeightKey = `fabric:${primaryGid}:${primaryRowIndex}`;
   const fabricImageUrl = entry.cells.fabricImage?.value ?? "";
   const fabricName = entry.cells.name?.value ?? "";
-  const moveTargets = sheets.filter((item) => item.gid !== sheet.gid && !isHiddenFabricSheet(item.name));
+  const moveTargets = sheets.filter((item) => item.gid !== primaryGid && !isHiddenFabricSheet(item.name));
   return (
     <tr style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
       <RowNumberCell
         rowNumber={displayIndex + 1}
         actions={[
-          { label: "Add row", onClick: () => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: sheet.gid }) },
-          { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }) },
+          { label: "Add row", onClick: () => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: primaryGid }) },
+          { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_fabric_row", gid: primaryGid, rowIndex: primaryRowIndex }) },
           {
             label: "Move to fabric type",
             options: moveTargets.map((item) => ({ label: item.name, value: item.gid })),
-            onSelect: (targetGid) => submitPortalCell(fetcher, { intent: "move_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex, targetGid }),
+            onSelect: (targetGid) => submitPortalCell(fetcher, { intent: "move_fabric_row", gid: primaryGid, rowIndex: primaryRowIndex, targetGid }),
           },
-          { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this fabric row?")) submitPortalCell(fetcher, { intent: "delete_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }); } },
+          { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this fabric row?")) submitPortalCell(fetcher, { intent: "delete_fabric_row", gid: primaryGid, rowIndex: primaryRowIndex }); } },
         ]}
         heightKey={rowHeightKey}
       />
-      {UNIFIED_FABRIC_COLUMNS.map((column, colDisplayIdx) => {
+      {columns.map((column, colDisplayIdx) => {
         const cell = entry.cells[column.key];
         return (
           <FabricTd key={column.key} rowIndex={displayIndex} colIndex={colDisplayIdx}>
             {cell ? (
               <FabricCell
-                gid={sheet.gid}
-                rowIndex={sourceRowIndex}
+                gid={cell.gid}
+                rowIndex={cell.sourceRowIndex}
                 colIndex={cell.colIndex}
                 value={cell.value}
                 originalValue={cell.originalValue}
