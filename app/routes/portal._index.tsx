@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
 import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams, useSubmit } from "react-router";
@@ -25,7 +25,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const restockProductSearch = url.searchParams.get("restockProductSearch") ?? "";
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
-  const selectedFabricTab = url.searchParams.get("fabricTab") ?? "";
+  const fabricTypeFilter = url.searchParams.get("fabricType") ?? "";
   try {
   const SETTING_KEYS = [
     COLUMN_WIDTHS_KEY,
@@ -390,7 +390,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         select: { value: true },
       })
     : null;
-  const inrToAudRate = page === "fabric" && !selectedFabricTab ? await getInrToAudRate() : null;
+  const inrToAudRate = page === "fabric" ? await getInrToAudRate() : null;
   const manualFabricSheets = needsFabricSheets
     ? await getManualFabricSheets({
         savedValue: fabricManualSheetsSetting?.value,
@@ -407,14 +407,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Cache buster for the fabric image URLs we generate below. Using the
   // blob's updatedAt means every edit invalidates every image URL, which is
   // wasteful but correct — browsers refetch images via HTTP cache.
-  const fabricBlobUpdatedAt = page === "fabric" && selectedFabricTab
+  const fabricBlobUpdatedAt = page === "fabric"
     ? (await prisma.portalSetting.findUnique({
         where: { key: FABRIC_MANUAL_SHEETS_KEY },
         select: { updatedAt: true },
       }))?.updatedAt
     : null;
   const fabricBlobVersion = fabricBlobUpdatedAt ? new Date(fabricBlobUpdatedAt).getTime() : 0;
-  const fabricSheets = page === "fabric" && selectedFabricTab
+  const fabricSheets = page === "fabric"
     ? replaceFabricImagesWithUrls(
         getFabricSheets(
           undefined,
@@ -425,11 +425,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           customColumns.fabric,
           {},
           manualFabricSheets,
-        ),
+        ).filter((sheet) => isCombinedFabricSource(sheet)),
         fabricBlobVersion,
       )
-    : page === "fabric"
-      ? getFabricSheetSummaries(manualFabricSheets, fabricSettings.tileOrder)
     : [];
 
   // Collect all unique size names across all orders, sorted logically
@@ -494,7 +492,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     activityLogs,
     navOrder,
     fabricSheets,
-    selectedFabricTab,
+    fabricTypeFilter,
     inrToAudRate,
     samples,
     visionBoardData,
@@ -2987,6 +2985,14 @@ function isHiddenFabricSheet(name: string) {
   return HIDDEN_FABRIC_SHEET_NAMES.has(normalizeFabricName(name));
 }
 
+const COMBINED_FABRIC_ON_ORDER_GID = "759049382";
+
+function isCombinedFabricSource(sheet: { gid: string; kind: string; name: string }) {
+  if (isHiddenFabricSheet(sheet.name)) return false;
+  if (sheet.gid === COMBINED_FABRIC_ON_ORDER_GID) return true;
+  return sheet.kind === "stock" || sheet.kind === "simple-stock";
+}
+
 function isFabricTotalsExcluded(name: string) {
   return FABRIC_TOTAL_EXCLUDED_NAMES.has(normalizeFabricName(name));
 }
@@ -4220,7 +4226,7 @@ export default function PortalDashboard() {
     activityLogs,
     navOrder,
     fabricSheets,
-    selectedFabricTab,
+    fabricTypeFilter,
     inrToAudRate,
     samples,
     visionBoardData,
@@ -4554,18 +4560,16 @@ export default function PortalDashboard() {
             canLoadInventory={canLoadPackingInventory}
           />
         ) : page === "fabric" ? (
-          <FabricSheetsPanel
+          <CombinedFabricStockPanel
             sheets={fabricSheets}
-            selectedGid={selectedFabricTab}
             fabricSettings={fabricSettings}
             productInfo={productInfo}
             users={users}
-            tableHeaderLabels={tableHeaderLabels}
-            customColumns={customColumns}
             rowHeights={rowHeights}
             inrToAudRate={inrToAudRate}
             nameSearch={searchTitleInput}
-            onSelect={(gid) => updateParams({ fabricTab: gid })}
+            fabricTypeFilter={fabricTypeFilter}
+            updateParams={updateParams}
           />
         ) : page === "productinfo" ? (
           <ProductInformationPanel
@@ -7596,313 +7600,280 @@ function ProductInformationPanel({
   );
 }
 
-function FabricSheetsPanel({
+const UNIFIED_FABRIC_COLUMNS = [
+  { key: "supplier", label: "Supplier", header: "Supplier" },
+  { key: "fabricType", label: "Fabric Type", header: "Fabric Type" },
+  { key: "fabricImage", label: "Fabric", header: "Fabric" },
+  { key: "name", label: "Name", header: "Name" },
+  { key: "collection", label: "Collection", header: "Collection" },
+  { key: "costPerMeter", label: "Cost per Meter", header: "Cost per Meter" },
+  { key: "cutPieces", label: "Cut Pieces", header: "Cut Pieces" },
+  { key: "receivedDate", label: "Received / Date", header: "Received / Date" },
+  { key: "products", label: "Products", header: "Products" },
+  { key: "inStock", label: "In Stock", header: "Meters in Stock" },
+  { key: "onOrder", label: "On Order", header: "Quantity Ordered" },
+] as const;
+
+type UnifiedFabricKey = typeof UNIFIED_FABRIC_COLUMNS[number]["key"];
+type UnifiedFabricCell = { colIndex: number; header: string; value: string; originalValue: string };
+type UnifiedFabricRowEntry = {
+  sheet: FabricSheetData;
+  sourceRowIndex: number;
+  row: string[];
+  cells: Record<UnifiedFabricKey, UnifiedFabricCell | null>;
+};
+
+function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): UnifiedFabricRowEntry {
+  const sourceRowIndex = sheet.rowKeys?.[displayRowIndex] ?? displayRowIndex;
+  const row = sheet.rows[displayRowIndex] ?? [];
+  const originalRow = sheet.originalRows?.[sourceRowIndex] ?? row;
+  const isOnOrderSheet = sheet.gid === COMBINED_FABRIC_ON_ORDER_GID;
+  const find = (predicate: (header: string) => boolean) =>
+    sheet.headers.findIndex((header) => predicate(header.trim().toLowerCase()));
+  const supplierIdx = find((h) => /^supplier$/.test(h));
+  const fabricTypeIdx = find((h) => /^fabric\s*type$/.test(h) || /^type$/.test(h));
+  const imageIdx = find((h) => /^fabric$/.test(h) || /^picture$/.test(h));
+  const nameIdx = find((h) => /^name$/.test(h));
+  const collectionIdx = find((h) => /^collection$/.test(h));
+  const costIdx = find((h) => /cost\s*per\s*meter|price\s*per\s*meter|^price$/.test(h));
+  const cutPiecesIdx = find((h) => /^cut\s*pieces?$/.test(h));
+  const receivedIdx = find((h) => /received/.test(h) || /^order\s*date$/.test(h));
+  const productsIdx = find((h) => /^products?$/.test(h));
+  const quantityIdx = find((h) => /meters?\s*in\s*stock|meters?\s*available|^meters?$|quantity\s*ordered/.test(h));
+  const make = (idx: number, header: string): UnifiedFabricCell | null => idx < 0 ? null : {
+    colIndex: idx,
+    header,
+    value: row[idx] ?? "",
+    originalValue: originalRow[idx] ?? "",
+  };
+  return {
+    sheet,
+    sourceRowIndex,
+    row,
+    cells: {
+      supplier: make(supplierIdx, "Supplier"),
+      fabricType: make(fabricTypeIdx, "Fabric Type"),
+      fabricImage: make(imageIdx, "Fabric"),
+      name: make(nameIdx, "Name"),
+      collection: make(collectionIdx, "Collection"),
+      costPerMeter: make(costIdx, "Cost per Meter"),
+      cutPieces: make(cutPiecesIdx, "Cut Pieces"),
+      receivedDate: make(receivedIdx, "Received / Date"),
+      products: make(productsIdx, "Products"),
+      inStock: !isOnOrderSheet ? make(quantityIdx, "Meters in Stock") : null,
+      onOrder: isOnOrderSheet ? make(quantityIdx, "Quantity Ordered") : null,
+    },
+  };
+}
+
+function parseFabricNumberCell(value: string | undefined) {
+  if (!value) return 0;
+  const n = parseFloat(String(value).replace(/[, ]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function CombinedFabricStockPanel({
   sheets,
-  selectedGid,
   fabricSettings,
   productInfo,
   users,
-  tableHeaderLabels,
-  customColumns,
   rowHeights,
   inrToAudRate,
-  nameSearch = "",
-  onSelect,
+  nameSearch,
+  fabricTypeFilter,
+  updateParams,
 }: {
   sheets: FabricSheetData[];
-  selectedGid: string;
   fabricSettings: FabricSettings;
   productInfo: ProductInfo;
   users: PortalUser[];
-  tableHeaderLabels: Record<string, string>;
-  customColumns: TableCustomColumns;
   rowHeights: Record<string, number>;
   inrToAudRate: number | null;
-  nameSearch?: string;
-  onSelect: (gid: string) => void;
+  nameSearch: string;
+  fabricTypeFilter: string;
+  updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
-  const selectedSheet = sheets.find((sheet) => sheet.gid === selectedGid) ?? null;
-  const [orderedSheets, setOrderedSheets] = useState(sheets);
-  const [dragGid, setDragGid] = useState<string | null>(null);
-  useEffect(() => setOrderedSheets(sheets), [sheets]);
-  const saveTileOrder = (nextSheets: FabricSheetData[]) => {
-    submitPortalCell(
-      fetcher,
-      {
-        intent: "update_fabric_settings",
-        value: JSON.stringify({ ...fabricSettings, tileOrder: nextSheets.map((sheet) => sheet.gid) }),
-      },
-      { label: "Undo fabric tile order", fields: { intent: "update_fabric_settings", value: JSON.stringify(fabricSettings) } },
-    );
-  };
-  const totalSheets = orderedSheets.filter((sheet) => !isFabricTotalsExcluded(sheet.name));
-  const totalQuantity = totalSheets.reduce((sum, sheet) => sum + (sheet.totalQuantity ?? 0), 0);
-  const totalCostInr = totalSheets.reduce((sum, sheet) => sum + (sheet.totalCost ?? 0), 0);
-  const totalCostAud = inrToAudRate && totalCostInr ? totalCostInr * inrToAudRate : null;
-  const [showTotalsHelp, setShowTotalsHelp] = useState(false);
+  const allRows = useMemo(() => {
+    const entries: UnifiedFabricRowEntry[] = [];
+    for (const sheet of sheets) {
+      if (sheet.error) continue;
+      for (let i = 0; i < sheet.rows.length; i++) {
+        entries.push(unifyFabricRow(sheet, i));
+      }
+    }
+    return entries;
+  }, [sheets]);
 
-  if (selectedSheet) {
-    return (
-      <div style={s.fabricPage}>
-        <div style={s.fabricToolbar}>
-          <div style={s.fabricToolbarLeft}>
-            <button type="button" onClick={() => onSelect("")} style={s.secondaryButton}>
-              Back to fabric types
-            </button>
-          </div>
-          <div style={s.fabricToolbarMeta}>
-            <strong>{selectedSheet.name}</strong>
-            <span>{selectedSheet.rowCount} rows</span>
-            {selectedSheet.totalQuantity != null && <span>{formatFabricNumber(selectedSheet.totalQuantity)} total</span>}
-            {selectedSheet.totalCost != null && <span>{formatCurrency(selectedSheet.totalCost)} fabric cost</span>}
-          </div>
-        </div>
-        <FabricSheetTable
-          sheet={selectedSheet}
-          sheets={sheets}
-          fetcher={fetcher}
-          fabricSettings={fabricSettings}
-          productInfo={productInfo}
-          users={users}
-          tableHeaderLabels={tableHeaderLabels}
-          customColumns={customColumns}
-          rowHeights={rowHeights}
-          nameSearch={nameSearch}
-          onDeleteList={() => onSelect("")}
-        />
-      </div>
-    );
-  }
+  const fabricTypeChoices = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of allRows) {
+      const raw = entry.cells.fabricType?.value.trim() || entry.sheet.name.trim();
+      if (!raw) continue;
+      counts.set(raw, (counts.get(raw) ?? 0) + 1);
+    }
+    return [...counts.keys()].sort((a, b) => a.localeCompare(b));
+  }, [allRows]);
+
+  const filteredRows = useMemo(() => {
+    const search = nameSearch.trim().toLowerCase();
+    const typeFilter = fabricTypeFilter.trim().toLowerCase();
+    return allRows.filter((entry) => {
+      if (typeFilter) {
+        const ft = (entry.cells.fabricType?.value.trim() || entry.sheet.name.trim()).toLowerCase();
+        if (ft !== typeFilter) return false;
+      }
+      if (search) {
+        const name = (entry.cells.name?.value ?? "").toLowerCase();
+        if (!name.includes(search)) return false;
+      }
+      return true;
+    });
+  }, [allRows, nameSearch, fabricTypeFilter]);
+
+  const totalInStock = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.inStock?.value), 0);
+  const totalOnOrder = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.onOrder?.value), 0);
+  const totalCostInr = filteredRows.reduce((sum, entry) => {
+    if (!entry.cells.inStock) return sum;
+    return sum + parseFabricNumberCell(entry.cells.inStock.value) * parseFabricNumberCell(entry.cells.costPerMeter?.value);
+  }, 0);
+  const totalCostAud = inrToAudRate && totalCostInr ? totalCostInr * inrToAudRate : null;
 
   return (
     <div style={s.fabricPage}>
-      <div style={s.fabricTotalsBar}>
-        <span
-          style={s.fabricTotalsHelp}
-          onMouseEnter={() => setShowTotalsHelp(true)}
-          onMouseLeave={() => setShowTotalsHelp(false)}
-          onFocus={() => setShowTotalsHelp(true)}
-          onBlur={() => setShowTotalsHelp(false)}
-          tabIndex={0}
-        >
-          !
-          {showTotalsHelp && (
-            <span style={s.fabricTotalsHelpBubble}>
-              Totals do not include On Order, Fabric on Order, Random Fabric Bits and Bobs
-            </span>
+      <div style={s.fabricToolbar}>
+        <div style={s.fabricToolbarLeft}>
+          <label style={s.filterLabel}>
+            Fabric type
+            <select
+              value={fabricTypeFilter}
+              onChange={(event) => updateParams({ fabricType: event.currentTarget.value })}
+              style={s.productTypeFilter}
+            >
+              <option value="">All fabric types</option>
+              {fabricTypeChoices.map((type) => (
+                <option key={type} value={type}>{type}</option>
+              ))}
+            </select>
+          </label>
+          {fabricTypeFilter && (
+            <button type="button" style={s.secondaryButton} onClick={() => updateParams({ fabricType: "" })}>
+              Clear filter
+            </button>
           )}
-        </span>
-        <span style={s.fabricTotalsItem}>
-          <strong>{formatFabricNumber(totalQuantity)}</strong>
-          <span>Total fabric</span>
-        </span>
-        <span style={s.fabricTotalsItem}>
-          <strong>{formatCurrency(totalCostInr)}</strong>
-          <span>Total value</span>
-        </span>
-        <span style={s.fabricTotalsItem}>
-          <strong>{totalCostAud == null ? "—" : formatAudCurrency(totalCostAud)}</strong>
-          <span>AUD value</span>
-        </span>
+        </div>
+        <div style={s.fabricToolbarMeta}>
+          <span><strong>{filteredRows.length}</strong> rows</span>
+          <span><strong>{formatFabricNumber(totalInStock)}</strong> in stock</span>
+          <span><strong>{formatFabricNumber(totalOnOrder)}</strong> on order</span>
+          {totalCostInr > 0 && <span><strong>{formatCurrency(totalCostInr)}</strong> value</span>}
+          {totalCostAud != null && <span><strong>{formatAudCurrency(totalCostAud)}</strong> AUD</span>}
+        </div>
       </div>
-      <div style={s.fabricTileActions}>
-        <button
-          type="button"
-          style={s.secondaryButton}
-          onClick={() => {
-            const name = window.prompt("New fabric type name?");
-            if (!name?.trim()) return;
-            const gid = `custom_${Date.now()}`;
-            submitPortalCell(
-              fetcher,
-              { intent: "create_fabric_sheet", gid, name: name.trim() },
-              { label: "Undo create fabric list", fields: { intent: "delete_fabric_sheet", gid } },
-            );
-          }}
-        >
-          Create fabric list
-        </button>
-      </div>
-      <div style={s.fabricGrid}>
-        {orderedSheets.map((sheet) => (
-          <button
-            key={sheet.gid}
-            type="button"
-            draggable
-            onDragStart={() => setDragGid(sheet.gid)}
-            onDragOver={(event) => {
-              event.preventDefault();
-              if (!dragGid || dragGid === sheet.gid) return;
-              const from = orderedSheets.findIndex((item) => item.gid === dragGid);
-              const to = orderedSheets.findIndex((item) => item.gid === sheet.gid);
-              if (from < 0 || to < 0) return;
-              const next = [...orderedSheets];
-              const [moved] = next.splice(from, 1);
-              next.splice(to, 0, moved);
-              setOrderedSheets(next);
-              saveTileOrder(next);
-            }}
-            onDragEnd={() => setDragGid(null)}
-            onClick={() => onSelect(sheet.gid)}
-            style={{ ...s.fabricCard, ...(dragGid === sheet.gid ? s.fabricCardDragging : {}) }}
-          >
-            <span style={s.fabricCardHandle}>Drag</span>
-            <span style={s.fabricCardTitle}>{sheet.name}</span>
-            <span style={s.fabricCardMeta}>
-              {sheet.error ? "Unable to load" : `${sheet.rowCount} rows`}
-            </span>
-            {!sheet.error && sheet.totalQuantity != null && (
-              <span style={s.fabricCardQuantity}>{formatFabricNumber(sheet.totalQuantity)} total</span>
-            )}
-            {!sheet.error && sheet.totalCost != null && (
-              <span style={s.fabricCardCost}>{formatCurrency(sheet.totalCost)} fabric cost</span>
-            )}
-          </button>
-        ))}
+      <div style={s.fabricTableShell}>
+        <div style={s.fabricTableWrap}>
+          <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
+            <thead>
+              <tr>
+                <th style={{ ...s.fabricTh, ...s.rowNumberHeader }}>#</th>
+                {UNIFIED_FABRIC_COLUMNS.map((column) => (
+                  <th key={column.key} style={s.fabricTh}>{column.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {filteredRows.map((entry, displayIdx) => (
+                <CombinedFabricRow
+                  key={`${entry.sheet.gid}:${entry.sourceRowIndex}`}
+                  entry={entry}
+                  displayIndex={displayIdx}
+                  fetcher={fetcher}
+                  fabricSettings={fabricSettings}
+                  productInfo={productInfo}
+                  users={users}
+                  rowHeights={rowHeights}
+                  sheets={sheets}
+                />
+              ))}
+              {!filteredRows.length && (
+                <tr>
+                  <td colSpan={UNIFIED_FABRIC_COLUMNS.length + 1} style={{ ...s.fabricTd, padding: 24, textAlign: "center" }}>
+                    No fabric rows match the current filters.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
 }
 
-function FabricSheetTable({
-  sheet,
-  sheets,
+function CombinedFabricRow({
+  entry,
+  displayIndex,
   fetcher,
   fabricSettings,
   productInfo,
   users,
-  tableHeaderLabels,
-  customColumns,
   rowHeights,
-  nameSearch,
-  onDeleteList,
+  sheets,
 }: {
-  sheet: FabricSheetData;
-  sheets: FabricSheetData[];
+  entry: UnifiedFabricRowEntry;
+  displayIndex: number;
   fetcher: ReturnType<typeof useFetcher>;
   fabricSettings: FabricSettings;
   productInfo: ProductInfo;
   users: PortalUser[];
-  tableHeaderLabels: Record<string, string>;
-  customColumns: TableCustomColumns;
   rowHeights: Record<string, number>;
-  nameSearch: string;
-  onDeleteList: () => void;
+  sheets: FabricSheetData[];
 }) {
-  if (sheet.error) {
-    return <div style={s.empty}>Unable to load {sheet.name}: {sheet.error}</div>;
-  }
-  if (!sheet.rows.length) {
-    return <div style={s.empty}>No rows found for {sheet.name}.</div>;
-  }
-
-  const nameIndex = sheet.headers.findIndex((header) => /^name$/i.test(header.trim()));
-  const searchText = nameSearch.trim().toLowerCase();
-  const displayRows = sheet.rows
-    .map((row, rowIndex) => ({ row, rowIndex, sourceRowIndex: sheet.rowKeys?.[rowIndex] ?? rowIndex }))
-    .filter(({ row }) => !searchText || (nameIndex >= 0 && String(row[nameIndex] ?? "").toLowerCase().includes(searchText)));
-
+  const { sheet, sourceRowIndex } = entry;
+  const rowHeightKey = `fabric:${sheet.gid}:${sourceRowIndex}`;
+  const fabricImageUrl = entry.cells.fabricImage?.value ?? "";
+  const fabricName = entry.cells.name?.value ?? "";
+  const moveTargets = sheets.filter((item) => item.gid !== sheet.gid && !isHiddenFabricSheet(item.name));
   return (
-    <div style={s.fabricTableShell}>
-      <div style={s.fabricTableWrap}>
-        <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
-          <thead>
-            <tr>
-              <th style={{ ...s.fabricTh, ...s.rowNumberHeader }}>#</th>
-              {sheet.headers.map((header, index) => {
-                const customSheetColumns = customColumns.fabric[sheet.gid] ?? [];
-                const customStartIndex = sheet.headers.length - customSheetColumns.length;
-                return (
-                  <FabricHeaderCell
-                    key={`${header}-${index}`}
-                    gid={sheet.gid}
-                    columnId={index >= customStartIndex ? customSheetColumns[index - customStartIndex]?.id : undefined}
-                    index={index}
-                    label={headerLabel(tableHeaderLabels, `fabric:${sheet.gid}:${index}`, header)}
-                  />
-                );
-              })}
-            </tr>
-          </thead>
-          <tbody>
-            {displayRows.map(({ row, rowIndex, sourceRowIndex }, displayRowIndex) => {
-              const rowHeightKey = `fabric:${sheet.gid}:${sourceRowIndex}`;
-              const fabricImageUrl = row.find((cell, cellIndex) => {
-                const header = sheet.headers[cellIndex] ?? "";
-                const cellValue = String(cell ?? "");
-                return isFabricImageValue(cellValue) || (/picture|image/i.test(header) && cellValue.trim());
-              }) ?? "";
-              const fabricName = nameIndex >= 0 ? String(row[nameIndex] ?? "") : "";
-              return (
-              <tr key={rowIndex} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
-                <RowNumberCell rowNumber={displayRowIndex + 1} actions={[
-                  { label: "Add row", onClick: () => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: sheet.gid }) },
-                  { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }) },
-                  {
-                    label: "Move to fabric type",
-                    options: sheets
-                      .filter((item) => item.gid !== sheet.gid && !isHiddenFabricSheet(item.name))
-                      .map((item) => ({ label: item.name, value: item.gid })),
-                    onSelect: (targetGid) => submitPortalCell(fetcher, { intent: "move_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex, targetGid }),
-                  },
-                  { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this fabric row?")) submitPortalCell(fetcher, { intent: "delete_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }); } },
-                ]} heightKey={rowHeightKey} />
-                {sheet.headers.map((_, colIndex) => (
-                  <FabricTd key={colIndex} rowIndex={displayRowIndex} colIndex={colIndex}>
-                    <FabricCell
-                      gid={sheet.gid}
-                      rowIndex={sourceRowIndex}
-                      colIndex={colIndex}
-                      value={row[colIndex] ?? ""}
-                      originalValue={sheet.originalRows?.[sourceRowIndex]?.[colIndex] ?? ""}
-                      fabricImageUrl={String(fabricImageUrl)}
-                      fabricName={fabricName}
-                      header={sheet.headers[colIndex] ?? ""}
-                      fetcher={fetcher}
-                      fabricSettings={fabricSettings}
-                      productInfo={productInfo}
-                      users={users}
-                    />
-                  </FabricTd>
-                ))}
-              </tr>
-            );})}
-            {!displayRows.length && (
-              <tr>
-                <td colSpan={sheet.headers.length + 1} style={{ ...s.fabricTd, padding: 24, textAlign: "center" }}>
-                  No fabric names match this search.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-      <div style={s.fabricTableFooter}>
-        <button
-          type="button"
-          style={s.deleteButton}
-          onClick={() => {
-            if (!window.confirm(`Delete the "${sheet.name}" fabric list?`)) return;
-            submitPortalCell(
-              fetcher,
-              { intent: "delete_fabric_sheet", gid: sheet.gid },
-              {
-                label: "Undo delete fabric list",
-                fields: {
-                  intent: "restore_fabric_sheet",
-                  gid: sheet.gid,
-                  sheet: JSON.stringify({ gid: sheet.gid, name: sheet.name, headers: sheet.headers, rows: sheet.rows }),
-                },
-              },
-            );
-            onDeleteList();
-          }}
-        >
-          Delete list
-        </button>
-      </div>
-    </div>
+    <tr style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
+      <RowNumberCell
+        rowNumber={displayIndex + 1}
+        actions={[
+          { label: "Add row", onClick: () => submitPortalCell(fetcher, { intent: "add_fabric_row", gid: sheet.gid }) },
+          { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }) },
+          {
+            label: "Move to fabric type",
+            options: moveTargets.map((item) => ({ label: item.name, value: item.gid })),
+            onSelect: (targetGid) => submitPortalCell(fetcher, { intent: "move_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex, targetGid }),
+          },
+          { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this fabric row?")) submitPortalCell(fetcher, { intent: "delete_fabric_row", gid: sheet.gid, rowIndex: sourceRowIndex }); } },
+        ]}
+        heightKey={rowHeightKey}
+      />
+      {UNIFIED_FABRIC_COLUMNS.map((column, colDisplayIdx) => {
+        const cell = entry.cells[column.key];
+        return (
+          <FabricTd key={column.key} rowIndex={displayIndex} colIndex={colDisplayIdx}>
+            {cell ? (
+              <FabricCell
+                gid={sheet.gid}
+                rowIndex={sourceRowIndex}
+                colIndex={cell.colIndex}
+                value={cell.value}
+                originalValue={cell.originalValue}
+                fabricImageUrl={String(fabricImageUrl)}
+                fabricName={fabricName}
+                header={cell.header}
+                fetcher={fetcher}
+                fabricSettings={fabricSettings}
+                productInfo={productInfo}
+                users={users}
+              />
+            ) : null}
+          </FabricTd>
+        );
+      })}
+    </tr>
   );
 }
 
