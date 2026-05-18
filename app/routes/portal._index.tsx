@@ -284,7 +284,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const rowHeights = normalizeTableRowHeights(rowHeightsSetting?.value);
   const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
   const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
-  const fabricSettings = normalizeFabricSettings(fabricSettingsSetting?.value);
+  let fabricSettings = normalizeFabricSettings(fabricSettingsSetting?.value);
   const productInfo = normalizeProductInfo(productInfoSetting?.value);
   const usersWithSeed = await ensureSuperAdmin(users);
   const currentUser = getCurrentPortalUser(request, usersWithSeed);
@@ -404,6 +404,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const fabricStockIndex: FabricStockEntry[] = page === "restock"
     ? buildFabricStockIndex(manualFabricSheets)
     : [];
+  if (page === "fabric") {
+    fabricSettings = {
+      ...fabricSettings,
+      fabricTypeOptions: ensureFabricTypeChipsForRows(fabricSettings.fabricTypeOptions, manualFabricSheets),
+    };
+  }
   // Cache buster for the fabric image URLs we generate below. Using the
   // blob's updatedAt means every edit invalidates every image URL, which is
   // wasteful but correct — browsers refetch images via HTTP cache.
@@ -2850,6 +2856,28 @@ function canonicalizeFabricType(raw: string): string {
     }
   }
   return trimmed;
+}
+
+function ensureFabricTypeChipsForRows(options: RestockOption[], sheets: FabricStockSheet[]): RestockOption[] {
+  const byLabel = new Map<string, RestockOption>(options.map((opt) => [canonicalizeFabricType(opt.label), opt]));
+  let nextIndex = byLabel.size;
+  const addLabel = (rawLabel: string) => {
+    const canonical = canonicalizeFabricType(rawLabel.trim());
+    if (!canonical || byLabel.has(canonical)) return;
+    const colors = FABRIC_CHIP_COLORS[nextIndex % FABRIC_CHIP_COLORS.length];
+    byLabel.set(canonical, { value: slugForOption(canonical), label: canonical, ...colors });
+    nextIndex++;
+  };
+  for (const sheet of sheets) {
+    if (!isCombinedFabricSource(sheet)) continue;
+    const fabricTypeIdx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h.trim()) || /^type$/i.test(h.trim()));
+    for (const row of sheet.rows) {
+      const raw = fabricTypeIdx >= 0 ? String(row[fabricTypeIdx] ?? "").trim() : "";
+      if (raw) addLabel(raw);
+      else addLabel(sheet.name);
+    }
+  }
+  return [...byLabel.values()];
 }
 
 function canonicalizeFabricTypeOptions(options: RestockOption[]): RestockOption[] {
@@ -7747,16 +7775,12 @@ function CombinedFabricStockPanel({
 
   const fabricTypeChoices = useMemo(() => {
     const labels = new Set<string>();
-    for (const entry of allRows) {
-      const raw = entry.cells.fabricType?.value.trim() || entry.sheet.name.trim();
-      if (raw) labels.add(canonicalizeFabricType(raw));
-    }
     for (const option of fabricSettings.fabricTypeOptions) {
       const label = canonicalizeFabricType(option.label);
       if (label) labels.add(label);
     }
     return [...labels].sort((a, b) => a.localeCompare(b));
-  }, [allRows, fabricSettings.fabricTypeOptions]);
+  }, [fabricSettings.fabricTypeOptions]);
 
   const filteredRows = useMemo(() => {
     const search = nameSearch.trim().toLowerCase();
