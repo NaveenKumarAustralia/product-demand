@@ -3075,6 +3075,7 @@ const COMBINED_FABRIC_PAD_COLUMNS: Array<{ header: string; regex: RegExp }> = [
   { header: "Cut Pieces", regex: /^cut\s*pieces?$/ },
   { header: "Received / Date", regex: /received|^order\s*date$/ },
   { header: "Products", regex: /^products?$/ },
+  { header: "Order Date", regex: /^order\s*date$/ },
 ];
 
 function padCombinedFabricSheet(sheet: FabricSheetData): FabricSheetData {
@@ -7713,6 +7714,7 @@ const UNIFIED_FABRIC_COLUMNS = [
   { key: "products", label: "Products", header: "Products" },
   { key: "inStock", label: "In Stock", header: "Meters in Stock" },
   { key: "onOrder", label: "On Order", header: "Quantity Ordered" },
+  { key: "orderDate", label: "Order Date", header: "Order Date" },
 ] as const;
 
 type UnifiedFabricKey = typeof UNIFIED_FABRIC_COLUMNS[number]["key"];
@@ -7744,7 +7746,8 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
   const collectionIdx = find((h) => /^collection$/.test(h));
   const costIdx = find((h) => /cost\s*per\s*meter|price\s*per\s*meter|^price$/.test(h));
   const cutPiecesIdx = find((h) => /^cut\s*pieces?$/.test(h));
-  const receivedIdx = find((h) => /received/.test(h) || /^order\s*date$/.test(h));
+  const receivedIdx = find((h) => /received/.test(h));
+  const orderDateIdx = find((h) => /^order\s*date$/.test(h));
   const productsIdx = find((h) => /^products?$/.test(h));
   const quantityIdx = find((h) => /meters?\s*in\s*stock|meters?\s*available|^meters?$|quantity\s*ordered/.test(h));
   const make = (idx: number, header: string): UnifiedFabricCell | null => idx < 0 ? null : {
@@ -7777,6 +7780,7 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
       products: make(productsIdx, "Products"),
       inStock: !isOnOrderSheet ? make(quantityIdx, "Meters in Stock") : null,
       onOrder: isOnOrderSheet ? make(quantityIdx, "Quantity Ordered") : null,
+      orderDate: make(orderDateIdx, "Order Date"),
     },
   };
 }
