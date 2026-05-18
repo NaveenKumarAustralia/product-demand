@@ -8044,7 +8044,6 @@ function CombinedFabricStockPanel({
                     }}
                     style={{
                       ...s.fabricTh,
-                      position: "relative",
                       cursor: "grab",
                       ...(dragKey === column.key ? { opacity: 0.55 } : {}),
                     }}
