@@ -2834,6 +2834,39 @@ function fabricHeaderIndex(headers: string[], pattern: RegExp) {
   return headers.findIndex((header) => pattern.test(header));
 }
 
+const FABRIC_TYPE_ALIASES: Array<{ canonical: string; aliases: string[] }> = [
+  { canonical: "40x40 Printed", aliases: ["40x40", "40x40 printed"] },
+  { canonical: "60x60 Printed", aliases: ["60x60", "60x60 printed"] },
+  { canonical: "Plain 40x40", aliases: ["40x40 lattha", "40x40 latha", "plain 40x40"] },
+];
+
+function canonicalizeFabricType(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return trimmed;
+  const lower = trimmed.toLowerCase();
+  for (const entry of FABRIC_TYPE_ALIASES) {
+    if (entry.aliases.includes(lower) || entry.canonical.toLowerCase() === lower) {
+      return entry.canonical;
+    }
+  }
+  return trimmed;
+}
+
+function canonicalizeFabricTypeOptions(options: RestockOption[]): RestockOption[] {
+  const byLabel = new Map<string, RestockOption>();
+  for (const option of options) {
+    const canonicalLabel = canonicalizeFabricType(option.label);
+    if (byLabel.has(canonicalLabel)) continue;
+    byLabel.set(canonicalLabel, { ...option, label: canonicalLabel, value: slugForOption(canonicalLabel) });
+  }
+  for (const [index, alias] of FABRIC_TYPE_ALIASES.entries()) {
+    if (byLabel.has(alias.canonical)) continue;
+    const colors = FABRIC_CHIP_COLORS[(byLabel.size + index) % FABRIC_CHIP_COLORS.length];
+    byLabel.set(alias.canonical, { value: slugForOption(alias.canonical), label: alias.canonical, ...colors });
+  }
+  return [...byLabel.values()];
+}
+
 function buildFabricDefaults(pattern: RegExp): RestockOption[] {
   const labels = new Set<string>();
   for (const sheet of initialFabricStockSheets) {
@@ -2856,7 +2889,9 @@ function normalizeFabricSettings(value: unknown): FabricSettings {
     : {};
   return {
     supplierOptions: normalizeRestockOptions(settings.supplierOptions, buildFabricDefaults(/^supplier$/i)),
-    fabricTypeOptions: normalizeRestockOptions(settings.fabricTypeOptions, buildFabricDefaults(/fabric\s*type/i)),
+    fabricTypeOptions: canonicalizeFabricTypeOptions(
+      normalizeRestockOptions(settings.fabricTypeOptions, buildFabricDefaults(/fabric\s*type/i)),
+    ),
     tileOrder: Array.isArray(settings.tileOrder)
       ? settings.tileOrder.map((item) => String(item)).filter(Boolean)
       : [],
@@ -7652,7 +7687,12 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
     row,
     cells: {
       supplier: make(supplierIdx, "Supplier"),
-      fabricType: make(fabricTypeIdx, "Fabric Type"),
+      fabricType: fabricTypeIdx < 0 ? null : {
+        colIndex: fabricTypeIdx,
+        header: "Fabric Type",
+        value: canonicalizeFabricType(row[fabricTypeIdx] ?? ""),
+        originalValue: canonicalizeFabricType(originalRow[fabricTypeIdx] ?? ""),
+      },
       fabricImage: make(imageIdx, "Fabric"),
       name: make(nameIdx, "Name"),
       collection: make(collectionIdx, "Collection"),
@@ -7706,22 +7746,25 @@ function CombinedFabricStockPanel({
   }, [sheets]);
 
   const fabricTypeChoices = useMemo(() => {
-    const counts = new Map<string, number>();
+    const labels = new Set<string>();
     for (const entry of allRows) {
       const raw = entry.cells.fabricType?.value.trim() || entry.sheet.name.trim();
-      if (!raw) continue;
-      counts.set(raw, (counts.get(raw) ?? 0) + 1);
+      if (raw) labels.add(canonicalizeFabricType(raw));
     }
-    return [...counts.keys()].sort((a, b) => a.localeCompare(b));
-  }, [allRows]);
+    for (const option of fabricSettings.fabricTypeOptions) {
+      const label = canonicalizeFabricType(option.label);
+      if (label) labels.add(label);
+    }
+    return [...labels].sort((a, b) => a.localeCompare(b));
+  }, [allRows, fabricSettings.fabricTypeOptions]);
 
   const filteredRows = useMemo(() => {
     const search = nameSearch.trim().toLowerCase();
-    const typeFilter = fabricTypeFilter.trim().toLowerCase();
+    const typeFilter = canonicalizeFabricType(fabricTypeFilter).toLowerCase();
     return allRows.filter((entry) => {
       if (typeFilter) {
-        const ft = (entry.cells.fabricType?.value.trim() || entry.sheet.name.trim()).toLowerCase();
-        if (ft !== typeFilter) return false;
+        const raw = entry.cells.fabricType?.value.trim() || entry.sheet.name.trim();
+        if (canonicalizeFabricType(raw).toLowerCase() !== typeFilter) return false;
       }
       if (search) {
         const name = (entry.cells.name?.value ?? "").toLowerCase();
