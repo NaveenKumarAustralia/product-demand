@@ -7774,13 +7774,18 @@ function CombinedFabricStockPanel({
   }, [sheets]);
 
   const fabricTypeChoices = useMemo(() => {
+    const rowLabels = new Set<string>();
+    for (const entry of allRows) {
+      const raw = entry.cells.fabricType?.value.trim() || entry.sheet.name.trim();
+      if (raw) rowLabels.add(canonicalizeFabricType(raw));
+    }
     const labels = new Set<string>();
     for (const option of fabricSettings.fabricTypeOptions) {
       const label = canonicalizeFabricType(option.label);
-      if (label) labels.add(label);
+      if (label && rowLabels.has(label)) labels.add(label);
     }
     return [...labels].sort((a, b) => a.localeCompare(b));
-  }, [fabricSettings.fabricTypeOptions]);
+  }, [allRows, fabricSettings.fabricTypeOptions]);
 
   const filteredRows = useMemo(() => {
     const search = nameSearch.trim().toLowerCase();
