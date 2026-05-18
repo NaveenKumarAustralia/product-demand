@@ -25,7 +25,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const restockProductSearch = url.searchParams.get("restockProductSearch") ?? "";
   const packingSearchLineId = Number(url.searchParams.get("packingSearchLineId") ?? 0) || null;
   const sortBy = url.searchParams.get("sortBy") ?? "orderDateDesc";
-  const fabricTypeFilter = url.searchParams.get("fabricType") ?? "";
   try {
   const SETTING_KEYS = [
     COLUMN_WIDTHS_KEY,
@@ -500,7 +499,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     activityLogs,
     navOrder,
     fabricSheets,
-    fabricTypeFilter,
     inrToAudRate,
     samples,
     visionBoardData,
@@ -2667,6 +2665,7 @@ type FabricSettings = {
   fabricTypeOptions: RestockOption[];
   tileOrder: string[];
   combinedColumnOrder: string[];
+  combinedColumnWidths: Record<string, number>;
 };
 type TableCustomColumn = { id: string; label: string };
 type TableCustomColumns = {
@@ -2932,6 +2931,13 @@ function normalizeFabricSettings(value: unknown): FabricSettings {
     combinedColumnOrder: Array.isArray(settings.combinedColumnOrder)
       ? settings.combinedColumnOrder.map((item) => String(item)).filter(Boolean)
       : [],
+    combinedColumnWidths: settings.combinedColumnWidths && typeof settings.combinedColumnWidths === "object"
+      ? Object.fromEntries(
+          Object.entries(settings.combinedColumnWidths as Record<string, unknown>)
+            .map(([key, value]) => [key, Number(value)])
+            .filter(([, value]) => Number.isFinite(value) && (value as number) >= 40),
+        )
+      : {},
   };
 }
 
@@ -4328,7 +4334,6 @@ export default function PortalDashboard() {
     activityLogs,
     navOrder,
     fabricSheets,
-    fabricTypeFilter,
     inrToAudRate,
     samples,
     visionBoardData,
@@ -4670,8 +4675,6 @@ export default function PortalDashboard() {
             rowHeights={rowHeights}
             inrToAudRate={inrToAudRate}
             nameSearch={searchTitleInput}
-            fabricTypeFilter={fabricTypeFilter}
-            updateParams={updateParams}
           />
         ) : page === "productinfo" ? (
           <ProductInformationPanel
@@ -7839,8 +7842,6 @@ function CombinedFabricStockPanel({
   rowHeights,
   inrToAudRate,
   nameSearch,
-  fabricTypeFilter,
-  updateParams,
 }: {
   sheets: FabricSheetData[];
   fabricSettings: FabricSettings;
@@ -7849,10 +7850,9 @@ function CombinedFabricStockPanel({
   rowHeights: Record<string, number>;
   inrToAudRate: number | null;
   nameSearch: string;
-  fabricTypeFilter: string;
-  updateParams: (updates: Record<string, string>) => void;
 }) {
   const fetcher = useFetcher();
+  const [fabricTypeFilter, setFabricTypeFilter] = useState("");
   const allRows = useMemo(() => {
     const entries: UnifiedFabricRowEntry[] = [];
     for (const sheet of sheets) {
@@ -7927,6 +7927,45 @@ function CombinedFabricStockPanel({
     );
   };
 
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(fabricSettings.combinedColumnWidths);
+  useEffect(() => setColumnWidths(fabricSettings.combinedColumnWidths), [fabricSettings.combinedColumnWidths]);
+  const widthFor = (key: string) => columnWidths[key] ?? 160;
+  const startColumnResize = (columnKey: UnifiedFabricKey, event: React.MouseEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = widthFor(columnKey);
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    let nextWidth = startWidth;
+    const handleMove = (moveEvent: MouseEvent) => {
+      nextWidth = Math.max(60, startWidth + moveEvent.clientX - startX);
+      setColumnWidths((current) => ({ ...current, [columnKey]: nextWidth }));
+    };
+    const handleUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      document.removeEventListener("mousemove", handleMove);
+      document.removeEventListener("mouseup", handleUp);
+      if (nextWidth === startWidth) return;
+      submitPortalCell(
+        fetcher,
+        {
+          intent: "update_fabric_settings",
+          value: JSON.stringify({
+            ...fabricSettings,
+            combinedColumnWidths: { ...fabricSettings.combinedColumnWidths, [columnKey]: nextWidth },
+          }),
+        },
+        { label: "Undo column resize", fields: { intent: "update_fabric_settings", value: JSON.stringify(fabricSettings) } },
+      );
+    };
+    document.addEventListener("mousemove", handleMove);
+    document.addEventListener("mouseup", handleUp);
+  };
+
   const totalInStock = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.inStock?.value), 0);
   const totalOnOrder = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.onOrder?.value), 0);
   const totalCostInr = filteredRows.reduce((sum, entry) => {
@@ -7943,7 +7982,7 @@ function CombinedFabricStockPanel({
             Fabric type
             <select
               value={fabricTypeFilter}
-              onChange={(event) => updateParams({ fabricType: event.currentTarget.value })}
+              onChange={(event) => setFabricTypeFilter(event.currentTarget.value)}
               style={s.productTypeFilter}
             >
               <option value="">All fabric types</option>
@@ -7953,7 +7992,7 @@ function CombinedFabricStockPanel({
             </select>
           </label>
           {fabricTypeFilter && (
-            <button type="button" style={s.secondaryButton} onClick={() => updateParams({ fabricType: "" })}>
+            <button type="button" style={s.secondaryButton} onClick={() => setFabricTypeFilter("")}>
               Clear filter
             </button>
           )}
@@ -7969,6 +8008,12 @@ function CombinedFabricStockPanel({
       <div style={s.fabricTableShell}>
         <div style={s.fabricTableWrap}>
           <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
+            <colgroup>
+              <col style={{ width: 48 }} />
+              {localColumns.map((column) => (
+                <col key={column.key} style={{ width: widthFor(column.key) }} />
+              ))}
+            </colgroup>
             <thead>
               <tr>
                 <th style={{ ...s.fabricTh, ...s.rowNumberHeader }}>#</th>
@@ -7999,12 +8044,22 @@ function CombinedFabricStockPanel({
                     }}
                     style={{
                       ...s.fabricTh,
+                      position: "relative",
                       cursor: "grab",
                       ...(dragKey === column.key ? { opacity: 0.55 } : {}),
                     }}
                     title="Drag to reorder"
                   >
                     {column.label}
+                    <span
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label={`Resize ${column.label} column`}
+                      onMouseDown={(event) => startColumnResize(column.key, event)}
+                      style={s.resizeHandle}
+                      draggable={false}
+                      onDragStart={(event) => event.preventDefault()}
+                    />
                   </th>
                 ))}
               </tr>
@@ -8317,7 +8372,6 @@ function FabricCell({
       ? fabricSettings.fabricTypeOptions
       : null;
   const chipOption = chipOptions?.find((option) => option.label === draft || option.value === slugForOption(draft));
-  const multiline = draft.includes("\n") || draft.length > 34;
   const centerValue = isNumericFabricCell(header, draft);
   const save = (nextValue: string) => {
     if (nextValue === value) return;
@@ -8449,20 +8503,18 @@ function FabricCell({
     );
   }
 
-  const common = {
-    value: draft,
-    onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(event.currentTarget.value),
-    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => save(event.currentTarget.value),
-    style: {
-      ...(multiline ? s.fabricCellTextarea : s.fabricCellInput),
-      ...(centerValue ? s.fabricNumberCellInput : {}),
-    },
-    placeholder: "—",
-  };
-
   return (
     <>
-      {multiline ? <textarea rows={3} {...common} /> : <input type="text" {...common} />}
+      <AutoGrowTextarea
+        value={draft}
+        onChange={setDraft}
+        onCommit={save}
+        style={{
+          ...s.fabricCellTextarea,
+          ...(centerValue ? s.fabricNumberCellInput : {}),
+        }}
+        placeholder="—"
+      />
       {originalValue && originalValue !== draft && (
         <div style={s.fabricCellActions}>
           <button
@@ -8478,6 +8530,56 @@ function FabricCell({
         </div>
       )}
     </>
+  );
+}
+
+function AutoGrowTextarea({
+  value,
+  onChange,
+  onCommit,
+  style,
+  placeholder,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  onCommit: (next: string) => void;
+  style?: React.CSSProperties;
+  placeholder?: string;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const resize = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.max(el.scrollHeight, 22)}px`;
+  };
+  useEffect(() => { resize(); }, [value]);
+  useEffect(() => {
+    const handle = () => resize();
+    window.addEventListener("resize", handle);
+    return () => window.removeEventListener("resize", handle);
+  }, []);
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      onChange={(event) => onChange(event.currentTarget.value)}
+      onBlur={(event) => onCommit(event.currentTarget.value)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          onCommit(event.currentTarget.value);
+        }
+      }}
+      rows={1}
+      style={{
+        ...style,
+        whiteSpace: "pre-wrap",
+        overflow: "hidden",
+        resize: "none",
+      }}
+      placeholder={placeholder}
+    />
   );
 }
 
@@ -13459,7 +13561,7 @@ const s: Record<string, React.CSSProperties> = {
     verticalAlign: "top",
     color: "var(--portal-table-text-color, #1f2937)",
     fontWeight: 600,
-    minWidth: 120,
+    minWidth: 60,
     fontSize: "var(--portal-table-font-size, 13px)",
   },
   fabricCellInput: {
