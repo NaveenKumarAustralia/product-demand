@@ -8453,7 +8453,15 @@ function FabricCell({
     );
   };
   const uploadImage = async (file: File | null) => {
-    if (!file || !file.type.startsWith("image/")) return;
+    if (!file) {
+      window.alert(`DEBUG A: uploadImage called but file is null. gid=${gid}, row=${rowIndex}, col=${colIndex}`);
+      return;
+    }
+    window.alert(`DEBUG B: uploadImage starting. file=${file.name}, type=${file.type}, size=${file.size}, gid=${gid}, row=${rowIndex}, col=${colIndex}`);
+    if (!file.type.startsWith("image/")) {
+      window.alert(`DEBUG C: file type rejected: "${file.type}"`);
+      return;
+    }
     if (file.size > 5 * 1024 * 1024) {
       window.alert(`That image is ${(file.size / 1024 / 1024).toFixed(1)} MB — over the 5 MB limit. Try a smaller one.`);
       return;
@@ -8466,14 +8474,15 @@ function FabricCell({
     formData.set("colIndex", String(colIndex));
     formData.set("image", file);
     try {
+      window.alert(`DEBUG D: sending POST to /portal with size ${formData.get("image") instanceof File ? (formData.get("image") as File).size : "?"}`);
       const response = await fetch("/portal", { method: "POST", body: formData, credentials: "same-origin" });
+      window.alert(`DEBUG E: server response HTTP ${response.status} ${response.statusText}`);
       if (!response.ok) {
-        window.alert(`Image upload failed: server returned HTTP ${response.status}`);
         return;
       }
       revalidator.revalidate();
     } catch (error) {
-      window.alert(`Image upload error: ${error instanceof Error ? error.message : String(error)}`);
+      window.alert(`DEBUG F: fetch threw error: ${error instanceof Error ? error.message : String(error)}`);
     }
   };
 
