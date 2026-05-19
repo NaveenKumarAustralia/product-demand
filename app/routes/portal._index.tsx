@@ -2666,6 +2666,7 @@ type FabricSettings = {
   tileOrder: string[];
   combinedColumnOrder: string[];
   combinedColumnWidths: Record<string, number>;
+  imagesCompactedV1: boolean;
 };
 type TableCustomColumn = { id: string; label: string };
 type TableCustomColumns = {
@@ -2938,6 +2939,7 @@ function normalizeFabricSettings(value: unknown): FabricSettings {
             .filter(([, value]) => Number.isFinite(value) && (value as number) >= 40),
         )
       : {},
+    imagesCompactedV1: Boolean(settings.imagesCompactedV1),
   };
 }
 
@@ -7855,6 +7857,77 @@ function CombinedFabricStockPanel({
 }) {
   const fetcher = useFetcher();
   const [fabricTypeFilter, setFabricTypeFilter] = useState("");
+  const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
+  useEffect(() => setPendingDeletes(new Set()), [sheets]);
+
+  const compactionStartedRef = useRef(false);
+  useEffect(() => {
+    if (compactionStartedRef.current) return;
+    if (fabricSettings.imagesCompactedV1) return;
+    if (typeof window === "undefined") return;
+    compactionStartedRef.current = true;
+    type ImageCell = { gid: string; rowIndex: number; colIndex: number; url: string };
+    const cells: ImageCell[] = [];
+    for (const sheet of sheets) {
+      if (sheet.error) continue;
+      for (let i = 0; i < sheet.rows.length; i++) {
+        const sourceRowIndex = sheet.rowKeys?.[i] ?? i;
+        const row = sheet.rows[i] ?? [];
+        for (let c = 0; c < row.length; c++) {
+          const value = String(row[c] ?? "");
+          if (/^\/portal\/fabric-image\//.test(value)) {
+            cells.push({ gid: sheet.gid, rowIndex: sourceRowIndex, colIndex: c, url: value });
+          }
+        }
+      }
+    }
+    let cancelled = false;
+    const compactOne = async (cell: ImageCell) => {
+      const response = await fetch(cell.url);
+      if (!response.ok) return;
+      const blob = await response.blob();
+      if (blob.size < 200 * 1024) return;
+      const file = new File([blob], "fabric-image", { type: blob.type || "image/jpeg" });
+      const resized = await resizeImageForFabricUpload(file);
+      if (resized.size >= blob.size) return;
+      const fd = new FormData();
+      fd.set("intent", "upload_fabric_image");
+      fd.set("gid", cell.gid);
+      fd.set("rowIndex", String(cell.rowIndex));
+      fd.set("colIndex", String(cell.colIndex));
+      fd.set("image", resized);
+      fd.set("noRevalidate", "1");
+      await fetch("/portal", { method: "POST", body: fd });
+    };
+    (async () => {
+      for (const cell of cells) {
+        if (cancelled) return;
+        try {
+          await compactOne(cell);
+        } catch (error) {
+          console.warn("Fabric image compaction failed", cell, error);
+        }
+      }
+      if (!cancelled) {
+        const next = { ...fabricSettings, imagesCompactedV1: true };
+        const fd = new FormData();
+        fd.set("intent", "update_fabric_settings");
+        fd.set("value", JSON.stringify(next));
+        fd.set("noRevalidate", "1");
+        await fetch("/portal", { method: "POST", body: fd });
+      }
+    })();
+    return () => { cancelled = true; };
+    // We want this to run once per page mount; depending on sheets/settings would re-trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const markRowDeleted = useCallback((gid: string, rowIndex: number) => {
+    setPendingDeletes((prev) => {
+      const next = new Set(prev);
+      next.add(`${gid}:${rowIndex}`);
+      return next;
+    });
+  }, []);
   const allRows = useMemo(() => {
     const entries: UnifiedFabricRowEntry[] = [];
     for (const sheet of sheets) {
@@ -7863,8 +7936,9 @@ function CombinedFabricStockPanel({
         entries.push(unifyFabricRow(sheet, i));
       }
     }
-    return mergeFabricRowEntries(entries);
-  }, [sheets]);
+    const merged = mergeFabricRowEntries(entries);
+    return merged.filter((entry) => !pendingDeletes.has(`${entry.primarySheet.gid}:${entry.primaryRowIndex}`));
+  }, [sheets, pendingDeletes]);
 
   const fabricTypeChoices = useMemo(() => {
     const rowLabels = new Set<string>();
@@ -8078,6 +8152,7 @@ function CombinedFabricStockPanel({
                   users={users}
                   rowHeights={rowHeights}
                   sheets={sheets}
+                  onMarkDeleted={markRowDeleted}
                 />
               ))}
               {!filteredRows.length && (
@@ -8105,6 +8180,7 @@ function CombinedFabricRow({
   users,
   rowHeights,
   sheets,
+  onMarkDeleted,
 }: {
   entry: UnifiedFabricRowEntry;
   displayIndex: number;
@@ -8115,6 +8191,7 @@ function CombinedFabricRow({
   users: PortalUser[];
   rowHeights: Record<string, number>;
   sheets: FabricSheetData[];
+  onMarkDeleted: (gid: string, rowIndex: number) => void;
 }) {
   const primaryGid = entry.primarySheet.gid;
   const primaryRowIndex = entry.primaryRowIndex;
@@ -8134,7 +8211,11 @@ function CombinedFabricRow({
             options: moveTargets.map((item) => ({ label: item.name, value: item.gid })),
             onSelect: (targetGid) => submitPortalCell(fetcher, { intent: "move_fabric_row", gid: primaryGid, rowIndex: primaryRowIndex, targetGid }),
           },
-          { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this fabric row?")) submitPortalCell(fetcher, { intent: "delete_fabric_row", gid: primaryGid, rowIndex: primaryRowIndex }); } },
+          { label: "Delete row", danger: true, onClick: () => {
+              if (!window.confirm("Delete this fabric row?")) return;
+              onMarkDeleted(primaryGid, primaryRowIndex);
+              submitPortalCell(fetcher, { intent: "delete_fabric_row", gid: primaryGid, rowIndex: primaryRowIndex });
+            } },
         ]}
         heightKey={rowHeightKey}
       />
