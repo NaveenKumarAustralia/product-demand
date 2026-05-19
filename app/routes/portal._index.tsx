@@ -8340,7 +8340,10 @@ function FabricTd({
 }
 
 function isFabricImageValue(value: string) {
-  return /^data:image\//i.test(value.trim()) || /^(?:https?:\/\/|\/).+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(value.trim());
+  const trimmed = value.trim();
+  return /^data:image\//i.test(trimmed)
+    || /^blob:/i.test(trimmed)
+    || /^(?:https?:\/\/|\/).+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(trimmed);
 }
 
 // Browser-side shrink: a 4000x3000 phone photo (~5 MB) becomes ~800x600 (~120 KB)
