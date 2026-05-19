@@ -8454,8 +8454,14 @@ function FabricCell({
   };
   const uploadImage = async (file: File | null) => {
     if (!file || !file.type.startsWith("image/")) return;
-    if (file.size > 5 * 1024 * 1024) {
-      window.alert(`That image is ${(file.size / 1024 / 1024).toFixed(1)} MB — over the 5 MB limit. Try a smaller one.`);
+    let processed = file;
+    try {
+      processed = await resizeImageForFabricUpload(file);
+    } catch {
+      processed = file;
+    }
+    if (processed.size > 5 * 1024 * 1024) {
+      window.alert(`That image is ${(processed.size / 1024 / 1024).toFixed(1)} MB — over the 5 MB limit. Try a smaller one.`);
       return;
     }
     pushPortalUndo({ label: "Undo fabric image", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } });
@@ -8464,7 +8470,7 @@ function FabricCell({
     formData.set("gid", gid);
     formData.set("rowIndex", String(rowIndex));
     formData.set("colIndex", String(colIndex));
-    formData.set("image", file);
+    formData.set("image", processed);
     try {
       const response = await fetch("/portal", { method: "POST", body: formData, credentials: "same-origin" });
       if (!response.ok) {
@@ -8594,10 +8600,32 @@ function FabricImageEditCell({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogDragOver, setDialogDragOver] = useState(false);
+  const [pasteMenu, setPasteMenu] = useState<{ x: number; y: number } | null>(null);
   const handleUpload = async (file: File | null | undefined) => {
     if (!file) return;
     await uploadImage(file);
     setDialogOpen(false);
+  };
+  const pasteFromClipboard = async () => {
+    setPasteMenu(null);
+    if (!navigator.clipboard || typeof navigator.clipboard.read !== "function") {
+      window.alert("This browser doesn't allow reading the clipboard. Use Cmd/Ctrl+V instead.");
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const imageType = item.types.find((type) => type.startsWith("image/"));
+        if (!imageType) continue;
+        const blob = await item.getType(imageType);
+        const file = new File([blob], "pasted-image", { type: imageType });
+        await handleUpload(file);
+        return;
+      }
+      window.alert("No image found in the clipboard.");
+    } catch (error) {
+      window.alert(`Paste failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   };
   useEffect(() => {
     if (!dialogOpen) return;
@@ -8723,6 +8751,11 @@ function FabricImageEditCell({
               </button>
             </div>
             <div
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setPasteMenu({ x: event.clientX, y: event.clientY });
+              }}
               style={{
                 border: dialogDragOver ? "3px dashed #2563eb" : "3px dashed #cbd5e1",
                 background: dialogDragOver ? "#dbeafe" : "#f8fafc",
@@ -8735,7 +8768,7 @@ function FabricImageEditCell({
               }}
             >
               <div style={{ marginBottom: 6 }}>Drop an image here</div>
-              <div style={{ fontSize: 13, color: "#94a3b8" }}>or paste from clipboard (Cmd/Ctrl+V)</div>
+              <div style={{ fontSize: 13, color: "#94a3b8" }}>or paste with Cmd/Ctrl+V — or right-click for paste</div>
             </div>
             <button
               type="button"
@@ -8776,6 +8809,43 @@ function FabricImageEditCell({
               </button>
             )}
           </div>
+          {pasteMenu && (
+            <div
+              onClick={(event) => event.stopPropagation()}
+              style={{
+                position: "fixed",
+                left: pasteMenu.x,
+                top: pasteMenu.y,
+                background: "#fff",
+                border: "1px solid #cbd5e1",
+                borderRadius: 6,
+                boxShadow: "0 10px 20px rgba(15,23,42,0.18)",
+                padding: 4,
+                zIndex: 10000,
+                minWidth: 180,
+              }}
+              onMouseLeave={() => setPasteMenu(null)}
+            >
+              <button
+                type="button"
+                style={{
+                  display: "block",
+                  width: "100%",
+                  padding: "8px 12px",
+                  background: "transparent",
+                  border: "none",
+                  textAlign: "left",
+                  cursor: "pointer",
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: "#1f2937",
+                }}
+                onClick={() => void pasteFromClipboard()}
+              >
+                Paste from clipboard
+              </button>
+            </div>
+          )}
         </div>,
         document.body,
       )}
