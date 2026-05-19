@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
-import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams, useSubmit } from "react-router";
+import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRevalidator, useRouteError, useSearchParams, useSubmit } from "react-router";
 import prisma from "../db.server";
 import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
 import { syncOrderNoteMessages, syncSampleIterationMessages } from "../portal-messages.server";
@@ -8418,6 +8418,7 @@ function FabricCell({
   productInfo: ProductInfo;
   users: PortalUser[];
 }) {
+  const revalidator = useRevalidator();
   const [draft, setDraft] = useState(value);
   const [imageHover, setImageHover] = useState(false);
   useEffect(() => setDraft(value), [value]);
@@ -8451,7 +8452,7 @@ function FabricCell({
       { label: "Undo fabric cell", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } },
     );
   };
-  const uploadImage = (file: File | null) => {
+  const uploadImage = async (file: File | null) => {
     if (!file || !file.type.startsWith("image/")) return;
     if (file.size > 5 * 1024 * 1024) {
       window.alert(`That image is ${(file.size / 1024 / 1024).toFixed(1)} MB — over the 5 MB limit. Try a smaller one.`);
@@ -8464,7 +8465,16 @@ function FabricCell({
     formData.set("rowIndex", String(rowIndex));
     formData.set("colIndex", String(colIndex));
     formData.set("image", file);
-    fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
+    try {
+      const response = await fetch("/portal", { method: "POST", body: formData, credentials: "same-origin" });
+      if (!response.ok) {
+        window.alert(`Image upload failed: server returned HTTP ${response.status}`);
+        return;
+      }
+      revalidator.revalidate();
+    } catch (error) {
+      window.alert(`Image upload error: ${error instanceof Error ? error.message : String(error)}`);
+    }
   };
 
   if (/^products?$/i.test(normalizedHeader)) {
