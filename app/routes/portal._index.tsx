@@ -8451,17 +8451,10 @@ function FabricCell({
       { label: "Undo fabric cell", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } },
     );
   };
-  const uploadImage = async (file: File | null) => {
+  const uploadImage = (file: File | null) => {
     if (!file) return;
-    let processed: File;
-    try {
-      processed = await resizeImageForFabricUpload(file);
-    } catch (error) {
-      console.error("Image resize failed; uploading original", error);
-      processed = file;
-    }
-    if (processed.size > 5 * 1024 * 1024) {
-      window.alert("That image is over 5 MB even after resize. Try a smaller one.");
+    if (file.size > 5 * 1024 * 1024) {
+      window.alert("That image is over 5 MB. Try a smaller one.");
       return;
     }
     pushPortalUndo({ label: "Undo fabric image", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } });
@@ -8470,7 +8463,7 @@ function FabricCell({
     formData.set("gid", gid);
     formData.set("rowIndex", String(rowIndex));
     formData.set("colIndex", String(colIndex));
-    formData.set("image", processed);
+    formData.set("image", file);
     fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
   };
 
