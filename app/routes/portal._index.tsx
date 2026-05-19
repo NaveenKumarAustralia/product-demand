@@ -8495,58 +8495,17 @@ function FabricCell({
 
   if (imageColumn) {
     return (
-      <div style={s.fabricImageEditCell}>
-        <div
-          tabIndex={0}
-          style={s.fabricImageDrop}
-          onMouseEnter={() => setImageHover(true)}
-          onMouseLeave={() => setImageHover(false)}
-          onFocus={() => setImageHover(true)}
-          onBlur={() => setImageHover(false)}
-          onPaste={(event) => {
-            const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
-            if (file) uploadImage(file);
-          }}
-          title="Paste or upload image"
-        >
-          {imageValue ? <img src={trimmed} alt="" style={s.fabricSheetImage} /> : <span>Paste image</span>}
-          {imageValue && (
-            <button
-              type="button"
-              style={{ ...s.imageDeleteOverlay, ...(imageHover ? s.imageDeleteOverlayVisible : {}) }}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                setDraft("");
-                save("");
-              }}
-            >
-              Delete
-            </button>
-          )}
-          <input
-            type="file"
-            accept="image/*"
-            style={s.hiddenFileInput}
-            onChange={(event) => {
-              uploadImage(event.currentTarget.files?.[0] ?? null);
-              event.currentTarget.value = "";
-            }}
-          />
-      </div>
-        {originalValue && originalValue !== draft && (
-          <button
-            type="button"
-            style={s.fabricMiniButton}
-            onClick={() => {
-              setDraft(originalValue);
-              save(originalValue);
-            }}
-          >
-            Restore
-          </button>
-        )}
-      </div>
+      <FabricImageEditCell
+        value={trimmed}
+        imageValue={imageValue}
+        originalValue={originalValue}
+        draft={draft}
+        setDraft={setDraft}
+        save={save}
+        uploadImage={uploadImage}
+        imageHover={imageHover}
+        setImageHover={setImageHover}
+      />
     );
   }
 
@@ -8598,6 +8557,155 @@ function FabricCell({
         </div>
       )}
     </>
+  );
+}
+
+function FabricImageEditCell({
+  value,
+  imageValue,
+  originalValue,
+  draft,
+  setDraft,
+  save,
+  uploadImage,
+  imageHover,
+  setImageHover,
+}: {
+  value: string;
+  imageValue: boolean;
+  originalValue: string;
+  draft: string;
+  setDraft: (next: string) => void;
+  save: (next: string) => void;
+  uploadImage: (file: File | null) => void;
+  imageHover: boolean;
+  setImageHover: (hover: boolean) => void;
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [focused, setFocused] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [menu]);
+  return (
+    <div style={s.fabricImageEditCell}>
+      <div
+        tabIndex={0}
+        style={{
+          ...s.fabricImageDrop,
+          ...(focused ? { borderColor: "#2563eb", boxShadow: "0 0 0 2px rgba(37, 99, 235, 0.3)" } : {}),
+          ...(dragOver ? { borderStyle: "solid", borderColor: "#2563eb", background: "#dbeafe" } : {}),
+        }}
+        onMouseEnter={() => setImageHover(true)}
+        onMouseLeave={() => setImageHover(false)}
+        onFocus={() => { setImageHover(true); setFocused(true); }}
+        onBlur={() => { setImageHover(false); setFocused(false); }}
+        onPaste={(event) => {
+          const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
+          if (file) uploadImage(file);
+        }}
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDragEnter={(event) => {
+          if (!Array.from(event.dataTransfer.items ?? []).some((item) => item.kind === "file")) return;
+          setDragOver(true);
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          setDragOver(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragOver(false);
+          const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
+          if (file) uploadImage(file);
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setMenu({ x: event.clientX, y: event.clientY });
+        }}
+        title="Click to focus, then paste (Ctrl/Cmd+V), drop an image, or right-click for options"
+      >
+        {imageValue ? <img src={value} alt="" style={s.fabricSheetImage} /> : <span>Click & paste, drop, or right-click</span>}
+        {imageValue && (
+          <button
+            type="button"
+            style={{ ...s.imageDeleteOverlay, ...(imageHover ? s.imageDeleteOverlayVisible : {}) }}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setDraft("");
+              save("");
+            }}
+          >
+            Delete
+          </button>
+        )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          style={s.hiddenFileInput}
+          onChange={(event) => {
+            uploadImage(event.currentTarget.files?.[0] ?? null);
+            event.currentTarget.value = "";
+          }}
+        />
+      </div>
+      {originalValue && originalValue !== draft && (
+        <button
+          type="button"
+          style={s.fabricMiniButton}
+          onClick={() => {
+            setDraft(originalValue);
+            save(originalValue);
+          }}
+        >
+          Restore
+        </button>
+      )}
+      {menu && typeof document !== "undefined" && createPortal(
+        <div
+          style={{ ...s.contextMenu, left: menu.x, top: menu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            style={s.contextMenuButton}
+            onClick={() => {
+              setMenu(null);
+              fileInputRef.current?.click();
+            }}
+          >
+            Upload image…
+          </button>
+          {imageValue && (
+            <button
+              type="button"
+              style={{ ...s.contextMenuButton, ...s.contextMenuDanger }}
+              onClick={() => {
+                setMenu(null);
+                setDraft("");
+                save("");
+              }}
+            >
+              Delete image
+            </button>
+          )}
+        </div>,
+        document.body,
+      )}
+    </div>
   );
 }
 
