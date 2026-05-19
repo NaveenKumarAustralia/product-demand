@@ -8321,6 +8321,47 @@ function isFabricImageValue(value: string) {
   return /^data:image\//i.test(value.trim()) || /^(?:https?:\/\/|\/).+\.(png|jpe?g|webp|gif|avif)(\?.*)?$/i.test(value.trim());
 }
 
+// Browser-side shrink: a 4000x3000 phone photo (~5 MB) becomes ~800x600 (~120 KB)
+// before it ever hits the network. Keeps uploads under the server's size cap,
+// makes the stored blob smaller, and makes image cells render faster.
+async function resizeImageForFabricUpload(file: File): Promise<File> {
+  if (!file.type.startsWith("image/")) return file;
+  // Tiny files: skip the work.
+  if (file.size < 200 * 1024) return file;
+  const dataUrl: string = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+  const img = new Image();
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error("decode failed"));
+    img.src = dataUrl;
+  });
+  const maxEdge = 800;
+  const longest = Math.max(img.naturalWidth, img.naturalHeight);
+  if (!longest) return file;
+  const ratio = Math.min(1, maxEdge / longest);
+  const width = Math.max(1, Math.round(img.naturalWidth * ratio));
+  const height = Math.max(1, Math.round(img.naturalHeight * ratio));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return file;
+  ctx.drawImage(img, 0, 0, width, height);
+  const blob: Blob | null = await new Promise((resolve) => {
+    canvas.toBlob((result) => resolve(result), "image/webp", 0.82);
+  });
+  if (!blob || blob.size >= file.size) return file;
+  return new File([blob], file.name.replace(/\.[a-z]+$/i, "") + ".webp", {
+    type: "image/webp",
+    lastModified: Date.now(),
+  });
+}
+
 function isNumericFabricCell(header: string, value: string) {
   const normalizedHeader = header.trim().toLowerCase();
   if (/cost|price|meter|quantity|received|^k$|^l$|additional/.test(normalizedHeader)) return true;
@@ -8388,15 +8429,26 @@ function FabricCell({
       { label: "Undo fabric cell", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } },
     );
   };
-  const uploadImage = (file: File | null) => {
+  const uploadImage = async (file: File | null) => {
     if (!file) return;
+    let processed: File;
+    try {
+      processed = await resizeImageForFabricUpload(file);
+    } catch (error) {
+      console.error("Image resize failed; uploading original", error);
+      processed = file;
+    }
+    if (processed.size > 5 * 1024 * 1024) {
+      window.alert("That image is over 5 MB even after resize. Try a smaller one.");
+      return;
+    }
     pushPortalUndo({ label: "Undo fabric image", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } });
     const formData = new FormData();
     formData.set("intent", "upload_fabric_image");
     formData.set("gid", gid);
     formData.set("rowIndex", String(rowIndex));
     formData.set("colIndex", String(colIndex));
-    formData.set("image", file);
+    formData.set("image", processed);
     fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
   };
 
