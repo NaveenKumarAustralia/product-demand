@@ -412,29 +412,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Cache buster for the fabric image URLs we generate below. Using the
   // blob's updatedAt means every edit invalidates every image URL, which is
   // wasteful but correct — browsers refetch images via HTTP cache.
-  const fabricBlobUpdatedAt = page === "fabric"
-    ? (await prisma.portalSetting.findUnique({
-        where: { key: FABRIC_MANUAL_SHEETS_KEY },
-        select: { updatedAt: true },
-      }))?.updatedAt
-    : null;
-  const fabricBlobVersion = fabricBlobUpdatedAt ? new Date(fabricBlobUpdatedAt).getTime() : 0;
   const fabricSheets = page === "fabric"
-    ? replaceFabricImagesWithUrls(
-        getFabricSheets(
-          undefined,
-          undefined,
-          undefined,
-          fabricSettings.tileOrder,
-          [],
-          customColumns.fabric,
-          {},
-          manualFabricSheets,
-        )
-          .filter((sheet) => isCombinedFabricSource(sheet))
-          .map(padCombinedFabricSheet),
-        fabricBlobVersion,
+    ? getFabricSheets(
+        undefined,
+        undefined,
+        undefined,
+        fabricSettings.tileOrder,
+        [],
+        customColumns.fabric,
+        {},
+        manualFabricSheets,
       )
+        .filter((sheet) => isCombinedFabricSource(sheet))
+        .map(padCombinedFabricSheet)
     : [];
 
   // Collect all unique size names across all orders, sorted logically
