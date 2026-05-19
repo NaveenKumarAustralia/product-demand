@@ -3082,6 +3082,8 @@ const COMBINED_FABRIC_PAD_COLUMNS: Array<{ header: string; regex: RegExp }> = [
   { header: "Received / Date", regex: /received|^order\s*date$/ },
   { header: "Products", regex: /^products?$/ },
   { header: "Order Date", regex: /^order\s*date$/ },
+  { header: "Meters in Stock", regex: /meters?\s*in\s*stock|meters?\s*available|^meters?$/ },
+  { header: "Quantity Ordered", regex: /quantity\s*ordered/ },
 ];
 
 function padCombinedFabricSheet(sheet: FabricSheetData): FabricSheetData {
@@ -7739,7 +7741,6 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
   const sourceRowIndex = sheet.rowKeys?.[displayRowIndex] ?? displayRowIndex;
   const row = sheet.rows[displayRowIndex] ?? [];
   const originalRow = sheet.originalRows?.[sourceRowIndex] ?? row;
-  const isOnOrderSheet = sheet.gid === COMBINED_FABRIC_ON_ORDER_GID;
   const find = (predicate: (header: string) => boolean) =>
     sheet.headers.findIndex((header) => predicate(header.trim().toLowerCase()));
   const supplierIdx = find((h) => /^supplier$/.test(h));
@@ -7752,7 +7753,8 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
   const receivedIdx = find((h) => /received/.test(h));
   const orderDateIdx = find((h) => /^order\s*date$/.test(h));
   const productsIdx = find((h) => /^products?$/.test(h));
-  const quantityIdx = find((h) => /meters?\s*in\s*stock|meters?\s*available|^meters?$|quantity\s*ordered/.test(h));
+  const inStockIdx = find((h) => /meters?\s*in\s*stock|meters?\s*available|^meters?$/.test(h));
+  const onOrderIdx = find((h) => /quantity\s*ordered/.test(h));
   const make = (idx: number, header: string): UnifiedFabricCell | null => idx < 0 ? null : {
     gid: sheet.gid,
     sourceRowIndex,
@@ -7781,8 +7783,8 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
       cutPieces: make(cutPiecesIdx, "Cut Pieces"),
       receivedDate: make(receivedIdx, "Received / Date"),
       products: make(productsIdx, "Products"),
-      inStock: !isOnOrderSheet ? make(quantityIdx, "Meters in Stock") : null,
-      onOrder: isOnOrderSheet ? make(quantityIdx, "Quantity Ordered") : null,
+      inStock: make(inStockIdx, "Meters in Stock"),
+      onOrder: make(onOrderIdx, "Quantity Ordered"),
       orderDate: make(orderDateIdx, "Order Date"),
     },
   };
