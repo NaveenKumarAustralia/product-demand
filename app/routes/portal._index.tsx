@@ -8451,15 +8451,8 @@ function FabricCell({
       { label: "Undo fabric cell", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } },
     );
   };
-  const uploadImage = async (file: File | null) => {
-    if (!file) {
-      window.alert("Upload failed: no file received from drop/picker");
-      return;
-    }
-    if (!file.type.startsWith("image/")) {
-      window.alert(`Upload failed: file type "${file.type || "unknown"}" is not an image`);
-      return;
-    }
+  const uploadImage = (file: File | null) => {
+    if (!file || !file.type.startsWith("image/")) return;
     if (file.size > 5 * 1024 * 1024) {
       window.alert(`That image is ${(file.size / 1024 / 1024).toFixed(1)} MB — over the 5 MB limit. Try a smaller one.`);
       return;
@@ -8471,16 +8464,7 @@ function FabricCell({
     formData.set("rowIndex", String(rowIndex));
     formData.set("colIndex", String(colIndex));
     formData.set("image", file);
-    try {
-      const response = await fetch("/portal", { method: "POST", body: formData, credentials: "same-origin" });
-      if (!response.ok) {
-        window.alert(`Upload failed: server returned HTTP ${response.status}`);
-        return;
-      }
-      window.location.reload();
-    } catch (error) {
-      window.alert(`Upload error: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    fetcher.submit(formData, { method: "post", encType: "multipart/form-data" });
   };
 
   if (/^products?$/i.test(normalizedHeader)) {
