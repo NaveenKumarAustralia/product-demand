@@ -7860,67 +7860,8 @@ function CombinedFabricStockPanel({
   const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
   useEffect(() => setPendingDeletes(new Set()), [sheets]);
 
-  const compactionStartedRef = useRef(false);
-  useEffect(() => {
-    if (compactionStartedRef.current) return;
-    if (fabricSettings.imagesCompactedV1) return;
-    if (typeof window === "undefined") return;
-    compactionStartedRef.current = true;
-    type ImageCell = { gid: string; rowIndex: number; colIndex: number; url: string };
-    const cells: ImageCell[] = [];
-    for (const sheet of sheets) {
-      if (sheet.error) continue;
-      for (let i = 0; i < sheet.rows.length; i++) {
-        const sourceRowIndex = sheet.rowKeys?.[i] ?? i;
-        const row = sheet.rows[i] ?? [];
-        for (let c = 0; c < row.length; c++) {
-          const value = String(row[c] ?? "");
-          if (/^\/portal\/fabric-image\//.test(value)) {
-            cells.push({ gid: sheet.gid, rowIndex: sourceRowIndex, colIndex: c, url: value });
-          }
-        }
-      }
-    }
-    let cancelled = false;
-    const compactOne = async (cell: ImageCell) => {
-      const response = await fetch(cell.url);
-      if (!response.ok) return;
-      const blob = await response.blob();
-      if (blob.size < 200 * 1024) return;
-      const file = new File([blob], "fabric-image", { type: blob.type || "image/jpeg" });
-      const resized = await resizeImageForFabricUpload(file);
-      if (resized.size >= blob.size) return;
-      const fd = new FormData();
-      fd.set("intent", "upload_fabric_image");
-      fd.set("gid", cell.gid);
-      fd.set("rowIndex", String(cell.rowIndex));
-      fd.set("colIndex", String(cell.colIndex));
-      fd.set("image", resized);
-      fd.set("noRevalidate", "1");
-      await fetch("/portal", { method: "POST", body: fd });
-    };
-    (async () => {
-      for (const cell of cells) {
-        if (cancelled) return;
-        try {
-          await compactOne(cell);
-        } catch (error) {
-          console.warn("Fabric image compaction failed", cell, error);
-        }
-      }
-      if (!cancelled) {
-        const next = { ...fabricSettings, imagesCompactedV1: true };
-        const fd = new FormData();
-        fd.set("intent", "update_fabric_settings");
-        fd.set("value", JSON.stringify(next));
-        fd.set("noRevalidate", "1");
-        await fetch("/portal", { method: "POST", body: fd });
-      }
-    })();
-    return () => { cancelled = true; };
-    // We want this to run once per page mount; depending on sheets/settings would re-trigger.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Bulk image compaction disabled — was contending with the page's image
+  // loads. Reintroduce behind an explicit user-triggered button if needed.
   const markRowDeleted = useCallback((gid: string, rowIndex: number) => {
     setPendingDeletes((prev) => {
       const next = new Set(prev);
