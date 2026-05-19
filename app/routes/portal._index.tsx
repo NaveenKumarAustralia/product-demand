@@ -8655,7 +8655,7 @@ function FabricImageEditCell({
           ref={fileInputRef}
           type="file"
           accept="image/*"
-          style={s.hiddenFileInput}
+          style={{ position: "absolute", left: -10000, top: -10000, width: 1, height: 1, opacity: 0 }}
           onChange={(event) => {
             uploadImage(event.currentTarget.files?.[0] ?? null);
             event.currentTarget.value = "";
