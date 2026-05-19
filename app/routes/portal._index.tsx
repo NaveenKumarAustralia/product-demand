@@ -8454,6 +8454,9 @@ function FabricCell({
   };
   const uploadImage = async (file: File | null) => {
     if (!file || !file.type.startsWith("image/")) return;
+    // Instant preview via an object URL while the resize + encode run in the background.
+    const previewUrl = URL.createObjectURL(file);
+    setDraft(previewUrl);
     let processed = file;
     try {
       processed = await resizeImageForFabricUpload(file);
@@ -8464,23 +8467,26 @@ function FabricCell({
       window.alert(`That image is ${(processed.size / 1024 / 1024).toFixed(1)} MB — over the 5 MB limit. Try a smaller one.`);
       return;
     }
-    pushPortalUndo({ label: "Undo fabric image", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } });
-    const formData = new FormData();
-    formData.set("intent", "upload_fabric_image");
-    formData.set("gid", gid);
-    formData.set("rowIndex", String(rowIndex));
-    formData.set("colIndex", String(colIndex));
-    formData.set("image", processed);
+    let dataUrl = "";
     try {
-      const response = await fetch("/portal", { method: "POST", body: formData, credentials: "same-origin" });
-      if (!response.ok) {
-        window.alert(`Upload failed: server returned HTTP ${response.status}`);
-        return;
-      }
-      revalidator.revalidate();
-    } catch (error) {
-      window.alert(`Upload failed: ${error instanceof Error ? error.message : String(error)}`);
+      dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result ?? ""));
+        reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+        reader.readAsDataURL(processed);
+      });
+    } catch {
+      window.alert("Couldn't read the image file.");
+      return;
     }
+    pushPortalUndo({ label: "Undo fabric image", fields: { intent: "update_fabric_cell", gid, rowIndex, colIndex, value } });
+    submitPortalCell(fetcher, {
+      intent: "update_fabric_cell",
+      gid,
+      rowIndex,
+      colIndex,
+      value: dataUrl,
+    });
   };
 
   if (/^products?$/i.test(normalizedHeader)) {
@@ -8576,6 +8582,226 @@ function FabricCell({
   );
 }
 
+function ImageUploadDialog({
+  open,
+  onClose,
+  onFile,
+  hasCurrentImage,
+  onRemove,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onFile: (file: File) => void;
+  hasCurrentImage: boolean;
+  onRemove: () => void;
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [pasteMenu, setPasteMenu] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    const onPaste = (event: ClipboardEvent) => {
+      const file = Array.from(event.clipboardData?.files ?? []).find((item) => item.type.startsWith("image/"));
+      if (file) {
+        event.preventDefault();
+        onFile(file);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("paste", onPaste);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("paste", onPaste);
+    };
+  }, [open, onClose, onFile]);
+  const pasteFromClipboard = async () => {
+    setPasteMenu(null);
+    if (!navigator.clipboard || typeof navigator.clipboard.read !== "function") {
+      window.alert("This browser doesn't allow reading the clipboard. Use Cmd/Ctrl+V instead.");
+      return;
+    }
+    try {
+      const items = await navigator.clipboard.read();
+      for (const item of items) {
+        const imageType = item.types.find((type) => type.startsWith("image/"));
+        if (!imageType) continue;
+        const blob = await item.getType(imageType);
+        onFile(new File([blob], "pasted-image", { type: imageType }));
+        return;
+      }
+      window.alert("No image found in the clipboard.");
+    } catch (error) {
+      window.alert(`Paste failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  if (!open || typeof document === "undefined") return null;
+  return createPortal(
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(15, 23, 42, 0.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 9999,
+      }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(event) => event.stopPropagation()}
+        onDragOver={(event) => {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }}
+        onDragEnter={() => setDragOver(true)}
+        onDragLeave={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          setDragOver(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragOver(false);
+          const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
+          if (file) onFile(file);
+        }}
+        style={{
+          background: "#fff",
+          borderRadius: 10,
+          padding: 24,
+          width: 460,
+          maxWidth: "92vw",
+          boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.3)",
+          display: "flex",
+          flexDirection: "column",
+          gap: 16,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <strong style={{ fontSize: 16 }}>Add image</strong>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{ border: "none", background: "transparent", fontSize: 22, cursor: "pointer", lineHeight: 1, color: "#64748b" }}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <div
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setPasteMenu({ x: event.clientX, y: event.clientY });
+          }}
+          style={{
+            border: dragOver ? "3px dashed #2563eb" : "3px dashed #cbd5e1",
+            background: dragOver ? "#dbeafe" : "#f8fafc",
+            borderRadius: 8,
+            padding: 36,
+            textAlign: "center",
+            color: "#475569",
+            fontSize: 14,
+            fontWeight: 600,
+          }}
+        >
+          <div style={{ marginBottom: 6 }}>Drop an image here</div>
+          <div style={{ fontSize: 13, color: "#94a3b8" }}>or paste with Cmd/Ctrl+V — or right-click for paste</div>
+        </div>
+        <button
+          type="button"
+          style={{
+            background: "#2563eb",
+            color: "#fff",
+            border: "none",
+            padding: "10px 16px",
+            borderRadius: 6,
+            fontWeight: 700,
+            fontSize: 14,
+            cursor: "pointer",
+          }}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          Choose file…
+        </button>
+        {hasCurrentImage && (
+          <button
+            type="button"
+            style={{
+              background: "transparent",
+              color: "#991b1b",
+              border: "1px solid #fecaca",
+              padding: "8px 16px",
+              borderRadius: 6,
+              fontWeight: 700,
+              fontSize: 13,
+              cursor: "pointer",
+            }}
+            onClick={() => {
+              onRemove();
+              onClose();
+            }}
+          >
+            Remove current image
+          </button>
+        )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          style={{ display: "none" }}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = "";
+            if (file) onFile(file);
+          }}
+        />
+      </div>
+      {pasteMenu && (
+        <div
+          onClick={(event) => event.stopPropagation()}
+          style={{
+            position: "fixed",
+            left: pasteMenu.x,
+            top: pasteMenu.y,
+            background: "#fff",
+            border: "1px solid #cbd5e1",
+            borderRadius: 6,
+            boxShadow: "0 10px 20px rgba(15,23,42,0.18)",
+            padding: 4,
+            zIndex: 10000,
+            minWidth: 180,
+          }}
+          onMouseLeave={() => setPasteMenu(null)}
+        >
+          <button
+            type="button"
+            style={{
+              display: "block",
+              width: "100%",
+              padding: "8px 12px",
+              background: "transparent",
+              border: "none",
+              textAlign: "left",
+              cursor: "pointer",
+              fontSize: 13,
+              fontWeight: 600,
+              color: "#1f2937",
+            }}
+            onClick={() => void pasteFromClipboard()}
+          >
+            Paste from clipboard
+          </button>
+        </div>
+      )}
+    </div>,
+    document.body,
+  );
+}
+
 function FabricImageEditCell({
   value,
   imageValue,
@@ -8597,55 +8823,7 @@ function FabricImageEditCell({
   imageHover: boolean;
   setImageHover: (hover: boolean) => void;
 }) {
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [dialogDragOver, setDialogDragOver] = useState(false);
-  const [pasteMenu, setPasteMenu] = useState<{ x: number; y: number } | null>(null);
-  const handleUpload = async (file: File | null | undefined) => {
-    if (!file) return;
-    await uploadImage(file);
-    setDialogOpen(false);
-  };
-  const pasteFromClipboard = async () => {
-    setPasteMenu(null);
-    if (!navigator.clipboard || typeof navigator.clipboard.read !== "function") {
-      window.alert("This browser doesn't allow reading the clipboard. Use Cmd/Ctrl+V instead.");
-      return;
-    }
-    try {
-      const items = await navigator.clipboard.read();
-      for (const item of items) {
-        const imageType = item.types.find((type) => type.startsWith("image/"));
-        if (!imageType) continue;
-        const blob = await item.getType(imageType);
-        const file = new File([blob], "pasted-image", { type: imageType });
-        await handleUpload(file);
-        return;
-      }
-      window.alert("No image found in the clipboard.");
-    } catch (error) {
-      window.alert(`Paste failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
-  useEffect(() => {
-    if (!dialogOpen) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setDialogOpen(false);
-    };
-    const onPaste = (event: ClipboardEvent) => {
-      const file = Array.from(event.clipboardData?.files ?? []).find((item) => item.type.startsWith("image/"));
-      if (file) {
-        event.preventDefault();
-        void handleUpload(file);
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    document.addEventListener("paste", onPaste);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.removeEventListener("paste", onPaste);
-    };
-  });
   return (
     <div style={s.fabricImageEditCell}>
       <div
@@ -8686,169 +8864,19 @@ function FabricImageEditCell({
           Restore
         </button>
       )}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="image/*"
-        style={{ display: "none" }}
-        onChange={(event) => {
-          const file = event.currentTarget.files?.[0];
-          event.currentTarget.value = "";
-          void handleUpload(file);
+      <ImageUploadDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        onFile={(file) => {
+          setDialogOpen(false);
+          void uploadImage(file);
+        }}
+        hasCurrentImage={imageValue}
+        onRemove={() => {
+          setDraft("");
+          save("");
         }}
       />
-      {dialogOpen && typeof document !== "undefined" && createPortal(
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(15, 23, 42, 0.55)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 9999,
-          }}
-          onClick={() => setDialogOpen(false)}
-        >
-          <div
-            onClick={(event) => event.stopPropagation()}
-            onDragOver={(event) => {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "copy";
-            }}
-            onDragEnter={() => setDialogDragOver(true)}
-            onDragLeave={(event) => {
-              if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-              setDialogDragOver(false);
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              setDialogDragOver(false);
-              const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
-              if (file) void handleUpload(file);
-            }}
-            style={{
-              background: "#fff",
-              borderRadius: 10,
-              padding: 24,
-              width: 460,
-              maxWidth: "92vw",
-              boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.3)",
-              display: "flex",
-              flexDirection: "column",
-              gap: 16,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <strong style={{ fontSize: 16 }}>Add fabric image</strong>
-              <button
-                type="button"
-                onClick={() => setDialogOpen(false)}
-                style={{ border: "none", background: "transparent", fontSize: 22, cursor: "pointer", lineHeight: 1, color: "#64748b" }}
-                aria-label="Close"
-              >
-                ×
-              </button>
-            </div>
-            <div
-              onContextMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                setPasteMenu({ x: event.clientX, y: event.clientY });
-              }}
-              style={{
-                border: dialogDragOver ? "3px dashed #2563eb" : "3px dashed #cbd5e1",
-                background: dialogDragOver ? "#dbeafe" : "#f8fafc",
-                borderRadius: 8,
-                padding: 36,
-                textAlign: "center",
-                color: "#475569",
-                fontSize: 14,
-                fontWeight: 600,
-              }}
-            >
-              <div style={{ marginBottom: 6 }}>Drop an image here</div>
-              <div style={{ fontSize: 13, color: "#94a3b8" }}>or paste with Cmd/Ctrl+V — or right-click for paste</div>
-            </div>
-            <button
-              type="button"
-              style={{
-                background: "#2563eb",
-                color: "#fff",
-                border: "none",
-                padding: "10px 16px",
-                borderRadius: 6,
-                fontWeight: 700,
-                fontSize: 14,
-                cursor: "pointer",
-              }}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              Choose file…
-            </button>
-            {imageValue && (
-              <button
-                type="button"
-                style={{
-                  background: "transparent",
-                  color: "#991b1b",
-                  border: "1px solid #fecaca",
-                  padding: "8px 16px",
-                  borderRadius: 6,
-                  fontWeight: 700,
-                  fontSize: 13,
-                  cursor: "pointer",
-                }}
-                onClick={() => {
-                  setDraft("");
-                  save("");
-                  setDialogOpen(false);
-                }}
-              >
-                Remove current image
-              </button>
-            )}
-          </div>
-          {pasteMenu && (
-            <div
-              onClick={(event) => event.stopPropagation()}
-              style={{
-                position: "fixed",
-                left: pasteMenu.x,
-                top: pasteMenu.y,
-                background: "#fff",
-                border: "1px solid #cbd5e1",
-                borderRadius: 6,
-                boxShadow: "0 10px 20px rgba(15,23,42,0.18)",
-                padding: 4,
-                zIndex: 10000,
-                minWidth: 180,
-              }}
-              onMouseLeave={() => setPasteMenu(null)}
-            >
-              <button
-                type="button"
-                style={{
-                  display: "block",
-                  width: "100%",
-                  padding: "8px 12px",
-                  background: "transparent",
-                  border: "none",
-                  textAlign: "left",
-                  cursor: "pointer",
-                  fontSize: 13,
-                  fontWeight: 600,
-                  color: "#1f2937",
-                }}
-                onClick={() => void pasteFromClipboard()}
-              >
-                Paste from clipboard
-              </button>
-            </div>
-          )}
-        </div>,
-        document.body,
-      )}
     </div>
   );
 }
@@ -11108,49 +11136,74 @@ function PackingSkuCell({ lineId, value }: { lineId: number; value: string }) {
 function PackingImageCell({ lineId, field, value }: { lineId: number; field: "productImageUrl" | "fabricImageData"; value: string }) {
   const fetcher = useFetcher();
   const [imageHover, setImageHover] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [localValue, setLocalValue] = useState(value);
+  useEffect(() => setLocalValue(value), [value]);
 
-  const saveFile = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => submitPortalCell(
+  const saveFile = async (file: File) => {
+    const previewUrl = URL.createObjectURL(file);
+    setLocalValue(previewUrl);
+    let processed = file;
+    try {
+      processed = await resizeImageForFabricUpload(file);
+    } catch {
+      processed = file;
+    }
+    if (processed.size > 5 * 1024 * 1024) {
+      window.alert(`That image is ${(processed.size / 1024 / 1024).toFixed(1)} MB — over the 5 MB limit. Try a smaller one.`);
+      return;
+    }
+    let dataUrl = "";
+    try {
+      dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result ?? ""));
+        reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+        reader.readAsDataURL(processed);
+      });
+    } catch {
+      window.alert("Couldn't read the image file.");
+      return;
+    }
+    submitPortalCell(
       fetcher,
       {
         intent: "update_packing_line",
         lineId,
         field,
-        value: String(reader.result ?? ""),
+        value: dataUrl,
       },
       { label: "Undo packing image", fields: { intent: "update_packing_line", lineId, field, value } },
     );
-    reader.readAsDataURL(file);
   };
-  const clearImage = () => submitPortalCell(
-    fetcher,
-    {
-      intent: "update_packing_line",
-      lineId,
-      field,
-      value: "",
-    },
-    { label: "Undo image delete", fields: { intent: "update_packing_line", lineId, field, value } },
-  );
+  const clearImage = () => {
+    setLocalValue("");
+    submitPortalCell(
+      fetcher,
+      {
+        intent: "update_packing_line",
+        lineId,
+        field,
+        value: "",
+      },
+      { label: "Undo image delete", fields: { intent: "update_packing_line", lineId, field, value } },
+    );
+  };
 
   return (
     <div style={s.packingImageCell}>
       <div
-        tabIndex={0}
         style={s.fabricImageDrop}
         onMouseEnter={() => setImageHover(true)}
         onMouseLeave={() => setImageHover(false)}
-        onFocus={() => setImageHover(true)}
-        onBlur={() => setImageHover(false)}
-        onPaste={(event) => {
-          const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
-          if (file) saveFile(file);
+        onContextMenu={(event) => {
+          event.preventDefault();
+          setDialogOpen(true);
         }}
-        title="Paste or upload image"
+        title="Right-click to upload, drop, or paste"
       >
-        {value ? <img src={value} alt="" style={s.fabricThumb} /> : <span>Paste image</span>}
-        {value && (
+        {localValue ? <img src={localValue} alt="" style={s.fabricThumb} /> : <span>Right-click to add image</span>}
+        {localValue && (
           <button
             type="button"
             style={{ ...s.imageDeleteOverlay, ...(imageHover ? s.imageDeleteOverlayVisible : {}) }}
@@ -11163,17 +11216,17 @@ function PackingImageCell({ lineId, field, value }: { lineId: number; field: "pr
             Delete
           </button>
         )}
-        <input
-          type="file"
-          accept="image/*"
-          style={s.hiddenFileInput}
-          onChange={(event) => {
-            const file = event.currentTarget.files?.[0];
-            if (file) saveFile(file);
-            event.currentTarget.value = "";
-          }}
-        />
       </div>
+      <ImageUploadDialog
+        open={dialogOpen}
+        onClose={() => setDialogOpen(false)}
+        onFile={(file) => {
+          setDialogOpen(false);
+          void saveFile(file);
+        }}
+        hasCurrentImage={Boolean(localValue)}
+        onRemove={clearImage}
+      />
     </div>
   );
 }
