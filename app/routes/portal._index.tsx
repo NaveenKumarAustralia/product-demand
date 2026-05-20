@@ -7938,6 +7938,7 @@ function CombinedFabricStockPanel({
   useEffect(() => setColumnWidths(fabricSettings.combinedColumnWidths), [fabricSettings.combinedColumnWidths]);
   const tableRef = useRef<HTMLTableElement>(null);
   const resizingRef = useRef(false);
+  const [resizeHoverKey, setResizeHoverKey] = useState<UnifiedFabricKey | null>(null);
   const widthFor = (key: string) => columnWidths[key] ?? 160;
   const startColumnResize = (columnKey: UnifiedFabricKey, event: React.MouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
@@ -7963,7 +7964,7 @@ function CombinedFabricStockPanel({
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
       // Defer clearing so the th's onDragStart (if any) still sees we resized.
-      window.setTimeout(() => { resizingRef.current = false; }, 0);
+      window.setTimeout(() => { resizingRef.current = false; setResizeHoverKey(null); }, 0);
       if (nextWidth === startWidth) return;
       // Commit the final width to React state + persist once.
       setColumnWidths((current) => ({ ...current, [columnKey]: nextWidth }));
@@ -8037,9 +8038,9 @@ function CombinedFabricStockPanel({
                 {localColumns.map((column) => (
                   <th
                     key={column.key}
-                    draggable
+                    draggable={resizeHoverKey !== column.key}
                     onDragStart={(event) => {
-                      if (resizingRef.current) {
+                      if (resizingRef.current || resizeHoverKey === column.key) {
                         event.preventDefault();
                         return;
                       }
@@ -8075,6 +8076,8 @@ function CombinedFabricStockPanel({
                       role="separator"
                       aria-orientation="vertical"
                       aria-label={`Resize ${column.label} column`}
+                      onMouseEnter={() => setResizeHoverKey(column.key)}
+                      onMouseLeave={() => { if (!resizingRef.current) setResizeHoverKey(null); }}
                       onMouseDown={(event) => startColumnResize(column.key, event)}
                       style={s.resizeHandle}
                       draggable={false}
