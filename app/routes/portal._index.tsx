@@ -7936,12 +7936,14 @@ function CombinedFabricStockPanel({
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(fabricSettings.combinedColumnWidths);
   useEffect(() => setColumnWidths(fabricSettings.combinedColumnWidths), [fabricSettings.combinedColumnWidths]);
+  const tableRef = useRef<HTMLTableElement>(null);
   const widthFor = (key: string) => columnWidths[key] ?? 160;
   const startColumnResize = (columnKey: UnifiedFabricKey, event: React.MouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
     event.stopPropagation();
     const startX = event.clientX;
     const startWidth = widthFor(columnKey);
+    const colEl = tableRef.current?.querySelector<HTMLTableColElement>(`col[data-col-key="${columnKey}"]`);
     const previousCursor = document.body.style.cursor;
     const previousUserSelect = document.body.style.userSelect;
     document.body.style.cursor = "col-resize";
@@ -7949,7 +7951,9 @@ function CombinedFabricStockPanel({
     let nextWidth = startWidth;
     const handleMove = (moveEvent: MouseEvent) => {
       nextWidth = Math.max(60, startWidth + moveEvent.clientX - startX);
-      setColumnWidths((current) => ({ ...current, [columnKey]: nextWidth }));
+      // Resize the column directly on the DOM during drag so we avoid
+      // re-rendering every row on each mousemove (which made it janky).
+      if (colEl) colEl.style.width = `${nextWidth}px`;
     };
     const handleUp = () => {
       document.body.style.cursor = previousCursor;
@@ -7957,6 +7961,8 @@ function CombinedFabricStockPanel({
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
       if (nextWidth === startWidth) return;
+      // Commit the final width to React state + persist once.
+      setColumnWidths((current) => ({ ...current, [columnKey]: nextWidth }));
       submitPortalCell(
         fetcher,
         {
@@ -8014,11 +8020,11 @@ function CombinedFabricStockPanel({
       </div>
       <div style={s.fabricTableShell}>
         <div style={s.fabricTableWrap}>
-          <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
+          <table ref={tableRef} style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
             <colgroup>
               <col style={{ width: 48 }} />
               {localColumns.map((column) => (
-                <col key={column.key} style={{ width: widthFor(column.key) }} />
+                <col key={column.key} data-col-key={column.key} style={{ width: widthFor(column.key) }} />
               ))}
             </colgroup>
             <thead>
@@ -8915,7 +8921,9 @@ function AutoGrowTextarea({
       rows={1}
       style={{
         ...style,
+        boxSizing: "border-box",
         whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
         overflow: "hidden",
         resize: "none",
       }}
