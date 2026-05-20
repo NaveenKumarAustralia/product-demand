@@ -7937,10 +7937,12 @@ function CombinedFabricStockPanel({
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(fabricSettings.combinedColumnWidths);
   useEffect(() => setColumnWidths(fabricSettings.combinedColumnWidths), [fabricSettings.combinedColumnWidths]);
   const tableRef = useRef<HTMLTableElement>(null);
+  const resizingRef = useRef(false);
   const widthFor = (key: string) => columnWidths[key] ?? 160;
   const startColumnResize = (columnKey: UnifiedFabricKey, event: React.MouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
     event.stopPropagation();
+    resizingRef.current = true;
     const startX = event.clientX;
     const startWidth = widthFor(columnKey);
     const colEl = tableRef.current?.querySelector<HTMLTableColElement>(`col[data-col-key="${columnKey}"]`);
@@ -7960,6 +7962,8 @@ function CombinedFabricStockPanel({
       document.body.style.userSelect = previousUserSelect;
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
+      // Defer clearing so the th's onDragStart (if any) still sees we resized.
+      window.setTimeout(() => { resizingRef.current = false; }, 0);
       if (nextWidth === startWidth) return;
       // Commit the final width to React state + persist once.
       setColumnWidths((current) => ({ ...current, [columnKey]: nextWidth }));
@@ -8035,6 +8039,10 @@ function CombinedFabricStockPanel({
                     key={column.key}
                     draggable
                     onDragStart={(event) => {
+                      if (resizingRef.current) {
+                        event.preventDefault();
+                        return;
+                      }
                       setDragKey(column.key);
                       event.dataTransfer.effectAllowed = "move";
                     }}
@@ -10456,6 +10464,8 @@ function PackingListDetail({
   const [packingColumnWidths, setPackingColumnWidths] = useState<Record<string, number>>(savedPackingColumnWidths);
   const [skipWords, setSkipWords] = useState("");
   const [packingListSearch, setPackingListSearch] = useState("");
+  const [statusValue, setStatusValue] = useState(packingList.status ?? "still_packing");
+  useEffect(() => setStatusValue(packingList.status ?? "still_packing"), [packingList.status]);
   const packingColumns = [
     ...PACKING_COLUMNS,
     ...customColumns.map((column) => ({ id: column.id, label: column.label, width: 130, center: false })),
@@ -10613,18 +10623,21 @@ function PackingListDetail({
           <label style={s.packingToolbarLabel}>
             <span>Status</span>
             <select
-              key={packingList.status ?? "still_packing"}
-              defaultValue={packingList.status ?? "still_packing"}
-              onChange={(event) => submitPortalCell(
-                fetcher,
-                {
-                  intent: "update_packing_list",
-                  packingId: packingList.id,
-                  field: "status",
-                  value: event.currentTarget.value,
-                },
-                { label: "Undo packing status", fields: { intent: "update_packing_list", packingId: packingList.id, field: "status", value: packingList.status ?? "still_packing" } },
-              )}
+              value={statusValue}
+              onChange={(event) => {
+                const next = event.currentTarget.value;
+                setStatusValue(next);
+                submitPortalCell(
+                  fetcher,
+                  {
+                    intent: "update_packing_list",
+                    packingId: packingList.id,
+                    field: "status",
+                    value: next,
+                  },
+                  { label: "Undo packing status", fields: { intent: "update_packing_list", packingId: packingList.id, field: "status", value: packingList.status ?? "still_packing" } },
+                );
+              }}
               style={{ ...s.packingInput, width: 160 }}
             >
               {PACKING_STATUS_OPTIONS.map((opt) => (
