@@ -8089,7 +8089,19 @@ function CombinedFabricStockPanel({
                       aria-orientation="vertical"
                       aria-label={`Resize ${column.label} column`}
                       onMouseDown={(event) => startColumnResize(column.key, event)}
-                      style={s.resizeHandle}
+                      onMouseEnter={(event) => { event.currentTarget.style.background = "#2563eb"; }}
+                      onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        right: 0,
+                        width: 12,
+                        height: "100%",
+                        cursor: "col-resize",
+                        zIndex: 30,
+                        background: "transparent",
+                        touchAction: "none",
+                      }}
                     />
                   </th>
                 ))}
