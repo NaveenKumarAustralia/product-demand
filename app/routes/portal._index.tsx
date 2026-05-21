@@ -7723,19 +7723,23 @@ function ProductInformationPanel({
 }
 
 const UNIFIED_FABRIC_COLUMNS = [
-  { key: "supplier", label: "Supplier", header: "Supplier" },
-  { key: "fabricType", label: "Fabric Type", header: "Fabric Type" },
-  { key: "fabricImage", label: "Fabric", header: "Fabric" },
-  { key: "name", label: "Name", header: "Name" },
-  { key: "collection", label: "Collection", header: "Collection" },
-  { key: "costPerMeter", label: "Cost per Meter", header: "Cost per Meter" },
-  { key: "cutPieces", label: "Cut Pieces", header: "Cut Pieces" },
-  { key: "receivedDate", label: "Received / Date", header: "Received / Date" },
-  { key: "products", label: "Products", header: "Products" },
-  { key: "inStock", label: "In Stock", header: "Meters in Stock" },
-  { key: "onOrder", label: "On Order", header: "Quantity Ordered" },
-  { key: "orderDate", label: "Order Date", header: "Order Date" },
+  { key: "supplier", label: "Supplier", header: "Supplier", defaultWidth: 130 },
+  { key: "fabricType", label: "Fabric Type", header: "Fabric Type", defaultWidth: 130 },
+  { key: "fabricImage", label: "Fabric", header: "Fabric", defaultWidth: 120 },
+  { key: "name", label: "Name", header: "Name", defaultWidth: 150 },
+  { key: "collection", label: "Collection", header: "Collection", defaultWidth: 120 },
+  { key: "costPerMeter", label: "Cost per Meter", header: "Cost per Meter", defaultWidth: 100 },
+  { key: "cutPieces", label: "Cut Pieces", header: "Cut Pieces", defaultWidth: 110 },
+  { key: "receivedDate", label: "Received / Date", header: "Received / Date", defaultWidth: 150 },
+  { key: "products", label: "Products", header: "Products", defaultWidth: 160 },
+  { key: "inStock", label: "In Stock", header: "Meters in Stock", defaultWidth: 90 },
+  { key: "onOrder", label: "On Order", header: "Quantity Ordered", defaultWidth: 90 },
+  { key: "orderDate", label: "Order Date", header: "Order Date", defaultWidth: 110 },
 ] as const;
+
+const FABRIC_COLUMN_DEFAULT_WIDTHS: Record<string, number> = Object.fromEntries(
+  UNIFIED_FABRIC_COLUMNS.map((column) => [column.key, column.defaultWidth]),
+);
 
 type UnifiedFabricKey = typeof UNIFIED_FABRIC_COLUMNS[number]["key"];
 type UnifiedFabricCell = {
@@ -7959,7 +7963,7 @@ function CombinedFabricStockPanel({
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(fabricSettings.combinedColumnWidths);
   useEffect(() => setColumnWidths(fabricSettings.combinedColumnWidths), [fabricSettings.combinedColumnWidths]);
-  const widthFor = (key: string) => columnWidths[key] ?? 160;
+  const widthFor = (key: string) => columnWidths[key] ?? FABRIC_COLUMN_DEFAULT_WIDTHS[key] ?? 140;
   const startColumnResize = (columnKey: UnifiedFabricKey, event: React.MouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -7980,14 +7984,16 @@ function CombinedFabricStockPanel({
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
       if (nextWidth === startWidth) return;
+      const nextWidths = { ...columnWidths, [columnKey]: nextWidth };
+      setColumnWidths(nextWidths);
       submitPortalCell(
         fetcher,
         {
           intent: "update_fabric_settings",
-          value: JSON.stringify({
-            ...fabricSettings,
-            combinedColumnWidths: { ...fabricSettings.combinedColumnWidths, [columnKey]: nextWidth },
-          }),
+          value: JSON.stringify({ ...fabricSettings, combinedColumnWidths: nextWidths }),
+          // Skip loader revalidation so our optimistic widths aren't reset
+          // (matches how packing/restock persist column widths).
+          noRevalidate: "1",
         },
         { label: "Undo column resize", fields: { intent: "update_fabric_settings", value: JSON.stringify(fabricSettings) } },
       );
