@@ -7995,6 +7995,10 @@ function CombinedFabricStockPanel({
     document.addEventListener("mousemove", handleMove);
     document.addEventListener("mouseup", handleUp);
   };
+  // With table-layout: fixed the browser only honours the <col> widths when
+  // the table itself has an explicit width — so resizing has no effect unless
+  // we set it to the sum of the column widths (matches packing/restock).
+  const fabricTableWidth = 48 + localColumns.reduce((sum, column) => sum + widthFor(column.key), 0);
 
   const totalInStock = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.inStock?.value), 0);
   const totalOnOrder = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.onOrder?.value), 0);
@@ -8037,7 +8041,7 @@ function CombinedFabricStockPanel({
       </div>
       <div style={s.fabricTableShell}>
         <div style={s.fabricTableWrap}>
-          <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
+          <table style={{ ...s.fabricTable, width: fabricTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
             <colgroup>
               <col style={{ width: 48 }} />
               {localColumns.map((column) => (
