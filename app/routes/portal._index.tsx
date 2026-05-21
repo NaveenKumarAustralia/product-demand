@@ -93,13 +93,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           type RawSample = { id: number; sortOrder: number; name: string; createdAt: Date; updatedAt: Date };
           type RawIterSlim = {
             id: number; sampleId: number; version: number; name: string | null; notes: string | null;
-            fabricType: string | null; sampleSize: string | null; buttonType: string | null; status: string;
+            fabricType: string | null; sampleSize: string | null; buttonType: string | null; factoryCost: string | null; status: string;
             imageCount: number; hasThumbnail: boolean; taggedUsers: unknown;
             createdAt: Date; updatedAt: Date;
           };
           const rawSamples = await prisma.$queryRaw<RawSample[]>`SELECT id, "sortOrder", name, "createdAt", "updatedAt" FROM "Sample" ORDER BY "sortOrder" ASC, "createdAt" DESC`;
           const rawIters = await prisma.$queryRaw<RawIterSlim[]>`
-            SELECT id, "sampleId", version, name, notes, "fabricType", "sampleSize", "buttonType", status,
+            SELECT id, "sampleId", version, name, notes, "fabricType", "sampleSize", "buttonType", "factoryCost", status,
               CASE WHEN jsonb_typeof(images) = 'array'
                 THEN jsonb_array_length(images) ELSE 0
               END AS "imageCount",
@@ -113,7 +113,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({
               id: it.id, sampleId: it.sampleId, version: it.version,
               name: it.name, notes: it.notes,
-              fabricType: it.fabricType, sampleSize: it.sampleSize, buttonType: it.buttonType,
+              fabricType: it.fabricType, sampleSize: it.sampleSize, buttonType: it.buttonType, factoryCost: it.factoryCost,
               status: it.status,
               images: [] as string[],
               imageCount: Number(it.imageCount),
@@ -140,7 +140,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               ...s,
               iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({
                 id: it.id, sampleId: it.sampleId, version: it.version, name: it.name, notes: it.notes,
-                fabricType: null, sampleSize: null, buttonType: null, status: it.status,
+                fabricType: null, sampleSize: null, buttonType: null, factoryCost: null, status: it.status,
                 images: [] as string[], imageCount: Number(it.imageCount),
                 taggedUsers: it.taggedUsers, createdAt: it.createdAt, updatedAt: it.updatedAt,
               })),
@@ -163,7 +163,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 ...s,
                 iterations: rawIters.filter((it) => it.sampleId === s.id).map((it) => ({
                   id: it.id, sampleId: it.sampleId, version: it.version, name: null, notes: it.notes,
-                  fabricType: null, sampleSize: null, buttonType: null, status: it.status,
+                  fabricType: null, sampleSize: null, buttonType: null, factoryCost: null, status: it.status,
                   images: [] as string[], imageCount: Number(it.imageCount),
                   taggedUsers: [], createdAt: it.createdAt, updatedAt: it.updatedAt,
                 })),
@@ -1560,6 +1560,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (form.has("fabricType")) updates.fabricType = String(form.get("fabricType") ?? "") || null;
     if (form.has("sampleSize")) updates.sampleSize = String(form.get("sampleSize") ?? "") || null;
     if (form.has("buttonType")) updates.buttonType = String(form.get("buttonType") ?? "") || null;
+    if (form.has("factoryCost")) updates.factoryCost = String(form.get("factoryCost") ?? "") || null;
     if (form.has("status")) updates.status = String(form.get("status") ?? "under_consideration");
     if (form.has("addImage")) {
       const currentImages = Array.isArray(iteration.images) ? iteration.images as string[] : [];
@@ -5420,6 +5421,7 @@ type SampleIterationType = {
   fabricType: string | null;
   sampleSize: string | null;
   buttonType: string | null;
+  factoryCost: string | null;
   status: string;
   images: unknown;
   imageCount?: number;
@@ -5882,6 +5884,7 @@ function SampleIterationBlock({
   const [fabricType, setFabricType] = useState(iteration.fabricType ?? "");
   const [sampleSize, setSampleSize] = useState(iteration.sampleSize ?? "");
   const [buttonType, setButtonType] = useState(iteration.buttonType ?? "");
+  const [factoryCost, setFactoryCost] = useState(iteration.factoryCost ?? "");
   const [status, setStatus] = useState(iteration.status);
   // Saved-image count + cache-buster version. Each image is rendered as
   // <img src="/portal/image/sample/<id>/<i>?v=<version>"> so the browser
@@ -5900,6 +5903,7 @@ function SampleIterationBlock({
   useEffect(() => { setFabricType(iteration.fabricType ?? ""); }, [iteration.fabricType, iteration.id]);
   useEffect(() => { setSampleSize(iteration.sampleSize ?? ""); }, [iteration.sampleSize, iteration.id]);
   useEffect(() => { setButtonType(iteration.buttonType ?? ""); }, [iteration.buttonType, iteration.id]);
+  useEffect(() => { setFactoryCost(iteration.factoryCost ?? ""); }, [iteration.factoryCost, iteration.id]);
   useEffect(() => { setStatus(iteration.status); }, [iteration.status, iteration.id]);
   useEffect(() => {
     // Sync savedCount up if the loader (or background hook) has written
@@ -6149,14 +6153,15 @@ function SampleIterationBlock({
         </button>
       </div>
 
-      {/* Fabric / Size / Button fields */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 0, borderTop: "1px solid #f1f5f9" }}>
+      {/* Fabric / Size / Button / Factory cost fields */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 0, borderTop: "1px solid #f1f5f9" }}>
         {([
           { label: "Fabric type", value: fabricType, setter: setFabricType, field: "fabricType" },
           { label: "Sample size", value: sampleSize, setter: setSampleSize, field: "sampleSize" },
           { label: "Button type", value: buttonType, setter: setButtonType, field: "buttonType" },
+          { label: "Factory cost", value: factoryCost, setter: setFactoryCost, field: "factoryCost" },
         ] as const).map(({ label, value, setter, field }, i) => (
-          <div key={field} style={{ borderRight: i < 2 ? "1px solid #f1f5f9" : "none", padding: "10px 14px" }}>
+          <div key={field} style={{ borderRight: i < 3 ? "1px solid #f1f5f9" : "none", padding: "10px 14px" }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", marginBottom: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
             <input
               style={{ width: "100%", border: "none", outline: "none", fontSize: "var(--portal-panel-font-size, 13px)", color: "#111827", background: "transparent", fontFamily: "inherit", padding: 0 }}

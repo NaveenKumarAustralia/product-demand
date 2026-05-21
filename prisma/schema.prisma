@@ -229,6 +229,7 @@ model SampleIteration {
   fabricType  String?
   sampleSize  String?
   buttonType  String?
+  factoryCost String?
   status      String   @default("under_consideration")
   images      Json     @default("[]")
   thumbnail   String?
