@@ -5443,6 +5443,7 @@ function sampleStatusLabel(status: string) {
   if (status === "changes_requested") return "Changes Requested";
   if (status === "sample_in_production") return "Sample in Production";
   if (status === "given_to_factory") return "Given to Factory";
+  if (status === "sent") return "Sent";
   if (status === "under_consideration") return "Under Consideration";
   if (status === "in_progress") return "In Progress";
   return "No versions yet";
@@ -5455,6 +5456,7 @@ function sampleStatusPillStyle(status: string, large?: boolean): React.CSSProper
   if (status === "changes_requested") return { ...base, background: "#fef3c7", color: "#92400e" };
   if (status === "sample_in_production") return { ...base, background: "#ffedd5", color: "#9a3412" };
   if (status === "given_to_factory") return { ...base, background: "#dbeafe", color: "#1e40af" };
+  if (status === "sent") return { ...base, background: "#cffafe", color: "#155e75" };
   if (status === "under_consideration") return { ...base, background: "#ede9fe", color: "#5b21b6" };
   if (status === "in_progress") return { ...base, background: "#dbeafe", color: "#1e40af" };
   return { ...base, background: "#f1f5f9", color: "#64748b" };
@@ -6099,6 +6101,7 @@ function SampleIterationBlock({
         >
           <option value="under_consideration">Under Consideration</option>
           <option value="given_to_factory">Given to Factory</option>
+          <option value="sent">Sent</option>
           <option value="sample_in_production">Sample in Production</option>
           <option value="changes_requested">Changes Requested</option>
           <option value="approved">Approved</option>
@@ -7951,17 +7954,12 @@ function CombinedFabricStockPanel({
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(fabricSettings.combinedColumnWidths);
   useEffect(() => setColumnWidths(fabricSettings.combinedColumnWidths), [fabricSettings.combinedColumnWidths]);
-  const tableRef = useRef<HTMLTableElement>(null);
-  const resizingRef = useRef(false);
-  const [resizeHoverKey, setResizeHoverKey] = useState<UnifiedFabricKey | null>(null);
   const widthFor = (key: string) => columnWidths[key] ?? 160;
   const startColumnResize = (columnKey: UnifiedFabricKey, event: React.MouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
     event.stopPropagation();
-    resizingRef.current = true;
     const startX = event.clientX;
     const startWidth = widthFor(columnKey);
-    const colEl = tableRef.current?.querySelector<HTMLTableColElement>(`col[data-col-key="${columnKey}"]`);
     const previousCursor = document.body.style.cursor;
     const previousUserSelect = document.body.style.userSelect;
     document.body.style.cursor = "col-resize";
@@ -7969,20 +7967,14 @@ function CombinedFabricStockPanel({
     let nextWidth = startWidth;
     const handleMove = (moveEvent: MouseEvent) => {
       nextWidth = Math.max(60, startWidth + moveEvent.clientX - startX);
-      // Resize the column directly on the DOM during drag so we avoid
-      // re-rendering every row on each mousemove (which made it janky).
-      if (colEl) colEl.style.width = `${nextWidth}px`;
+      setColumnWidths((current) => ({ ...current, [columnKey]: nextWidth }));
     };
     const handleUp = () => {
       document.body.style.cursor = previousCursor;
       document.body.style.userSelect = previousUserSelect;
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
-      // Defer clearing so the th's onDragStart (if any) still sees we resized.
-      window.setTimeout(() => { resizingRef.current = false; setResizeHoverKey(null); }, 0);
       if (nextWidth === startWidth) return;
-      // Commit the final width to React state + persist once.
-      setColumnWidths((current) => ({ ...current, [columnKey]: nextWidth }));
       submitPortalCell(
         fetcher,
         {
@@ -8040,11 +8032,11 @@ function CombinedFabricStockPanel({
       </div>
       <div style={s.fabricTableShell}>
         <div style={s.fabricTableWrap}>
-          <table ref={tableRef} style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
+          <table style={s.fabricTable} onKeyDown={handleTableGridKeyDown}>
             <colgroup>
               <col style={{ width: 48 }} />
               {localColumns.map((column) => (
-                <col key={column.key} data-col-key={column.key} style={{ width: widthFor(column.key) }} />
+                <col key={column.key} style={{ width: widthFor(column.key) }} />
               ))}
             </colgroup>
             <thead>
@@ -8053,18 +8045,9 @@ function CombinedFabricStockPanel({
                 {localColumns.map((column) => (
                   <th
                     key={column.key}
-                    draggable={resizeHoverKey !== column.key}
-                    onDragStart={(event) => {
-                      if (resizingRef.current || resizeHoverKey === column.key) {
-                        event.preventDefault();
-                        return;
-                      }
-                      setDragKey(column.key);
-                      event.dataTransfer.effectAllowed = "move";
-                    }}
                     onDragOver={(event) => {
-                      event.preventDefault();
                       if (!dragKey || dragKey === column.key) return;
+                      event.preventDefault();
                       const from = localColumns.findIndex((item) => item.key === dragKey);
                       const to = localColumns.findIndex((item) => item.key === column.key);
                       if (from < 0 || to < 0) return;
@@ -8073,30 +8056,35 @@ function CombinedFabricStockPanel({
                       next.splice(to, 0, moved);
                       setLocalColumns(next);
                     }}
-                    onDragEnd={() => {
-                      setDragKey(null);
-                      if (localColumns.map((c) => c.key).join("|") !== orderedColumns.map((c) => c.key).join("|")) {
-                        saveColumnOrder(localColumns);
-                      }
-                    }}
                     style={{
                       ...s.fabricTh,
-                      cursor: "grab",
                       ...(dragKey === column.key ? { opacity: 0.55 } : {}),
                     }}
-                    title="Drag to reorder"
                   >
+                    <span
+                      draggable
+                      onDragStart={(event) => {
+                        setDragKey(column.key);
+                        event.dataTransfer.effectAllowed = "move";
+                      }}
+                      onDragEnd={() => {
+                        setDragKey(null);
+                        if (localColumns.map((c) => c.key).join("|") !== orderedColumns.map((c) => c.key).join("|")) {
+                          saveColumnOrder(localColumns);
+                        }
+                      }}
+                      title="Drag to reorder column"
+                      style={{ cursor: "grab", marginRight: 6, color: "#94a3b8", userSelect: "none" }}
+                    >
+                      ⠿
+                    </span>
                     {column.label}
                     <span
                       role="separator"
                       aria-orientation="vertical"
                       aria-label={`Resize ${column.label} column`}
-                      onMouseEnter={() => setResizeHoverKey(column.key)}
-                      onMouseLeave={() => { if (!resizingRef.current) setResizeHoverKey(null); }}
                       onMouseDown={(event) => startColumnResize(column.key, event)}
                       style={s.resizeHandle}
-                      draggable={false}
-                      onDragStart={(event) => event.preventDefault()}
                     />
                   </th>
                 ))}
