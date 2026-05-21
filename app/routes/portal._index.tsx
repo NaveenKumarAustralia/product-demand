@@ -703,7 +703,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const data: Record<string, unknown> = {};
     if (field === "title") data.title = value.trim() || "Untitled shipment";
     if (field === "invoiceNumber") data.invoiceNumber = value.trim() || null;
-    if (field === "status") data.status = value || "still_packing";
+    if (field === "status") {
+      const nextStatus = value || "still_packing";
+      // Status is a one-way gate: once it leaves "still_packing" it can't go
+      // back (which would re-open quantity editing) — admins exempt.
+      if (nextStatus === "still_packing" && packingId && !currentUser?.admin) {
+        const current = await prisma.packingList.findUnique({ where: { id: packingId }, select: { status: true } });
+        if ((current?.status ?? "still_packing") !== "still_packing") return null;
+      }
+      data.status = nextStatus;
+    }
     if (field === "shipmentDate") {
       const parsedDate = value ? parsePortalDate(value) : null;
       if (value && !parsedDate) return null;
@@ -903,8 +912,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const lineId = Number(form.get("lineId"));
     const size = String(form.get("size") ?? "");
     const value = Math.max(0, Number(form.get("value") ?? 0) || 0);
-    const line = await prisma.packingListLine.findUnique({ where: { id: lineId }, select: { qtys: true, shopifyLoadedQtys: true, productTitle: true } });
+    const line = await prisma.packingListLine.findUnique({
+      where: { id: lineId },
+      select: { qtys: true, shopifyLoadedQtys: true, productTitle: true, packingList: { select: { status: true } } },
+    });
     if (!line || !size) return null;
+    // Quantities are frozen once the list moves past "still_packing" — admins exempt.
+    if ((line.packingList?.status ?? "still_packing") !== "still_packing" && !currentUser?.admin) return null;
     const qtys = normalizeQtys(line.qtys);
     const shopifyLoadedQtys = normalizeQtys(line.shopifyLoadedQtys);
     const previousQty = qtys[size] ?? 0;
@@ -4659,6 +4673,7 @@ export default function PortalDashboard() {
             searchTitle={searchTitleInput}
             updateParams={updateParams}
             canLoadInventory={canLoadPackingInventory}
+            canEditLockedQuantities={Boolean(currentUser?.admin)}
           />
         ) : page === "fabric" ? (
           <CombinedFabricStockPanel
@@ -10236,6 +10251,7 @@ function PackingListsPanel({
   searchTitle,
   updateParams,
   canLoadInventory,
+  canEditLockedQuantities,
 }: {
   packingLists: PackingListWithLines[];
   selectedPackingList: PackingListWithLines | null;
@@ -10250,6 +10266,7 @@ function PackingListsPanel({
   searchTitle: string;
   updateParams: (updates: Record<string, string>) => void;
   canLoadInventory: boolean;
+  canEditLockedQuantities: boolean;
 }) {
   const fetcher = useFetcher();
 
@@ -10272,6 +10289,7 @@ function PackingListsPanel({
             headerSearch={searchTitle}
             updateParams={updateParams}
             canLoadInventory={canLoadInventory}
+            canEditLockedQuantities={canEditLockedQuantities}
           />
         </section>
       )}
@@ -10447,6 +10465,7 @@ function PackingListDetail({
   headerSearch = "",
   updateParams,
   canLoadInventory,
+  canEditLockedQuantities,
 }: {
   packingList: PackingListWithLines;
   savedPackingColumnWidths: Record<string, number>;
@@ -10460,6 +10479,7 @@ function PackingListDetail({
   headerSearch?: string;
   updateParams: (updates: Record<string, string>) => void;
   canLoadInventory: boolean;
+  canEditLockedQuantities: boolean;
 }) {
   const fetcher = useFetcher();
   const loadInventoryFetcher = useFetcher();
@@ -10469,6 +10489,9 @@ function PackingListDetail({
   const [packingListSearch, setPackingListSearch] = useState("");
   const [statusValue, setStatusValue] = useState(packingList.status ?? "still_packing");
   useEffect(() => setStatusValue(packingList.status ?? "still_packing"), [packingList.status]);
+  // Quantities are editable only while "still_packing"; once it moves past that
+  // they freeze (and status can't revert to still_packing) — unless an admin.
+  const quantitiesLocked = (packingList.status ?? "still_packing") !== "still_packing" && !canEditLockedQuantities;
   const packingColumns = [
     ...PACKING_COLUMNS,
     ...customColumns.map((column) => ({ id: column.id, label: column.label, width: 130, center: false })),
@@ -10643,9 +10666,16 @@ function PackingListDetail({
               }}
               style={{ ...s.packingInput, width: 160 }}
             >
-              {PACKING_STATUS_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
+              {PACKING_STATUS_OPTIONS.map((opt) => {
+                // Once the list has moved past "still_packing", non-admins can't
+                // set it back (which would re-open quantity editing).
+                const lockStillPacking = opt.value === "still_packing"
+                  && (packingList.status ?? "still_packing") !== "still_packing"
+                  && !canEditLockedQuantities;
+                return (
+                  <option key={opt.value} value={opt.value} disabled={lockStillPacking}>{opt.label}</option>
+                );
+              })}
             </select>
           </label>
           <label style={s.packingToolbarLabel}>
@@ -10775,6 +10805,7 @@ function PackingListDetail({
                 customCells={customCells}
                 rowHeights={rowHeights}
                 frozenOffsets={packingFrozenOffsets}
+                quantitiesLocked={quantitiesLocked}
               />
               );
             }) : (
@@ -10848,6 +10879,7 @@ function PackingListLineRow({
   customCells,
   rowHeights,
   frozenOffsets,
+  quantitiesLocked,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -10856,6 +10888,7 @@ function PackingListLineRow({
   customCells: Record<string, string>;
   rowHeights: Record<string, number>;
   frozenOffsets?: number[];
+  quantitiesLocked: boolean;
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -10899,9 +10932,10 @@ function PackingListLineRow({
           <input
             type="text"
             inputMode="numeric"
+            readOnly={quantitiesLocked}
             defaultValue={qtys[size] || ""}
-            onChange={(event) => { event.currentTarget.value = event.currentTarget.value.replace(/\D/g, ""); }}
-            onBlur={(event) => submitPortalCell(
+            onChange={(event) => { if (!quantitiesLocked) event.currentTarget.value = event.currentTarget.value.replace(/\D/g, ""); }}
+            onBlur={quantitiesLocked ? undefined : (event) => submitPortalCell(
               fetcher,
               {
                 intent: "update_packing_qty",
@@ -10911,7 +10945,12 @@ function PackingListLineRow({
               },
               { label: "Undo packing quantity", fields: { intent: "update_packing_qty", lineId: line.id, size, value: qtys[size] ?? 0 } },
             )}
-            style={{ ...s.qtyInput, ...(qtys[size] > 0 && shopifyLoadedQtys[size] === qtys[size] ? { color: "#fff" } : {}) }}
+            title={quantitiesLocked ? "Quantities are locked once the list moves past Still packing" : undefined}
+            style={{
+              ...s.qtyInput,
+              ...(qtys[size] > 0 && shopifyLoadedQtys[size] === qtys[size] ? { color: "#fff" } : {}),
+              ...(quantitiesLocked ? { cursor: "not-allowed", background: "#f1f5f9" } : {}),
+            }}
           />
         </PackingTd>
       ))}
