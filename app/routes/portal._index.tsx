@@ -13967,7 +13967,7 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #cbd5e1",
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
   },
-  fabricTable: { borderCollapse: "separate", borderSpacing: 0, minWidth: 960, width: "100%", fontSize: 13 },
+  fabricTable: { borderCollapse: "separate", borderSpacing: 0, minWidth: 960, fontSize: 13, tableLayout: "fixed" },
   fabricTh: {
     position: "sticky",
     top: 0,
