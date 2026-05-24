@@ -3101,12 +3101,20 @@ function padCombinedFabricSheet(sheet: FabricSheetData): FabricSheetData {
     missing.push(col.header);
   }
   if (!missing.length) return sheet;
-  const blanks = missing.map(() => "");
+  const newLength = sheet.headers.length + missing.length;
+  // Pad only as needed: if a row already has a value at the pad position (because it
+  // was saved into a pad column before the column was persisted into headers), keep it.
+  const padRow = (row: string[]) => {
+    if (row.length >= newLength) return row;
+    const result = [...row];
+    while (result.length < newLength) result.push("");
+    return result;
+  };
   return {
     ...sheet,
     headers: [...sheet.headers, ...missing],
-    rows: sheet.rows.map((row) => [...row, ...blanks]),
-    originalRows: sheet.originalRows?.map((row) => [...row, ...blanks]),
+    rows: sheet.rows.map(padRow),
+    originalRows: sheet.originalRows?.map(padRow),
   };
 }
 
@@ -3470,9 +3478,12 @@ function getFabricSheets(
         const rowKey = fabricRowKey(sheet.gid, rowIndex);
         return !deletedRows[rowKey] || recoveredRows.has(rowKey) || shouldRestoreLostPeacockRow(sheet.gid, rowIndex);
       });
-    const rows = rowEntries.map(({ row, rowIndex }) => (
-      Array.from({ length: headers.length }, (_, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? row[colIndex] ?? "")
-    ));
+    const rows = rowEntries.map(({ row, rowIndex }) => {
+      // Preserve cells beyond headers.length so values written into not-yet-persisted
+      // pad columns (e.g. "Quantity Ordered", "Order Date") aren't dropped on reload.
+      const length = Math.max(headers.length, row.length);
+      return Array.from({ length }, (_, colIndex) => overrides[fabricCellKey(sheet.gid, rowIndex, colIndex)] ?? row[colIndex] ?? "");
+    });
     return {
       ...sheet,
       headers,
