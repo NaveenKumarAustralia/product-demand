@@ -1041,6 +1041,37 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "toggle_packing_qty_manual_loaded_for_product") {
+    if (!currentUser?.admin) return null;
+    const packingId = Number(form.get("packingId"));
+    const productId = String(form.get("productId") ?? "");
+    const size = String(form.get("size") ?? "");
+    if (!packingId || !productId || !size) return null;
+    const lines = await prisma.packingListLine.findMany({
+      where: { packingListId: packingId, productId },
+      select: { id: true, qtys: true, manuallyLoadedQtys: true },
+    });
+    // If every contributing line is already fully marked for this size, the
+    // toggle removes the mark from all of them. Otherwise, mark every line.
+    const allMarked = lines.every((line) => {
+      const qty = normalizeQtys(line.qtys)[size] ?? 0;
+      if (qty <= 0) return true;
+      return normalizeQtys(line.manuallyLoadedQtys)[size] === qty;
+    });
+    for (const line of lines) {
+      const qtys = normalizeQtys(line.qtys);
+      const qty = qtys[size] ?? 0;
+      if (qty <= 0) continue;
+      const manual = normalizeQtys(line.manuallyLoadedQtys);
+      if (allMarked) delete manual[size]; else manual[size] = qty;
+      await prisma.packingListLine.update({
+        where: { id: line.id },
+        data: { manuallyLoadedQtys: manual },
+      });
+    }
+    return null;
+  }
+
   if (intent === "duplicate_packing_line") {
     const lineId = Number(form.get("lineId"));
     const line = await prisma.packingListLine.findUnique({ where: { id: lineId } });
@@ -2203,6 +2234,7 @@ const PACKING_COLUMNS = [
   { id: "price", label: "Price ₹", width: 92, center: true },
   { id: "value", label: "Value ₹", width: 96, center: true },
   { id: "weight", label: "Weight", width: 90, center: true },
+  { id: "shopify", label: "Shopify", width: 84, center: true },
 ];
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
@@ -11026,21 +11058,9 @@ function PackingListLineRow({
   const isLoadedForSize = (size: string) => qtys[size] > 0 && (
     shopifyLoadedQtys[size] === qtys[size] || manuallyLoadedQtys[size] === qtys[size]
   );
-  const isManuallyMarkedForSize = (size: string) => qtys[size] > 0 && manuallyLoadedQtys[size] === qtys[size];
   const total = packingTotal(qtys);
   const price = line.priceRupees ?? 0;
   const value = total * price;
-  const [sizeMenu, setSizeMenu] = useState<{ x: number; y: number; size: string } | null>(null);
-  useEffect(() => {
-    if (!sizeMenu) return;
-    const close = () => setSizeMenu(null);
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", close);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", close);
-    };
-  }, [sizeMenu]);
 
   const rowHeightKey = `packing:${line.id}`;
 
@@ -11057,45 +11077,10 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]}><PackingImageCell lineId={line.id} field="productImageUrl" value={line.productImageUrl ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={2} center stickyLeft={frozenOffsets?.[2]}><PackingImageCell lineId={line.id} field="fabricImageData" value={line.fabricImageData ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={3} overflowVisible stickyLeft={frozenOffsets?.[3]} isLastFrozen>
-        {(() => {
-          const showLink = isAdmin && line.productId && shopDomain;
-          return (
-            <div style={{ position: "relative", paddingLeft: showLink ? 30 : 0 }}>
-              {showLink && (
-                <a
-                  href={`https://${shopDomain}/admin/products/${line.productId!.replace(/^gid:\/\/shopify\/Product\//, "")}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title="Open product in Shopify admin"
-                  style={{
-                    position: "absolute",
-                    top: 4,
-                    left: 2,
-                    zIndex: 2,
-                    width: 22,
-                    height: 22,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    background: "#ecfeff",
-                    border: "1px solid #67e8f9",
-                    color: "#0e7490",
-                    borderRadius: 4,
-                    fontSize: 11,
-                    fontWeight: 800,
-                    textDecoration: "none",
-                  }}
-                >
-                  ↗
-                </a>
-              )}
-              <PackingProductNameCell
-                line={line}
-                updateParams={updateParams}
-              />
-            </div>
-          );
-        })()}
+        <PackingProductNameCell
+          line={line}
+          updateParams={updateParams}
+        />
       </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={4}><PackingSkuCell lineId={line.id} value={line.sku ?? ""} /></PackingTd>
       {PACKING_SIZES.map((size, sizeIndex) => (
@@ -11107,14 +11092,7 @@ function PackingListLineRow({
           style={{
             ...(isLoadedForSize(size) ? s.loadedInventoryCell : {}),
           }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            if (isAdmin) {
-              setSizeMenu({ x: e.clientX, y: e.clientY, size });
-              return;
-            }
-            document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List Line", entityId: String(line.id), field: `Qty (${size})`, entityName: line.productTitle } }));
-          }}
+          onContextMenu={(e) => { e.preventDefault(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List Line", entityId: String(line.id), field: `Qty (${size})`, entityName: line.productTitle } })); }}
         >
           <input
             type="text"
@@ -11134,7 +11112,7 @@ function PackingListLineRow({
             )}
             title={quantitiesLocked
               ? "Quantities are locked once the list moves past Still packing"
-              : (isAdmin ? "Right-click for options (mark loaded / history)" : undefined)}
+              : undefined}
             style={{
               ...s.qtyInput,
               ...(isLoadedForSize(size) ? { color: "#fff" } : {}),
@@ -11147,76 +11125,36 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={16} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={17} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={18} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={19} center>
+        {isAdmin && line.productId && shopDomain ? (
+          <a
+            href={`https://${shopDomain}/admin/products/${line.productId.replace(/^gid:\/\/shopify\/Product\//, "")}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open product in Shopify admin"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "4px 10px",
+              background: "#ecfeff",
+              border: "1px solid #67e8f9",
+              color: "#0e7490",
+              borderRadius: 4,
+              fontSize: 12,
+              fontWeight: 700,
+              textDecoration: "none",
+            }}
+          >
+            Open ↗
+          </a>
+        ) : null}
+      </PackingTd>
       {customColumns.map((column, customIndex) => (
-        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={19 + customIndex}>
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={20 + customIndex}>
           <TableCustomCell cellKey={`packing:${line.id}:${column.id}`} value={customCells[`packing:${line.id}:${column.id}`] ?? ""} />
         </PackingTd>
       ))}
-      {sizeMenu && typeof document !== "undefined" && createPortal(
-        <div
-          onMouseDown={(event) => event.stopPropagation()}
-          style={{
-            position: "fixed",
-            left: sizeMenu.x,
-            top: sizeMenu.y,
-            background: "#fff",
-            border: "1px solid #cbd5e1",
-            borderRadius: 6,
-            boxShadow: "0 10px 24px rgba(15,23,42,0.18)",
-            padding: 4,
-            zIndex: 10000,
-            minWidth: 220,
-          }}
-        >
-          <button
-            type="button"
-            disabled={(qtys[sizeMenu.size] ?? 0) <= 0}
-            style={{
-              display: "block",
-              width: "100%",
-              padding: "8px 12px",
-              background: "transparent",
-              border: "none",
-              textAlign: "left",
-              cursor: (qtys[sizeMenu.size] ?? 0) > 0 ? "pointer" : "not-allowed",
-              fontSize: 13,
-              fontWeight: 600,
-              color: (qtys[sizeMenu.size] ?? 0) > 0 ? "#1f2937" : "#94a3b8",
-            }}
-            onClick={() => {
-              const size = sizeMenu.size;
-              setSizeMenu(null);
-              if ((qtys[size] ?? 0) <= 0) return;
-              submitPortalCell(fetcher, { intent: "toggle_packing_qty_manual_loaded", lineId: line.id, size });
-            }}
-          >
-            {isManuallyMarkedForSize(sizeMenu.size) ? "✓ Unmark as loaded in Shopify" : "Mark as loaded in Shopify"}
-          </button>
-          <button
-            type="button"
-            style={{
-              display: "block",
-              width: "100%",
-              padding: "8px 12px",
-              background: "transparent",
-              border: "none",
-              textAlign: "left",
-              cursor: "pointer",
-              fontSize: 13,
-              fontWeight: 600,
-              color: "#1f2937",
-            }}
-            onClick={() => {
-              const { x, y, size } = sizeMenu;
-              setSizeMenu(null);
-              document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x, y, entity: "Packing List Line", entityId: String(line.id), field: `Qty (${size})`, entityName: line.productTitle } }));
-            }}
-          >
-            View history
-          </button>
-        </div>,
-        document.body,
-      )}
     </tr>
   );
 }
@@ -11346,35 +11284,7 @@ function PackingCombinedRow({
       </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={3}>
         <div style={{ position: "relative", padding: "8px 10px", minHeight: 96 }}>
-          {adminUrl && (
-            <a
-              href={adminUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open product in Shopify admin"
-              style={{
-                position: "absolute",
-                top: 6,
-                left: 6,
-                width: 22,
-                height: 22,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "#ecfeff",
-                border: "1px solid #67e8f9",
-                color: "#0e7490",
-                borderRadius: 4,
-                fontSize: 11,
-                fontWeight: 800,
-                textDecoration: "none",
-              }}
-            >
-              ↗
-            </a>
-          )}
           <div style={{
-            padding: adminUrl ? "0 0 0 32px" : 0,
             fontWeight: 700,
             color: "#111827",
             fontSize: "var(--portal-table-font-size, 13px)",
@@ -11424,25 +11334,68 @@ function PackingCombinedRow({
       <PackingTd rowIndex={rowIndex} colIndex={4}>
         <span style={{ display: "block", padding: "8px 10px", color: "#374151", fontSize: 12, whiteSpace: "pre-wrap" }}>{row.sku ?? ""}</span>
       </PackingTd>
-      {PACKING_SIZES.map((size, sizeIndex) => (
-        <PackingTd
-          key={size}
-          rowIndex={rowIndex}
-          colIndex={5 + sizeIndex}
-          center
-          style={{ ...(isLoadedForSize(size) ? s.loadedInventoryCell : {}) }}
-        >
-          <span style={{ display: "block", padding: "8px 0", fontWeight: 700, color: isLoadedForSize(size) ? "#fff" : "#111827" }}>
-            {row.qtys[size] || ""}
-          </span>
-        </PackingTd>
-      ))}
+      {PACKING_SIZES.map((size, sizeIndex) => {
+        const hasQty = (row.qtys[size] ?? 0) > 0;
+        const canToggle = isAdmin && hasQty && row.productId;
+        return (
+          <PackingTd
+            key={size}
+            rowIndex={rowIndex}
+            colIndex={5 + sizeIndex}
+            center
+            style={{
+              ...(isLoadedForSize(size) ? s.loadedInventoryCell : {}),
+              ...(canToggle ? { cursor: "pointer" } : {}),
+            }}
+            onClick={canToggle ? () => {
+              submitPortalCell(fetcher, {
+                intent: "toggle_packing_qty_manual_loaded_for_product",
+                packingId,
+                productId: row.productId ?? "",
+                size,
+              });
+            } : undefined}
+          >
+            <span
+              style={{ display: "block", padding: "8px 0", fontWeight: 700, color: isLoadedForSize(size) ? "#fff" : "#111827" }}
+              title={canToggle ? (isLoadedForSize(size) ? "Click to unmark as loaded" : "Click to mark as loaded in Shopify") : undefined}
+            >
+              {row.qtys[size] || ""}
+            </span>
+          </PackingTd>
+        );
+      })}
       <PackingTd rowIndex={rowIndex} colIndex={15} center><span style={s.total}>{total}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={16} center><span style={s.total}>{row.totalPrice ? Math.round(row.totalPrice) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={17} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={18} center><span style={s.total}>{row.totalWeight ? Math.round(row.totalWeight) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={19} center>
+        {adminUrl ? (
+          <a
+            href={adminUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open product in Shopify admin"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "4px 10px",
+              background: "#ecfeff",
+              border: "1px solid #67e8f9",
+              color: "#0e7490",
+              borderRadius: 4,
+              fontSize: 12,
+              fontWeight: 700,
+              textDecoration: "none",
+            }}
+          >
+            Open ↗
+          </a>
+        ) : null}
+      </PackingTd>
       {customColumns.map((column, customIndex) => (
-        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={19 + customIndex} />
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={20 + customIndex} />
       ))}
     </tr>
   );
