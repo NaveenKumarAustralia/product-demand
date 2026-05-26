@@ -348,6 +348,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const selectedPackingList = packingId
     ? packingLists.find((list) => list.id === packingId) ?? null
     : null;
+  // Shop domain for "open in Shopify admin" links and per-row inventory loads.
+  const shopDomain = page === "packing" && selectedPackingList
+    ? (await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" }, select: { shop: true } }))?.shop ?? null
+    : null;
   const productResults = page === "packing" && selectedPackingList && productSearch.trim().length >= 2
     ? await searchShopifyProducts(productSearch)
     : [];
@@ -475,6 +479,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     productInfo,
     packingLists,
     selectedPackingList,
+    shopDomain,
     productSearch,
     restockProductSearch,
     packingSearchLineId,
@@ -914,17 +919,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const value = Math.max(0, Number(form.get("value") ?? 0) || 0);
     const line = await prisma.packingListLine.findUnique({
       where: { id: lineId },
-      select: { qtys: true, shopifyLoadedQtys: true, productTitle: true, packingList: { select: { status: true } } },
+      select: { qtys: true, shopifyLoadedQtys: true, manuallyLoadedQtys: true, productTitle: true, packingList: { select: { status: true } } },
     });
     if (!line || !size) return null;
     // Quantities are frozen once the list moves past "still_packing" — admins exempt.
     if ((line.packingList?.status ?? "still_packing") !== "still_packing" && !currentUser?.admin) return null;
     const qtys = normalizeQtys(line.qtys);
     const shopifyLoadedQtys = normalizeQtys(line.shopifyLoadedQtys);
+    const manuallyLoadedQtys = normalizeQtys(line.manuallyLoadedQtys);
     const previousQty = qtys[size] ?? 0;
     qtys[size] = value;
+    // Changing the qty invalidates any prior "loaded" marker for that size.
     delete shopifyLoadedQtys[size];
-    await prisma.packingListLine.update({ where: { id: lineId }, data: { qtys, shopifyLoadedQtys } });
+    delete manuallyLoadedQtys[size];
+    await prisma.packingListLine.update({ where: { id: lineId }, data: { qtys, shopifyLoadedQtys, manuallyLoadedQtys } });
     if (value !== previousQty) {
       await logActivity(currentUser?.name ?? "Unknown", "Updated", "Packing List Line", {
         entityId: String(lineId),
@@ -936,9 +944,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
-  if (intent === "load_packing_inventory") {
+  if (intent === "load_packing_inventory" || intent === "load_packing_inventory_for_product") {
     if (!canLoadPackingInventory) return null;
     const packingId = Number(form.get("packingId"));
+    const onlyProductId = intent === "load_packing_inventory_for_product"
+      ? String(form.get("productId") ?? "")
+      : null;
+    if (intent === "load_packing_inventory_for_product" && !onlyProductId) return null;
     const skipWords = String(form.get("skipWords") ?? "")
       .split(",")
       .map((word) => word.trim().toLowerCase())
@@ -964,15 +976,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     for (const line of packingList.lines) {
       const title = line.productTitle.toLowerCase();
       if (!line.productId || line.isCustom || skipWords.some((word) => title.includes(word))) continue;
+      if (onlyProductId && line.productId !== onlyProductId) continue;
 
       const qtys = normalizeQtys(line.qtys);
       const loadedQtys = normalizeQtys(line.shopifyLoadedQtys);
+      const manualQtys = normalizeQtys(line.manuallyLoadedQtys);
       const variants = await getVariants(line.productId);
       const changes: ShopifyInventoryChange[] = [];
       const nextLoadedQtys: Record<string, number> = { ...loadedQtys };
 
       for (const [size, qty] of Object.entries(qtys)) {
-        if (qty <= 0 || loadedQtys[size] === qty) continue;
+        // Skip if already pushed to Shopify OR manually marked as loaded.
+        if (qty <= 0 || loadedQtys[size] === qty || manualQtys[size] === qty) continue;
         const variant = matchingVariantForSize(variants, size);
         if (!variant?.inventoryItemId) continue;
         changes.push({ size, qty, inventoryItemId: variant.inventoryItemId });
@@ -990,6 +1005,39 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
     }
 
+    // Master button is one-time-use: record when it was pressed so the UI
+    // hides it afterward. Per-product loads don't set this.
+    if (intent === "load_packing_inventory" && !packingList.masterInventoryLoadedAt) {
+      await prisma.packingList.update({
+        where: { id: packingId },
+        data: { masterInventoryLoadedAt: new Date() },
+      });
+    }
+
+    return null;
+  }
+
+  if (intent === "toggle_packing_qty_manual_loaded") {
+    if (!currentUser?.admin) return null;
+    const lineId = Number(form.get("lineId"));
+    const size = String(form.get("size") ?? "");
+    const line = await prisma.packingListLine.findUnique({
+      where: { id: lineId },
+      select: { qtys: true, manuallyLoadedQtys: true },
+    });
+    if (!line || !size) return null;
+    const qtys = normalizeQtys(line.qtys);
+    const manualQtys = normalizeQtys(line.manuallyLoadedQtys);
+    const qty = qtys[size] ?? 0;
+    if (manualQtys[size] === qty && qty > 0) {
+      delete manualQtys[size];
+    } else if (qty > 0) {
+      manualQtys[size] = qty;
+    }
+    await prisma.packingListLine.update({
+      where: { id: lineId },
+      data: { manuallyLoadedQtys: manualQtys },
+    });
     return null;
   }
 
@@ -4340,6 +4388,7 @@ export default function PortalDashboard() {
     productInfo,
     packingLists,
     selectedPackingList,
+    shopDomain,
     productSearch,
     restockProductSearch,
     packingSearchLineId,
@@ -4686,6 +4735,8 @@ export default function PortalDashboard() {
             updateParams={updateParams}
             canLoadInventory={canLoadPackingInventory}
             canEditLockedQuantities={Boolean(currentUser?.admin)}
+            isAdmin={Boolean(currentUser?.admin)}
+            shopDomain={shopDomain}
           />
         ) : page === "fabric" ? (
           <CombinedFabricStockPanel
@@ -10278,6 +10329,8 @@ function PackingListsPanel({
   updateParams,
   canLoadInventory,
   canEditLockedQuantities,
+  isAdmin,
+  shopDomain,
 }: {
   packingLists: PackingListWithLines[];
   selectedPackingList: PackingListWithLines | null;
@@ -10293,6 +10346,8 @@ function PackingListsPanel({
   updateParams: (updates: Record<string, string>) => void;
   canLoadInventory: boolean;
   canEditLockedQuantities: boolean;
+  isAdmin: boolean;
+  shopDomain: string | null;
 }) {
   const fetcher = useFetcher();
 
@@ -10316,6 +10371,8 @@ function PackingListsPanel({
             updateParams={updateParams}
             canLoadInventory={canLoadInventory}
             canEditLockedQuantities={canEditLockedQuantities}
+            isAdmin={isAdmin}
+            shopDomain={shopDomain}
           />
         </section>
       )}
@@ -10492,6 +10549,8 @@ function PackingListDetail({
   updateParams,
   canLoadInventory,
   canEditLockedQuantities,
+  isAdmin,
+  shopDomain,
 }: {
   packingList: PackingListWithLines;
   savedPackingColumnWidths: Record<string, number>;
@@ -10506,6 +10565,8 @@ function PackingListDetail({
   updateParams: (updates: Record<string, string>) => void;
   canLoadInventory: boolean;
   canEditLockedQuantities: boolean;
+  isAdmin: boolean;
+  shopDomain: string | null;
 }) {
   const fetcher = useFetcher();
   const loadInventoryFetcher = useFetcher();
@@ -10515,6 +10576,7 @@ function PackingListDetail({
   const [packingListSearch, setPackingListSearch] = useState("");
   const [statusValue, setStatusValue] = useState(packingList.status ?? "still_packing");
   useEffect(() => setStatusValue(packingList.status ?? "still_packing"), [packingList.status]);
+  const [combineView, setCombineView] = useState(false);
   // Quantities are editable only while "still_packing"; once it moves past that
   // they freeze (and status can't revert to still_packing) — unless an admin.
   const quantitiesLocked = (packingList.status ?? "still_packing") !== "still_packing" && !canEditLockedQuantities;
@@ -10729,12 +10791,12 @@ function PackingListDetail({
         </div>
         {/* Row 2: load inventory (left) + total quantity (right) */}
         <div style={s.packingBottomRow}>
-          {canLoadInventory ? (
+          {canLoadInventory && !packingList.masterInventoryLoadedAt ? (
             <loadInventoryFetcher.Form
               method="post"
               style={s.loadInventoryForm}
               onSubmit={(event) => {
-                const ok = window.confirm("Add these packing list quantities to current Shopify stock?");
+                const ok = window.confirm("Add these packing list quantities to current Shopify stock? You can only do this once — afterwards, use the per-product Load button in combined view.");
                 if (!ok) event.preventDefault();
               }}
             >
@@ -10755,8 +10817,29 @@ function PackingListDetail({
               </button>
             </loadInventoryFetcher.Form>
           ) : <div />}
-          <div style={s.packingTotalPill}>
-            Total quantity <strong>{packingListTotal(packingList)}</strong>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setCombineView((current) => !current)}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 6,
+                  border: "1px solid #cbd5e1",
+                  background: combineView ? "#2563eb" : "#fff",
+                  color: combineView ? "#fff" : "#1f2937",
+                  fontWeight: 700,
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+                title="Combine rows with the same product into a single row"
+              >
+                {combineView ? "✓ Combined by product" : "Combine by product"}
+              </button>
+            )}
+            <div style={s.packingTotalPill}>
+              Total quantity <strong>{packingListTotal(packingList)}</strong>
+            </div>
           </div>
         </div>
       </div>
@@ -10814,7 +10897,19 @@ function PackingListDetail({
             </tr>
           </thead>
           <tbody>
-            {visiblePackingLines.length ? visiblePackingLines.map((line, rowIndex) => {
+            {combineView ? (
+              buildCombinedPackingRows(visiblePackingLines).map((row, rowIndex) => (
+                <PackingCombinedRow
+                  key={row.key}
+                  row={row}
+                  rowIndex={rowIndex}
+                  customColumns={customColumns}
+                  isAdmin={isAdmin}
+                  shopDomain={shopDomain}
+                  packingId={packingList.id}
+                />
+              ))
+            ) : (visiblePackingLines.length ? visiblePackingLines.map((line, rowIndex) => {
               const packingFrozenOffsets = [
                 48,
                 48 + packingWidthFor("box"),
@@ -10832,6 +10927,8 @@ function PackingListDetail({
                 rowHeights={rowHeights}
                 frozenOffsets={packingFrozenOffsets}
                 quantitiesLocked={quantitiesLocked}
+                isAdmin={isAdmin}
+                shopDomain={shopDomain}
               />
               );
             }) : (
@@ -10840,7 +10937,7 @@ function PackingListDetail({
                   No packing list rows match this search.
                 </td>
               </tr>
-            )}
+            ))}
           </tbody>
           <tfoot>
             {(() => {
@@ -10906,6 +11003,8 @@ function PackingListLineRow({
   rowHeights,
   frozenOffsets,
   quantitiesLocked,
+  isAdmin,
+  shopDomain,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -10915,10 +11014,18 @@ function PackingListLineRow({
   rowHeights: Record<string, number>;
   frozenOffsets?: number[];
   quantitiesLocked: boolean;
+  isAdmin: boolean;
+  shopDomain: string | null;
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
   const shopifyLoadedQtys = normalizeQtys(line.shopifyLoadedQtys);
+  const manuallyLoadedQtys = normalizeQtys(line.manuallyLoadedQtys);
+  // A size is considered "loaded" if either the real Shopify push or the
+  // manual-mark matches the current packed quantity.
+  const isLoadedForSize = (size: string) => qtys[size] > 0 && (
+    shopifyLoadedQtys[size] === qtys[size] || manuallyLoadedQtys[size] === qtys[size]
+  );
   const total = packingTotal(qtys);
   const price = line.priceRupees ?? 0;
   const value = total * price;
@@ -10938,10 +11045,40 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]}><PackingImageCell lineId={line.id} field="productImageUrl" value={line.productImageUrl ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={2} center stickyLeft={frozenOffsets?.[2]}><PackingImageCell lineId={line.id} field="fabricImageData" value={line.fabricImageData ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={3} overflowVisible stickyLeft={frozenOffsets?.[3]} isLastFrozen>
-        <PackingProductNameCell
-          line={line}
-          updateParams={updateParams}
-        />
+        <div style={{ position: "relative" }}>
+          {isAdmin && line.productId && shopDomain && (
+            <a
+              href={`https://${shopDomain}/admin/products/${line.productId.replace(/^gid:\/\/shopify\/Product\//, "")}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open product in Shopify admin"
+              style={{
+                position: "absolute",
+                top: 4,
+                left: 4,
+                zIndex: 2,
+                width: 22,
+                height: 22,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "#ecfeff",
+                border: "1px solid #67e8f9",
+                color: "#0e7490",
+                borderRadius: 4,
+                fontSize: 11,
+                fontWeight: 800,
+                textDecoration: "none",
+              }}
+            >
+              ↗
+            </a>
+          )}
+          <PackingProductNameCell
+            line={line}
+            updateParams={updateParams}
+          />
+        </div>
       </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={4}><PackingSkuCell lineId={line.id} value={line.sku ?? ""} /></PackingTd>
       {PACKING_SIZES.map((size, sizeIndex) => (
@@ -10951,9 +11088,18 @@ function PackingListLineRow({
           colIndex={5 + sizeIndex}
           center
           style={{
-            ...(qtys[size] > 0 && shopifyLoadedQtys[size] === qtys[size] ? s.loadedInventoryCell : {}),
+            ...(isLoadedForSize(size) ? s.loadedInventoryCell : {}),
           }}
-          onContextMenu={(e) => { e.preventDefault(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List Line", entityId: String(line.id), field: `Qty (${size})`, entityName: line.productTitle } })); }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            if (isAdmin && e.shiftKey) {
+              const want = qtys[size] ?? 0;
+              if (want <= 0) return;
+              submitPortalCell(fetcher, { intent: "toggle_packing_qty_manual_loaded", lineId: line.id, size });
+              return;
+            }
+            document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List Line", entityId: String(line.id), field: `Qty (${size})`, entityName: line.productTitle } }));
+          }}
         >
           <input
             type="text"
@@ -10971,10 +11117,12 @@ function PackingListLineRow({
               },
               { label: "Undo packing quantity", fields: { intent: "update_packing_qty", lineId: line.id, size, value: qtys[size] ?? 0 } },
             )}
-            title={quantitiesLocked ? "Quantities are locked once the list moves past Still packing" : undefined}
+            title={quantitiesLocked
+              ? "Quantities are locked once the list moves past Still packing"
+              : (isAdmin ? "Right-click for history · Shift+right-click to toggle 'loaded in Shopify' highlight" : undefined)}
             style={{
               ...s.qtyInput,
-              ...(qtys[size] > 0 && shopifyLoadedQtys[size] === qtys[size] ? { color: "#fff" } : {}),
+              ...(isLoadedForSize(size) ? { color: "#fff" } : {}),
               ...(quantitiesLocked ? { cursor: "not-allowed", background: "#f1f5f9" } : {}),
             }}
           />
@@ -10988,6 +11136,226 @@ function PackingListLineRow({
         <PackingTd key={column.id} rowIndex={rowIndex} colIndex={19 + customIndex}>
           <TableCustomCell cellKey={`packing:${line.id}:${column.id}`} value={customCells[`packing:${line.id}:${column.id}`] ?? ""} />
         </PackingTd>
+      ))}
+    </tr>
+  );
+}
+
+type CombinedPackingRow = {
+  key: string;
+  productId: string | null;
+  isCustom: boolean;
+  productTitle: string;
+  productImageUrl: string | null;
+  fabricImageData: string | null;
+  sku: string | null;
+  boxNumbers: string[];
+  qtys: Record<string, number>;
+  shopifyLoadedQtys: Record<string, number>;
+  manuallyLoadedQtys: Record<string, number>;
+  totalPrice: number;
+  totalWeight: number;
+};
+
+function buildCombinedPackingRows(lines: PackingListWithLines["lines"]): CombinedPackingRow[] {
+  const byKey = new Map<string, CombinedPackingRow>();
+  const order: string[] = [];
+  for (const line of lines) {
+    const key = line.productId
+      ? `pid:${line.productId}`
+      : `title:${(line.productTitle ?? "").trim().toLowerCase() || `line:${line.id}`}`;
+    let entry = byKey.get(key);
+    if (!entry) {
+      entry = {
+        key,
+        productId: line.productId,
+        isCustom: Boolean(line.isCustom),
+        productTitle: line.productTitle ?? "",
+        productImageUrl: line.productImageUrl ?? null,
+        fabricImageData: line.fabricImageData ?? null,
+        sku: line.sku ?? null,
+        boxNumbers: [],
+        qtys: {},
+        shopifyLoadedQtys: {},
+        manuallyLoadedQtys: {},
+        totalPrice: 0,
+        totalWeight: 0,
+      };
+      byKey.set(key, entry);
+      order.push(key);
+    }
+    if (line.boxNumber && !entry.boxNumbers.includes(line.boxNumber)) {
+      entry.boxNumbers.push(line.boxNumber);
+    }
+    const lineQtys = normalizeQtys(line.qtys);
+    const lineLoaded = normalizeQtys(line.shopifyLoadedQtys);
+    const lineManual = normalizeQtys(line.manuallyLoadedQtys);
+    for (const [size, qty] of Object.entries(lineQtys)) {
+      entry.qtys[size] = (entry.qtys[size] ?? 0) + qty;
+    }
+    for (const [size, qty] of Object.entries(lineLoaded)) {
+      entry.shopifyLoadedQtys[size] = (entry.shopifyLoadedQtys[size] ?? 0) + qty;
+    }
+    for (const [size, qty] of Object.entries(lineManual)) {
+      entry.manuallyLoadedQtys[size] = (entry.manuallyLoadedQtys[size] ?? 0) + qty;
+    }
+    if (typeof line.priceRupees === "number") entry.totalPrice += line.priceRupees;
+    if (typeof line.weight === "number") entry.totalWeight += line.weight;
+  }
+  // Sort box numbers numerically when possible so 1,2,10 reads correctly.
+  for (const entry of byKey.values()) {
+    entry.boxNumbers.sort((a, b) => {
+      const an = Number(a); const bn = Number(b);
+      if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+      return a.localeCompare(b);
+    });
+  }
+  return order.map((key) => byKey.get(key)!).filter(Boolean);
+}
+
+function PackingCombinedRow({
+  row,
+  rowIndex,
+  customColumns,
+  isAdmin,
+  shopDomain,
+  packingId,
+}: {
+  row: CombinedPackingRow;
+  rowIndex: number;
+  customColumns: TableCustomColumn[];
+  isAdmin: boolean;
+  shopDomain: string | null;
+  packingId: number;
+}) {
+  const fetcher = useFetcher();
+  const isLoadedForSize = (size: string) => {
+    const want = row.qtys[size] ?? 0;
+    if (want <= 0) return false;
+    const got = (row.shopifyLoadedQtys[size] ?? 0) + (row.manuallyLoadedQtys[size] ?? 0);
+    return got >= want;
+  };
+  const allSizesLoaded = Object.entries(row.qtys).every(([size, qty]) => qty <= 0 || isLoadedForSize(size));
+  const canLoadThisRow = isAdmin && Boolean(row.productId) && !row.isCustom && !allSizesLoaded;
+  const adminUrl = isAdmin && row.productId && shopDomain
+    ? `https://${shopDomain}/admin/products/${row.productId.replace(/^gid:\/\/shopify\/Product\//, "")}`
+    : null;
+  const total = packingTotal(row.qtys);
+  const value = total * (row.totalPrice / Math.max(1, row.boxNumbers.length || 1));
+  const fabricImageSrc = row.fabricImageData || "";
+  return (
+    <tr style={{ ...s.row, background: "#fafbfc" }}>
+      <RowNumberCell rowNumber={rowIndex + 1} actions={[]} />
+      <PackingTd rowIndex={rowIndex} colIndex={0} center>
+        <span style={{ color: "#6b7280", fontSize: 12, fontWeight: 600 }}>
+          {row.boxNumbers.length ? row.boxNumbers.join(", ") : "—"}
+        </span>
+      </PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={1} center>
+        {row.productImageUrl ? <img src={row.productImageUrl} alt="" style={{ width: 90, height: 110, objectFit: "cover", borderRadius: 4 }} /> : null}
+      </PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={2} center>
+        {fabricImageSrc ? <img src={fabricImageSrc} alt="" style={{ width: 90, height: 110, objectFit: "cover", borderRadius: 4 }} /> : null}
+      </PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={3}>
+        <div style={{ position: "relative", padding: "8px 10px", minHeight: 96 }}>
+          {adminUrl && (
+            <a
+              href={adminUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open product in Shopify admin"
+              style={{
+                position: "absolute",
+                top: 6,
+                left: 6,
+                width: 22,
+                height: 22,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "#ecfeff",
+                border: "1px solid #67e8f9",
+                color: "#0e7490",
+                borderRadius: 4,
+                fontSize: 11,
+                fontWeight: 800,
+                textDecoration: "none",
+              }}
+            >
+              ↗
+            </a>
+          )}
+          <div style={{
+            padding: adminUrl ? "0 0 0 32px" : 0,
+            fontWeight: 700,
+            color: "#111827",
+            fontSize: "var(--portal-table-font-size, 13px)",
+            lineHeight: 1.3,
+          }}>
+            {row.productTitle}
+          </div>
+          {canLoadThisRow && (
+            <button
+              type="button"
+              onClick={() => {
+                if (!window.confirm(`Load inventory for "${row.productTitle}" to Shopify?`)) return;
+                submitPortalCell(
+                  fetcher,
+                  {
+                    intent: "load_packing_inventory_for_product",
+                    packingId,
+                    productId: row.productId ?? "",
+                  },
+                );
+              }}
+              disabled={fetcher.state !== "idle"}
+              style={{
+                position: "absolute",
+                bottom: 6,
+                left: 6,
+                padding: "4px 8px",
+                background: "#0f766e",
+                color: "#fff",
+                border: "none",
+                borderRadius: 4,
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              {fetcher.state !== "idle" ? "Loading…" : "Load inventory"}
+            </button>
+          )}
+          {!canLoadThisRow && row.productId && !row.isCustom && allSizesLoaded && (
+            <span style={{ position: "absolute", bottom: 6, left: 6, color: "#0f766e", fontSize: 11, fontWeight: 700 }}>
+              ✓ Loaded
+            </span>
+          )}
+        </div>
+      </PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={4}>
+        <span style={{ display: "block", padding: "8px 10px", color: "#374151", fontSize: 12, whiteSpace: "pre-wrap" }}>{row.sku ?? ""}</span>
+      </PackingTd>
+      {PACKING_SIZES.map((size, sizeIndex) => (
+        <PackingTd
+          key={size}
+          rowIndex={rowIndex}
+          colIndex={5 + sizeIndex}
+          center
+          style={{ ...(isLoadedForSize(size) ? s.loadedInventoryCell : {}) }}
+        >
+          <span style={{ display: "block", padding: "8px 0", fontWeight: 700, color: isLoadedForSize(size) ? "#fff" : "#111827" }}>
+            {row.qtys[size] || ""}
+          </span>
+        </PackingTd>
+      ))}
+      <PackingTd rowIndex={rowIndex} colIndex={15} center><span style={s.total}>{total}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={16} center><span style={s.total}>{row.totalPrice ? Math.round(row.totalPrice) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={17} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={18} center><span style={s.total}>{row.totalWeight ? Math.round(row.totalWeight) : ""}</span></PackingTd>
+      {customColumns.map((column, customIndex) => (
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={19 + customIndex} />
       ))}
     </tr>
   );

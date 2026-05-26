@@ -108,6 +108,7 @@ model PackingList {
   status                   String            @default("still_packing")
   notes                    String?
   hiddenAt                 DateTime?
+  masterInventoryLoadedAt  DateTime?
   createdAt                DateTime          @default(now())
   updatedAt                DateTime          @updatedAt
   lines                    PackingListLine[]
@@ -140,6 +141,7 @@ model PackingListLine {
   isCustom        Boolean     @default(false)
   qtys            Json        @default("{}")
   shopifyLoadedQtys Json      @default("{}")
+  manuallyLoadedQtys Json     @default("{}")
   priceRupees     Float?
   weight          Float?
   notes           String?
