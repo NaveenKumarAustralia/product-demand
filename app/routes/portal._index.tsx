@@ -11026,9 +11026,21 @@ function PackingListLineRow({
   const isLoadedForSize = (size: string) => qtys[size] > 0 && (
     shopifyLoadedQtys[size] === qtys[size] || manuallyLoadedQtys[size] === qtys[size]
   );
+  const isManuallyMarkedForSize = (size: string) => qtys[size] > 0 && manuallyLoadedQtys[size] === qtys[size];
   const total = packingTotal(qtys);
   const price = line.priceRupees ?? 0;
   const value = total * price;
+  const [sizeMenu, setSizeMenu] = useState<{ x: number; y: number; size: string } | null>(null);
+  useEffect(() => {
+    if (!sizeMenu) return;
+    const close = () => setSizeMenu(null);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [sizeMenu]);
 
   const rowHeightKey = `packing:${line.id}`;
 
@@ -11045,40 +11057,45 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]}><PackingImageCell lineId={line.id} field="productImageUrl" value={line.productImageUrl ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={2} center stickyLeft={frozenOffsets?.[2]}><PackingImageCell lineId={line.id} field="fabricImageData" value={line.fabricImageData ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={3} overflowVisible stickyLeft={frozenOffsets?.[3]} isLastFrozen>
-        <div style={{ position: "relative" }}>
-          {isAdmin && line.productId && shopDomain && (
-            <a
-              href={`https://${shopDomain}/admin/products/${line.productId.replace(/^gid:\/\/shopify\/Product\//, "")}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="Open product in Shopify admin"
-              style={{
-                position: "absolute",
-                top: 4,
-                left: 4,
-                zIndex: 2,
-                width: 22,
-                height: 22,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                background: "#ecfeff",
-                border: "1px solid #67e8f9",
-                color: "#0e7490",
-                borderRadius: 4,
-                fontSize: 11,
-                fontWeight: 800,
-                textDecoration: "none",
-              }}
-            >
-              ↗
-            </a>
-          )}
-          <PackingProductNameCell
-            line={line}
-            updateParams={updateParams}
-          />
-        </div>
+        {(() => {
+          const showLink = isAdmin && line.productId && shopDomain;
+          return (
+            <div style={{ position: "relative", paddingLeft: showLink ? 30 : 0 }}>
+              {showLink && (
+                <a
+                  href={`https://${shopDomain}/admin/products/${line.productId!.replace(/^gid:\/\/shopify\/Product\//, "")}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Open product in Shopify admin"
+                  style={{
+                    position: "absolute",
+                    top: 4,
+                    left: 2,
+                    zIndex: 2,
+                    width: 22,
+                    height: 22,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: "#ecfeff",
+                    border: "1px solid #67e8f9",
+                    color: "#0e7490",
+                    borderRadius: 4,
+                    fontSize: 11,
+                    fontWeight: 800,
+                    textDecoration: "none",
+                  }}
+                >
+                  ↗
+                </a>
+              )}
+              <PackingProductNameCell
+                line={line}
+                updateParams={updateParams}
+              />
+            </div>
+          );
+        })()}
       </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={4}><PackingSkuCell lineId={line.id} value={line.sku ?? ""} /></PackingTd>
       {PACKING_SIZES.map((size, sizeIndex) => (
@@ -11092,10 +11109,8 @@ function PackingListLineRow({
           }}
           onContextMenu={(e) => {
             e.preventDefault();
-            if (isAdmin && e.shiftKey) {
-              const want = qtys[size] ?? 0;
-              if (want <= 0) return;
-              submitPortalCell(fetcher, { intent: "toggle_packing_qty_manual_loaded", lineId: line.id, size });
+            if (isAdmin) {
+              setSizeMenu({ x: e.clientX, y: e.clientY, size });
               return;
             }
             document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List Line", entityId: String(line.id), field: `Qty (${size})`, entityName: line.productTitle } }));
@@ -11119,7 +11134,7 @@ function PackingListLineRow({
             )}
             title={quantitiesLocked
               ? "Quantities are locked once the list moves past Still packing"
-              : (isAdmin ? "Right-click for history · Shift+right-click to toggle 'loaded in Shopify' highlight" : undefined)}
+              : (isAdmin ? "Right-click for options (mark loaded / history)" : undefined)}
             style={{
               ...s.qtyInput,
               ...(isLoadedForSize(size) ? { color: "#fff" } : {}),
@@ -11137,6 +11152,71 @@ function PackingListLineRow({
           <TableCustomCell cellKey={`packing:${line.id}:${column.id}`} value={customCells[`packing:${line.id}:${column.id}`] ?? ""} />
         </PackingTd>
       ))}
+      {sizeMenu && typeof document !== "undefined" && createPortal(
+        <div
+          onMouseDown={(event) => event.stopPropagation()}
+          style={{
+            position: "fixed",
+            left: sizeMenu.x,
+            top: sizeMenu.y,
+            background: "#fff",
+            border: "1px solid #cbd5e1",
+            borderRadius: 6,
+            boxShadow: "0 10px 24px rgba(15,23,42,0.18)",
+            padding: 4,
+            zIndex: 10000,
+            minWidth: 220,
+          }}
+        >
+          <button
+            type="button"
+            disabled={(qtys[sizeMenu.size] ?? 0) <= 0}
+            style={{
+              display: "block",
+              width: "100%",
+              padding: "8px 12px",
+              background: "transparent",
+              border: "none",
+              textAlign: "left",
+              cursor: (qtys[sizeMenu.size] ?? 0) > 0 ? "pointer" : "not-allowed",
+              fontSize: 13,
+              fontWeight: 600,
+              color: (qtys[sizeMenu.size] ?? 0) > 0 ? "#1f2937" : "#94a3b8",
+            }}
+            onClick={() => {
+              const size = sizeMenu.size;
+              setSizeMenu(null);
+              if ((qtys[size] ?? 0) <= 0) return;
+              submitPortalCell(fetcher, { intent: "toggle_packing_qty_manual_loaded", lineId: line.id, size });
+            }}
+          >
+            {isManuallyMarkedForSize(sizeMenu.size) ? "✓ Unmark as loaded in Shopify" : "Mark as loaded in Shopify"}
+          </button>
+          <button
+            type="button"
+            style={{
+              display: "block",
+              width: "100%",
+              padding: "8px 12px",
+              background: "transparent",
+              border: "none",
+              textAlign: "left",
+              cursor: "pointer",
+              fontSize: 13,
+              fontWeight: 600,
+              color: "#1f2937",
+            }}
+            onClick={() => {
+              const { x, y, size } = sizeMenu;
+              setSizeMenu(null);
+              document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x, y, entity: "Packing List Line", entityId: String(line.id), field: `Qty (${size})`, entityName: line.productTitle } }));
+            }}
+          >
+            View history
+          </button>
+        </div>,
+        document.body,
+      )}
     </tr>
   );
 }
@@ -11160,7 +11240,14 @@ type CombinedPackingRow = {
 function buildCombinedPackingRows(lines: PackingListWithLines["lines"]): CombinedPackingRow[] {
   const byKey = new Map<string, CombinedPackingRow>();
   const order: string[] = [];
+  // Convention: only the first row of a new box has the box number written in;
+  // subsequent rows in the same box leave it blank. Track the "current box" as
+  // we iterate so inherited rows still attribute to the right box.
+  let currentBox = "";
   for (const line of lines) {
+    const explicitBox = (line.boxNumber ?? "").trim();
+    if (explicitBox) currentBox = explicitBox;
+    const effectiveBox = currentBox;
     const key = line.productId
       ? `pid:${line.productId}`
       : `title:${(line.productTitle ?? "").trim().toLowerCase() || `line:${line.id}`}`;
@@ -11184,8 +11271,8 @@ function buildCombinedPackingRows(lines: PackingListWithLines["lines"]): Combine
       byKey.set(key, entry);
       order.push(key);
     }
-    if (line.boxNumber && !entry.boxNumbers.includes(line.boxNumber)) {
-      entry.boxNumbers.push(line.boxNumber);
+    if (effectiveBox && !entry.boxNumbers.includes(effectiveBox)) {
+      entry.boxNumbers.push(effectiveBox);
     }
     const lineQtys = normalizeQtys(line.qtys);
     const lineLoaded = normalizeQtys(line.shopifyLoadedQtys);
