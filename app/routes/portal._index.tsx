@@ -1083,34 +1083,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const packingId = Number(form.get("packingId"));
     const action = String(form.get("action") ?? "");
     if (!packingId || (action !== "mark" && action !== "unmark")) return null;
-    let cells: { productId: string; size: string }[] = [];
+    let cells: { lineId: number; size: string }[] = [];
     try {
       const raw = JSON.parse(String(form.get("cells") ?? "[]"));
       if (Array.isArray(raw)) {
         cells = raw
           .map((entry) => ({
-            productId: String(entry?.productId ?? ""),
+            lineId: Number(entry?.lineId ?? 0),
             size: String(entry?.size ?? ""),
           }))
-          .filter((entry) => entry.productId && entry.size);
+          .filter((entry) => Number.isFinite(entry.lineId) && entry.lineId > 0 && entry.size);
       }
     } catch {
       return null;
     }
     if (!cells.length) return null;
-    const productIds = Array.from(new Set(cells.map((cell) => cell.productId)));
+    const lineIds = Array.from(new Set(cells.map((cell) => cell.lineId)));
     const lines = await prisma.packingListLine.findMany({
-      where: { packingListId: packingId, productId: { in: productIds } },
-      select: { id: true, productId: true, qtys: true, manuallyLoadedQtys: true },
+      where: { packingListId: packingId, id: { in: lineIds } },
+      select: { id: true, qtys: true, manuallyLoadedQtys: true },
     });
-    const sizesByProduct = new Map<string, Set<string>>();
+    const sizesByLine = new Map<number, Set<string>>();
     for (const cell of cells) {
-      let set = sizesByProduct.get(cell.productId);
-      if (!set) { set = new Set(); sizesByProduct.set(cell.productId, set); }
+      let set = sizesByLine.get(cell.lineId);
+      if (!set) { set = new Set(); sizesByLine.set(cell.lineId, set); }
       set.add(cell.size);
     }
     for (const line of lines) {
-      const sizes = line.productId ? sizesByProduct.get(line.productId) : null;
+      const sizes = sizesByLine.get(line.id);
       if (!sizes || !sizes.size) continue;
       const qtys = normalizeQtys(line.qtys);
       const manual = normalizeQtys(line.manuallyLoadedQtys);
@@ -1140,10 +1140,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const lines = await prisma.packingListLine.findMany({
       where: {
         packingListId: packingId,
-        isCustom: false,
         OR: [{ productId: null }, { productId: "" }],
       },
-      select: { id: true, productTitle: true, productImageUrl: true },
+      select: { id: true, productTitle: true, productImageUrl: true, isCustom: true },
     });
     let relinked = 0;
     // Cache by normalized title so duplicate titles in the same list only hit
@@ -1167,6 +1166,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         where: { id: line.id },
         data: {
           productId: matched.id,
+          ...(line.isCustom ? { isCustom: false } : {}),
           ...(line.productImageUrl ? {} : { productImageUrl: matched.imageUrl ?? undefined }),
         },
       });
@@ -10714,10 +10714,10 @@ function PackingListDetail({
   const [combineView, setCombineView] = useState(false);
   const bulkLoadedFetcher = useFetcher();
   const relinkFetcher = useFetcher<{ relinked: number; scanned: number; error?: string }>();
-  const unlinkedLinesCount = packingList.lines.filter((line) => !line.isCustom && !line.productId).length;
+  const unlinkedLinesCount = packingList.lines.filter((line) => !line.productId && (line.productTitle ?? "").trim().length > 0).length;
   const [combinedSelectedCells, setCombinedSelectedCells] = useState<Set<string>>(new Set());
   const [combinedAnchorCell, setCombinedAnchorCell] = useState<string | null>(null);
-  const [combinedCellMenu, setCombinedCellMenu] = useState<{ x: number; y: number; cells: { productId: string; size: string }[] } | null>(null);
+  const [combinedCellMenu, setCombinedCellMenu] = useState<{ x: number; y: number; cells: { lineId: number; size: string }[] } | null>(null);
   useEffect(() => {
     if (!combineView) {
       setCombinedSelectedCells(new Set());
@@ -11087,20 +11087,31 @@ function PackingListDetail({
           <tbody>
             {combineView ? (() => {
               const combinedRows = buildCombinedPackingRows(visiblePackingLines);
-              const productRowIndex = new Map<string, number>();
+              const rowKeyToIndex = new Map<string, number>();
+              const rowKeyToLineIds = new Map<string, number[]>();
               combinedRows.forEach((row, idx) => {
-                if (row.productId) productRowIndex.set(row.productId, idx);
+                rowKeyToIndex.set(row.key, idx);
+                rowKeyToLineIds.set(row.key, row.lineIds);
               });
-              const cellKey = (productId: string, size: string) => `${productId}:${size}`;
-              const parseCellKey = (key: string): { productId: string; size: string } => {
-                const sepIdx = key.lastIndexOf(":");
-                return { productId: key.slice(0, sepIdx), size: key.slice(sepIdx + 1) };
+              const cellKey = (rowKey: string, size: string) => `${rowKey}|${size}`;
+              const parseCellKey = (key: string): { rowKey: string; size: string } => {
+                const sepIdx = key.lastIndexOf("|");
+                return { rowKey: key.slice(0, sepIdx), size: key.slice(sepIdx + 1) };
+              };
+              const expandToLineCells = (selectionKeys: string[]): { lineId: number; size: string }[] => {
+                const out: { lineId: number; size: string }[] = [];
+                for (const key of selectionKeys) {
+                  const { rowKey, size } = parseCellKey(key);
+                  const lineIds = rowKeyToLineIds.get(rowKey) ?? [];
+                  for (const lineId of lineIds) out.push({ lineId, size });
+                }
+                return out;
               };
               const buildRectSelection = (anchor: string, target: string): Set<string> => {
                 const a = parseCellKey(anchor);
                 const b = parseCellKey(target);
-                const ar = productRowIndex.get(a.productId);
-                const br = productRowIndex.get(b.productId);
+                const ar = rowKeyToIndex.get(a.rowKey);
+                const br = rowKeyToIndex.get(b.rowKey);
                 if (ar === undefined || br === undefined) return new Set([target]);
                 const ac = PACKING_SIZES.indexOf(a.size);
                 const bc = PACKING_SIZES.indexOf(b.size);
@@ -11110,16 +11121,15 @@ function PackingListDetail({
                 const next = new Set<string>();
                 for (let r = r1; r <= r2; r += 1) {
                   const row = combinedRows[r];
-                  if (!row.productId) continue;
                   for (let c = c1; c <= c2; c += 1) {
                     const size = PACKING_SIZES[c];
-                    if ((row.qtys[size] ?? 0) > 0) next.add(cellKey(row.productId, size));
+                    if ((row.qtys[size] ?? 0) > 0) next.add(cellKey(row.key, size));
                   }
                 }
                 return next;
               };
-              const handleCellClick = (productId: string, size: string, event: React.MouseEvent) => {
-                const key = cellKey(productId, size);
+              const handleCellClick = (rowKey: string, size: string, event: React.MouseEvent) => {
+                const key = cellKey(rowKey, size);
                 if (event.shiftKey && combinedAnchorCell) {
                   setCombinedSelectedCells(buildRectSelection(combinedAnchorCell, key));
                 } else if (event.metaKey || event.ctrlKey) {
@@ -11132,9 +11142,9 @@ function PackingListDetail({
                   setCombinedAnchorCell(key);
                 }
               };
-              const handleCellContextMenu = (productId: string, size: string, event: React.MouseEvent) => {
+              const handleCellContextMenu = (rowKey: string, size: string, event: React.MouseEvent) => {
                 event.preventDefault();
-                const key = cellKey(productId, size);
+                const key = cellKey(rowKey, size);
                 let cells = combinedSelectedCells;
                 if (!cells.has(key)) {
                   cells = new Set([key]);
@@ -11144,7 +11154,7 @@ function PackingListDetail({
                 setCombinedCellMenu({
                   x: event.clientX,
                   y: event.clientY,
-                  cells: Array.from(cells).map(parseCellKey),
+                  cells: expandToLineCells(Array.from(cells)),
                 });
               };
               return combinedRows.map((row, rowIndex) => (
@@ -11436,6 +11446,7 @@ type CombinedPackingRow = {
   fabricImageData: string | null;
   sku: string | null;
   boxNumbers: string[];
+  lineIds: number[];
   qtys: Record<string, number>;
   shopifyLoadedQtys: Record<string, number>;
   manuallyLoadedQtys: Record<string, number>;
@@ -11468,6 +11479,7 @@ function buildCombinedPackingRows(lines: PackingListWithLines["lines"]): Combine
         fabricImageData: line.fabricImageData ?? null,
         sku: line.sku ?? null,
         boxNumbers: [],
+        lineIds: [],
         qtys: {},
         shopifyLoadedQtys: {},
         manuallyLoadedQtys: {},
@@ -11480,6 +11492,7 @@ function buildCombinedPackingRows(lines: PackingListWithLines["lines"]): Combine
     if (effectiveBox && !entry.boxNumbers.includes(effectiveBox)) {
       entry.boxNumbers.push(effectiveBox);
     }
+    entry.lineIds.push(line.id);
     const lineQtys = normalizeQtys(line.qtys);
     const lineLoaded = normalizeQtys(line.shopifyLoadedQtys);
     const lineManual = normalizeQtys(line.manuallyLoadedQtys);
@@ -11524,8 +11537,8 @@ function PackingCombinedRow({
   shopDomain: string | null;
   packingId: number;
   selectedCells: Set<string>;
-  onCellClick: (productId: string, size: string, event: React.MouseEvent) => void;
-  onCellContextMenu: (productId: string, size: string, event: React.MouseEvent) => void;
+  onCellClick: (rowKey: string, size: string, event: React.MouseEvent) => void;
+  onCellContextMenu: (rowKey: string, size: string, event: React.MouseEvent) => void;
 }) {
   const fetcher = useFetcher();
   const isLoadedForSize = (size: string) => {
@@ -11610,9 +11623,9 @@ function PackingCombinedRow({
       </PackingTd>
       {PACKING_SIZES.map((size, sizeIndex) => {
         const hasQty = (row.qtys[size] ?? 0) > 0;
-        const canSelect = isAdmin && hasQty && Boolean(row.productId);
-        const cellKey = row.productId ? `${row.productId}:${size}` : "";
-        const isSelected = canSelect && cellKey ? selectedCells.has(cellKey) : false;
+        const canSelect = isAdmin && hasQty;
+        const cellKey = `${row.key}|${size}`;
+        const isSelected = canSelect ? selectedCells.has(cellKey) : false;
         return (
           <PackingTd
             key={size}
@@ -11625,10 +11638,10 @@ function PackingCombinedRow({
               ...(isSelected ? { outline: "2px solid #2563eb", outlineOffset: -2, position: "relative", zIndex: 1 } : {}),
             }}
             onClick={canSelect ? (event) => {
-              onCellClick(row.productId!, size, event);
+              onCellClick(row.key, size, event);
             } : undefined}
             onContextMenu={canSelect ? (event) => {
-              onCellContextMenu(row.productId!, size, event);
+              onCellContextMenu(row.key, size, event);
             } : undefined}
           >
             <span
