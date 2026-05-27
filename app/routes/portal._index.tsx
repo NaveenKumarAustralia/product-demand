@@ -10613,7 +10613,7 @@ function PackingListDetail({
   // they freeze (and status can't revert to still_packing) — unless an admin.
   const quantitiesLocked = (packingList.status ?? "still_packing") !== "still_packing" && !canEditLockedQuantities;
   const packingColumns = [
-    ...PACKING_COLUMNS,
+    ...PACKING_COLUMNS.filter((col) => col.id !== "shopify" || combineView),
     ...customColumns.map((column) => ({ id: column.id, label: column.label, width: 130, center: false })),
   ];
   const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
@@ -10961,6 +10961,7 @@ function PackingListDetail({
                 quantitiesLocked={quantitiesLocked}
                 isAdmin={isAdmin}
                 shopDomain={shopDomain}
+                showShopifyColumn={combineView}
               />
               );
             }) : (
@@ -11037,6 +11038,7 @@ function PackingListLineRow({
   quantitiesLocked,
   isAdmin,
   shopDomain,
+  showShopifyColumn,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -11048,6 +11050,7 @@ function PackingListLineRow({
   quantitiesLocked: boolean;
   isAdmin: boolean;
   shopDomain: string | null;
+  showShopifyColumn: boolean;
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -11125,31 +11128,33 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={16} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={17} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={18} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={19} center>
-        {isAdmin && line.productId && shopDomain ? (
-          <a
-            href={`https://${shopDomain}/admin/products/${line.productId.replace(/^gid:\/\/shopify\/Product\//, "")}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            title="Open product in Shopify admin"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: "4px 10px",
-              background: "#ecfeff",
-              border: "1px solid #67e8f9",
-              color: "#0e7490",
-              borderRadius: 4,
-              fontSize: 12,
-              fontWeight: 700,
-              textDecoration: "none",
-            }}
-          >
-            Open ↗
-          </a>
-        ) : null}
-      </PackingTd>
+      {showShopifyColumn && (
+        <PackingTd rowIndex={rowIndex} colIndex={19} center>
+          {isAdmin && line.productId && shopDomain ? (
+            <a
+              href={`https://${shopDomain}/admin/products/${line.productId.replace(/^gid:\/\/shopify\/Product\//, "")}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open product in Shopify admin"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "4px 10px",
+                background: "#ecfeff",
+                border: "1px solid #67e8f9",
+                color: "#0e7490",
+                borderRadius: 4,
+                fontSize: 12,
+                fontWeight: 700,
+                textDecoration: "none",
+              }}
+            >
+              Open ↗
+            </a>
+          ) : null}
+        </PackingTd>
+      )}
       {customColumns.map((column, customIndex) => (
         <PackingTd key={column.id} rowIndex={rowIndex} colIndex={20 + customIndex}>
           <TableCustomCell cellKey={`packing:${line.id}:${column.id}`} value={customCells[`packing:${line.id}:${column.id}`] ?? ""} />
