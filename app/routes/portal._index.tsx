@@ -879,15 +879,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const lineId = Number(form.get("lineId"));
     const product = JSON.parse(String(form.get("product") ?? "{}")) as ShopifySearchProduct;
     if (!lineId || !product?.id) return null;
+    // Existing packed quantities (and any manual "loaded" marks) must survive
+    // linking — the row already represents real packed goods. shopifyLoadedQtys
+    // is cleared because the row is now pointing at a different product.
+    const existing = await prisma.packingListLine.findUnique({
+      where: { id: lineId },
+      select: { sku: true, productImageUrl: true },
+    });
     await prisma.packingListLine.update({
       where: { id: lineId },
       data: {
         productId: product.id,
         productTitle: product.title || "Untitled product",
-        productImageUrl: product.imageUrl || null,
-        sku: product.skus?.filter(Boolean).join("\n") || null,
+        productImageUrl: existing?.productImageUrl || product.imageUrl || null,
+        sku: existing?.sku || product.skus?.filter(Boolean).join("\n") || null,
         isCustom: false,
-        qtys: Object.fromEntries((product.sizes ?? []).map((size) => [size, 0])),
         shopifyLoadedQtys: {},
       },
     });
