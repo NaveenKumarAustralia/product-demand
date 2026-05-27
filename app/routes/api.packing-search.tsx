@@ -2,7 +2,21 @@ import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { unauthenticated } from "../shopify.server";
 
-const VALID_SIZES = new Set(["XS", "S", "M", "L", "XL", "2XL", "3XL", "S-M", "M-L", "L-XL"]);
+// Find the "Size" selected-option's value. Falls back to "Free Size" for a
+// product that has exactly one variant with no Size option. Returns null
+// (so the variant is dropped) for multi-variant products with no Size
+// option — those would otherwise collapse to a single ambiguous row.
+const extractSizeLabel = (
+  selectedOptions: { name?: string | null; value?: string | null }[] | undefined,
+  totalVariantCount: number,
+): string | null => {
+  const sizeOption = (selectedOptions ?? []).find(
+    (option) => (option?.name ?? "").trim().toLowerCase() === "size",
+  );
+  if (sizeOption?.value && sizeOption.value.trim()) return sizeOption.value.trim();
+  if (totalVariantCount === 1) return "Free Size";
+  return null;
+};
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
@@ -49,14 +63,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const mapJson = (json: any, shop: string) =>
     (json?.data?.products?.edges ?? []).map((edge: any) => {
       const seen = new Set<string>();
-      const variants = (edge.node.variants?.edges ?? [])
-        .map((e: any) => e.node)
-        .map((v: any) => {
-          const size = (v.selectedOptions as { name: string; value: string }[] | undefined)
-            ?.map((o) => o.value)
-            .find((val) => VALID_SIZES.has(val)) ?? null;
-          return { raw: v, size };
-        })
+      const rawVariants = (edge.node.variants?.edges ?? []).map((e: any) => e.node);
+      const variants = rawVariants
+        .map((v: any) => ({ raw: v, size: extractSizeLabel(v.selectedOptions, rawVariants.length) }))
         .filter(({ size }: { size: string | null }) => {
           if (!size || seen.has(size)) return false;
           seen.add(size);

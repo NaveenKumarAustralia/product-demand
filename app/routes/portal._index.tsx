@@ -882,10 +882,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // Existing packed quantities (and any manual "loaded" marks) must survive
     // linking — the row already represents real packed goods. shopifyLoadedQtys
     // is cleared because the row is now pointing at a different product.
+    // We do seed any of the product's sizes that aren't yet present with 0,
+    // so the size column appears in the table even before the user fills it
+    // in — needed for non-baseline sizes like "Free Size" or "XL-2XL" that
+    // are derived from the line data.
     const existing = await prisma.packingListLine.findUnique({
       where: { id: lineId },
-      select: { sku: true, productImageUrl: true },
+      select: { sku: true, productImageUrl: true, qtys: true },
     });
+    const mergedQtys = { ...normalizeQtys(existing?.qtys) };
+    for (const size of product.sizes ?? []) {
+      if (size && !(size in mergedQtys)) mergedQtys[size] = 0;
+    }
     await prisma.packingListLine.update({
       where: { id: lineId },
       data: {
@@ -894,6 +902,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         productImageUrl: existing?.productImageUrl || product.imageUrl || null,
         sku: existing?.sku || product.skus?.filter(Boolean).join("\n") || null,
         isCustom: false,
+        qtys: mergedQtys,
         shopifyLoadedQtys: {},
       },
     });
@@ -2326,19 +2335,49 @@ const PACKING_STATUS_OPTIONS = [
 ];
 const PACKING_SIZES = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
 const DEFAULT_PACKING_ROWS = 5;
-const PACKING_COLUMNS = [
+const PACKING_COLUMNS_BEFORE_SIZES = [
   { id: "box", label: "Box", width: 70, center: true },
   { id: "picture", label: "Picture", width: 150, center: true },
   { id: "fabric", label: "Fabric Image", width: 150, center: true },
   { id: "name", label: "Name", width: 320 },
   { id: "sku", label: "SKU", width: 220 },
-  ...PACKING_SIZES.map((size) => ({ id: `qty:${size}`, label: size, width: 76, center: true })),
+];
+const PACKING_COLUMNS_AFTER_SIZES = [
   { id: "total", label: "Total", width: 82, center: true },
   { id: "price", label: "Price ₹", width: 92, center: true },
   { id: "value", label: "Value ₹", width: 96, center: true },
   { id: "weight", label: "Weight", width: 90, center: true },
   { id: "shopify", label: "Shopify", width: 84, center: true },
 ];
+// Builds the size column list for a given packing list, merging the
+// baseline (XS..3XL plus the slash combos) with any extra size keys
+// present in the lines themselves (Free Size, XL-2XL, etc). Baseline
+// columns come first in their canonical order; extras come after in the
+// order they first appear in the data — keeps the layout stable for
+// standard lists while still surfacing one-off sizes.
+function derivePackingSizes(lines: Array<{ qtys?: unknown }>): string[] {
+  const baselineSet = new Set(PACKING_SIZES);
+  const extras: string[] = [];
+  const seenExtras = new Set<string>();
+  for (const line of lines) {
+    const qtys = normalizeQtys(line.qtys);
+    for (const key of Object.keys(qtys)) {
+      const trimmed = key.trim();
+      if (!trimmed || baselineSet.has(trimmed) || seenExtras.has(trimmed)) continue;
+      seenExtras.add(trimmed);
+      extras.push(trimmed);
+    }
+  }
+  return [...PACKING_SIZES, ...extras];
+}
+function packingColumnsForSizes(sizes: string[]) {
+  return [
+    ...PACKING_COLUMNS_BEFORE_SIZES,
+    ...sizes.map((size) => ({ id: `qty:${size}`, label: size, width: 76, center: true })),
+    ...PACKING_COLUMNS_AFTER_SIZES,
+  ];
+}
+const PACKING_COLUMNS = packingColumnsForSizes(PACKING_SIZES);
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
 };
@@ -4050,20 +4089,12 @@ async function searchShopifyProducts(query: string): Promise<ShopifySearchProduc
     }
   `;
 
-  const VALID_SIZES = new Set(["XS", "S", "M", "L", "XL", "2XL", "3XL", "S-M", "M-L", "L-XL"]);
-
   const mapProducts = (json: any): ShopifySearchProduct[] => (json?.data?.products?.edges ?? []).map((edge: any) => {
     const rawVariants: any[] = (edge.node.variants?.edges ?? []).map((variantEdge: any) => variantEdge.node);
 
     const seen = new Set<string>();
     const sizeVariants = rawVariants
-      .map((v: any) => {
-        const sizeValue: string | null =
-          (v.selectedOptions as { name: string; value: string }[] | undefined)
-            ?.map((o) => o.value)
-            .find((val) => VALID_SIZES.has(val)) ?? null;
-        return { raw: v, sizeValue };
-      })
+      .map((v: any) => ({ raw: v, sizeValue: extractShopifySizeLabel(v.selectedOptions, rawVariants.length) }))
       .filter(({ sizeValue }) => {
         if (!sizeValue || seen.has(sizeValue)) return false;
         seen.add(sizeValue);
@@ -4227,6 +4258,25 @@ function normalizeVariantSizeLabel(value: string) {
   return value.trim().toLowerCase().replace(/\s+/g, "").replace(/-/g, "/");
 }
 
+// Derive a packing-list-friendly size label for a Shopify variant.
+// Returns the explicit "Size" option value when one exists (so XL-2XL, Free,
+// or any custom size label is preserved). When a product has exactly one
+// variant with no Size option, returns the "Free Size" sentinel so the
+// packing list can still target it. Multi-option products without a Size
+// option (e.g. Color-only) are deliberately skipped to avoid pushing
+// inventory to an ambiguous variant.
+function extractShopifySizeLabel(
+  selectedOptions: { name?: string | null; value?: string | null }[] | undefined | null,
+  totalVariantCount: number,
+): string | null {
+  const sizeOption = (selectedOptions ?? []).find(
+    (option) => (option?.name ?? "").trim().toLowerCase() === "size",
+  );
+  if (sizeOption?.value && sizeOption.value.trim()) return sizeOption.value.trim();
+  if (totalVariantCount === 1) return "Free Size";
+  return null;
+}
+
 function matchingVariantForSize(variants: ShopifyVariantInfo[], size: string) {
   const normalizedSize = normalizeVariantSizeLabel(size);
   return variants.find((variant) => normalizeVariantSizeLabel(variant.title) === normalizedSize) ?? null;
@@ -4274,6 +4324,7 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
             id
             title
             sku
+            selectedOptions { name value }
             inventoryItem {
               id
               inventoryLevels(first: 20) {
@@ -4292,10 +4343,25 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
   `;
   const json = await shopifyGraphql<any>(session.shop, session.accessToken, graphqlQuery, { id: productId });
 
-  return (json?.data?.product?.variants?.nodes ?? [])
+  const nodes: any[] = json?.data?.product?.variants?.nodes ?? [];
+  // Relabel the lone default-title variant of a single-variant product to the
+  // "Free Size" sentinel so matchingVariantForSize("Free Size", …) finds it.
+  // For everything else, preserve the original variant title so existing
+  // size-only and multi-option products keep matching the way they did
+  // before (size-only: title is already the size; multi-option: title stays
+  // "Red / M" and is intentionally skipped by the matcher).
+  const isFreeSize = nodes.length === 1 && (() => {
+    const opts = (nodes[0]?.selectedOptions ?? []) as { name?: string | null; value?: string | null }[];
+    if (!opts.length) return true;
+    const hasSize = opts.some((o) => (o?.name ?? "").trim().toLowerCase() === "size");
+    if (hasSize) return false;
+    return opts.every((o) => (o?.name ?? "") === "Title" && (o?.value ?? "") === "Default Title");
+  })();
+
+  return nodes
     .map((variant: any) => ({
       id: String(variant.id ?? ""),
-      title: String(variant.title ?? ""),
+      title: isFreeSize ? "Free Size" : String(variant.title ?? ""),
       sku: variant.sku ? String(variant.sku) : null,
       availableInventory: shopifyVariantAvailableInventory(variant),
       inventoryItemId: variant.inventoryItem?.id ? String(variant.inventoryItem.id) : null,
@@ -10738,8 +10804,9 @@ function PackingListDetail({
   // Quantities are editable only while "still_packing"; once it moves past that
   // they freeze (and status can't revert to still_packing) — unless an admin.
   const quantitiesLocked = (packingList.status ?? "still_packing") !== "still_packing" && !canEditLockedQuantities;
+  const packingSizes = derivePackingSizes(packingList.lines);
   const packingColumns = [
-    ...PACKING_COLUMNS.filter((col) => col.id !== "shopify" || combineView),
+    ...packingColumnsForSizes(packingSizes).filter((col) => col.id !== "shopify" || combineView),
     ...customColumns.map((column) => ({ id: column.id, label: column.label, width: 130, center: false })),
   ];
   const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
@@ -10753,7 +10820,7 @@ function PackingListDetail({
       "Box",
       "Name",
       "SKU",
-      ...PACKING_SIZES,
+      ...packingSizes,
       "Total",
       "Price rupees",
       "Value rupees",
@@ -10767,7 +10834,7 @@ function PackingListDetail({
         line.boxNumber ?? "",
         line.productTitle,
         line.sku ?? "",
-        ...PACKING_SIZES.map((size) => qtys[size] || ""),
+        ...packingSizes.map((size) => qtys[size] || ""),
         total || "",
         line.priceRupees ?? "",
         total && price ? Math.round(total * price) : "",
@@ -10785,7 +10852,7 @@ function PackingListDetail({
       "TOTAL",
       "",
       "",
-      ...PACKING_SIZES.map(() => ""),
+      ...packingSizes.map(() => ""),
       totalQty || "",
       "",
       totalValue || "",
@@ -11113,8 +11180,8 @@ function PackingListDetail({
                 const ar = rowKeyToIndex.get(a.rowKey);
                 const br = rowKeyToIndex.get(b.rowKey);
                 if (ar === undefined || br === undefined) return new Set([target]);
-                const ac = PACKING_SIZES.indexOf(a.size);
-                const bc = PACKING_SIZES.indexOf(b.size);
+                const ac = packingSizes.indexOf(a.size);
+                const bc = packingSizes.indexOf(b.size);
                 if (ac < 0 || bc < 0) return new Set([target]);
                 const r1 = Math.min(ar, br); const r2 = Math.max(ar, br);
                 const c1 = Math.min(ac, bc); const c2 = Math.max(ac, bc);
@@ -11122,7 +11189,7 @@ function PackingListDetail({
                 for (let r = r1; r <= r2; r += 1) {
                   const row = combinedRows[r];
                   for (let c = c1; c <= c2; c += 1) {
-                    const size = PACKING_SIZES[c];
+                    const size = packingSizes[c];
                     if ((row.qtys[size] ?? 0) > 0) next.add(cellKey(row.key, size));
                   }
                 }
@@ -11169,6 +11236,7 @@ function PackingListDetail({
                   selectedCells={combinedSelectedCells}
                   onCellClick={handleCellClick}
                   onCellContextMenu={handleCellContextMenu}
+                  sizes={packingSizes}
                 />
               ));
             })() : (visiblePackingLines.length ? visiblePackingLines.map((line, rowIndex) => {
@@ -11192,6 +11260,7 @@ function PackingListDetail({
                 isAdmin={isAdmin}
                 shopDomain={shopDomain}
                 showShopifyColumn={combineView}
+                sizes={packingSizes}
               />
               );
             }) : (
@@ -11312,6 +11381,7 @@ function PackingListLineRow({
   isAdmin,
   shopDomain,
   showShopifyColumn,
+  sizes,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -11324,6 +11394,7 @@ function PackingListLineRow({
   isAdmin: boolean;
   shopDomain: string | null;
   showShopifyColumn: boolean;
+  sizes: string[];
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -11359,7 +11430,7 @@ function PackingListLineRow({
         />
       </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={4}><PackingSkuCell lineId={line.id} value={line.sku ?? ""} /></PackingTd>
-      {PACKING_SIZES.map((size, sizeIndex) => (
+      {sizes.map((size, sizeIndex) => (
         <PackingTd
           key={size}
           rowIndex={rowIndex}
@@ -11397,12 +11468,12 @@ function PackingListLineRow({
           />
         </PackingTd>
       ))}
-      <PackingTd rowIndex={rowIndex} colIndex={15} center><span style={s.total}>{total}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={16} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={17} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={18} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
       {showShopifyColumn && (
-        <PackingTd rowIndex={rowIndex} colIndex={19} center>
+        <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center>
           {isAdmin && line.productId && shopDomain ? (
             <a
               href={`https://${shopDomain}/admin/products/${line.productId.replace(/^gid:\/\/shopify\/Product\//, "")}`}
@@ -11429,7 +11500,7 @@ function PackingListLineRow({
         </PackingTd>
       )}
       {customColumns.map((column, customIndex) => (
-        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={20 + customIndex}>
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={10 + sizes.length + customIndex}>
           <TableCustomCell cellKey={`packing:${line.id}:${column.id}`} value={customCells[`packing:${line.id}:${column.id}`] ?? ""} />
         </PackingTd>
       ))}
@@ -11529,6 +11600,7 @@ function PackingCombinedRow({
   selectedCells,
   onCellClick,
   onCellContextMenu,
+  sizes,
 }: {
   row: CombinedPackingRow;
   rowIndex: number;
@@ -11539,6 +11611,7 @@ function PackingCombinedRow({
   selectedCells: Set<string>;
   onCellClick: (rowKey: string, size: string, event: React.MouseEvent) => void;
   onCellContextMenu: (rowKey: string, size: string, event: React.MouseEvent) => void;
+  sizes: string[];
 }) {
   const fetcher = useFetcher();
   const isLoadedForSize = (size: string) => {
@@ -11621,7 +11694,7 @@ function PackingCombinedRow({
       <PackingTd rowIndex={rowIndex} colIndex={4}>
         <span style={{ display: "block", padding: "8px 10px", color: "#374151", fontSize: 12, whiteSpace: "pre-wrap" }}>{row.sku ?? ""}</span>
       </PackingTd>
-      {PACKING_SIZES.map((size, sizeIndex) => {
+      {sizes.map((size, sizeIndex) => {
         const hasQty = (row.qtys[size] ?? 0) > 0;
         const canSelect = isAdmin && hasQty;
         const cellKey = `${row.key}|${size}`;
@@ -11653,11 +11726,11 @@ function PackingCombinedRow({
           </PackingTd>
         );
       })}
-      <PackingTd rowIndex={rowIndex} colIndex={15} center><span style={s.total}>{total}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={16} center><span style={s.total}>{row.totalPrice ? Math.round(row.totalPrice) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={17} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={18} center><span style={s.total}>{row.totalWeight ? Math.round(row.totalWeight) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={19} center>
+      <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><span style={s.total}>{row.totalPrice ? Math.round(row.totalPrice) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center><span style={s.total}>{row.totalWeight ? Math.round(row.totalWeight) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center>
         {adminUrl ? (
           <a
             href={adminUrl}
@@ -11683,7 +11756,7 @@ function PackingCombinedRow({
         ) : null}
       </PackingTd>
       {customColumns.map((column, customIndex) => (
-        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={20 + customIndex} />
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={10 + sizes.length + customIndex} />
       ))}
     </tr>
   );
