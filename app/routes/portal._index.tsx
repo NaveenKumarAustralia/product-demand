@@ -1128,6 +1128,47 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "relink_packing_lines_to_shopify") {
+    const packingId = Number(form.get("packingId"));
+    if (!packingId) return jsonResponse({ relinked: 0, scanned: 0, error: "missing_packing_id" });
+    const lines = await prisma.packingListLine.findMany({
+      where: {
+        packingListId: packingId,
+        isCustom: false,
+        OR: [{ productId: null }, { productId: "" }],
+      },
+      select: { id: true, productTitle: true, productImageUrl: true },
+    });
+    let relinked = 0;
+    // Cache by normalized title so duplicate titles in the same list only hit
+    // Shopify once.
+    const cache = new Map<string, { id: string; imageUrl: string | null } | null>();
+    for (const line of lines) {
+      const title = (line.productTitle ?? "").trim();
+      if (!title) continue;
+      const cacheKey = title.toLowerCase();
+      let matched: { id: string; imageUrl: string | null } | null | undefined = cache.get(cacheKey);
+      if (matched === undefined) {
+        const results = await searchShopifyProducts(title);
+        const exact = results.filter((p) => p.title.trim().toLowerCase() === cacheKey);
+        matched = exact.length === 1
+          ? { id: exact[0].id, imageUrl: exact[0].imageUrl ?? null }
+          : null;
+        cache.set(cacheKey, matched);
+      }
+      if (!matched) continue;
+      await prisma.packingListLine.update({
+        where: { id: line.id },
+        data: {
+          productId: matched.id,
+          ...(line.productImageUrl ? {} : { productImageUrl: matched.imageUrl ?? undefined }),
+        },
+      });
+      relinked += 1;
+    }
+    return jsonResponse({ relinked, scanned: lines.length });
+  }
+
   if (intent === "duplicate_packing_line") {
     const lineId = Number(form.get("lineId"));
     const line = await prisma.packingListLine.findUnique({ where: { id: lineId } });
@@ -10666,6 +10707,8 @@ function PackingListDetail({
   useEffect(() => setStatusValue(packingList.status ?? "still_packing"), [packingList.status]);
   const [combineView, setCombineView] = useState(false);
   const bulkLoadedFetcher = useFetcher();
+  const relinkFetcher = useFetcher<{ relinked: number; scanned: number; error?: string }>();
+  const unlinkedLinesCount = packingList.lines.filter((line) => !line.isCustom && !line.productId).length;
   const [combinedSelectedCells, setCombinedSelectedCells] = useState<Set<string>>(new Set());
   const [combinedAnchorCell, setCombinedAnchorCell] = useState<string | null>(null);
   const [combinedCellMenu, setCombinedCellMenu] = useState<{ x: number; y: number; cells: { productId: string; size: string }[] } | null>(null);
@@ -10927,6 +10970,36 @@ function PackingListDetail({
             </loadInventoryFetcher.Form>
           ) : <div />}
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {unlinkedLinesCount > 0 && (
+              <button
+                type="button"
+                disabled={relinkFetcher.state !== "idle"}
+                onClick={() => {
+                  if (!window.confirm(`Re-check Shopify for ${unlinkedLinesCount} unlinked product${unlinkedLinesCount === 1 ? "" : "s"}? Quantities won't change — this only links lines to Shopify products so admins can load inventory later.`)) return;
+                  submitPortalCell(relinkFetcher, {
+                    intent: "relink_packing_lines_to_shopify",
+                    packingId: packingList.id,
+                  });
+                }}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 6,
+                  border: "1px solid #cbd5e1",
+                  background: "#fff",
+                  color: "#1f2937",
+                  fontWeight: 700,
+                  fontSize: 13,
+                  cursor: relinkFetcher.state !== "idle" ? "wait" : "pointer",
+                }}
+                title="Search Shopify by product title for lines that aren't linked yet, and link any exact matches."
+              >
+                {relinkFetcher.state !== "idle"
+                  ? "Re-checking…"
+                  : relinkFetcher.data
+                    ? `Re-check Shopify (${unlinkedLinesCount} left, ${relinkFetcher.data.relinked} linked)`
+                    : `Re-check Shopify (${unlinkedLinesCount} unlinked)`}
+              </button>
+            )}
             {isAdmin && (
               <button
                 type="button"
