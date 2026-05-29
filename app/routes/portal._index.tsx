@@ -48,6 +48,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const needsPackingLists = page === "packing" || packingId !== null;
   const needsActivityLogs = page !== "visionboard" && page !== "samples";
 
+  // Defensive: the SupplierOrder schema gained `destination` recently. If
+  // this environment hasn't run the migration yet, Prisma's findMany
+  // (which selects every modelled column) would throw and the whole page
+  // would crash. ADD COLUMN IF NOT EXISTS makes the query safe on a
+  // stale DB. Only attempted when we actually need the orders.
+  if (needsOrders) {
+    try {
+      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "destination" TEXT`);
+    } catch (e) {
+      console.warn("[destination] column ensure failed:", e);
+    }
+  }
+
   const [settingsRows, allOrders, packingLists] = await retryAsync(() => Promise.all([
       prisma.portalSetting.findMany({ where: { key: { in: SETTING_KEYS } }, select: { key: true, value: true } }),
       needsOrders
