@@ -2261,6 +2261,12 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (formData?.get("noRevalidate") === "1") return false;
   const intent = formData?.get("intent") as string | null;
   if (intent === "reorder_samples" || intent === "rename_sample" || intent === "update_sample_iteration") return false;
+  // Destination updates only flip a column on one row. The chip dropdown
+  // shows the new value optimistically via its own fetcher formData, and
+  // OrderRow keeps the destination in local state so the row tint /
+  // stamp react instantly — there's no reason to re-run the (expensive)
+  // restock loader (Shopify variant enrichment etc.) just for this.
+  if (intent === "update_destination") return false;
   // Vision Board: only skip revalidation for in-drawer notes/fields saves
   // (they don't affect the card grid). Anything that changes name, image
   // count, ordering or board metadata must refresh the grid so the panel
@@ -12619,11 +12625,17 @@ function OrderRow({
     window.localStorage.setItem(DELETE_CONFIRM_SKIP_KEY, String(Date.now() + 24 * 60 * 60 * 1000));
   };
 
+  // Destination is tracked locally so the chip click reflects in the row
+  // tint / stamp instantly (we skip loader revalidation for this intent
+  // — see shouldRevalidate). Resync from the prop only when the prop's
+  // own value changes (e.g. another tab edited the row).
+  const [destinationLocal, setDestinationLocal] = useState(order.destination ?? "");
+  useEffect(() => { setDestinationLocal(order.destination ?? ""); }, [order.destination]);
   // When the user marks this order to stay at the factory, tint the whole
   // row red and overlay a translucent "KEEP AT FACTORY" stamp across the
   // first frozen cells (order date / picture / name) — hard to miss when
   // scanning the table.
-  const isKeptAtFactory = order.destination === "keep_at_factory";
+  const isKeptAtFactory = destinationLocal === "keep_at_factory";
   const keepBg = isKeptAtFactory ? { background: "#fef2f2" } : undefined;
   return (
     <>
@@ -12731,7 +12743,7 @@ function OrderRow({
 
         {/* Destination — keep at factory in India vs send to AU */}
         <Td rowIndex={rowIndex} colIndex={destinationCol} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Destination" historyEntityName={order.productTitle}>
-          <DestinationCell orderId={order.id} value={order.destination ?? ""} restockSettings={restockSettings} />
+          <DestinationCell orderId={order.id} value={destinationLocal} restockSettings={restockSettings} onChange={setDestinationLocal} />
         </Td>
 
         {/* Fabric in stock — looked up from the fabric name in the product title */}
@@ -12927,6 +12939,7 @@ function RestockOptionChipDropdown({
   updateIntent: "update_status" | "update_priority" | "update_destination";
   undoLabel: string;
   emptyLabel?: string;
+  onChange?: (next: string) => void;
 }) {
   const cellFetcher = useFetcher();
   const settingsFetcher = useFetcher();
@@ -12982,6 +12995,7 @@ function RestockOptionChipDropdown({
       { intent: updateIntent, orderId, value: nextValue },
       { label: undoLabel, fields: { intent: updateIntent, orderId, value } },
     );
+    onChange?.(nextValue);
   };
 
   const saveSettingsOptions = (nextOptions: RestockOption[]) => {
@@ -13109,7 +13123,17 @@ function RestockOptionChipDropdown({
   );
 }
 
-function DestinationCell({ orderId, value, restockSettings }: { orderId: number; value: string; restockSettings: RestockSettings }) {
+function DestinationCell({
+  orderId,
+  value,
+  restockSettings,
+  onChange,
+}: {
+  orderId: number;
+  value: string;
+  restockSettings: RestockSettings;
+  onChange?: (next: string) => void;
+}) {
   return (
     <RestockOptionChipDropdown
       orderId={orderId}
@@ -13120,6 +13144,7 @@ function DestinationCell({ orderId, value, restockSettings }: { orderId: number;
       updateIntent="update_destination"
       undoLabel="Undo destination"
       emptyLabel="— Destination —"
+      onChange={onChange}
     />
   );
 }
