@@ -12941,6 +12941,11 @@ function RestockOptionChipDropdown({
   undoLabel: string;
   emptyLabel?: string;
   onChange?: (next: string) => void;
+  // When true, treat `value` as the sole source of truth and ignore the
+  // cellFetcher.formData fallback. Use this when the parent already
+  // applies optimistic updates locally — that way the loader returning
+  // a stale prop value can't briefly override the user's selection.
+  controlled?: boolean;
 }) {
   const cellFetcher = useFetcher();
   const settingsFetcher = useFetcher();
@@ -12952,7 +12957,9 @@ function RestockOptionChipDropdown({
   const [editLabel, setEditLabel] = useState("");
   const [editBg, setEditBg] = useState("#f3f4f6");
   const [editColor, setEditColor] = useState("#374151");
-  const current = cellFetcher.formData ? String(cellFetcher.formData.get("value")) : value;
+  const current = controlled
+    ? value
+    : (cellFetcher.formData ? String(cellFetcher.formData.get("value")) : value);
   const option = options.find((item) => item.value === current);
 
   const updateRect = () => {
@@ -13146,6 +13153,7 @@ function DestinationCell({
       undoLabel="Undo destination"
       emptyLabel="— Destination —"
       onChange={onChange}
+      controlled
     />
   );
 }
