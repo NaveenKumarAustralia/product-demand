@@ -4888,61 +4888,62 @@ export default function PortalDashboard() {
                 )) : <span style={s.activeUserEmpty}>No active users</span>}
               </div>
             </div>
-            {page === "restock" && (
-              <div style={{ ...s.filters, position: "relative" }}>
-                <label style={s.filterLabel}>
-                  Product group
-                  <select
-                    value={selectedProductGroup}
-                    onChange={(event) => updateParams({ productGroup: event.currentTarget.value, productType: "" })}
-                    style={s.productTypeFilter}
-                  >
-                    <option value="">All groups</option>
-                    {productGroups.map((group) => (
-                      <option key={group} value={group}>{group}</option>
-                    ))}
-                  </select>
-                </label>
-                <label style={s.filterLabel}>
-                  Sort
-                  <select value={sortBy} onChange={(event) => updateParams({ sortBy: event.currentTarget.value })} style={s.productTypeFilter}>
-                    <option value="orderDateDesc">Order date newest</option>
-                    <option value="orderDateAsc">Order date oldest</option>
-                    <option value="titleAsc">Product title A-Z</option>
-                    <option value="titleDesc">Product title Z-A</option>
-                  </select>
-                </label>
-                <label style={s.filterLabel}>
-                  Status
-                  <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
-                    <option value="">All statuses</option>
-                    {statusFilters.map((status) => (
-                      <option key={status} value={status}>{labelForOption(restockSettings.statusOptions, status)} ({statusFilterCounts[status] ?? 0})</option>
-                    ))}
-                  </select>
-                </label>
-                <label style={s.filterLabel}>
-                  Priority
-                  <select value={selectedPriority} onChange={(event) => updateParams({ priority: event.currentTarget.value })} style={s.productTypeFilter}>
-                    <option value="">All priorities</option>
-                    {priorityFilters.map((priority) => (
-                      <option key={priority} value={priority}>{labelForOption(restockSettings.priorityOptions, priority)}</option>
-                    ))}
-                  </select>
-                </label>
-                <label style={s.filterLabel}>
-                  Destination
-                  <select value={selectedDestination} onChange={(event) => updateParams({ destination: event.currentTarget.value })} style={s.productTypeFilter}>
-                    <option value="">All destinations</option>
-                    {destinationFilters.map((destination) => (
-                      <option key={destination} value={destination}>{labelForOption(restockSettings.destinationOptions, destination)}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            )}
           </div>
         </header>
+
+        {page === "restock" && (
+          <div style={s.restockFilterBar}>
+            <label style={s.filterLabel}>
+              Product group
+              <select
+                value={selectedProductGroup}
+                onChange={(event) => updateParams({ productGroup: event.currentTarget.value, productType: "" })}
+                style={s.productTypeFilter}
+              >
+                <option value="">All groups</option>
+                {productGroups.map((group) => (
+                  <option key={group} value={group}>{group}</option>
+                ))}
+              </select>
+            </label>
+            <label style={s.filterLabel}>
+              Sort
+              <select value={sortBy} onChange={(event) => updateParams({ sortBy: event.currentTarget.value })} style={s.productTypeFilter}>
+                <option value="orderDateDesc">Order date newest</option>
+                <option value="orderDateAsc">Order date oldest</option>
+                <option value="titleAsc">Product title A-Z</option>
+                <option value="titleDesc">Product title Z-A</option>
+              </select>
+            </label>
+            <label style={s.filterLabel}>
+              Status
+              <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
+                <option value="">All statuses</option>
+                {statusFilters.map((status) => (
+                  <option key={status} value={status}>{labelForOption(restockSettings.statusOptions, status)} ({statusFilterCounts[status] ?? 0})</option>
+                ))}
+              </select>
+            </label>
+            <label style={s.filterLabel}>
+              Priority
+              <select value={selectedPriority} onChange={(event) => updateParams({ priority: event.currentTarget.value })} style={s.productTypeFilter}>
+                <option value="">All priorities</option>
+                {priorityFilters.map((priority) => (
+                  <option key={priority} value={priority}>{labelForOption(restockSettings.priorityOptions, priority)}</option>
+                ))}
+              </select>
+            </label>
+            <label style={s.filterLabel}>
+              Destination
+              <select value={selectedDestination} onChange={(event) => updateParams({ destination: event.currentTarget.value })} style={s.productTypeFilter}>
+                <option value="">All destinations</option>
+                {destinationFilters.map((destination) => (
+                  <option key={destination} value={destination}>{labelForOption(restockSettings.destinationOptions, destination)}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
 
         {page === "settings" ? (
           <div style={{ display: "grid", gap: 16 }}>
@@ -13641,6 +13642,19 @@ const s: Record<string, React.CSSProperties> = {
     background: "#f8fafc",
   },
   filters: { display: "flex", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 10 },
+  restockFilterBar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "flex-start",
+    flexWrap: "wrap" as const,
+    gap: 12,
+    width: "100%",
+    padding: "8px 12px",
+    marginBottom: 12,
+    border: "1px solid #dbe3ee",
+    borderRadius: 10,
+    background: "#f8fafc",
+  },
   filterLabel: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#374151" },
   productTypeFilter: {
     border: "1px solid #b6c0cc",
