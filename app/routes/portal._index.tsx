@@ -12600,6 +12600,7 @@ function OrderRow({
   // first frozen cells (order date / picture / name) — hard to miss when
   // scanning the table.
   const isKeptAtFactory = order.destination === "keep_at_factory";
+  const keepBg = isKeptAtFactory ? { background: "#fef2f2" } : undefined;
   return (
     <>
       <tr id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(isKeptAtFactory ? { background: "#fef2f2" } : {}) }}>
@@ -12608,13 +12609,13 @@ function OrderRow({
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
         {/* Factory notes */}
-        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={isKeptAtFactory ? { background: "#fef2f2" } : undefined}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={keepBg}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
         {/* Order date */}
-        <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={isKeptAtFactory ? { background: "#fef2f2" } : undefined}><span style={s.dateText}>{orderDate}</span></Td>
+        <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={keepBg}><span style={s.dateText}>{orderDate}</span></Td>
 
         {/* Picture */}
-        <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[2]} style={isKeptAtFactory ? { background: "#fef2f2" } : undefined}>
+        <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[2]} style={keepBg}>
           <div style={s.imageCell}>
             {order.productImageUrl
               ? <img src={order.productImageUrl} alt="" style={s.thumb} />
@@ -12622,9 +12623,11 @@ function OrderRow({
           </div>
         </Td>
 
-        {/* Name — also hosts the KEEP AT FACTORY stamp overlay so it
-            visually covers the date / picture / name area to the left. */}
-        <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={isKeptAtFactory ? { background: "#fef2f2", position: "relative" } : { position: "relative" }}>
+        {/* Name — also hosts the KEEP AT FACTORY stamp overlay when set.
+            Sticky cells are already positioning contexts for absolute
+            children, so the stamp anchors to this cell without us having
+            to add position:relative (which would break sticky). */}
+        <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={keepBg}>
           <span style={s.productName}>{order.productTitle}</span>
           {isKeptAtFactory && (
             <div
@@ -12632,9 +12635,8 @@ function OrderRow({
               style={{
                 position: "absolute",
                 top: "50%",
-                // The Name cell starts after order-date + picture, so to centre
-                // the stamp across the three columns we shift it left by
-                // roughly (orderDate width / 2 + picture width / 2).
+                // Centre across (order-date + picture + name) by shifting
+                // left from the Name cell's own left edge.
                 left: -((DEFAULT_COLUMN_WIDTHS.orderDate ?? 92) + (DEFAULT_COLUMN_WIDTHS.picture ?? 88)) / 2,
                 transform: "translateY(-50%) rotate(-12deg)",
                 pointerEvents: "none",
