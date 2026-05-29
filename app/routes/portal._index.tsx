@@ -12944,6 +12944,8 @@ function RestockOptionChipDropdown({
   updateIntent,
   undoLabel,
   emptyLabel,
+  onChange,
+  controlled,
 }: {
   orderId: number;
   value: string;
