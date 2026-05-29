@@ -12659,17 +12659,15 @@ function OrderRow({
               style={{
                 position: "absolute",
                 top: "50%",
-                // The stamp must visually cover only the order date,
-                // picture, and name columns (not factory notes to the
-                // left). Place the stamp's center at the midpoint of
-                // those three columns, measured from the Name cell's
-                // left edge:
-                //   midpoint = -(orderDate + picture) + (orderDate +
-                //              picture + name) / 2
-                //            = (name - orderDate - picture) / 2
-                left: ((DEFAULT_COLUMN_WIDTHS.name ?? 260)
-                       - (DEFAULT_COLUMN_WIDTHS.orderDate ?? 92)
-                       - (DEFAULT_COLUMN_WIDTHS.picture ?? 88)) / 2,
+                // Centre the stamp across the first three data columns —
+                // Factory Notes + Order Date + Picture — so it sits over
+                // them, not the Name/SKU area. The stamp is anchored to
+                // the Name cell, so we shift its centre LEFT from Name's
+                // left edge by half the combined width of those three:
+                //   midpoint = -(factoryNotes + orderDate + picture) / 2
+                left: -((DEFAULT_COLUMN_WIDTHS.factoryNotes ?? 190)
+                       + (DEFAULT_COLUMN_WIDTHS.orderDate ?? 92)
+                       + (DEFAULT_COLUMN_WIDTHS.picture ?? 88)) / 2,
                 transform: "translate(-50%, -50%) rotate(-12deg)",
                 pointerEvents: "none",
                 color: "#b91c1c",
