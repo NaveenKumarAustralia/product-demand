@@ -42,6 +42,7 @@ model SupplierOrder {
   priority        String?
   productImageUrl String?
   eta             DateTime?
+  destination     String?
   notes           String?
   totalQty        Int       @default(0)
   createdAt    DateTime    @default(now())

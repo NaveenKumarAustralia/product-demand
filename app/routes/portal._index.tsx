@@ -2128,6 +2128,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (raw && !parsedDate) return null;
     updates.eta = parsedDate;
   }
+  if (intent === "update_destination") {
+    const raw = String(form.get("value") ?? "").trim();
+    // Only allow the known values, blank, or null. Anything else is ignored
+    // so a stray POST can't write garbage into the column.
+    const allowed = new Set(["keep_at_factory", "send_to_au", ""]);
+    if (!allowed.has(raw)) return null;
+    updates.destination = raw || null;
+  }
 
   if (intent === "update_qty") {
     const size = String(form.get("size") ?? "");
@@ -2219,6 +2227,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       update_factory_notes: "Factory notes",
       update_notes: "Notes",
       update_eta: "ETA",
+      update_destination: "Destination",
     };
     const logField = loggableIntents[intent];
     if (logField && orderId) {
@@ -2861,6 +2870,7 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   notes: 150,
   priority: 160,
   eta: 145,
+  destination: 180,
   fabricStock: 170,
   delete: 104,
 };
@@ -4686,6 +4696,7 @@ export default function PortalDashboard() {
     { id: "notes", label: "Notes" },
     { id: "priority", label: "Priority" },
     { id: "eta", label: "ETA" },
+    { id: "destination", label: "Destination", center: true },
     { id: "fabricStock", label: "Fabric in stock", center: true },
     ...customColumns.restock.map((column) => ({ id: column.id, label: column.label })),
   ];
@@ -12563,7 +12574,8 @@ function OrderRow({
   const notesCol = totalCol + 2;
   const priorityCol = totalCol + 3;
   const etaCol = totalCol + 4;
-  const fabricStockCol = totalCol + 5;
+  const destinationCol = totalCol + 5;
+  const fabricStockCol = totalCol + 6;
   const fabricMatches = findFabricStockMatches(order.productTitle, fabricStockIndex);
   const rowHeightKey = `restock:${order.id}`;
   const shouldSkipDeleteConfirm = () => {
@@ -12583,21 +12595,26 @@ function OrderRow({
     window.localStorage.setItem(DELETE_CONFIRM_SKIP_KEY, String(Date.now() + 24 * 60 * 60 * 1000));
   };
 
+  // When the user marks this order to stay at the factory, tint the whole
+  // row red and overlay a translucent "KEEP AT FACTORY" stamp across the
+  // first frozen cells (order date / picture / name) — hard to miss when
+  // scanning the table.
+  const isKeptAtFactory = order.destination === "keep_at_factory";
   return (
     <>
-      <tr id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
+      <tr id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(isKeptAtFactory ? { background: "#fef2f2" } : {}) }}>
         <RowNumberCell rowNumber={rowIndex} actions={[
           { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
         {/* Factory notes */}
-        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={isKeptAtFactory ? { background: "#fef2f2" } : undefined}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
         {/* Order date */}
-        <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]}><span style={s.dateText}>{orderDate}</span></Td>
+        <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={isKeptAtFactory ? { background: "#fef2f2" } : undefined}><span style={s.dateText}>{orderDate}</span></Td>
 
         {/* Picture */}
-        <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[2]}>
+        <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[2]} style={isKeptAtFactory ? { background: "#fef2f2" } : undefined}>
           <div style={s.imageCell}>
             {order.productImageUrl
               ? <img src={order.productImageUrl} alt="" style={s.thumb} />
@@ -12605,8 +12622,42 @@ function OrderRow({
           </div>
         </Td>
 
-        {/* Name */}
-        <Td rowIndex={rowIndex} colIndex={3} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen><span style={s.productName}>{order.productTitle}</span></Td>
+        {/* Name — also hosts the KEEP AT FACTORY stamp overlay so it
+            visually covers the date / picture / name area to the left. */}
+        <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={isKeptAtFactory ? { background: "#fef2f2", position: "relative" } : { position: "relative" }}>
+          <span style={s.productName}>{order.productTitle}</span>
+          {isKeptAtFactory && (
+            <div
+              aria-hidden
+              style={{
+                position: "absolute",
+                top: "50%",
+                // The Name cell starts after order-date + picture, so to centre
+                // the stamp across the three columns we shift it left by
+                // roughly (orderDate width / 2 + picture width / 2).
+                left: -((DEFAULT_COLUMN_WIDTHS.orderDate ?? 92) + (DEFAULT_COLUMN_WIDTHS.picture ?? 88)) / 2,
+                transform: "translateY(-50%) rotate(-12deg)",
+                pointerEvents: "none",
+                color: "#b91c1c",
+                border: "4px solid #b91c1c",
+                borderRadius: 8,
+                padding: "8px 18px",
+                fontSize: 24,
+                fontWeight: 900,
+                letterSpacing: "0.06em",
+                textTransform: "uppercase",
+                opacity: 0.55,
+                fontFamily: "Georgia, 'Times New Roman', serif",
+                whiteSpace: "nowrap",
+                zIndex: 50,
+                textShadow: "0 0 2px #fff",
+                background: "transparent",
+              }}
+            >
+              Keep at factory
+            </div>
+          )}
+        </Td>
 
         {/* SKU */}
         <Td rowIndex={rowIndex} colIndex={4} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="SKU" historyEntityName={order.productTitle}>
@@ -12645,6 +12696,11 @@ function OrderRow({
 
         {/* ETA */}
         <Td rowIndex={rowIndex} colIndex={etaCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="ETA" historyEntityName={order.productTitle}><EtaCell orderId={order.id} value={etaValue} /></Td>
+
+        {/* Destination — keep at factory in India vs send to AU */}
+        <Td rowIndex={rowIndex} colIndex={destinationCol} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Destination" historyEntityName={order.productTitle}>
+          <DestinationCell orderId={order.id} value={order.destination ?? ""} />
+        </Td>
 
         {/* Fabric in stock — looked up from the fabric name in the product title */}
         <Td rowIndex={rowIndex} colIndex={fabricStockCol} center>
@@ -13021,6 +13077,54 @@ function RestockOptionChipDropdown({
   );
 }
 
+// Destination — fixed two-choice cell. Stock either stays at the factory
+// in India or ships to Australia. Null means undecided. Clicking a chip
+// toggles it (click an already-active chip to clear back to undecided).
+function DestinationCell({ orderId, value }: { orderId: number; value: string }) {
+  const fetcher = useFetcher();
+  const submit = (next: string) => {
+    submitPortalCell(
+      fetcher,
+      { intent: "update_destination", orderId, value: next },
+      { label: "Undo destination", fields: { intent: "update_destination", orderId, value } },
+    );
+  };
+  const chipBase: React.CSSProperties = {
+    padding: "5px 10px",
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: "pointer",
+    border: "1px solid transparent",
+    background: "#f1f5f9",
+    color: "#475569",
+    lineHeight: 1.2,
+    whiteSpace: "nowrap",
+  };
+  const activeKeep: React.CSSProperties = { background: "#fee2e2", color: "#b91c1c", border: "1px solid #fca5a5" };
+  const activeSend: React.CSSProperties = { background: "#dcfce7", color: "#166534", border: "1px solid #86efac" };
+  return (
+    <div style={{ display: "flex", gap: 4, justifyContent: "center", alignItems: "center", flexWrap: "wrap" }}>
+      <button
+        type="button"
+        onClick={() => submit(value === "keep_at_factory" ? "" : "keep_at_factory")}
+        style={{ ...chipBase, ...(value === "keep_at_factory" ? activeKeep : {}) }}
+        title="Keep this stock at the factory in India"
+      >
+        Keep at factory
+      </button>
+      <button
+        type="button"
+        onClick={() => submit(value === "send_to_au" ? "" : "send_to_au")}
+        style={{ ...chipBase, ...(value === "send_to_au" ? activeSend : {}) }}
+        title="Send this stock to Australia"
+      >
+        Send to AU
+      </button>
+    </div>
+  );
+}
+
 function StatusCell({ orderId, value, restockSettings }: { orderId: number; value: string; restockSettings: RestockSettings }) {
   return (
     <RestockOptionChipDropdown
@@ -13314,6 +13418,7 @@ function Td({
   historyEntityName,
   stickyLeft,
   isLastFrozen,
+  style,
 }: {
   children: React.ReactNode;
   center?: boolean;
@@ -13326,6 +13431,7 @@ function Td({
   historyEntityName?: string;
   stickyLeft?: number;
   isLastFrozen?: boolean;
+  style?: React.CSSProperties;
 }) {
   const frozenStyle: React.CSSProperties = stickyLeft !== undefined ? {
     position: "sticky",
@@ -13353,7 +13459,7 @@ function Td({
           }
         }, 0);
       }}
-      style={{ ...s.td, textAlign: center ? "center" : "left", ...(overflowVisible ? { overflow: "visible" } : {}), ...frozenStyle }}
+      style={{ ...s.td, textAlign: center ? "center" : "left", ...(overflowVisible ? { overflow: "visible" } : {}), ...frozenStyle, ...style }}
     >
       {children}
     </td>
