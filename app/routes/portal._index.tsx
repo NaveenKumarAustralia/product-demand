@@ -2135,11 +2135,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     updates.eta = parsedDate;
   }
   if (intent === "update_destination") {
-    const raw = String(form.get("value") ?? "").trim();
-    // Only allow the known values, blank, or null. Anything else is ignored
-    // so a stray POST can't write garbage into the column.
-    const allowed = new Set(["keep_at_factory", "send_to_au", ""]);
-    if (!allowed.has(raw)) return null;
+    // Chip values come from the editable destinationOptions in
+    // RestockSettings — the user can add new chips at any time — so we
+    // can't whitelist a fixed enum here. Accept any non-empty short
+    // string; blank clears the destination back to null.
+    const raw = String(form.get("value") ?? "").trim().slice(0, 64);
     updates.destination = raw || null;
   }
 
