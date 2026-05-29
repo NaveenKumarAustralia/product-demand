@@ -6429,7 +6429,7 @@ function SampleIterationBlock({
       </div>
 
       {expanded && (
-        <>
+        <div style={{ maxHeight: "60vh", overflowY: "auto", WebkitOverflowScrolling: "touch" as const }}>
           {/* Images */}
           <div style={s.sampleIterationImages}>
             {Array.from({ length: savedCount }).map((_, index) => (
@@ -6515,7 +6515,7 @@ function SampleIterationBlock({
               </div>
             )}
           </div>
-        </>
+        </div>
       )}
 
       {lightboxIndex !== null && typeof document !== "undefined" && createPortal(
