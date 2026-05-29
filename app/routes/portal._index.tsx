@@ -6174,7 +6174,10 @@ function SampleIterationBlock({
   type PendingImage = { id: string; blobUrl: string };
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
 
-  useEffect(() => { setNotes(iteration.notes ?? ""); }, [iteration.notes, iteration.id]);
+  // Only sync notes from the prop when switching to a *different* iteration —
+  // not on every prop change. Otherwise an unrelated loader revalidation can
+  // wipe an in-progress draft while the user is typing.
+  useEffect(() => { setNotes(iteration.notes ?? ""); }, [iteration.id]);
   useEffect(() => { setNameDraft(iteration.name ?? ""); }, [iteration.name, iteration.id]);
   useEffect(() => { setFabricType(iteration.fabricType ?? ""); }, [iteration.fabricType, iteration.id]);
   useEffect(() => { setSampleSize(iteration.sampleSize ?? ""); }, [iteration.sampleSize, iteration.id]);
@@ -6209,28 +6212,42 @@ function SampleIterationBlock({
     if (trimmed !== (iteration.name ?? "")) submitUpdate({ name: trimmed });
   };
 
+  // Most recent saved value + most recent typed value, both held in refs so
+  // the debounced auto-saver and the unmount safety-net always see the
+  // latest data (closures over state would go stale).
+  const lastSavedNotesRef = useRef<string>(iteration.notes ?? "");
+  const currentNotesRef = useRef<string>(iteration.notes ?? "");
+  useEffect(() => { currentNotesRef.current = notes; }, [notes]);
+  useEffect(() => { lastSavedNotesRef.current = iteration.notes ?? ""; }, [iteration.id]);
   const saveNotes = () => {
-    const previous = iteration.notes ?? "";
-    if (notes === previous) return;
-    // If the user appended new text at the end of the existing note, prefix
-    // that new text with their name so the next reader knows who wrote it.
-    // If they edited the middle (or wholly rewrote), save as-is — auto-
-    // prefixing would mangle their edits.
-    let toSave = notes;
-    const authorName = (currentUser?.name ?? "").trim().split(/\s+/)[0];
-    if (authorName && notes.startsWith(previous)) {
-      const addition = notes.slice(previous.length);
-      const trimmedAddition = addition.replace(/^\s+/, "");
-      if (trimmedAddition.length > 0) {
-        const sep = previous.length === 0 ? "" : (previous.endsWith("\n") ? "" : "\n");
-        toSave = previous + sep + `${authorName}: ${trimmedAddition}`;
-        // Reflect the saved value in local state so subsequent typing is
-        // treated as a further append (not a rewrite of the prefix).
-        setNotes(toSave);
-      }
-    }
-    submitUpdate({ notes: toSave });
+    const value = currentNotesRef.current;
+    if (value === lastSavedNotesRef.current) return;
+    lastSavedNotesRef.current = value;
+    // Update the parent's cached iteration so close/reopen the drawer (or any
+    // other in-page re-render) reflects the saved value immediately, without
+    // waiting for a loader revalidation.
+    onLocalUpdate(iteration.id, { notes: value });
+    fetcher.submit({ intent: "update_sample_iteration", iterationId: String(iteration.id), notes: value }, { method: "post" });
   };
+  // Debounced auto-save while typing: each change schedules a save 400ms
+  // later, replacing any previously pending save. Snappy enough that a quick
+  // close-and-refresh almost always catches the save, slow enough that we
+  // never fire mid-burst.
+  const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (notes === lastSavedNotesRef.current) return;
+    if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+    notesSaveTimer.current = setTimeout(saveNotes, 400);
+    return () => { if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notes]);
+  // Belt-and-braces: on unmount (drawer closes, version deleted, etc),
+  // flush any pending save so nothing ever vanishes.
+  useEffect(() => () => {
+    if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+    saveNotes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const addImages = async (files: File[]) => {
     if (files.length === 0) return;
@@ -6497,7 +6514,7 @@ function SampleIterationBlock({
                   if (e.key === "Escape") { e.preventDefault(); setMentionQuery(null); }
                 }
               }}
-              rows={3}
+              rows={7}
             />
             {mentionQuery !== null && filteredMentionUsers.length > 0 && (
               <div style={{ position: "absolute", bottom: "calc(100% + 4px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.14)", zIndex: 300, minWidth: 180, padding: 4 }}>
@@ -16016,11 +16033,12 @@ const s: Record<string, React.CSSProperties> = {
   sampleIterationNotes: {
     width: "100%",
     border: "none",
-    padding: "8px 16px 14px",
-    fontSize: "var(--portal-panel-font-size, 13px)" as unknown as number,
+    padding: "10px 16px 16px",
+    fontSize: "var(--portal-panel-font-size, 14px)" as unknown as number,
+    lineHeight: 1.5,
     color: "#374151",
     resize: "vertical" as const,
-    minHeight: 84,
+    minHeight: 180,
     background: "#fafafa",
     fontFamily: "inherit",
     boxSizing: "border-box" as const,
