@@ -6115,8 +6115,15 @@ function SampleDetailPanel({
               No versions yet. Click &ldquo;Add new version&rdquo; to record the first sample.
             </div>
           )}
-          {sortedIterations.map((iteration) => (
-            <SampleIterationBlock key={iteration.id} iteration={iteration} users={users} currentUser={currentUser} onLocalUpdate={onIterationLocalUpdate} />
+          {sortedIterations.map((iteration, index) => (
+            <SampleIterationBlock
+              key={iteration.id}
+              iteration={iteration}
+              users={users}
+              currentUser={currentUser}
+              onLocalUpdate={onIterationLocalUpdate}
+              defaultExpanded={index === 0}
+            />
           ))}
         </div>
       </div>
@@ -6129,15 +6136,21 @@ function SampleIterationBlock({
   users,
   currentUser,
   onLocalUpdate,
+  defaultExpanded,
 }: {
   iteration: SampleIterationType;
   users: PortalUser[];
   currentUser: PortalUser | null;
   onLocalUpdate: (iterationId: number, patch: Partial<SampleIterationType>) => void;
+  defaultExpanded: boolean;
 }) {
   const fetcher = useFetcher();
   const notesRef = useRef<HTMLTextAreaElement>(null);
   const [notes, setNotes] = useState(iteration.notes ?? "");
+  // Older versions collapse to just their header so the drawer doesn't
+  // become a wall of images for samples with many iterations. User can
+  // click any header to toggle.
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(iteration.name ?? "");
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
@@ -6317,10 +6330,32 @@ function SampleIterationBlock({
     ? `Version ${iteration.version} — ${iteration.name}`
     : `Version ${iteration.version}`;
 
+  const hasNotes = (notes ?? "").trim().length > 0;
   return (
     <div style={s.sampleIterationBlock}>
-      {/* Header row */}
-      <div style={s.sampleIterationHeader}>
+      {/* Header row — click anywhere on it (outside the inner controls) to collapse/expand */}
+      <div
+        style={{ ...s.sampleIterationHeader, cursor: "pointer" }}
+        onClick={(e) => {
+          // Don't toggle when the click landed inside an input / button / select inside the header.
+          const tag = (e.target as HTMLElement).tagName;
+          if (tag === "INPUT" || tag === "BUTTON" || tag === "SELECT" || tag === "OPTION" || tag === "TEXTAREA") return;
+          if ((e.target as HTMLElement).closest("button, select, input, textarea")) return;
+          setExpanded((v) => !v);
+        }}
+        title={expanded ? "Click to collapse" : "Click to expand"}
+      >
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
+          style={{ background: "none", border: "none", padding: "2px 4px", cursor: "pointer", color: "#6b7280", lineHeight: 1, borderRadius: 4, display: "flex", alignItems: "center" }}
+          aria-label={expanded ? "Collapse version" : "Expand version"}
+          title={expanded ? "Collapse" : "Expand"}
+        >
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 120ms ease" }}>
+            <path d="M7 5l6 5-6 5V5z" />
+          </svg>
+        </button>
         <div style={{ flex: 1, minWidth: 0 }}>
           {nameEditing ? (
             <input
@@ -6337,12 +6372,18 @@ function SampleIterationBlock({
               <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>{versionLabel}</span>
               <button
                 type="button"
-                onClick={() => setNameEditing(true)}
+                onClick={(e) => { e.stopPropagation(); setNameEditing(true); }}
                 style={{ background: "none", border: "none", padding: "2px 4px", cursor: "pointer", color: "#9ca3af", lineHeight: 1, borderRadius: 4, display: "flex", alignItems: "center" }}
                 title="Edit version name"
               >
                 <svg width="13" height="13" viewBox="0 0 20 20" fill="currentColor"><path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"/></svg>
               </button>
+              {!expanded && hasNotes && (
+                <span style={{ fontSize: 11, color: "#92400e", background: "#fef3c7", padding: "2px 6px", borderRadius: 4, fontWeight: 600 }} title="Has notes">📝</span>
+              )}
+              {!expanded && savedCount > 0 && (
+                <span style={{ fontSize: 11, color: "#6b7280" }}>{savedCount} photo{savedCount === 1 ? "" : "s"}</span>
+              )}
             </div>
           )}
         </div>
@@ -6378,7 +6419,8 @@ function SampleIterationBlock({
         <button
           type="button"
           style={s.removeUserButton}
-          onClick={() => {
+          onClick={(e) => {
+            e.stopPropagation();
             if (window.confirm("Delete this version?")) {
               fetcher.submit({ intent: "delete_sample_iteration", iterationId: String(iteration.id) }, { method: "post" });
             }
@@ -6386,91 +6428,95 @@ function SampleIterationBlock({
         >Delete version</button>
       </div>
 
-      {/* Images */}
-      <div style={s.sampleIterationImages}>
-        {Array.from({ length: savedCount }).map((_, index) => (
-          <div key={`saved-${index}`} style={s.sampleIterationImageWrap}>
-            <img
-              src={`/portal/image/sample/${iteration.id}/${index}?v=${version}`}
-              alt={`v${iteration.version} image ${index + 1}`}
-              style={{ ...s.sampleIterationImage, cursor: "zoom-in" }}
-              loading="lazy"
-              decoding="async"
-              onClick={() => setLightboxIndex(index)}
-            />
-            <button type="button" style={s.sampleIterationImageRemove} onClick={() => requestRemoveSavedImage(index)} aria-label="Remove image">×</button>
+      {expanded && (
+        <>
+          {/* Images */}
+          <div style={s.sampleIterationImages}>
+            {Array.from({ length: savedCount }).map((_, index) => (
+              <div key={`saved-${index}`} style={s.sampleIterationImageWrap}>
+                <img
+                  src={`/portal/image/sample/${iteration.id}/${index}?v=${version}`}
+                  alt={`v${iteration.version} image ${index + 1}`}
+                  style={{ ...s.sampleIterationImage, cursor: "zoom-in" }}
+                  loading="lazy"
+                  decoding="async"
+                  onClick={() => setLightboxIndex(index)}
+                />
+                <button type="button" style={s.sampleIterationImageRemove} onClick={() => requestRemoveSavedImage(index)} aria-label="Remove image">×</button>
+              </div>
+            ))}
+            {pendingImages.map((p, i) => (
+              <div key={`pending-${p.id}`} style={s.sampleIterationImageWrap}>
+                <img
+                  src={p.blobUrl}
+                  alt={`uploading ${i + 1}`}
+                  style={{ ...s.sampleIterationImage, opacity: 0.6 }}
+                />
+                <button type="button" style={s.sampleIterationImageRemove} onClick={() => removePendingImage(p.id)} aria-label="Cancel upload">×</button>
+              </div>
+            ))}
+            <button type="button" style={s.sampleIterationAddImage} onClick={() => setUploadModalOpen(true)}>
+              <span>+ Add photos</span>
+            </button>
           </div>
-        ))}
-        {pendingImages.map((p, i) => (
-          <div key={`pending-${p.id}`} style={s.sampleIterationImageWrap}>
-            <img
-              src={p.blobUrl}
-              alt={`uploading ${i + 1}`}
-              style={{ ...s.sampleIterationImage, opacity: 0.6 }}
-            />
-            <button type="button" style={s.sampleIterationImageRemove} onClick={() => removePendingImage(p.id)} aria-label="Cancel upload">×</button>
-          </div>
-        ))}
-        <button type="button" style={s.sampleIterationAddImage} onClick={() => setUploadModalOpen(true)}>
-          <span>+ Add photos</span>
-        </button>
-      </div>
 
-      {/* Fabric / Size / Button / Factory cost fields */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 0, borderTop: "1px solid #f1f5f9" }}>
-        {([
-          { label: "Fabric type", value: fabricType, setter: setFabricType, field: "fabricType" },
-          { label: "Sample size", value: sampleSize, setter: setSampleSize, field: "sampleSize" },
-          { label: "Button type", value: buttonType, setter: setButtonType, field: "buttonType" },
-          { label: "Factory cost", value: factoryCost, setter: setFactoryCost, field: "factoryCost" },
-        ] as const).map(({ label, value, setter, field }, i) => (
-          <div key={field} style={{ borderRight: i < 3 ? "1px solid #f1f5f9" : "none", padding: "10px 14px" }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", marginBottom: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
-            <input
-              style={{ width: "100%", border: "none", outline: "none", fontSize: "var(--portal-panel-font-size, 13px)", color: "#111827", background: "transparent", fontFamily: "inherit", padding: 0 }}
-              value={value}
-              placeholder={`Enter ${label.toLowerCase()}`}
-              onChange={(e) => setter(e.target.value)}
-              onBlur={(e) => { const v = e.target.value; if (v !== (iteration[field as keyof SampleIterationType] ?? "")) submitUpdate({ [field]: v }); }}
-            />
-          </div>
-        ))}
-      </div>
-
-      <div style={{ position: "relative" }}>
-        <div style={{ padding: "10px 16px 0", fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em", borderTop: "1px solid #f1f5f9", background: "#fafafa" }}>
-          Notes for version {iteration.version}
-        </div>
-        <textarea
-          ref={notesRef}
-          style={s.sampleIterationNotes}
-          value={notes}
-          placeholder="Notes, change requests, measurements… type @ to tag someone"
-          onChange={handleNotesChange}
-          onBlur={() => { setMentionQuery(null); saveNotes(); }}
-          onKeyDown={(e) => {
-            if (mentionQuery !== null && filteredMentionUsers.length > 0) {
-              if (e.key === "Escape") { e.preventDefault(); setMentionQuery(null); }
-            }
-          }}
-          rows={3}
-        />
-        {mentionQuery !== null && filteredMentionUsers.length > 0 && (
-          <div style={{ position: "absolute", bottom: "calc(100% + 4px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.14)", zIndex: 300, minWidth: 180, padding: 4 }}>
-            {filteredMentionUsers.map((user) => (
-              <button
-                key={user.id}
-                type="button"
-                onMouseDown={(e) => { e.preventDefault(); selectMention(user); }}
-                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 10px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#111827", borderRadius: 5, textAlign: "left" }}
-              >
-                <span style={{ fontWeight: 600, color: "#2563eb" }}>@{user.name.split(/\s+/)[0].toLowerCase()}</span>
-                <span style={{ color: "#6b7280" }}>{user.name}</span>
-              </button>
+          {/* Fabric / Size / Button / Factory cost fields */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 0, borderTop: "1px solid #f1f5f9" }}>
+            {([
+              { label: "Fabric type", value: fabricType, setter: setFabricType, field: "fabricType" },
+              { label: "Sample size", value: sampleSize, setter: setSampleSize, field: "sampleSize" },
+              { label: "Button type", value: buttonType, setter: setButtonType, field: "buttonType" },
+              { label: "Factory cost", value: factoryCost, setter: setFactoryCost, field: "factoryCost" },
+            ] as const).map(({ label, value, setter, field }, i) => (
+              <div key={field} style={{ borderRight: i < 3 ? "1px solid #f1f5f9" : "none", padding: "10px 14px" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", marginBottom: 4, textTransform: "uppercase" as const, letterSpacing: "0.04em" }}>{label}</div>
+                <input
+                  style={{ width: "100%", border: "none", outline: "none", fontSize: "var(--portal-panel-font-size, 13px)", color: "#111827", background: "transparent", fontFamily: "inherit", padding: 0 }}
+                  value={value}
+                  placeholder={`Enter ${label.toLowerCase()}`}
+                  onChange={(e) => setter(e.target.value)}
+                  onBlur={(e) => { const v = e.target.value; if (v !== (iteration[field as keyof SampleIterationType] ?? "")) submitUpdate({ [field]: v }); }}
+                />
+              </div>
             ))}
           </div>
-        )}
-      </div>
+
+          <div style={{ position: "relative" }}>
+            <div style={{ padding: "10px 16px 0", fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em", borderTop: "1px solid #f1f5f9", background: "#fafafa" }}>
+              Notes for version {iteration.version}
+            </div>
+            <textarea
+              ref={notesRef}
+              style={s.sampleIterationNotes}
+              value={notes}
+              placeholder="Notes, change requests, measurements… type @ to tag someone"
+              onChange={handleNotesChange}
+              onBlur={() => { setMentionQuery(null); saveNotes(); }}
+              onKeyDown={(e) => {
+                if (mentionQuery !== null && filteredMentionUsers.length > 0) {
+                  if (e.key === "Escape") { e.preventDefault(); setMentionQuery(null); }
+                }
+              }}
+              rows={3}
+            />
+            {mentionQuery !== null && filteredMentionUsers.length > 0 && (
+              <div style={{ position: "absolute", bottom: "calc(100% + 4px)", left: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.14)", zIndex: 300, minWidth: 180, padding: 4 }}>
+                {filteredMentionUsers.map((user) => (
+                  <button
+                    key={user.id}
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); selectMention(user); }}
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 10px", background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "#111827", borderRadius: 5, textAlign: "left" }}
+                  >
+                    <span style={{ fontWeight: 600, color: "#2563eb" }}>@{user.name.split(/\s+/)[0].toLowerCase()}</span>
+                    <span style={{ color: "#6b7280" }}>{user.name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {lightboxIndex !== null && typeof document !== "undefined" && createPortal(
         <ImageLightbox
@@ -15787,13 +15833,19 @@ const s: Record<string, React.CSSProperties> = {
     top: 0,
     right: 0,
     bottom: 0,
+    height: "100vh",
     width: 800,
     maxWidth: "95vw",
     background: "#fff",
     boxShadow: "-4px 0 32px rgba(0,0,0,0.18)",
     zIndex: 1200,
-    display: "flex",
-    flexDirection: "column" as const,
+    // Grid layout pins the iterations row to the remaining vertical space
+    // explicitly. Flexbox with min-height:0 should do the same thing but in
+    // practice some browsers / embedded contexts (Shopify admin iframe) end
+    // up letting the flex child grow to its content height, defeating
+    // overflow:auto. A grid 1fr track is unambiguous.
+    display: "grid",
+    gridTemplateRows: "auto auto 1fr",
     overflow: "hidden",
   },
   samplePanelBackdrop: {
