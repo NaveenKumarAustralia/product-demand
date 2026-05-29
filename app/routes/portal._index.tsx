@@ -12626,11 +12626,12 @@ function OrderRow({
   };
 
   // Destination is tracked locally so the chip click reflects in the row
-  // tint / stamp instantly (we skip loader revalidation for this intent
-  // — see shouldRevalidate). Resync from the prop only when the prop's
-  // own value changes (e.g. another tab edited the row).
+  // tint / stamp instantly (we skip loader revalidation for this intent).
+  // We deliberately do NOT resync from order.destination on prop change —
+  // the row's key is order.id, so when a different order takes this slot
+  // useState re-initialises from scratch; within the lifetime of a single
+  // order, only the user's clicks change the destination here.
   const [destinationLocal, setDestinationLocal] = useState(order.destination ?? "");
-  useEffect(() => { setDestinationLocal(order.destination ?? ""); }, [order.destination]);
   // When the user marks this order to stay at the factory, tint the whole
   // row red and overlay a translucent "KEEP AT FACTORY" stamp across the
   // first frozen cells (order date / picture / name) — hard to miss when
