@@ -6438,6 +6438,9 @@ function SampleIterationBlock({
       </div>
 
       <div style={{ position: "relative" }}>
+        <div style={{ padding: "10px 16px 0", fontSize: 11, fontWeight: 600, color: "#9ca3af", textTransform: "uppercase", letterSpacing: "0.04em", borderTop: "1px solid #f1f5f9", background: "#fafafa" }}>
+          Notes for version {iteration.version}
+        </div>
         <textarea
           ref={notesRef}
           style={s.sampleIterationNotes}
@@ -15865,7 +15868,9 @@ const s: Record<string, React.CSSProperties> = {
   },
   samplePanelIterations: {
     flex: 1,
+    minHeight: 0,
     overflowY: "auto" as const,
+    WebkitOverflowScrolling: "touch" as const,
     padding: "16px 24px 32px",
     display: "flex",
     flexDirection: "column" as const,
@@ -15961,12 +15966,11 @@ const s: Record<string, React.CSSProperties> = {
   sampleIterationNotes: {
     width: "100%",
     border: "none",
-    borderTop: "1px solid #f1f5f9",
-    padding: "12px 16px",
+    padding: "8px 16px 14px",
     fontSize: "var(--portal-panel-font-size, 13px)" as unknown as number,
     color: "#374151",
     resize: "vertical" as const,
-    minHeight: 72,
+    minHeight: 84,
     background: "#fafafa",
     fontFamily: "inherit",
     boxSizing: "border-box" as const,
