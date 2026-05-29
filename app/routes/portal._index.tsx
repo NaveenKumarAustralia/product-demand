@@ -6080,6 +6080,7 @@ function SampleDetailPanel({
     <>
       <div style={s.samplePanelBackdrop} onClick={onClose} />
       <div style={s.samplePanel}>
+        <div style={s.samplePanelStickyTop}>
         <div style={s.samplePanelHeader}>
           <div style={s.samplePanelNameWrap}>
             {isEditingName ? (
@@ -6107,6 +6108,7 @@ function SampleDetailPanel({
           <button type="button" style={{ ...s.primaryActionButton, width: "100%" }} onClick={addIteration}>
             + Add new version
           </button>
+        </div>
         </div>
 
         <div style={s.samplePanelIterations}>
@@ -15850,13 +15852,17 @@ const s: Record<string, React.CSSProperties> = {
     top: 0,
     right: 0,
     bottom: 0,
-    height: "100vh",
     width: 800,
     maxWidth: "95vw",
     background: "#fff",
     boxShadow: "-4px 0 32px rgba(0,0,0,0.18)",
     zIndex: 1200,
-    overflow: "hidden",
+    // The panel itself is the scroll container — much more reliable across
+    // browsers and embedded contexts than nested flex/grid/absolute setups.
+    // The header + "Add new version" stay visible because they're wrapped
+    // in a position: sticky pinned bar.
+    overflowY: "auto" as const,
+    WebkitOverflowScrolling: "touch" as const,
   },
   samplePanelBackdrop: {
     position: "fixed" as const,
@@ -15926,22 +15932,20 @@ const s: Record<string, React.CSSProperties> = {
     padding: "14px 24px",
     borderBottom: "1px solid #f1f5f9",
   },
-  // The iterations container is absolutely positioned so it can scroll
-  // independently regardless of how flex/grid behave in embedded contexts.
-  // The `top` value should match the combined header + topActions height
-  // (header ~76px + topActions ~62px ≈ 138). Keeping a little buffer.
   samplePanelIterations: {
-    position: "absolute" as const,
-    top: 142,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    overflowY: "auto" as const,
-    WebkitOverflowScrolling: "touch" as const,
     padding: "16px 24px 32px",
     display: "flex",
     flexDirection: "column" as const,
     gap: 16,
+  },
+  samplePanelStickyTop: {
+    position: "sticky" as const,
+    top: 0,
+    background: "#fff",
+    zIndex: 5,
+    // A subtle shadow when content scrolls underneath makes the pinned bar
+    // legible against any iteration content.
+    boxShadow: "0 1px 0 #e5e7eb",
   },
   samplePanelEmpty: {
     color: "#9ca3af",
