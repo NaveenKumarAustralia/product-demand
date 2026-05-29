@@ -6429,7 +6429,7 @@ function SampleIterationBlock({
       </div>
 
       {expanded && (
-        <div style={{ maxHeight: "60vh", overflowY: "auto", WebkitOverflowScrolling: "touch" as const }}>
+        <div>
           {/* Images */}
           <div style={s.sampleIterationImages}>
             {Array.from({ length: savedCount }).map((_, index) => (
@@ -15839,13 +15839,6 @@ const s: Record<string, React.CSSProperties> = {
     background: "#fff",
     boxShadow: "-4px 0 32px rgba(0,0,0,0.18)",
     zIndex: 1200,
-    // Grid layout pins the iterations row to the remaining vertical space
-    // explicitly. Flexbox with min-height:0 should do the same thing but in
-    // practice some browsers / embedded contexts (Shopify admin iframe) end
-    // up letting the flex child grow to its content height, defeating
-    // overflow:auto. A grid 1fr track is unambiguous.
-    display: "grid",
-    gridTemplateRows: "auto auto 1fr",
     overflow: "hidden",
   },
   samplePanelBackdrop: {
@@ -15861,7 +15854,6 @@ const s: Record<string, React.CSSProperties> = {
     gap: 12,
     padding: "20px 24px 16px",
     borderBottom: "1px solid #e5e7eb",
-    flexShrink: 0,
   },
   samplePanelNameWrap: {
     display: "flex",
@@ -15916,11 +15908,17 @@ const s: Record<string, React.CSSProperties> = {
   samplePanelTopActions: {
     padding: "14px 24px",
     borderBottom: "1px solid #f1f5f9",
-    flexShrink: 0,
   },
+  // The iterations container is absolutely positioned so it can scroll
+  // independently regardless of how flex/grid behave in embedded contexts.
+  // The `top` value should match the combined header + topActions height
+  // (header ~76px + topActions ~62px ≈ 138). Keeping a little buffer.
   samplePanelIterations: {
-    flex: 1,
-    minHeight: 0,
+    position: "absolute" as const,
+    top: 142,
+    left: 0,
+    right: 0,
+    bottom: 0,
     overflowY: "auto" as const,
     WebkitOverflowScrolling: "touch" as const,
     padding: "16px 24px 32px",
