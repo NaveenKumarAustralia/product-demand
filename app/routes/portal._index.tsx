@@ -17,6 +17,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   );
   const selectedStatus = url.searchParams.get("status") ?? "";
   const selectedPriority = url.searchParams.get("priority") ?? "";
+  const selectedDestination = url.searchParams.get("destination") ?? "";
   const searchTitle = url.searchParams.get("q") ?? "";
   const serverSearchTitle = page === "restock" ? "" : searchTitle;
   const messageOrderId = Number(url.searchParams.get("messageOrderId") ?? 0) || null;
@@ -309,10 +310,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }, {});
   const priorityFilters = Array.from(new Set(normalizedOrders.map((order) => order.priority).filter(Boolean) as string[]))
     .sort((a, b) => labelForOption(restockSettings.priorityOptions, a).localeCompare(labelForOption(restockSettings.priorityOptions, b)));
+  const destinationFilters = Array.from(new Set(normalizedOrders.map((order) => order.destination).filter(Boolean) as string[]))
+    .sort((a, b) => labelForOption(restockSettings.destinationOptions, a).localeCompare(labelForOption(restockSettings.destinationOptions, b)));
   const filteredOrders = normalizedOrders
     .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
     .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
     .filter((order) => !selectedPriority || order.priority === selectedPriority)
+    .filter((order) => !selectedDestination || order.destination === selectedDestination)
     .filter((order) => !serverSearchTitle || order.productTitle.toLowerCase().includes(serverSearchTitle.toLowerCase()))
     .filter((order) => !messageOrderId || order.id === messageOrderId)
     .sort((a, b) => {
@@ -461,10 +465,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     selectedProductGroup,
     selectedStatus,
     selectedPriority,
+    selectedDestination,
     searchTitle,
     statusFilters,
     statusFilterCounts,
     priorityFilters,
+    destinationFilters,
     sortBy,
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
@@ -2325,6 +2331,10 @@ const DEFAULT_PRIORITY_OPTIONS = [
   { value: "urgent",    label: "URGENT",    bg: "#dc2626", color: "#fff" },
   { value: "cancelled", label: "Cancelled", bg: "#d97706", color: "#fff" },
 ];
+const DEFAULT_DESTINATION_OPTIONS = [
+  { value: "keep_at_factory", label: "Keep at factory", bg: "#fee2e2", color: "#b91c1c" },
+  { value: "send_to_au",      label: "Send to AU",      bg: "#dcfce7", color: "#166534" },
+];
 const FABRIC_CHIP_COLORS = [
   { bg: "#dbeafe", color: "#1e3a8a" },
   { bg: "#dcfce7", color: "#14532d" },
@@ -2893,6 +2903,7 @@ type RestockOption = { value: string; label: string; bg: string; color: string }
 type RestockSettings = {
   statusOptions: RestockOption[];
   priorityOptions: RestockOption[];
+  destinationOptions: RestockOption[];
   quantityFontSize: number;
   quantityFontColor: string;
   inventoryArrowColor: string;
@@ -3070,6 +3081,7 @@ function normalizeRestockSettings(value: unknown): RestockSettings {
   return {
     statusOptions: normalizeRestockOptions(settings.statusOptions, DEFAULT_STATUS_OPTIONS, DEFAULT_STATUS_COLORS),
     priorityOptions: normalizeRestockOptions(settings.priorityOptions, DEFAULT_PRIORITY_OPTIONS),
+    destinationOptions: normalizeRestockOptions(settings.destinationOptions, DEFAULT_DESTINATION_OPTIONS),
     quantityFontSize,
     quantityFontColor: normalizeHexColor(settings.quantityFontColor, "#111827"),
     inventoryArrowColor: normalizeHexColor(settings.inventoryArrowColor, "#4b5563"),
@@ -4581,10 +4593,12 @@ export default function PortalDashboard() {
     selectedProductGroup,
     selectedStatus,
     selectedPriority,
+    selectedDestination,
     searchTitle,
     statusFilters,
     statusFilterCounts,
     priorityFilters,
+    destinationFilters,
     sortBy,
     page,
     columnWidths: savedColumnWidths,
@@ -4913,6 +4927,15 @@ export default function PortalDashboard() {
                     <option value="">All priorities</option>
                     {priorityFilters.map((priority) => (
                       <option key={priority} value={priority}>{labelForOption(restockSettings.priorityOptions, priority)}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={s.filterLabel}>
+                  Destination
+                  <select value={selectedDestination} onChange={(event) => updateParams({ destination: event.currentTarget.value })} style={s.productTypeFilter}>
+                    <option value="">All destinations</option>
+                    {destinationFilters.map((destination) => (
+                      <option key={destination} value={destination}>{labelForOption(restockSettings.destinationOptions, destination)}</option>
                     ))}
                   </select>
                 </label>
@@ -12635,10 +12658,18 @@ function OrderRow({
               style={{
                 position: "absolute",
                 top: "50%",
-                // Centre across (order-date + picture + name) by shifting
-                // left from the Name cell's own left edge.
-                left: -((DEFAULT_COLUMN_WIDTHS.orderDate ?? 92) + (DEFAULT_COLUMN_WIDTHS.picture ?? 88)) / 2,
-                transform: "translateY(-50%) rotate(-12deg)",
+                // The stamp must visually cover only the order date,
+                // picture, and name columns (not factory notes to the
+                // left). Place the stamp's center at the midpoint of
+                // those three columns, measured from the Name cell's
+                // left edge:
+                //   midpoint = -(orderDate + picture) + (orderDate +
+                //              picture + name) / 2
+                //            = (name - orderDate - picture) / 2
+                left: ((DEFAULT_COLUMN_WIDTHS.name ?? 260)
+                       - (DEFAULT_COLUMN_WIDTHS.orderDate ?? 92)
+                       - (DEFAULT_COLUMN_WIDTHS.picture ?? 88)) / 2,
+                transform: "translate(-50%, -50%) rotate(-12deg)",
                 pointerEvents: "none",
                 color: "#b91c1c",
                 border: "4px solid #b91c1c",
@@ -12701,7 +12732,7 @@ function OrderRow({
 
         {/* Destination — keep at factory in India vs send to AU */}
         <Td rowIndex={rowIndex} colIndex={destinationCol} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Destination" historyEntityName={order.productTitle}>
-          <DestinationCell orderId={order.id} value={order.destination ?? ""} />
+          <DestinationCell orderId={order.id} value={order.destination ?? ""} restockSettings={restockSettings} />
         </Td>
 
         {/* Fabric in stock — looked up from the fabric name in the product title */}
@@ -12892,9 +12923,9 @@ function RestockOptionChipDropdown({
   orderId: number;
   value: string;
   options: RestockOption[];
-  optionKind: "statusOptions" | "priorityOptions";
+  optionKind: "statusOptions" | "priorityOptions" | "destinationOptions";
   restockSettings: RestockSettings;
-  updateIntent: "update_status" | "update_priority";
+  updateIntent: "update_status" | "update_priority" | "update_destination";
   undoLabel: string;
   emptyLabel?: string;
 }) {
@@ -13079,51 +13110,18 @@ function RestockOptionChipDropdown({
   );
 }
 
-// Destination — fixed two-choice cell. Stock either stays at the factory
-// in India or ships to Australia. Null means undecided. Clicking a chip
-// toggles it (click an already-active chip to clear back to undecided).
-function DestinationCell({ orderId, value }: { orderId: number; value: string }) {
-  const fetcher = useFetcher();
-  const submit = (next: string) => {
-    submitPortalCell(
-      fetcher,
-      { intent: "update_destination", orderId, value: next },
-      { label: "Undo destination", fields: { intent: "update_destination", orderId, value } },
-    );
-  };
-  const chipBase: React.CSSProperties = {
-    padding: "5px 10px",
-    borderRadius: 999,
-    fontSize: 11,
-    fontWeight: 700,
-    cursor: "pointer",
-    border: "1px solid transparent",
-    background: "#f1f5f9",
-    color: "#475569",
-    lineHeight: 1.2,
-    whiteSpace: "nowrap",
-  };
-  const activeKeep: React.CSSProperties = { background: "#fee2e2", color: "#b91c1c", border: "1px solid #fca5a5" };
-  const activeSend: React.CSSProperties = { background: "#dcfce7", color: "#166534", border: "1px solid #86efac" };
+function DestinationCell({ orderId, value, restockSettings }: { orderId: number; value: string; restockSettings: RestockSettings }) {
   return (
-    <div style={{ display: "flex", gap: 4, justifyContent: "center", alignItems: "center", flexWrap: "wrap" }}>
-      <button
-        type="button"
-        onClick={() => submit(value === "keep_at_factory" ? "" : "keep_at_factory")}
-        style={{ ...chipBase, ...(value === "keep_at_factory" ? activeKeep : {}) }}
-        title="Keep this stock at the factory in India"
-      >
-        Keep at factory
-      </button>
-      <button
-        type="button"
-        onClick={() => submit(value === "send_to_au" ? "" : "send_to_au")}
-        style={{ ...chipBase, ...(value === "send_to_au" ? activeSend : {}) }}
-        title="Send this stock to Australia"
-      >
-        Send to AU
-      </button>
-    </div>
+    <RestockOptionChipDropdown
+      orderId={orderId}
+      value={value}
+      options={restockSettings.destinationOptions}
+      optionKind="destinationOptions"
+      restockSettings={restockSettings}
+      updateIntent="update_destination"
+      undoLabel="Undo destination"
+      emptyLabel="— Destination —"
+    />
   );
 }
 
