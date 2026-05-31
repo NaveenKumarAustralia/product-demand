@@ -3178,14 +3178,39 @@ function normalizeRestockOptions(
   return items.length ? items : normalizeRestockOptions(defaults, defaults, defaultColors);
 }
 
+// Obsolete status chip values (and the chip we fold them into). Used to
+// clean up saved restockSettings so the UI always shows the unified
+// 5-chip set even on installs that have customised settings predating
+// the merge.
+const OBSOLETE_STATUS_VALUES = new Set(["packed", "ready_to_send", "arrived", "arrived_loaded"]);
+
 function normalizeRestockSettings(value: unknown): RestockSettings {
   const settings = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
   const quantityFontSize = Math.min(32, Math.max(10, Number(settings.quantityFontSize) || 13));
 
+  const rawStatusOptions = normalizeRestockOptions(settings.statusOptions, DEFAULT_STATUS_OPTIONS, DEFAULT_STATUS_COLORS);
+  // Drop chips that have been merged away. If "ready" isn't already in
+  // the list, insert it (with the default colour) just after the production
+  // chip so the order matches the new defaults.
+  const statusOptions = rawStatusOptions.filter((option) => !OBSOLETE_STATUS_VALUES.has(option.value));
+  if (!statusOptions.some((option) => option.value === "ready")) {
+    const readyDefault = DEFAULT_STATUS_OPTIONS.find((option) => option.value === "ready");
+    const readyColor = DEFAULT_STATUS_COLORS.ready ?? { bg: "#ede9fe", color: "#4c1d95" };
+    if (readyDefault) {
+      const insertAt = Math.max(0, statusOptions.findIndex((option) => option.value === "on_production") + 1);
+      statusOptions.splice(insertAt, 0, {
+        value: "ready",
+        label: readyDefault.label,
+        bg: readyColor.bg,
+        color: readyColor.color,
+      });
+    }
+  }
+
   return {
-    statusOptions: normalizeRestockOptions(settings.statusOptions, DEFAULT_STATUS_OPTIONS, DEFAULT_STATUS_COLORS),
+    statusOptions,
     priorityOptions: normalizeRestockOptions(settings.priorityOptions, DEFAULT_PRIORITY_OPTIONS),
     destinationOptions: normalizeRestockOptions(settings.destinationOptions, DEFAULT_DESTINATION_OPTIONS),
     quantityFontSize,
