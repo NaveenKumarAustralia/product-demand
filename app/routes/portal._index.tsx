@@ -59,6 +59,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     } catch (e) {
       console.warn("[destination] column ensure failed:", e);
     }
+    // Backfill: fold the old packed / ready_to_send statuses into the new
+    // unified `ready`. updateMany is a no-op when no rows match, so this
+    // is cheap to run on every load.
+    try {
+      await prisma.supplierOrder.updateMany({
+        where: { supplierStatus: { in: ["packed", "ready_to_send"] } },
+        data: { supplierStatus: "ready" },
+      });
+    } catch (e) {
+      console.warn("[supplierStatus] migration to 'ready' failed:", e);
+    }
   }
 
   const [settingsRows, allOrders, packingLists] = await retryAsync(() => Promise.all([
@@ -310,6 +321,55 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ...order,
     productType: normalizeProductGroup(order.productType) || null,
   }));
+  // For each productId that appears in restock orders, look up which open
+  // packing lists contain that product, so the status cell can show the
+  // invoice number(s) of the relevant packing list(s) under the chip.
+  // Skips lines that have already been fully loaded to Shopify.
+  const packingListsByProductId = new Map<string, PackingListBadge[]>();
+  if (page === "restock" && normalizedOrders.length) {
+    const productIds = Array.from(new Set(
+      normalizedOrders.map((order) => order.productId).filter(Boolean) as string[],
+    ));
+    if (productIds.length) {
+      try {
+        const lines = await prisma.packingListLine.findMany({
+          where: { productId: { in: productIds }, isCustom: false },
+          select: {
+            productId: true,
+            qtys: true,
+            shopifyLoadedQtys: true,
+            manuallyLoadedQtys: true,
+            packingList: { select: { id: true, invoiceNumber: true, title: true } },
+          },
+        });
+        for (const line of lines) {
+          if (!line.productId) continue;
+          // Skip lines where every size with packed qty has already been
+          // loaded (either pushed to Shopify or manually marked). Those
+          // packing lists are done and don't need to surface as "in".
+          const qtys = normalizeQtys(line.qtys);
+          const loaded = normalizeQtys(line.shopifyLoadedQtys);
+          const manual = normalizeQtys(line.manuallyLoadedQtys);
+          const anyOutstanding = Object.entries(qtys).some(([size, qty]) => {
+            if (qty <= 0) return false;
+            return loaded[size] !== qty && manual[size] !== qty;
+          });
+          if (!anyOutstanding) continue;
+          const list = packingListsByProductId.get(line.productId) ?? [];
+          if (!list.some((entry) => entry.packingListId === line.packingList.id)) {
+            list.push({
+              packingListId: line.packingList.id,
+              invoiceNumber: line.packingList.invoiceNumber,
+              title: line.packingList.title,
+            });
+            packingListsByProductId.set(line.productId, list);
+          }
+        }
+      } catch (e) {
+        console.warn("[packingListsByProductId] lookup failed:", e);
+      }
+    }
+  }
   const productGroups = Array.from(new Set(normalizedOrders.map((order) => order.productType).filter(Boolean) as string[]))
     .sort((a, b) => a.localeCompare(b));
   const statusFilters = Array.from(new Set(normalizedOrders.map((order) => order.supplierStatus).filter(Boolean)))
@@ -484,6 +544,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     statusFilterCounts,
     priorityFilters,
     destinationFilters,
+    packingListsByProductId: Object.fromEntries(packingListsByProductId),
     sortBy,
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
@@ -1007,6 +1068,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return variantCache.get(productId) ?? [];
     };
 
+    // Track which productIds successfully had inventory pushed, so we can
+    // auto-close any open restock orders for them that the user already
+    // marked as "in_shipment". Loading goods on Shopify is the natural
+    // end-of-life for an in-shipment restock request.
+    const loadedProductIds = new Set<string>();
+
     for (const line of packingList.lines) {
       const title = line.productTitle.toLowerCase();
       if (!line.productId || line.isCustom || skipWords.some((word) => title.includes(word))) continue;
@@ -1037,6 +1104,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         where: { id: line.id },
         data: { shopifyLoadedQtys: nextLoadedQtys },
       });
+      loadedProductIds.add(line.productId);
+    }
+
+    // Close any open restock orders for the products we just loaded that
+    // were sitting in "in_shipment" status. They're done — the goods are
+    // on Shopify. updateMany is a no-op when nothing matches.
+    if (loadedProductIds.size > 0) {
+      try {
+        await prisma.supplierOrder.updateMany({
+          where: {
+            productId: { in: Array.from(loadedProductIds) },
+            supplierStatus: "in_shipment",
+            status: "open",
+          },
+          data: { status: "closed" },
+        });
+      } catch (e) {
+        console.warn("[restock auto-close] failed:", e);
+      }
     }
 
     // Master button is one-time-use: record when it was pressed so the UI
@@ -2323,25 +2409,25 @@ async function logActivity(
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DEFAULT_STATUS_OPTIONS = [
-  { value: "on_order",       label: "On Order" },
-  { value: "on_production",  label: "On Production" },
-  { value: "in_shipment",    label: "In Shipment" },
-  { value: "packed",         label: "Packed" },
-  { value: "arrived",        label: "Arrived" },
-  { value: "arrived_loaded", label: "Arrived and Loaded" },
-  { value: "cancelled",      label: "Cancelled" },
-  { value: "ready_to_send",  label: "Ready To Send" },
+  { value: "on_order",      label: "On Order" },
+  { value: "on_production", label: "On Production" },
+  { value: "ready",         label: "Ready" },
+  { value: "in_shipment",   label: "In Shipment" },
+  { value: "cancelled",     label: "Cancelled" },
 ];
 
 const DEFAULT_STATUS_COLORS: Record<string, { bg: string; color: string }> = {
-  on_order:       { bg: "#fef9c3", color: "#374151" },
-  on_production:  { bg: "#dbeafe", color: "#374151" },
-  in_shipment:    { bg: "#dcfce7", color: "#374151" },
-  packed:         { bg: "#fed7aa", color: "#7c2d12" },
-  arrived:        { bg: "#bbf7d0", color: "#14532d" },
-  arrived_loaded: { bg: "#4ade80", color: "#052e16" },
-  cancelled:      { bg: "#fee2e2", color: "#991b1b" },
-  ready_to_send:  { bg: "#ede9fe", color: "#4c1d95" },
+  on_order:      { bg: "#fef9c3", color: "#374151" },
+  on_production: { bg: "#dbeafe", color: "#374151" },
+  ready:         { bg: "#ede9fe", color: "#4c1d95" },
+  in_shipment:   { bg: "#dcfce7", color: "#14532d" },
+  cancelled:     { bg: "#fee2e2", color: "#991b1b" },
+};
+// Old status values that should fold into the new ones. Used both at
+// settings normalisation time and as a one-shot SQL backfill in the loader.
+const STATUS_VALUE_MIGRATIONS: Record<string, string> = {
+  packed: "ready",
+  ready_to_send: "ready",
 };
 
 const DEFAULT_PRIORITY_OPTIONS = [
@@ -2905,6 +2991,7 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
 };
 
 type ColumnDef = { id: string; label: string; center?: boolean };
+type PackingListBadge = { packingListId: number; invoiceNumber: string | null; title: string };
 type PortalUserRole = "superadmin" | "admin" | "user";
 type PortalUser = {
   id: string;
@@ -4618,6 +4705,7 @@ export default function PortalDashboard() {
     statusFilterCounts,
     priorityFilters,
     destinationFilters,
+    packingListsByProductId,
     sortBy,
     page,
     columnWidths: savedColumnWidths,
@@ -5097,6 +5185,7 @@ export default function PortalDashboard() {
                     rowHeights={rowHeights}
                     frozenOffsets={restockFrozenOffsets}
                     fabricStockIndex={fabricStockIndex}
+                    packingListBadges={order.productId ? (packingListsByProductId as Record<string, PackingListBadge[]>)[order.productId] ?? [] : []}
                   />
                   );
                 })}
@@ -12580,6 +12669,7 @@ function OrderRow({
   rowHeights,
   frozenOffsets,
   fabricStockIndex,
+  packingListBadges,
 }: {
   order: Order;
   rowIndex: number;
@@ -12591,6 +12681,7 @@ function OrderRow({
   rowHeights: Record<string, number>;
   frozenOffsets?: number[];
   fabricStockIndex: FabricStockEntry[];
+  packingListBadges: PackingListBadge[];
 }) {
   const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
@@ -12744,7 +12835,7 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={totalCol} center><span style={s.total}>{order.totalQty}</span></Td>
 
         {/* Status */}
-        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} /></Td>
+        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} /></Td>
 
         {/* Notes (from order) */}
         <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
@@ -13173,17 +13264,59 @@ function DestinationCell({
   );
 }
 
-function StatusCell({ orderId, value, restockSettings }: { orderId: number; value: string; restockSettings: RestockSettings }) {
+function StatusCell({
+  orderId,
+  value,
+  restockSettings,
+  packingListBadges,
+}: {
+  orderId: number;
+  value: string;
+  restockSettings: RestockSettings;
+  packingListBadges: PackingListBadge[];
+}) {
+  // Only show the linked packing list invoice numbers when the row is
+  // actually marked as in shipment — otherwise the badge would be noise.
+  const showBadges = value === "in_shipment" && packingListBadges.length > 0;
   return (
-    <RestockOptionChipDropdown
-      orderId={orderId}
-      value={value}
-      options={restockSettings.statusOptions}
-      optionKind="statusOptions"
-      restockSettings={restockSettings}
-      updateIntent="update_status"
-      undoLabel="Undo status"
-    />
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
+      <RestockOptionChipDropdown
+        orderId={orderId}
+        value={value}
+        options={restockSettings.statusOptions}
+        optionKind="statusOptions"
+        restockSettings={restockSettings}
+        updateIntent="update_status"
+        undoLabel="Undo status"
+      />
+      {showBadges && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "center" }}>
+          {packingListBadges.map((badge) => {
+            const label = badge.invoiceNumber || badge.title || `List #${badge.packingListId}`;
+            return (
+              <a
+                key={badge.packingListId}
+                href={`/portal?page=packing&packingId=${badge.packingListId}`}
+                style={{
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: "#0e7490",
+                  background: "#ecfeff",
+                  border: "1px solid #67e8f9",
+                  borderRadius: 4,
+                  padding: "2px 6px",
+                  textDecoration: "none",
+                  whiteSpace: "nowrap",
+                }}
+                title={`Open packing list ${label}`}
+              >
+                📦 {label}
+              </a>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
