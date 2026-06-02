@@ -2366,6 +2366,12 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // stamp react instantly — there's no reason to re-run the (expensive)
   // restock loader (Shopify variant enrichment etc.) just for this.
   if (intent === "update_destination") return false;
+  // Packing line field edits (productTitle, sku, price, weight, notes,
+  // box number, image) are entirely local to one cell and never affect
+  // the rest of the page. PackingProductNameCell mirrors the typed
+  // value in local state so the new name is visible immediately; the
+  // expensive loader re-run added ~15s of perceived lag for nothing.
+  if (intent === "update_packing_line") return false;
   // Vision Board: only skip revalidation for in-drawer notes/fields saves
   // (they don't affect the card grid). Anything that changes name, image
   // count, ordering or board metadata must refresh the grid so the panel
@@ -12092,9 +12098,13 @@ function PackingProductNameCell({
   };
 
   if (hasLinkedProduct && !isChangingProduct) {
+    // Use the local `value` state (not displayValue from the prop) so that
+    // renames are visible instantly — the loader doesn't revalidate after
+    // update_packing_line saves, so prop wouldn't update until next page
+    // load. value tracks what the user committed.
     return (
       <div style={s.linkedProductCell}>
-        <span style={s.linkedProductTitle}>{displayValue || "Linked product"}</span>
+        <span style={s.linkedProductTitle}>{value || displayValue || "Linked product"}</span>
         <button
           type="button"
           style={s.changeProductButton}
@@ -12121,6 +12131,24 @@ function PackingProductNameCell({
           if (hasLinkedProduct) setIsChangingProduct(true);
         }}
         onChange={(event) => setValue(event.currentTarget.value)}
+        onKeyDown={(event) => {
+          // Enter commits whatever's typed (blur triggers the save in
+          // onBlur). preventDefault stops the type="search" default of
+          // submitting a form, which would otherwise reload the page.
+          if (event.key === "Enter") {
+            event.preventDefault();
+            inputRef.current?.blur();
+            return;
+          }
+          // Escape reverts to the last saved value and exits the cell.
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setValue(displayValue);
+            // Force the onBlur no-op path by syncing value first, then blurring.
+            window.setTimeout(() => inputRef.current?.blur(), 0);
+            return;
+          }
+        }}
         onBlur={(event) => {
           // Picking a product from the search dropdown is handled by
           // applyProduct() — don't double-save.
