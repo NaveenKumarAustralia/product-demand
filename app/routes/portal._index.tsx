@@ -12122,20 +12122,30 @@ function PackingProductNameCell({
         }}
         onChange={(event) => setValue(event.currentTarget.value)}
         onBlur={(event) => {
+          // Picking a product from the search dropdown is handled by
+          // applyProduct() — don't double-save.
           if (isProductSelected) return;
           setIsFocused(false);
-          if (hasLinkedProduct) {
+          setIsChangingProduct(false);
+          const nextValue = event.currentTarget.value;
+          // No actual change — nothing to save.
+          if (nextValue === displayValue) return;
+          // Safety net: if the row is linked to a Shopify product and the
+          // user cleared the input, revert rather than blanking the title.
+          // To remove the link they should use the explicit Change flow.
+          if (hasLinkedProduct && !nextValue.trim()) {
             setValue(displayValue);
-            setIsChangingProduct(false);
             return;
           }
+          // Save the typed title. The linked productId (if any) stays —
+          // the user is just renaming what's shown for this row.
           submitPortalCell(
             fetcher,
             {
               intent: "update_packing_line",
               lineId: line.id,
               field: "productTitle",
-              value: event.currentTarget.value,
+              value: nextValue,
             },
             { label: "Undo product title", fields: { intent: "update_packing_line", lineId: line.id, field: "productTitle", value: displayValue } },
           );
