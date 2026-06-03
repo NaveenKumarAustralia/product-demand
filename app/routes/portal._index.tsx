@@ -11957,12 +11957,17 @@ function PackingListLineRow({
     shopifyLoadedQtys[size] === qtys[size] || manuallyLoadedQtys[size] === qtys[size]
   );
   const total = packingTotal(qtys);
-  // Effective price: a manually-typed line.priceRupees overrides the
-  // auto-derived cost from the matching Product Information style. Auto
-  // kicks in when nothing's typed yet — handy for sample / one-off rows
-  // where the style lookup may not produce a value.
-  const manualPrice = line.priceRupees ?? 0;
-  const effectivePrice = manualPrice > 0 ? manualPrice : autoPriceRupees;
+  // Track manual price locally so Total ₹ recalculates instantly after
+  // the user blurs the Price input. shouldRevalidate skips
+  // update_packing_line saves, so the prop wouldn't refresh otherwise.
+  // The row's key={line.id} means useState re-initialises when a
+  // different line takes the slot.
+  const [manualPriceLocal, setManualPriceLocal] = useState<number>(line.priceRupees ?? 0);
+  // Effective price: a manually-typed override beats the auto-derived
+  // cost from the matching Product Information style. Auto kicks in
+  // when nothing's typed yet — handy for sample / one-off rows where
+  // the style lookup may not produce a value.
+  const effectivePrice = manualPriceLocal > 0 ? manualPriceLocal : autoPriceRupees;
   const value = total * effectivePrice;
 
   const rowHeightKey = `packing:${line.id}`;
@@ -12025,7 +12030,7 @@ function PackingListLineRow({
         </PackingTd>
       ))}
       <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center placeholder={autoPriceRupees > 0 ? `auto ${Math.round(autoPriceRupees)}` : undefined} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center placeholder={autoPriceRupees > 0 ? `auto ${Math.round(autoPriceRupees)}` : undefined} onCommit={(v) => setManualPriceLocal(Number(v) || 0)} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center>
         <span style={{ color: "#9ca3af", fontSize: 11 }} title="AUD conversion coming in Phase 2 (FX lock on shipment)">—</span>
@@ -12537,21 +12542,25 @@ function PackingProductNameCell({
   );
 }
 
-function PackingTextInput({ lineId, field, value, multiline, center, placeholder }: { lineId: number; field: string; value: string; multiline?: boolean; center?: boolean; placeholder?: string }) {
+function PackingTextInput({ lineId, field, value, multiline, center, placeholder, onCommit }: { lineId: number; field: string; value: string; multiline?: boolean; center?: boolean; placeholder?: string; onCommit?: (value: string) => void }) {
   const fetcher = useFetcher();
   const common = {
     defaultValue: value,
     placeholder,
-    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => submitPortalCell(
-      fetcher,
-      {
-        intent: "update_packing_line",
-        lineId,
-        field,
-        value: event.currentTarget.value,
-      },
-      { label: "Undo packing cell", fields: { intent: "update_packing_line", lineId, field, value } },
-    ),
+    onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      const nextValue = event.currentTarget.value;
+      submitPortalCell(
+        fetcher,
+        {
+          intent: "update_packing_line",
+          lineId,
+          field,
+          value: nextValue,
+        },
+        { label: "Undo packing cell", fields: { intent: "update_packing_line", lineId, field, value } },
+      );
+      onCommit?.(nextValue);
+    },
     style: { ...(multiline ? s.packingTextarea : s.packingCellInput), ...(center ? { textAlign: "center" as const } : {}) },
   };
   return multiline ? <textarea rows={3} {...common} /> : <input type="text" {...common} />;
