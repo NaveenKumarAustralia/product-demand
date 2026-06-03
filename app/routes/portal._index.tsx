@@ -1840,9 +1840,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     style.averageTrimMeters = readNumber("averageTrimMeters");
     style.stitchingCost = readNumber("stitchingCost");
     style.zipButtonsCost = readNumber("zipButtonsCost");
+    style.liningTrimCost = readNumber("liningTrimCost");
+    style.factoryProfit = readNumber("factoryProfit");
     style.sheetCount = readNumber("sheetCount");
     style.zipButtonType = String(form.get("zipButtonType") ?? "").trim();
     style.costingNotes = String(form.get("costingNotes") ?? "").trim();
+    // Recompute totalCost so the per-piece cost displayed elsewhere
+    // (restock / packing list) reflects the latest inputs without
+    // depending on the user manually saving it. fabricCost is set by
+    // the fabric-in-stock page workflow and we leave it alone here.
+    style.totalCost =
+      (style.stitchingCost ?? 0)
+      + (style.fabricCost ?? 0)
+      + (style.zipButtonsCost ?? 0)
+      + (style.liningTrimCost ?? 0)
+      + (style.factoryProfit ?? 0);
     await saveProductInfo(productInfo);
     return null;
   }
@@ -3135,6 +3147,8 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   priority: 160,
   eta: 145,
   destination: 180,
+  costRupees: 110,
+  costAud: 110,
   fabricStock: 170,
   delete: 104,
 };
@@ -3193,6 +3207,8 @@ type ProductInfoStyle = {
   stitchingCost?: number;
   fabricCost?: number;
   zipButtonsCost?: number;
+  liningTrimCost?: number;
+  factoryProfit?: number;
   totalCost?: number;
   sheetCount?: number;
   costingNotes?: string;
@@ -3209,7 +3225,7 @@ type ProductInfo = {
 };
 type ProductStyleCosting = Pick<
   ProductInfoStyle,
-  "averageMeters" | "averageTrimMeters" | "zipButtonType" | "stitchingCost" | "fabricCost" | "zipButtonsCost" | "totalCost" | "sheetCount" | "costingNotes"
+  "averageMeters" | "averageTrimMeters" | "zipButtonType" | "stitchingCost" | "fabricCost" | "zipButtonsCost" | "liningTrimCost" | "factoryProfit" | "totalCost" | "sheetCount" | "costingNotes"
 >;
 type UniversalSettings = {
   primaryButtonBg: string;
@@ -3502,6 +3518,48 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
   };
 }
 
+// Build a quick lookup from a normalised style name (lowercased, trimmed)
+// to the style's per-piece total cost in rupees, so the restock / packing
+// pages can show cost / value per row. Product titles in those pages
+// look like "Vivien Dress Queen Protea" — style name + print name
+// concatenated — so we match by longest-prefix-wins (so "Vivien Dress"
+// is preferred over "Vivien" if both are styles).
+type StyleCostLookup = {
+  // Lowercased style names sorted by length descending — prefix match
+  // takes the first hit.
+  byName: { name: string; totalCost: number }[];
+  // Resolve a product title to its per-piece cost in rupees, or 0 if no
+  // matching style is found.
+  costForTitle: (title: string | null | undefined) => number;
+};
+function buildStyleCostLookup(productInfo: ProductInfo): StyleCostLookup {
+  const byName: { name: string; totalCost: number }[] = [];
+  for (const category of productInfo.categories) {
+    for (const style of category.styles) {
+      const name = style.name?.trim().toLowerCase();
+      if (!name) continue;
+      const totalCost = typeof style.totalCost === "number" && Number.isFinite(style.totalCost)
+        ? style.totalCost
+        : 0;
+      byName.push({ name, totalCost });
+    }
+  }
+  byName.sort((a, b) => b.name.length - a.name.length);
+  return {
+    byName,
+    costForTitle: (title) => {
+      const haystack = (title ?? "").trim().toLowerCase();
+      if (!haystack) return 0;
+      for (const entry of byName) {
+        if (haystack === entry.name || haystack.startsWith(entry.name + " ")) {
+          return entry.totalCost;
+        }
+      }
+      return 0;
+    },
+  };
+}
+
 function normalizeProductInfo(value: unknown): ProductInfo {
   const rawCategories = value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>).categories
@@ -3531,6 +3589,8 @@ function normalizeProductInfo(value: unknown): ProductInfo {
             stitchingCost: Number(style.stitchingCost) || defaults.stitchingCost,
             fabricCost: Number(style.fabricCost) || defaults.fabricCost,
             zipButtonsCost: Number(style.zipButtonsCost) || defaults.zipButtonsCost,
+            liningTrimCost: Number(style.liningTrimCost) || defaults.liningTrimCost,
+            factoryProfit: Number(style.factoryProfit) || defaults.factoryProfit,
             totalCost: Number(style.totalCost) || defaults.totalCost,
             sheetCount: Number(style.sheetCount) || defaults.sheetCount,
             costingNotes: String(style.costingNotes ?? defaults.costingNotes ?? "").trim(),
@@ -5004,6 +5064,8 @@ export default function PortalDashboard() {
     { id: "priority", label: "Priority" },
     { id: "eta", label: "ETA" },
     { id: "destination", label: "Destination", center: true },
+    { id: "costRupees", label: "Cost (₹)", center: true },
+    { id: "costAud", label: "Cost (A$)", center: true },
     { id: "fabricStock", label: "Fabric in stock", center: true },
     ...customColumns.restock.map((column) => ({ id: column.id, label: column.label })),
   ];
@@ -5033,6 +5095,11 @@ export default function PortalDashboard() {
   const visibleOrders = page === "restock" && restockSearch
     ? orders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
     : orders;
+  // Lookup: product title (e.g. "Vivien Dress Queen Protea") → per-piece
+  // rupee cost from the matching ProductInformation style. Computed once
+  // per render of productInfo so OrderRow / PackingListLineRow only do a
+  // single Map lookup.
+  const styleCostLookup = useMemo(() => buildStyleCostLookup(productInfo), [productInfo]);
   const activePageTitle = page === "dashboard" ? "Dashboard"
     : page === "fabric" ? "Fabric in stock"
     : page === "settings" ? "Settings"
@@ -5287,6 +5354,7 @@ export default function PortalDashboard() {
             canEditLockedQuantities={Boolean(currentUser?.admin)}
             isAdmin={Boolean(currentUser?.admin)}
             shopDomain={shopDomain}
+            styleCostLookup={styleCostLookup}
           />
         ) : page === "fabric" ? (
           <CombinedFabricStockPanel
@@ -5394,6 +5462,7 @@ export default function PortalDashboard() {
                     fabricStockIndex={fabricStockIndex}
                     packingListBadges={order.productId ? (packingListsByProductId as Record<string, PackingListBadge[]>)[order.productId] ?? [] : []}
                     openPackingLists={openPackingLists as PackingListBadge[]}
+                    costPerPiece={styleCostLookup.costForTitle(order.productTitle)}
                   />
                   );
                 })}
@@ -8103,6 +8172,8 @@ function ProductInformationPanel({
       zipButtonType: style.zipButtonType ?? "",
       stitchingCost: numberToDraft(style.stitchingCost),
       zipButtonsCost: numberToDraft(style.zipButtonsCost),
+      liningTrimCost: numberToDraft(style.liningTrimCost),
+      factoryProfit: numberToDraft(style.factoryProfit),
       sheetCount: numberToDraft(style.sheetCount),
       costingNotes: style.costingNotes ?? "",
     });
@@ -8349,6 +8420,26 @@ function ProductInformationPanel({
                   inputMode="decimal"
                   value={detailDraft.zipButtonsCost ?? ""}
                   onChange={(event) => updateDetailDraft("zipButtonsCost", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Lining / trim cost
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={detailDraft.liningTrimCost ?? ""}
+                  onChange={(event) => updateDetailDraft("liningTrimCost", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Factory profit (₹/piece)
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={detailDraft.factoryProfit ?? ""}
+                  onChange={(event) => updateDetailDraft("factoryProfit", event.currentTarget.value)}
                   style={s.productInfoDetailsInput}
                 />
               </label>
@@ -10951,6 +11042,7 @@ function PackingListsPanel({
   canEditLockedQuantities,
   isAdmin,
   shopDomain,
+  styleCostLookup,
 }: {
   packingLists: PackingListWithLines[];
   selectedPackingList: PackingListWithLines | null;
@@ -10968,6 +11060,7 @@ function PackingListsPanel({
   canEditLockedQuantities: boolean;
   isAdmin: boolean;
   shopDomain: string | null;
+  styleCostLookup: StyleCostLookup;
 }) {
   const fetcher = useFetcher();
 
@@ -10993,6 +11086,7 @@ function PackingListsPanel({
             canEditLockedQuantities={canEditLockedQuantities}
             isAdmin={isAdmin}
             shopDomain={shopDomain}
+            styleCostLookup={styleCostLookup}
           />
         </section>
       )}
@@ -11171,6 +11265,7 @@ function PackingListDetail({
   canEditLockedQuantities,
   isAdmin,
   shopDomain,
+  styleCostLookup,
 }: {
   packingList: PackingListWithLines;
   savedPackingColumnWidths: Record<string, number>;
@@ -11187,6 +11282,7 @@ function PackingListDetail({
   canEditLockedQuantities: boolean;
   isAdmin: boolean;
   shopDomain: string | null;
+  styleCostLookup: StyleCostLookup;
 }) {
   const fetcher = useFetcher();
   const loadInventoryFetcher = useFetcher();
@@ -11680,6 +11776,7 @@ function PackingListDetail({
                 shopDomain={shopDomain}
                 showShopifyColumn={combineView}
                 sizes={packingSizes}
+                autoPriceRupees={styleCostLookup.costForTitle(line.productTitle)}
               />
               );
             }) : (
@@ -11801,6 +11898,7 @@ function PackingListLineRow({
   shopDomain,
   showShopifyColumn,
   sizes,
+  autoPriceRupees,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -11814,6 +11912,7 @@ function PackingListLineRow({
   shopDomain: string | null;
   showShopifyColumn: boolean;
   sizes: string[];
+  autoPriceRupees: number;
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -11825,8 +11924,13 @@ function PackingListLineRow({
     shopifyLoadedQtys[size] === qtys[size] || manuallyLoadedQtys[size] === qtys[size]
   );
   const total = packingTotal(qtys);
-  const price = line.priceRupees ?? 0;
-  const value = total * price;
+  // Effective price: a manually-typed line.priceRupees overrides the
+  // auto-derived cost from the matching Product Information style. Auto
+  // kicks in when nothing's typed yet — handy for sample / one-off rows
+  // where the style lookup may not produce a value.
+  const manualPrice = line.priceRupees ?? 0;
+  const effectivePrice = manualPrice > 0 ? manualPrice : autoPriceRupees;
+  const value = total * effectivePrice;
 
   const rowHeightKey = `packing:${line.id}`;
 
@@ -11888,7 +11992,7 @@ function PackingListLineRow({
         </PackingTd>
       ))}
       <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center placeholder={autoPriceRupees > 0 ? `auto ${Math.round(autoPriceRupees)}` : undefined} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
       {showShopifyColumn && (
@@ -12394,10 +12498,11 @@ function PackingProductNameCell({
   );
 }
 
-function PackingTextInput({ lineId, field, value, multiline, center }: { lineId: number; field: string; value: string; multiline?: boolean; center?: boolean }) {
+function PackingTextInput({ lineId, field, value, multiline, center, placeholder }: { lineId: number; field: string; value: string; multiline?: boolean; center?: boolean; placeholder?: string }) {
   const fetcher = useFetcher();
   const common = {
     defaultValue: value,
+    placeholder,
     onBlur: (event: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => submitPortalCell(
       fetcher,
       {
@@ -12911,6 +13016,7 @@ function OrderRow({
   fabricStockIndex,
   packingListBadges,
   openPackingLists,
+  costPerPiece,
 }: {
   order: Order;
   rowIndex: number;
@@ -12924,6 +13030,7 @@ function OrderRow({
   fabricStockIndex: FabricStockEntry[];
   packingListBadges: PackingListBadge[];
   openPackingLists: PackingListBadge[];
+  costPerPiece: number;
 }) {
   const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
@@ -12951,7 +13058,9 @@ function OrderRow({
   const priorityCol = totalCol + 3;
   const etaCol = totalCol + 4;
   const destinationCol = totalCol + 5;
-  const fabricStockCol = totalCol + 6;
+  const costRupeesCol = totalCol + 6;
+  const costAudCol = totalCol + 7;
+  const fabricStockCol = totalCol + 8;
   const fabricMatches = findFabricStockMatches(order.productTitle, fabricStockIndex);
   const rowHeightKey = `restock:${order.id}`;
   const shouldSkipDeleteConfirm = () => {
@@ -13093,6 +13202,31 @@ function OrderRow({
         {/* Destination — keep at factory in India vs send to AU */}
         <Td rowIndex={rowIndex} colIndex={destinationCol} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Destination" historyEntityName={order.productTitle}>
           <DestinationCell orderId={order.id} value={destinationLocal} restockSettings={restockSettings} onChange={setDestinationLocal} />
+        </Td>
+
+        {/* Cost in rupees — derived from the matching Product Info style.
+            Top line is per-piece cost, second line is total for the row's
+            qty. Shows "—" if no matching style is found. */}
+        <Td rowIndex={rowIndex} colIndex={costRupeesCol} center>
+          {costPerPiece > 0 ? (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+              <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
+                ₹{costPerPiece.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              </span>
+              {order.totalQty > 0 && (
+                <span style={{ fontSize: 11, color: "#6b7280" }}>
+                  Total ₹{(costPerPiece * order.totalQty).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                </span>
+              )}
+            </div>
+          ) : (
+            <span style={{ color: "#9ca3af" }}>—</span>
+          )}
+        </Td>
+
+        {/* Cost in AUD — placeholder until Phase 2 wires the FX rate. */}
+        <Td rowIndex={rowIndex} colIndex={costAudCol} center>
+          <span style={{ color: "#9ca3af", fontSize: 11 }} title="AUD conversion coming in Phase 2 (FX lock on shipment)">—</span>
         </Td>
 
         {/* Fabric in stock — looked up from the fabric name in the product title */}
