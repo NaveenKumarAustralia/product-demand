@@ -2632,28 +2632,46 @@ const PACKING_COLUMNS_BEFORE_SIZES = [
 const PACKING_COLUMNS_AFTER_SIZES = [
   { id: "total", label: "Total", width: 82, center: true },
   { id: "price", label: "Price ₹", width: 92, center: true },
-  { id: "value", label: "Value ₹", width: 96, center: true },
+  { id: "value", label: "Total ₹", width: 96, center: true },
+  { id: "costAud", label: "Total A$", width: 96, center: true },
   { id: "weight", label: "Weight", width: 90, center: true },
   { id: "shopify", label: "Shopify", width: 84, center: true },
 ];
-// Builds the size column list for a given packing list, merging the
-// baseline (XS..3XL plus the slash combos) with any extra size keys
-// present in the lines themselves (Free Size, XL-2XL, etc). Baseline
-// columns come first in their canonical order; extras come after in the
-// order they first appear in the data — keeps the layout stable for
-// standard lists while still surfacing one-off sizes.
+// Canonical form for a size label so "S-M", "S/M", "S - M", "sm" all
+// resolve to the same column. Lowercase, strip spaces, normalise dashes
+// to slashes.
+function canonicalSizeKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, "").replace(/-/g, "/");
+}
+// Builds the size column list for a given packing list:
+//   1. Always include every baseline column (XS..3XL plus the slash
+//      combos) so the user has somewhere to type even on empty rows.
+//   2. Append non-baseline sizes only when at least one line has
+//      qty > 0 for that size — keeps stray "Free Size" / "S-M"-style
+//      data from cluttering the table with empty extra columns.
+//   3. Deduplicate by canonical key so "S-M" and "S/M" are treated as
+//      the same column (baseline label wins, extras with the same
+//      canonical key are dropped).
 function derivePackingSizes(lines: Array<{ qtys?: unknown }>): string[] {
-  const baselineSet = new Set(PACKING_SIZES);
-  const extras: string[] = [];
-  const seenExtras = new Set<string>();
+  const baselineCanonical = new Set(PACKING_SIZES.map(canonicalSizeKey));
+  // Total qty per canonical key for non-baseline keys.
+  const extraQtyByCanonical = new Map<string, number>();
+  // First label seen per canonical extra key.
+  const extraLabelByCanonical = new Map<string, string>();
   for (const line of lines) {
     const qtys = normalizeQtys(line.qtys);
-    for (const key of Object.keys(qtys)) {
-      const trimmed = key.trim();
-      if (!trimmed || baselineSet.has(trimmed) || seenExtras.has(trimmed)) continue;
-      seenExtras.add(trimmed);
-      extras.push(trimmed);
+    for (const [rawKey, qty] of Object.entries(qtys)) {
+      const trimmed = rawKey.trim();
+      if (!trimmed) continue;
+      const canon = canonicalSizeKey(trimmed);
+      if (baselineCanonical.has(canon)) continue;
+      extraQtyByCanonical.set(canon, (extraQtyByCanonical.get(canon) ?? 0) + (Number(qty) || 0));
+      if (!extraLabelByCanonical.has(canon)) extraLabelByCanonical.set(canon, trimmed);
     }
+  }
+  const extras: string[] = [];
+  for (const [canon, label] of extraLabelByCanonical) {
+    if ((extraQtyByCanonical.get(canon) ?? 0) > 0) extras.push(label);
   }
   return [...PACKING_SIZES, ...extras];
 }
@@ -12009,9 +12027,12 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center placeholder={autoPriceRupees > 0 ? `auto ${Math.round(autoPriceRupees)}` : undefined} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center>
+        <span style={{ color: "#9ca3af", fontSize: 11 }} title="AUD conversion coming in Phase 2 (FX lock on shipment)">—</span>
+      </PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
       {showShopifyColumn && (
-        <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center>
+        <PackingTd rowIndex={rowIndex} colIndex={10 + sizes.length} center>
           {isAdmin && line.productId && shopDomain ? (
             <a
               href={`https://${shopDomain}/admin/products/${line.productId.replace(/^gid:\/\/shopify\/Product\//, "")}`}
@@ -12038,7 +12059,7 @@ function PackingListLineRow({
         </PackingTd>
       )}
       {customColumns.map((column, customIndex) => (
-        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={10 + sizes.length + customIndex}>
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={11 + sizes.length + customIndex}>
           <TableCustomCell cellKey={`packing:${line.id}:${column.id}`} value={customCells[`packing:${line.id}:${column.id}`] ?? ""} />
         </PackingTd>
       ))}
@@ -12267,8 +12288,11 @@ function PackingCombinedRow({
       <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><span style={s.total}>{row.totalPrice ? Math.round(row.totalPrice) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center><span style={s.total}>{row.totalWeight ? Math.round(row.totalWeight) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center>
+      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center>
+        <span style={{ color: "#9ca3af", fontSize: 11 }} title="AUD conversion coming in Phase 2 (FX lock on shipment)">—</span>
+      </PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center><span style={s.total}>{row.totalWeight ? Math.round(row.totalWeight) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={10 + sizes.length} center>
         {adminUrl ? (
           <a
             href={adminUrl}
@@ -12294,7 +12318,7 @@ function PackingCombinedRow({
         ) : null}
       </PackingTd>
       {customColumns.map((column, customIndex) => (
-        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={10 + sizes.length + customIndex} />
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={11 + sizes.length + customIndex} />
       ))}
     </tr>
   );
