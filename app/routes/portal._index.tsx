@@ -59,6 +59,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     } catch (e) {
       console.warn("[destination] column ensure failed:", e);
     }
+    try {
+      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "packingListId" INTEGER`);
+    } catch (e) {
+      console.warn("[packingListId] column ensure failed:", e);
+    }
     // Backfill: fold the old packed / ready_to_send statuses into the new
     // unified `ready`. updateMany is a no-op when no rows match, so this
     // is cheap to run on every load.
@@ -321,6 +326,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ...order,
     productType: normalizeProductGroup(order.productType) || null,
   }));
+  // All open packing lists (id + invoiceNumber + title), shown to the user
+  // when they assign an In Shipment status so they can pick which list the
+  // restock row belongs to. Defensive try in case the table doesn't exist
+  // yet on a stale DB.
+  let openPackingLists: PackingListBadge[] = [];
+  if (page === "restock") {
+    try {
+      const lists = await prisma.packingList.findMany({
+        where: { masterInventoryLoadedAt: null },
+        select: { id: true, invoiceNumber: true, title: true, createdAt: true },
+        orderBy: { createdAt: "desc" },
+      });
+      openPackingLists = lists.map((l) => ({
+        packingListId: l.id,
+        invoiceNumber: l.invoiceNumber,
+        title: l.title,
+      }));
+    } catch (e) {
+      console.warn("[openPackingLists] lookup failed:", e);
+    }
+  }
   // For each productId that appears in restock orders, look up which open
   // packing lists contain that product, so the status cell can show the
   // invoice number(s) of the relevant packing list(s) under the chip.
@@ -577,6 +603,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     priorityFilters,
     destinationFilters,
     packingListsByProductId: Object.fromEntries(packingListsByProductId),
+    openPackingLists,
     sortBy,
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
@@ -1139,16 +1166,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       loadedProductIds.add(line.productId);
     }
 
-    // Close any open restock orders for the products we just loaded that
-    // were sitting in "in_shipment" status. They're done — the goods are
-    // on Shopify. updateMany is a no-op when nothing matches.
+    // Close any open restock orders that were sitting in "in_shipment"
+    // status and are tied to this packing list. We prefer the explicit
+    // packingListId link — that closes only the rows the user actually
+    // attached to this list. For backward compatibility with rows that
+    // pre-date the link field (no packingListId set), we still fall back
+    // to a productId match so old data behaves like before.
     if (loadedProductIds.size > 0) {
       try {
         await prisma.supplierOrder.updateMany({
           where: {
-            productId: { in: Array.from(loadedProductIds) },
             supplierStatus: "in_shipment",
             status: "open",
+            OR: [
+              { packingListId: packingId },
+              {
+                AND: [
+                  { packingListId: null },
+                  { productId: { in: Array.from(loadedProductIds) } },
+                ],
+              },
+            ],
           },
           data: { status: "closed" },
         });
@@ -2273,6 +2311,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const raw = String(form.get("value") ?? "").trim().slice(0, 64);
     updates.destination = raw || null;
   }
+  if (intent === "update_packing_list_link") {
+    const raw = String(form.get("value") ?? "").trim();
+    const parsed = raw === "" ? null : Number(raw);
+    if (parsed !== null && (!Number.isFinite(parsed) || parsed <= 0)) return null;
+    updates.packingListId = parsed;
+  }
 
   if (intent === "update_qty") {
     const size = String(form.get("size") ?? "");
@@ -2365,6 +2409,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       update_notes: "Notes",
       update_eta: "ETA",
       update_destination: "Destination",
+      update_packing_list_link: "Packing list link",
     };
     const logField = loggableIntents[intent];
     if (logField && orderId) {
@@ -2398,6 +2443,9 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // stamp react instantly — there's no reason to re-run the (expensive)
   // restock loader (Shopify variant enrichment etc.) just for this.
   if (intent === "update_destination") return false;
+  // Linking a restock row to a packing list updates one column on one
+  // row — local optimistic state handles the badge.
+  if (intent === "update_packing_list_link") return false;
   // Packing line field edits (productTitle, sku, price, weight, notes,
   // box number, image) are entirely local to one cell and never affect
   // the rest of the page. PackingProductNameCell mirrors the typed
@@ -4791,6 +4839,7 @@ export default function PortalDashboard() {
     priorityFilters,
     destinationFilters,
     packingListsByProductId,
+    openPackingLists,
     sortBy,
     page,
     columnWidths: savedColumnWidths,
@@ -5271,6 +5320,7 @@ export default function PortalDashboard() {
                     frozenOffsets={restockFrozenOffsets}
                     fabricStockIndex={fabricStockIndex}
                     packingListBadges={order.productId ? (packingListsByProductId as Record<string, PackingListBadge[]>)[order.productId] ?? [] : []}
+                    openPackingLists={openPackingLists as PackingListBadge[]}
                   />
                   );
                 })}
@@ -12787,6 +12837,7 @@ function OrderRow({
   frozenOffsets,
   fabricStockIndex,
   packingListBadges,
+  openPackingLists,
 }: {
   order: Order;
   rowIndex: number;
@@ -12799,6 +12850,7 @@ function OrderRow({
   frozenOffsets?: number[];
   fabricStockIndex: FabricStockEntry[];
   packingListBadges: PackingListBadge[];
+  openPackingLists: PackingListBadge[];
 }) {
   const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
@@ -12954,7 +13006,7 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={totalCol} center><span style={s.total}>{order.totalQty}</span></Td>
 
         {/* Status */}
-        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} /></Td>
+        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} linkedPackingListId={order.packingListId ?? null} openPackingLists={openPackingLists} /></Td>
 
         {/* Notes (from order) */}
         <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
@@ -13388,15 +13440,44 @@ function StatusCell({
   value,
   restockSettings,
   packingListBadges,
+  linkedPackingListId,
+  openPackingLists,
 }: {
   orderId: number;
   value: string;
   restockSettings: RestockSettings;
   packingListBadges: PackingListBadge[];
+  linkedPackingListId: number | null;
+  openPackingLists: PackingListBadge[];
 }) {
-  // Only show the linked packing list invoice numbers when the row is
-  // actually marked as in shipment — otherwise the badge would be noise.
-  const showBadges = value === "in_shipment" && packingListBadges.length > 0;
+  const linkFetcher = useFetcher();
+  // Local optimistic state so picking a packing list reflects instantly —
+  // shouldRevalidate skips update_packing_list_link so the prop won't
+  // refresh until next page load.
+  const [linkLocal, setLinkLocal] = useState<number | null>(linkedPackingListId);
+  // Picker option pool: prefer packing lists that actually contain this
+  // product (so the user's first guess is right), then any other open
+  // packing list as a backup.
+  const productListIds = new Set(packingListBadges.map((b) => b.packingListId));
+  const pickerOptions: PackingListBadge[] = [
+    ...packingListBadges,
+    ...openPackingLists.filter((list) => !productListIds.has(list.packingListId)),
+  ];
+  // Resolve the linked packing list to a badge for display. Falls back to
+  // the productId-based lookup so legacy rows without an explicit link
+  // still show their badge.
+  const linkedBadge = linkLocal
+    ? pickerOptions.find((opt) => opt.packingListId === linkLocal) ?? null
+    : (packingListBadges[0] ?? null);
+  const showLinkUI = value === "in_shipment";
+  const submitLink = (next: number | null) => {
+    setLinkLocal(next);
+    submitPortalCell(
+      linkFetcher,
+      { intent: "update_packing_list_link", orderId, value: next === null ? "" : String(next) },
+      { label: "Undo packing list link", fields: { intent: "update_packing_list_link", orderId, value: linkLocal === null ? "" : String(linkLocal) } },
+    );
+  };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
       <RestockOptionChipDropdown
@@ -13408,32 +13489,63 @@ function StatusCell({
         updateIntent="update_status"
         undoLabel="Undo status"
       />
-      {showBadges && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "center" }}>
-          {packingListBadges.map((badge) => {
-            const label = badge.invoiceNumber || badge.title || `List #${badge.packingListId}`;
-            return (
-              <a
-                key={badge.packingListId}
-                href={`/portal?page=packing&packingId=${badge.packingListId}`}
-                style={{
-                  fontSize: 11,
-                  fontWeight: 600,
-                  color: "#0e7490",
-                  background: "#ecfeff",
-                  border: "1px solid #67e8f9",
-                  borderRadius: 4,
-                  padding: "2px 6px",
-                  textDecoration: "none",
-                  whiteSpace: "nowrap",
-                }}
-                title={`Open packing list ${label}`}
-              >
-                📦 {label}
-              </a>
-            );
-          })}
-        </div>
+      {showLinkUI && (
+        linkedBadge ? (
+          <div style={{ display: "flex", gap: 4, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+            <a
+              href={`/portal?page=packing&packingId=${linkedBadge.packingListId}`}
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: "#0e7490",
+                background: "#ecfeff",
+                border: "1px solid #67e8f9",
+                borderRadius: 4,
+                padding: "2px 6px",
+                textDecoration: "none",
+                whiteSpace: "nowrap",
+              }}
+              title={`Open packing list ${linkedBadge.invoiceNumber || linkedBadge.title}`}
+            >
+              📦 {linkedBadge.invoiceNumber || linkedBadge.title || `List #${linkedBadge.packingListId}`}
+            </a>
+            <button
+              type="button"
+              onClick={() => submitLink(null)}
+              style={{ border: "none", background: "none", cursor: "pointer", color: "#6b7280", fontSize: 11, padding: "0 4px" }}
+              title="Unlink from packing list"
+              aria-label="Unlink from packing list"
+            >
+              ×
+            </button>
+          </div>
+        ) : (
+          <select
+            value=""
+            onChange={(event) => {
+              const v = event.currentTarget.value;
+              if (!v) return;
+              submitLink(Number(v));
+            }}
+            style={{
+              fontSize: 11,
+              padding: "2px 4px",
+              borderRadius: 4,
+              border: "1px solid #cbd5e1",
+              background: "#fff",
+              color: "#475569",
+              maxWidth: "100%",
+            }}
+            title="Link this row to a packing list"
+          >
+            <option value="">— Link packing list —</option>
+            {pickerOptions.map((opt) => (
+              <option key={opt.packingListId} value={opt.packingListId}>
+                {opt.invoiceNumber || opt.title || `List #${opt.packingListId}`}
+              </option>
+            ))}
+          </select>
+        )
       )}
     </div>
   );

@@ -43,6 +43,7 @@ model SupplierOrder {
   productImageUrl String?
   eta             DateTime?
   destination     String?
+  packingListId   Int?
   notes           String?
   totalQty        Int       @default(0)
   createdAt    DateTime    @default(now())
