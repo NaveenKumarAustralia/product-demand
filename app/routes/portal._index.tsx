@@ -339,7 +339,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (page === "restock") {
     try {
       const lists = await prisma.packingList.findMany({
-        where: { masterInventoryLoadedAt: null },
+        where: { masterInventoryLoadedAt: null, hiddenAt: null },
         select: {
           id: true,
           invoiceNumber: true,
@@ -385,7 +385,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     if (productIds.length) {
       try {
         const lines = await prisma.packingListLine.findMany({
-          where: { productId: { in: productIds }, isCustom: false },
+          where: {
+            productId: { in: productIds },
+            isCustom: false,
+            packingList: { hiddenAt: null },
+          },
           select: {
             productId: true,
             qtys: true,
@@ -13485,6 +13489,11 @@ function StatusCell({
   openPackingLists: PackingListBadge[];
 }) {
   const linkFetcher = useFetcher();
+  // Track the chip's selected status locally so the packing list picker
+  // appears the instant the user picks "In Shipment" — otherwise it'd
+  // wait 1-2s for the loader revalidation to refresh the prop.
+  const [statusLocal, setStatusLocal] = useState(value);
+  useEffect(() => { setStatusLocal(value); }, [value]);
   // Local optimistic state so picking a packing list reflects instantly —
   // shouldRevalidate skips update_packing_list_link so the prop won't
   // refresh until next page load.
@@ -13503,7 +13512,7 @@ function StatusCell({
   const linkedBadge = linkLocal
     ? pickerOptions.find((opt) => opt.packingListId === linkLocal) ?? null
     : (packingListBadges[0] ?? null);
-  const showLinkUI = value === "in_shipment";
+  const showLinkUI = statusLocal === "in_shipment";
   const submitLink = (next: number | null) => {
     setLinkLocal(next);
     submitPortalCell(
@@ -13522,6 +13531,7 @@ function StatusCell({
         restockSettings={restockSettings}
         updateIntent="update_status"
         undoLabel="Undo status"
+        onChange={setStatusLocal}
       />
       {showLinkUI && (
         linkedBadge ? (
