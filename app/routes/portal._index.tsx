@@ -1841,6 +1841,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     style.stitchingCost = readNumber("stitchingCost");
     style.zipButtonsCost = readNumber("zipButtonsCost");
     style.liningTrimCost = readNumber("liningTrimCost");
+    style.factoryCost = readNumber("factoryCost");
     style.factoryProfit = readNumber("factoryProfit");
     style.sheetCount = readNumber("sheetCount");
     style.zipButtonType = String(form.get("zipButtonType") ?? "").trim();
@@ -1854,6 +1855,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       + (style.fabricCost ?? 0)
       + (style.zipButtonsCost ?? 0)
       + (style.liningTrimCost ?? 0)
+      + (style.factoryCost ?? 0)
       + (style.factoryProfit ?? 0);
     await saveProductInfo(productInfo);
     return null;
@@ -3208,6 +3210,7 @@ type ProductInfoStyle = {
   fabricCost?: number;
   zipButtonsCost?: number;
   liningTrimCost?: number;
+  factoryCost?: number;
   factoryProfit?: number;
   totalCost?: number;
   sheetCount?: number;
@@ -3225,7 +3228,7 @@ type ProductInfo = {
 };
 type ProductStyleCosting = Pick<
   ProductInfoStyle,
-  "averageMeters" | "averageTrimMeters" | "zipButtonType" | "stitchingCost" | "fabricCost" | "zipButtonsCost" | "liningTrimCost" | "factoryProfit" | "totalCost" | "sheetCount" | "costingNotes"
+  "averageMeters" | "averageTrimMeters" | "zipButtonType" | "stitchingCost" | "fabricCost" | "zipButtonsCost" | "liningTrimCost" | "factoryCost" | "factoryProfit" | "totalCost" | "sheetCount" | "costingNotes"
 >;
 type UniversalSettings = {
   primaryButtonBg: string;
@@ -3590,6 +3593,7 @@ function normalizeProductInfo(value: unknown): ProductInfo {
             fabricCost: Number(style.fabricCost) || defaults.fabricCost,
             zipButtonsCost: Number(style.zipButtonsCost) || defaults.zipButtonsCost,
             liningTrimCost: Number(style.liningTrimCost) || defaults.liningTrimCost,
+            factoryCost: Number(style.factoryCost) || defaults.factoryCost,
             factoryProfit: Number(style.factoryProfit) || defaults.factoryProfit,
             totalCost: Number(style.totalCost) || defaults.totalCost,
             sheetCount: Number(style.sheetCount) || defaults.sheetCount,
@@ -8173,6 +8177,7 @@ function ProductInformationPanel({
       stitchingCost: numberToDraft(style.stitchingCost),
       zipButtonsCost: numberToDraft(style.zipButtonsCost),
       liningTrimCost: numberToDraft(style.liningTrimCost),
+      factoryCost: numberToDraft(style.factoryCost),
       factoryProfit: numberToDraft(style.factoryProfit),
       sheetCount: numberToDraft(style.sheetCount),
       costingNotes: style.costingNotes ?? "",
@@ -8430,6 +8435,16 @@ function ProductInformationPanel({
                   inputMode="decimal"
                   value={detailDraft.liningTrimCost ?? ""}
                   onChange={(event) => updateDetailDraft("liningTrimCost", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Factory cost (₹/piece)
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={detailDraft.factoryCost ?? ""}
+                  onChange={(event) => updateDetailDraft("factoryCost", event.currentTarget.value)}
                   style={s.productInfoDetailsInput}
                 />
               </label>
