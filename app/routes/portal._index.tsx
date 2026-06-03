@@ -326,23 +326,49 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ...order,
     productType: normalizeProductGroup(order.productType) || null,
   }));
-  // All open packing lists (id + invoiceNumber + title), shown to the user
-  // when they assign an In Shipment status so they can pick which list the
-  // restock row belongs to. Defensive try in case the table doesn't exist
-  // yet on a stale DB.
+  // Open packing lists (id + invoiceNumber + title) for the In Shipment
+  // picker. A packing list counts as "open" when:
+  //   - the master Load Inventory button hasn't been pressed, AND
+  //   - at least one non-custom line still has qty that hasn't been
+  //     pushed to Shopify or manually marked loaded.
+  // The second check catches lists whose products have all been loaded
+  // individually via per-product buttons (master flag stays null in that
+  // case). Empty lists with no lines yet still appear so the user can
+  // pre-link to a freshly-created list.
   let openPackingLists: PackingListBadge[] = [];
   if (page === "restock") {
     try {
       const lists = await prisma.packingList.findMany({
         where: { masterInventoryLoadedAt: null },
-        select: { id: true, invoiceNumber: true, title: true, createdAt: true },
+        select: {
+          id: true,
+          invoiceNumber: true,
+          title: true,
+          createdAt: true,
+          lines: {
+            where: { isCustom: false },
+            select: { qtys: true, shopifyLoadedQtys: true, manuallyLoadedQtys: true },
+          },
+        },
         orderBy: { createdAt: "desc" },
       });
-      openPackingLists = lists.map((l) => ({
-        packingListId: l.id,
-        invoiceNumber: l.invoiceNumber,
-        title: l.title,
-      }));
+      openPackingLists = lists
+        .filter((list) => {
+          if (list.lines.length === 0) return true;
+          return list.lines.some((line) => {
+            const qtys = normalizeQtys(line.qtys);
+            const loaded = normalizeQtys(line.shopifyLoadedQtys);
+            const manual = normalizeQtys(line.manuallyLoadedQtys);
+            return Object.entries(qtys).some(([size, qty]) =>
+              qty > 0 && loaded[size] !== qty && manual[size] !== qty,
+            );
+          });
+        })
+        .map((l) => ({
+          packingListId: l.id,
+          invoiceNumber: l.invoiceNumber,
+          title: l.title,
+        }));
     } catch (e) {
       console.warn("[openPackingLists] lookup failed:", e);
     }
