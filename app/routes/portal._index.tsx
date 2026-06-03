@@ -5146,8 +5146,29 @@ export default function PortalDashboard() {
 
       <main style={s.main}>
         <header style={s.pageHeader}>
-          <div>
+          <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
             <h1 style={s.pageTitle}>{activePageTitle}</h1>
+            {page === "restock" && (() => {
+              const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
+              const showFiltered = filtersActive && (
+                restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
+                || restockTotalsFiltered.totalQty !== restockTotalsAll.totalQty
+              );
+              const totals = showFiltered ? restockTotalsFiltered : restockTotalsAll;
+              const label = showFiltered ? "Filtered" : "Total";
+              const fmt = (n: number) => n.toLocaleString();
+              return (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <span style={s.restockTotalsLabel}>{label}</span>
+                  <span style={{ ...s.restockTotalsBadge, ...(showFiltered ? s.restockTotalsBadgeFiltered : {}) }}>
+                    {fmt(totals.orderCount)} order{totals.orderCount === 1 ? "" : "s"}
+                  </span>
+                  <span style={{ ...s.restockTotalsBadge, ...(showFiltered ? s.restockTotalsBadgeFiltered : {}) }}>
+                    {fmt(totals.totalQty)} pcs
+                  </span>
+                </div>
+              );
+            })()}
           </div>
           <div style={s.headerControls}>
             <div style={s.utilityBar}>
@@ -5184,43 +5205,10 @@ export default function PortalDashboard() {
           </div>
         </header>
 
-        {page === "restock" && (() => {
-          const filtersActive =
-            Boolean(selectedProductGroup)
-            || Boolean(selectedStatus)
-            || Boolean(selectedPriority)
-            || Boolean(selectedDestination)
-            || Boolean(searchTitle);
-          const showFilteredBadge = filtersActive && (
-            restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
-            || restockTotalsFiltered.totalQty !== restockTotalsAll.totalQty
-          );
-          const formatN = (n: number) => n.toLocaleString();
-          return (
-            <>
-              <div style={s.restockTotalsBar}>
-                <span style={s.restockTotalsLabel}>Total</span>
-                <span style={s.restockTotalsBadge}>
-                  {formatN(restockTotalsAll.orderCount)} order{restockTotalsAll.orderCount === 1 ? "" : "s"}
-                </span>
-                <span style={s.restockTotalsBadge}>
-                  {formatN(restockTotalsAll.totalQty)} pcs
-                </span>
-                {showFilteredBadge && (
-                  <>
-                    <span style={{ ...s.restockTotalsLabel, marginLeft: 16 }}>Filtered</span>
-                    <span style={{ ...s.restockTotalsBadge, ...s.restockTotalsBadgeFiltered }}>
-                      {formatN(restockTotalsFiltered.orderCount)} order{restockTotalsFiltered.orderCount === 1 ? "" : "s"}
-                    </span>
-                    <span style={{ ...s.restockTotalsBadge, ...s.restockTotalsBadgeFiltered }}>
-                      {formatN(restockTotalsFiltered.totalQty)} pcs
-                    </span>
-                  </>
-                )}
-              </div>
-              <div style={s.restockFilterBar}>
-                <label style={s.filterLabel}>
-                  Product group
+        {page === "restock" && (
+          <div style={s.restockFilterBar}>
+            <label style={s.filterLabel}>
+              Product group
               <select
                 value={selectedProductGroup}
                 onChange={(event) => updateParams({ productGroup: event.currentTarget.value, productType: "" })}
@@ -5269,9 +5257,7 @@ export default function PortalDashboard() {
               </select>
             </label>
           </div>
-            </>
-          );
-        })()}
+        )}
 
         {page === "settings" ? (
           <div style={{ display: "grid", gap: 16 }}>
@@ -14154,15 +14140,6 @@ const s: Record<string, React.CSSProperties> = {
     gap: 12,
     padding: "4px 0",
     marginBottom: 10,
-  },
-  restockTotalsBar: {
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap" as const,
-    gap: 8,
-    padding: "4px 0",
-    marginBottom: 4,
-    fontSize: 13,
   },
   restockTotalsLabel: {
     fontSize: 11,
