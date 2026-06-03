@@ -3290,6 +3290,12 @@ function normalizeRestockOptions(
 // 5-chip set even on installs that have customised settings predating
 // the merge.
 const OBSOLETE_STATUS_VALUES = new Set(["packed", "ready_to_send", "arrived", "arrived_loaded"]);
+// Catches chips that look like invoice numbers (e.g. "Invoice no-7",
+// "Invoice 12"). These don't belong as status chips — the packing list
+// link is a separate field with its own picker — but a few snuck in
+// while users were exploring the UI. Strip them from the saved options
+// on read so they stop showing up in the chip menu.
+const STATUS_LABEL_NOISE = /^\s*invoice\b/i;
 
 function normalizeRestockSettings(value: unknown): RestockSettings {
   const settings = value && typeof value === "object" && !Array.isArray(value)
@@ -3298,10 +3304,13 @@ function normalizeRestockSettings(value: unknown): RestockSettings {
   const quantityFontSize = Math.min(32, Math.max(10, Number(settings.quantityFontSize) || 13));
 
   const rawStatusOptions = normalizeRestockOptions(settings.statusOptions, DEFAULT_STATUS_OPTIONS, DEFAULT_STATUS_COLORS);
-  // Drop chips that have been merged away. If "ready" isn't already in
-  // the list, insert it (with the default colour) just after the production
-  // chip so the order matches the new defaults.
-  const statusOptions = rawStatusOptions.filter((option) => !OBSOLETE_STATUS_VALUES.has(option.value));
+  // Drop chips that have been merged away (packed / ready_to_send /
+  // arrived / arrived_loaded) and anything that looks like an invoice
+  // number (those don't belong as status chips — use the packing list
+  // link instead). If "ready" isn't already in the list, insert it.
+  const statusOptions = rawStatusOptions.filter(
+    (option) => !OBSOLETE_STATUS_VALUES.has(option.value) && !STATUS_LABEL_NOISE.test(option.label),
+  );
   if (!statusOptions.some((option) => option.value === "ready")) {
     const readyDefault = DEFAULT_STATUS_OPTIONS.find((option) => option.value === "ready");
     const readyColor = DEFAULT_STATUS_COLORS.ready ?? { bg: "#ede9fe", color: "#4c1d95" };
