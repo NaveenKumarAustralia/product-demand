@@ -12860,27 +12860,29 @@ function OrderRow({
               aria-hidden
               style={{
                 position: "absolute",
-                top: "50%",
-                // Centre the stamp across the first three data columns —
-                // Factory Notes + Order Date + Picture — so it sits over
-                // them, not the Name/SKU area. The stamp is anchored to
-                // the Name cell, so we shift its centre LEFT from Name's
-                // left edge by half the combined width of those three:
+                // Pin to the bottom of the row so the stamp doesn't cover
+                // the order date / notes content at the top of the cell.
+                bottom: 6,
+                // Centre the stamp horizontally across the first three
+                // data columns (Factory Notes + Order Date + Picture).
+                // The stamp is anchored to the Name cell, so shift its
+                // centre LEFT from Name's left edge by half the combined
+                // width of those three:
                 //   midpoint = -(factoryNotes + orderDate + picture) / 2
                 left: -((DEFAULT_COLUMN_WIDTHS.factoryNotes ?? 190)
                        + (DEFAULT_COLUMN_WIDTHS.orderDate ?? 92)
                        + (DEFAULT_COLUMN_WIDTHS.picture ?? 88)) / 2,
-                transform: "translate(-50%, -50%) rotate(-12deg)",
+                transform: "translateX(-50%)",
                 pointerEvents: "none",
                 color: destinationStamp.stampColor,
-                border: `4px solid ${destinationStamp.stampColor}`,
-                borderRadius: 8,
-                padding: "8px 18px",
-                fontSize: 24,
+                border: `3px solid ${destinationStamp.stampColor}`,
+                borderRadius: 6,
+                padding: "4px 12px",
+                fontSize: 16,
                 fontWeight: 900,
                 letterSpacing: "0.06em",
                 textTransform: "uppercase",
-                opacity: 0.55,
+                opacity: 0.7,
                 fontFamily: "Georgia, 'Times New Roman', serif",
                 whiteSpace: "nowrap",
                 zIndex: 50,
