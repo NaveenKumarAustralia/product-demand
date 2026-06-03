@@ -486,6 +486,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       return bMax - aMax;
     })
     .flat();
+  // Totals for the top bar — one set for the unfiltered open orders
+  // (always shown), one set for the current filtered view (shown only
+  // when filters reduce the count). Quantity uses the totalQty column
+  // which is kept in sync as the user edits qty cells.
+  const totalsFor = (rows: typeof normalizedOrders) => ({
+    orderCount: rows.length,
+    totalQty: rows.reduce((sum, order) => sum + (order.totalQty ?? 0), 0),
+  });
+  const restockTotalsAll = totalsFor(normalizedOrders);
+  const restockTotalsFiltered = totalsFor(filteredOrders);
   const orders = page === "restock"
     ? await enrichOrdersWithShopifyVariants(filteredOrders)
     : filteredOrders;
@@ -634,6 +644,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     destinationFilters,
     packingListsByProductId: Object.fromEntries(packingListsByProductId),
     openPackingLists,
+    restockTotalsAll,
+    restockTotalsFiltered,
     sortBy,
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
@@ -4878,6 +4890,8 @@ export default function PortalDashboard() {
     destinationFilters,
     packingListsByProductId,
     openPackingLists,
+    restockTotalsAll,
+    restockTotalsFiltered,
     sortBy,
     page,
     columnWidths: savedColumnWidths,
@@ -5170,10 +5184,43 @@ export default function PortalDashboard() {
           </div>
         </header>
 
-        {page === "restock" && (
-          <div style={s.restockFilterBar}>
-            <label style={s.filterLabel}>
-              Product group
+        {page === "restock" && (() => {
+          const filtersActive =
+            Boolean(selectedProductGroup)
+            || Boolean(selectedStatus)
+            || Boolean(selectedPriority)
+            || Boolean(selectedDestination)
+            || Boolean(searchTitle);
+          const showFilteredBadge = filtersActive && (
+            restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
+            || restockTotalsFiltered.totalQty !== restockTotalsAll.totalQty
+          );
+          const formatN = (n: number) => n.toLocaleString();
+          return (
+            <>
+              <div style={s.restockTotalsBar}>
+                <span style={s.restockTotalsLabel}>Total</span>
+                <span style={s.restockTotalsBadge}>
+                  {formatN(restockTotalsAll.orderCount)} order{restockTotalsAll.orderCount === 1 ? "" : "s"}
+                </span>
+                <span style={s.restockTotalsBadge}>
+                  {formatN(restockTotalsAll.totalQty)} pcs
+                </span>
+                {showFilteredBadge && (
+                  <>
+                    <span style={{ ...s.restockTotalsLabel, marginLeft: 16 }}>Filtered</span>
+                    <span style={{ ...s.restockTotalsBadge, ...s.restockTotalsBadgeFiltered }}>
+                      {formatN(restockTotalsFiltered.orderCount)} order{restockTotalsFiltered.orderCount === 1 ? "" : "s"}
+                    </span>
+                    <span style={{ ...s.restockTotalsBadge, ...s.restockTotalsBadgeFiltered }}>
+                      {formatN(restockTotalsFiltered.totalQty)} pcs
+                    </span>
+                  </>
+                )}
+              </div>
+              <div style={s.restockFilterBar}>
+                <label style={s.filterLabel}>
+                  Product group
               <select
                 value={selectedProductGroup}
                 onChange={(event) => updateParams({ productGroup: event.currentTarget.value, productType: "" })}
@@ -5222,7 +5269,9 @@ export default function PortalDashboard() {
               </select>
             </label>
           </div>
-        )}
+            </>
+          );
+        })()}
 
         {page === "settings" ? (
           <div style={{ display: "grid", gap: 16 }}>
@@ -14105,6 +14154,35 @@ const s: Record<string, React.CSSProperties> = {
     gap: 12,
     padding: "4px 0",
     marginBottom: 10,
+  },
+  restockTotalsBar: {
+    display: "flex",
+    alignItems: "center",
+    flexWrap: "wrap" as const,
+    gap: 8,
+    padding: "4px 0",
+    marginBottom: 4,
+    fontSize: 13,
+  },
+  restockTotalsLabel: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: "#6b7280",
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.05em",
+  },
+  restockTotalsBadge: {
+    padding: "3px 10px",
+    borderRadius: 999,
+    background: "#eef2f7",
+    color: "#1f2937",
+    fontWeight: 700,
+    fontSize: 12,
+    whiteSpace: "nowrap" as const,
+  },
+  restockTotalsBadgeFiltered: {
+    background: "#dbeafe",
+    color: "#1e40af",
   },
   filterLabel: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700, color: "#374151" },
   productTypeFilter: {
