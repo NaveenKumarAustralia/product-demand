@@ -2444,8 +2444,30 @@ const DEFAULT_PRIORITY_OPTIONS = [
 ];
 const DEFAULT_DESTINATION_OPTIONS = [
   { value: "keep_at_factory", label: "Keep at factory", bg: "#fee2e2", color: "#b91c1c" },
-  { value: "send_to_au",      label: "Send to AU",      bg: "#dcfce7", color: "#166534" },
+  { value: "send_to_au",      label: "Send to AUS",     bg: "#fef9c3", color: "#a16207" },
+  { value: "send_to_usa",     label: "Send to USA",     bg: "#cffafe", color: "#0e7490" },
 ];
+// Row-tint + stamp palette per destination value. The chip colour and the
+// row colour are intentionally separate concepts (a chip on its own can
+// be any colour the user picked, while the row stamp needs to convey
+// urgency / destination). Falls back to the chip's own colours for any
+// custom destination the user adds via the chip editor.
+const DESTINATION_STAMP_PALETTE: Record<string, { rowBg: string; stampColor: string }> = {
+  keep_at_factory: { rowBg: "#fef2f2", stampColor: "#b91c1c" },
+  send_to_au:      { rowBg: "#fefce8", stampColor: "#a16207" },
+  send_to_aus:     { rowBg: "#fefce8", stampColor: "#a16207" },
+  send_to_usa:     { rowBg: "#ecfeff", stampColor: "#0e7490" },
+};
+function destinationStampStyle(
+  value: string,
+  options: RestockOption[],
+): { rowBg: string; stampColor: string; label: string } | null {
+  if (!value) return null;
+  const option = options.find((item) => item.value === value);
+  if (!option) return null;
+  const palette = DESTINATION_STAMP_PALETTE[value] ?? { rowBg: option.bg, stampColor: option.color };
+  return { rowBg: palette.rowBg, stampColor: palette.stampColor, label: option.label };
+}
 const FABRIC_CHIP_COLORS = [
   { bg: "#dbeafe", color: "#1e3a8a" },
   { bg: "#dcfce7", color: "#14532d" },
@@ -12799,27 +12821,27 @@ function OrderRow({
   // useState re-initialises from scratch; within the lifetime of a single
   // order, only the user's clicks change the destination here.
   const [destinationLocal, setDestinationLocal] = useState(order.destination ?? "");
-  // When the user marks this order to stay at the factory, tint the whole
-  // row red and overlay a translucent "KEEP AT FACTORY" stamp across the
-  // first frozen cells (order date / picture / name) — hard to miss when
-  // scanning the table.
-  const isKeptAtFactory = destinationLocal === "keep_at_factory";
-  const keepBg = isKeptAtFactory ? { background: "#fef2f2" } : undefined;
+  // Whenever a destination is set, tint the whole row and overlay a
+  // translucent stamp across the first frozen cells (order date /
+  // picture / name) using the per-destination palette. Hard to miss
+  // when scanning the table.
+  const destinationStamp = destinationStampStyle(destinationLocal, restockSettings.destinationOptions);
+  const destinationRowBg = destinationStamp ? { background: destinationStamp.rowBg } : undefined;
   return (
     <>
-      <tr id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(isKeptAtFactory ? { background: "#fef2f2" } : {}) }}>
+      <tr id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(destinationStamp ? { background: destinationStamp.rowBg } : {}) }}>
         <RowNumberCell rowNumber={rowIndex} actions={[
           { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
         {/* Factory notes */}
-        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={keepBg}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={destinationRowBg}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
         {/* Order date */}
-        <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={keepBg}><span style={s.dateText}>{orderDate}</span></Td>
+        <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={destinationRowBg}><span style={s.dateText}>{orderDate}</span></Td>
 
         {/* Picture */}
-        <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[2]} style={keepBg}>
+        <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[2]} style={destinationRowBg}>
           <div style={s.imageCell}>
             {order.productImageUrl
               ? <img src={order.productImageUrl} alt="" style={s.thumb} />
@@ -12827,13 +12849,13 @@ function OrderRow({
           </div>
         </Td>
 
-        {/* Name — also hosts the KEEP AT FACTORY stamp overlay when set.
+        {/* Name — also hosts the destination stamp overlay when set.
             Sticky cells are already positioning contexts for absolute
             children, so the stamp anchors to this cell without us having
             to add position:relative (which would break sticky). */}
-        <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={keepBg}>
+        <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={destinationRowBg}>
           <span style={s.productName}>{order.productTitle}</span>
-          {isKeptAtFactory && (
+          {destinationStamp && (
             <div
               aria-hidden
               style={{
@@ -12850,8 +12872,8 @@ function OrderRow({
                        + (DEFAULT_COLUMN_WIDTHS.picture ?? 88)) / 2,
                 transform: "translate(-50%, -50%) rotate(-12deg)",
                 pointerEvents: "none",
-                color: "#b91c1c",
-                border: "4px solid #b91c1c",
+                color: destinationStamp.stampColor,
+                border: `4px solid ${destinationStamp.stampColor}`,
                 borderRadius: 8,
                 padding: "8px 18px",
                 fontSize: 24,
@@ -12866,7 +12888,7 @@ function OrderRow({
                 background: "transparent",
               }}
             >
-              Keep at factory
+              {destinationStamp.label}
             </div>
           )}
         </Td>
