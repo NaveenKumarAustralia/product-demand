@@ -385,19 +385,51 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .sort((a, b) => labelForOption(restockSettings.priorityOptions, a).localeCompare(labelForOption(restockSettings.priorityOptions, b)));
   const destinationFilters = Array.from(new Set(normalizedOrders.map((order) => order.destination).filter(Boolean) as string[]))
     .sort((a, b) => labelForOption(restockSettings.destinationOptions, a).localeCompare(labelForOption(restockSettings.destinationOptions, b)));
-  const filteredOrders = normalizedOrders
+  const filteredOrdersUngrouped = normalizedOrders
     .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
     .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
     .filter((order) => !selectedPriority || order.priority === selectedPriority)
     .filter((order) => !selectedDestination || order.destination === selectedDestination)
     .filter((order) => !serverSearchTitle || order.productTitle.toLowerCase().includes(serverSearchTitle.toLowerCase()))
-    .filter((order) => !messageOrderId || order.id === messageOrderId)
-    .sort((a, b) => {
-      if (sortBy === "titleAsc") return a.productTitle.localeCompare(b.productTitle);
-      if (sortBy === "titleDesc") return b.productTitle.localeCompare(a.productTitle);
+    .filter((order) => !messageOrderId || order.id === messageOrderId);
+
+  // Group orders by product so multiple open orders for the same item
+  // sit together in the table. Group key is productId when the row is
+  // linked, otherwise the trimmed lowercased title (so custom rows with
+  // matching titles also cluster). The user's chosen sort still drives
+  // the ORDER OF GROUPS — within each group we sort by createdAt in the
+  // same direction so the cluster reads naturally.
+  const groupKeyFor = (order: typeof normalizedOrders[number]) =>
+    order.productId
+      ? `pid:${order.productId}`
+      : `title:${(order.productTitle ?? "").trim().toLowerCase() || `id:${order.id}`}`;
+  const orderGroups = new Map<string, typeof normalizedOrders>();
+  for (const order of filteredOrdersUngrouped) {
+    const key = groupKeyFor(order);
+    const bucket = orderGroups.get(key);
+    if (bucket) bucket.push(order);
+    else orderGroups.set(key, [order]);
+  }
+  for (const bucket of orderGroups.values()) {
+    bucket.sort((a, b) => {
       if (sortBy === "orderDateAsc") return a.createdAt.getTime() - b.createdAt.getTime();
       return b.createdAt.getTime() - a.createdAt.getTime();
     });
+  }
+  const filteredOrders = Array.from(orderGroups.values())
+    .sort((groupA, groupB) => {
+      if (sortBy === "titleAsc") return groupA[0].productTitle.localeCompare(groupB[0].productTitle);
+      if (sortBy === "titleDesc") return groupB[0].productTitle.localeCompare(groupA[0].productTitle);
+      if (sortBy === "orderDateAsc") {
+        const aMin = Math.min(...groupA.map((o) => o.createdAt.getTime()));
+        const bMin = Math.min(...groupB.map((o) => o.createdAt.getTime()));
+        return aMin - bMin;
+      }
+      const aMax = Math.max(...groupA.map((o) => o.createdAt.getTime()));
+      const bMax = Math.max(...groupB.map((o) => o.createdAt.getTime()));
+      return bMax - aMax;
+    })
+    .flat();
   const orders = page === "restock"
     ? await enrichOrdersWithShopifyVariants(filteredOrders)
     : filteredOrders;
