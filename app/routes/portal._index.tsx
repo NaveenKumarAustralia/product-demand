@@ -1166,26 +1166,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       loadedProductIds.add(line.productId);
     }
 
-    // Close any open restock orders that were sitting in "in_shipment"
-    // status and are tied to this packing list. We prefer the explicit
-    // packingListId link — that closes only the rows the user actually
-    // attached to this list. For backward compatibility with rows that
-    // pre-date the link field (no packingListId set), we still fall back
-    // to a productId match so old data behaves like before.
+    // Close any open restock orders sitting in "in_shipment" status
+    // whose product was actually loaded just now AND which are either
+    // explicitly linked to this packing list (preferred) or unlinked
+    // (legacy rows that pre-date the link field — fall back to
+    // productId-only match so old data keeps behaving like before).
+    // Critically, productId must be in loadedProductIds for BOTH
+    // branches — otherwise a per-product load on a list with several
+    // products would wrongly close rows for products that weren't
+    // actually loaded yet.
     if (loadedProductIds.size > 0) {
       try {
         await prisma.supplierOrder.updateMany({
           where: {
             supplierStatus: "in_shipment",
             status: "open",
+            productId: { in: Array.from(loadedProductIds) },
             OR: [
               { packingListId: packingId },
-              {
-                AND: [
-                  { packingListId: null },
-                  { productId: { in: Array.from(loadedProductIds) } },
-                ],
-              },
+              { packingListId: null },
             ],
           },
           data: { status: "closed" },
