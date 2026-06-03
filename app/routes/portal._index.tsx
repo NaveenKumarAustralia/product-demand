@@ -3539,44 +3539,94 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
   };
 }
 
-// Build a quick lookup from a normalised style name (lowercased, trimmed)
-// to the style's per-piece total cost in rupees, so the restock / packing
-// pages can show cost / value per row. Product titles in those pages
-// look like "Vivien Dress Queen Protea" — style name + print name
-// concatenated — so we match by longest-prefix-wins (so "Vivien Dress"
-// is preferred over "Vivien" if both are styles).
+// Cost lookup for restock / packing list. A product title looks like
+// "Vivien Dress Queen Protea" — style name + print name concatenated.
+//   1. Match the style by longest-prefix on the title (so "Vivien Dress"
+//      beats "Vivien" if both exist).
+//   2. Match the fabric by looking for any fabric stock entry's name
+//      appearing as a whole word in the title (e.g. "Queen Protea").
+//   3. Fabric cost is computed live: style.averageMeters × fabric's
+//      cost-per-meter from the fabric-in-stock sheet.
+//   4. Total = fabricCost + stitchingCost + factoryCost + factoryProfit
+//      (+ zip/buttons + lining/trim if those are set on the style).
+//
+// All four required inputs must be present and > 0 for the auto price
+// to surface: fabric-cost (= averageMeters × fabric costPerMeter from
+// fabric stock), stitchingCost, factoryCost, factoryProfit. If any of
+// these is missing, costForTitle returns 0 and the UI leaves the
+// Price ₹ cell blank as a cue to fill the missing piece (most often
+// the cost-per-meter on the Fabric in Stock page).
 type StyleCostLookup = {
-  // Lowercased style names sorted by length descending — prefix match
-  // takes the first hit.
-  byName: { name: string; totalCost: number }[];
-  // Resolve a product title to its per-piece cost in rupees, or 0 if no
-  // matching style is found.
+  // Resolve a product title to its per-piece cost in rupees, or 0 if
+  // anything required is missing.
   costForTitle: (title: string | null | undefined) => number;
 };
-function buildStyleCostLookup(productInfo: ProductInfo): StyleCostLookup {
-  const byName: { name: string; totalCost: number }[] = [];
+function buildStyleCostLookup(
+  productInfo: ProductInfo,
+  fabricStockIndex: FabricStockEntry[],
+): StyleCostLookup {
+  const isFilled = (n?: number) => typeof n === "number" && Number.isFinite(n) && n > 0;
+  // Style lookup table sorted by name length desc for longest-prefix match.
+  type StyleEntry = { name: string; style: ProductInfoStyle };
+  const styles: StyleEntry[] = [];
   for (const category of productInfo.categories) {
     for (const style of category.styles) {
       const name = style.name?.trim().toLowerCase();
       if (!name) continue;
-      const totalCost = typeof style.totalCost === "number" && Number.isFinite(style.totalCost)
-        ? style.totalCost
-        : 0;
-      byName.push({ name, totalCost });
+      styles.push({ name, style });
     }
   }
-  byName.sort((a, b) => b.name.length - a.name.length);
+  styles.sort((a, b) => b.name.length - a.name.length);
+  // Fabric name → first cost-per-meter found (stock sheets only). Names
+  // are case-insensitive.
+  const fabricCostByName = new Map<string, number>();
+  for (const entry of fabricStockIndex) {
+    if (entry.kind !== "stock") continue;
+    if (!isFilled(entry.costPerMeter)) continue;
+    const key = entry.name.trim().toLowerCase();
+    if (!fabricCostByName.has(key)) fabricCostByName.set(key, entry.costPerMeter!);
+  }
+  // Pre-sort fabric names by length desc for whole-word matching.
+  const fabricNamesByLength = Array.from(fabricCostByName.keys()).sort((a, b) => b.length - a.length);
+  const findFabricCostInTitle = (lowercaseTitle: string): number => {
+    for (const name of fabricNamesByLength) {
+      if (name.length < 3) continue;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`\\b${escaped}\\b`, "i");
+      if (re.test(lowercaseTitle)) return fabricCostByName.get(name) ?? 0;
+    }
+    return 0;
+  };
   return {
-    byName,
     costForTitle: (title) => {
       const haystack = (title ?? "").trim().toLowerCase();
       if (!haystack) return 0;
-      for (const entry of byName) {
+      // 1. Find the style via longest-prefix match.
+      let matchedStyle: ProductInfoStyle | null = null;
+      for (const entry of styles) {
         if (haystack === entry.name || haystack.startsWith(entry.name + " ")) {
-          return entry.totalCost;
+          matchedStyle = entry.style;
+          break;
         }
       }
-      return 0;
+      if (!matchedStyle) return 0;
+      // 2. Find fabric cost-per-meter from the fabric stock page.
+      const costPerMeter = findFabricCostInTitle(haystack);
+      const fabricCost = (matchedStyle.averageMeters ?? 0) * costPerMeter;
+      // 3. Required-fields gate — fabricCost computed > 0 and the three
+      // style-level required inputs all set.
+      const hasAllRequired =
+        fabricCost > 0
+        && isFilled(matchedStyle.stitchingCost)
+        && isFilled(matchedStyle.factoryCost)
+        && isFilled(matchedStyle.factoryProfit);
+      if (!hasAllRequired) return 0;
+      return fabricCost
+        + (matchedStyle.stitchingCost ?? 0)
+        + (matchedStyle.factoryCost ?? 0)
+        + (matchedStyle.factoryProfit ?? 0)
+        + (matchedStyle.zipButtonsCost ?? 0)
+        + (matchedStyle.liningTrimCost ?? 0);
     },
   };
 }
@@ -3928,7 +3978,7 @@ async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
 // Used by the restock page to show fabric availability per product based on the
 // fabric name appearing in the product title. Entries are kept separate (not summed)
 // so the same fabric name appearing in multiple sheets shows each individually.
-type FabricStockEntry = { name: string; meters: number; sheetName: string; kind: "stock" | "order" };
+type FabricStockEntry = { name: string; meters: number; sheetName: string; kind: "stock" | "order"; costPerMeter?: number };
 
 function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
   const out: FabricStockEntry[] = [];
@@ -3940,6 +3990,9 @@ function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
     const metersIdx = isStock
       ? sheet.headers.findIndex((h) => /meters?\s*in\s*stock/i.test(h))
       : sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered/i.test(h));
+    const costIdx = isStock
+      ? sheet.headers.findIndex((h) => /cost\s*per\s*meter/i.test(h))
+      : -1;
     if (nameIdx < 0 || metersIdx < 0) continue;
     for (const row of sheet.rows) {
       const name = (row[nameIdx] ?? "").trim();
@@ -3949,7 +4002,13 @@ function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
       if (!Number.isFinite(m)) continue;
       // Skip zero on-order rows so we don't clutter the cell with empty entries
       if (isOrder && m === 0) continue;
-      out.push({ name, meters: m, sheetName: sheet.name, kind: isStock ? "stock" : "order" });
+      let costPerMeter: number | undefined;
+      if (costIdx >= 0) {
+        const raw = (row[costIdx] ?? "").toString().replace(/[^0-9.]/g, "");
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed) && parsed > 0) costPerMeter = parsed;
+      }
+      out.push({ name, meters: m, sheetName: sheet.name, kind: isStock ? "stock" : "order", costPerMeter });
     }
   }
   return out;
@@ -5118,10 +5177,14 @@ export default function PortalDashboard() {
     ? orders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
     : orders;
   // Lookup: product title (e.g. "Vivien Dress Queen Protea") → per-piece
-  // rupee cost from the matching ProductInformation style. Computed once
-  // per render of productInfo so OrderRow / PackingListLineRow only do a
-  // single Map lookup.
-  const styleCostLookup = useMemo(() => buildStyleCostLookup(productInfo), [productInfo]);
+  // rupee cost. Style data drives stitching/factory/profit/etc. Fabric
+  // cost is computed live from the fabric-in-stock sheet:
+  // averageMeters × costPerMeter. Returns 0 if any required piece
+  // (fabric cost, stitching, factory cost, factory profit) is missing.
+  const styleCostLookup = useMemo(
+    () => buildStyleCostLookup(productInfo, fabricStockIndex),
+    [productInfo, fabricStockIndex],
+  );
   const activePageTitle = page === "dashboard" ? "Dashboard"
     : page === "fabric" ? "Fabric in stock"
     : page === "settings" ? "Settings"
@@ -12030,7 +12093,7 @@ function PackingListLineRow({
         </PackingTd>
       ))}
       <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center placeholder={autoPriceRupees > 0 ? `auto ${Math.round(autoPriceRupees)}` : undefined} onCommit={(v) => setManualPriceLocal(Number(v) || 0)} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center placeholder={autoPriceRupees > 0 ? String(Math.round(autoPriceRupees)) : undefined} onCommit={(v) => setManualPriceLocal(Number(v) || 0)} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center>
         <span style={{ color: "#9ca3af", fontSize: 11 }} title="AUD conversion coming in Phase 2 (FX lock on shipment)">—</span>
