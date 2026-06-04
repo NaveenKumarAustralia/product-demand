@@ -3577,25 +3577,31 @@ function buildStyleCostLookup(
     }
   }
   styles.sort((a, b) => b.name.length - a.name.length);
-  // Fabric name → first cost-per-meter found (stock sheets only). Names
-  // are case-insensitive.
-  const fabricCostByName = new Map<string, number>();
+  // Fabric name → { costPerMeter, styleMeters }. Names lowercased.
+  // First entry wins if the same fabric appears more than once.
+  type FabricInfo = { costPerMeter: number; styleMeters?: Record<string, number> };
+  const fabricInfoByName = new Map<string, FabricInfo>();
   for (const entry of fabricStockIndex) {
     if (entry.kind !== "stock") continue;
     if (!isFilled(entry.costPerMeter)) continue;
     const key = entry.name.trim().toLowerCase();
-    if (!fabricCostByName.has(key)) fabricCostByName.set(key, entry.costPerMeter!);
+    if (!fabricInfoByName.has(key)) {
+      fabricInfoByName.set(key, {
+        costPerMeter: entry.costPerMeter!,
+        styleMeters: entry.styleMeters,
+      });
+    }
   }
   // Pre-sort fabric names by length desc for whole-word matching.
-  const fabricNamesByLength = Array.from(fabricCostByName.keys()).sort((a, b) => b.length - a.length);
-  const findFabricCostInTitle = (lowercaseTitle: string): number => {
+  const fabricNamesByLength = Array.from(fabricInfoByName.keys()).sort((a, b) => b.length - a.length);
+  const findFabricInTitle = (lowercaseTitle: string): FabricInfo | null => {
     for (const name of fabricNamesByLength) {
       if (name.length < 3) continue;
       const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const re = new RegExp(`\\b${escaped}\\b`, "i");
-      if (re.test(lowercaseTitle)) return fabricCostByName.get(name) ?? 0;
+      if (re.test(lowercaseTitle)) return fabricInfoByName.get(name) ?? null;
     }
-    return 0;
+    return null;
   };
   return {
     costForTitle: (title) => {
@@ -3610,11 +3616,18 @@ function buildStyleCostLookup(
         }
       }
       if (!matchedStyle) return 0;
-      // 2. Find fabric cost-per-meter from the fabric stock page.
-      const costPerMeter = findFabricCostInTitle(haystack);
-      const fabricCost = (matchedStyle.averageMeters ?? 0) * costPerMeter;
-      // 3. Required-fields gate — fabricCost computed > 0 and the three
-      // style-level required inputs all set.
+      // 2. Find the matching fabric in the title.
+      const fabric = findFabricInTitle(haystack);
+      if (!fabric) return 0;
+      // 3. Meters per piece: prefer the fabric's per-style override
+      // (set via the Products popup on the Fabric in Stock page), fall
+      // back to the style's own averageMeters from product info.
+      const fabricOverrideMeters = fabric.styleMeters?.[matchedStyle.id];
+      const meters = isFilled(fabricOverrideMeters)
+        ? fabricOverrideMeters!
+        : (matchedStyle.averageMeters ?? 0);
+      const fabricCost = meters * fabric.costPerMeter;
+      // 4. Required-fields gate.
       const hasAllRequired =
         fabricCost > 0
         && isFilled(matchedStyle.stitchingCost)
@@ -3978,7 +3991,18 @@ async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
 // Used by the restock page to show fabric availability per product based on the
 // fabric name appearing in the product title. Entries are kept separate (not summed)
 // so the same fabric name appearing in multiple sheets shows each individually.
-type FabricStockEntry = { name: string; meters: number; sheetName: string; kind: "stock" | "order"; costPerMeter?: number };
+type FabricStockEntry = {
+  name: string;
+  meters: number;
+  sheetName: string;
+  kind: "stock" | "order";
+  costPerMeter?: number;
+  // Per-style meters overrides from the fabric row's Products popup.
+  // Keyed by styleId (slug); value is meters required for that style
+  // when made in this fabric. Used in preference to a style's own
+  // averageMeters when present and > 0.
+  styleMeters?: Record<string, number>;
+};
 
 function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
   const out: FabricStockEntry[] = [];
@@ -3992,6 +4016,9 @@ function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
       : sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered/i.test(h));
     const costIdx = isStock
       ? sheet.headers.findIndex((h) => /cost\s*per\s*meter/i.test(h))
+      : -1;
+    const productsIdx = isStock
+      ? sheet.headers.findIndex((h) => /^products?$/i.test(h))
       : -1;
     if (nameIdx < 0 || metersIdx < 0) continue;
     for (const row of sheet.rows) {
@@ -4008,7 +4035,27 @@ function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
         const parsed = Number(raw);
         if (Number.isFinite(parsed) && parsed > 0) costPerMeter = parsed;
       }
-      out.push({ name, meters: m, sheetName: sheet.name, kind: isStock ? "stock" : "order", costPerMeter });
+      let styleMeters: Record<string, number> | undefined;
+      if (productsIdx >= 0) {
+        try {
+          const parsed = JSON.parse((row[productsIdx] ?? "").toString() || "{}");
+          if (parsed && Array.isArray(parsed.styles)) {
+            const map: Record<string, number> = {};
+            for (const item of parsed.styles) {
+              const styleId = String(item?.styleId ?? "").trim();
+              const raw = String(item?.meters ?? "").trim();
+              const meters = Number(raw);
+              if (styleId && Number.isFinite(meters) && meters > 0) {
+                map[styleId] = meters;
+              }
+            }
+            if (Object.keys(map).length) styleMeters = map;
+          }
+        } catch {
+          /* Plain-text legacy values aren't usable for meters; ignore */
+        }
+      }
+      out.push({ name, meters: m, sheetName: sheet.name, kind: isStock ? "stock" : "order", costPerMeter, styleMeters });
     }
   }
   return out;
