@@ -519,6 +519,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     } catch (e) {
       console.warn("[shippingMethod] hydration failed:", e);
     }
+    // Defensive: lockedFxRate / lockedFxRateAt are Phase 2 additions. Use
+    // ADD COLUMN IF NOT EXISTS so a stale DB doesn't crash; hydrate via
+    // raw SQL so it works even if the Prisma client wasn't regenerated.
+    try {
+      await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRate" DOUBLE PRECISION`);
+      await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRateAt" TIMESTAMP(3)`);
+      const fxRows = await prisma.$queryRawUnsafe<Array<{ id: number; lockedFxRate: number | null; lockedFxRateAt: Date | null }>>(
+        `SELECT id, "lockedFxRate", "lockedFxRateAt" FROM "PackingList"`,
+      );
+      const fxMap = new Map(fxRows.map((row) => [row.id, row]));
+      for (const list of packingLists) {
+        const fx = fxMap.get(list.id);
+        (list as { lockedFxRate: number | null; lockedFxRateAt: Date | null }).lockedFxRate = fx?.lockedFxRate ?? null;
+        (list as { lockedFxRate: number | null; lockedFxRateAt: Date | null }).lockedFxRateAt = fx?.lockedFxRateAt ?? null;
+      }
+    } catch (e) {
+      console.warn("[lockedFxRate] hydration failed:", e);
+    }
   }
   const selectedPackingList = packingId
     ? packingLists.find((list) => list.id === packingId) ?? null
@@ -646,6 +664,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     openPackingLists,
     restockTotalsAll,
     restockTotalsFiltered,
+    inrPerAudCachedRate: (page === "restock" || page === "packing") ? await getCachedInrPerAud() : null,
+    fxRupeeBuffer: FX_RUPEE_BUFFER,
     sortBy,
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
@@ -898,6 +918,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if ((current?.status ?? "still_packing") !== "still_packing") return null;
       }
       data.status = nextStatus;
+      // FX lock: the first time a packing list transitions into the
+      // "on_the_way" status, snapshot the current INR/AUD rate. From
+      // then on, this list's AUD numbers are pinned to that rate
+      // regardless of subsequent FX moves.
+      if (nextStatus === "on_the_way" && packingId) {
+        try {
+          const existingRows = await prisma.$queryRawUnsafe<Array<{ lockedFxRate: number | null }>>(
+            `SELECT "lockedFxRate" FROM "PackingList" WHERE id = $1 LIMIT 1`,
+            packingId,
+          );
+          const alreadyLocked = existingRows[0]?.lockedFxRate;
+          if (!alreadyLocked || alreadyLocked <= 0) {
+            const live = await fetchLiveInrPerAud();
+            if (live && live > 0) {
+              await prisma.$executeRawUnsafe(
+                `UPDATE "PackingList" SET "lockedFxRate" = $1, "lockedFxRateAt" = $2 WHERE id = $3`,
+                live,
+                new Date(),
+                packingId,
+              );
+            }
+          }
+        } catch (e) {
+          console.warn("[fx lock] on_the_way snapshot failed:", e);
+        }
+      }
     }
     if (field === "shipmentDate") {
       const parsedDate = value ? parsePortalDate(value) : null;
@@ -2833,6 +2879,17 @@ const FABRIC_CUSTOM_SHEETS_KEY = "production-portal-fabric-custom-sheets-v1";
 const FABRIC_DELETED_SHEETS_KEY = "production-portal-fabric-deleted-sheets-v1";
 const FABRIC_MANUAL_SHEETS_KEY = "production-portal-fabric-manual-sheets-v1";
 const PRODUCT_INFO_KEY = "production-portal-product-info-v2";
+const INR_AUD_CACHE_KEY = "production-portal-inr-aud-rate-v1";
+// How many rupees we shave off the live rate before converting — covers
+// bank fees / conversion losses so the AUD value we display (and push to
+// Shopify in Phase 3) is conservative.
+const FX_RUPEE_BUFFER = 2;
+// How long the cached live rate is reused before re-fetching from the
+// free FX API. 12 hours is plenty for restock-page display where the
+// rate is informational; the packing list flow snapshots it explicitly
+// at the moment a shipment leaves the factory.
+const FX_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+type CachedFxRate = { inrPerAud: number; fetchedAt: string };
 const DEFAULT_FABRIC_HEADERS = ["Supplier", "Fabric Type", "Fabric", "Name", "Cost per Meter", "Meters in Stock", "Cut Pieces", "Received / Date", "Products", "Notes"];
 const PRODUCT_STYLE_IMAGES: Record<string, string> = {
   "Acacia Maxi Dress": "https://cdn.shopify.com/s/files/1/1204/4848/files/acacia-maxi-dress-spruced-up-teal-rayon-summer-maxi-dress-womens-karma-east_6572.jpg?v=1764067484",
@@ -4165,6 +4222,74 @@ async function getInrToAudRate() {
   }
 }
 
+// One-shot live fetch: hits open.er-api.com for AUD base and reads
+// rates.INR — the number of rupees per Australian dollar (the user's
+// preferred direction: "if 1 AUD = 68 INR..."). Returns the raw rate
+// (BEFORE applying the -2 rupee buffer) so the caller can decide.
+async function fetchLiveInrPerAud(): Promise<number | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
+  try {
+    const response = await fetch("https://open.er-api.com/v6/latest/AUD", {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const data = await response.json() as { rates?: Record<string, number> };
+    const rate = Number(data.rates?.INR);
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    return rate;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// DB-backed cache for the live INR/AUD rate. Reads PortalSetting
+// INR_AUD_CACHE_KEY, returns the raw rate if it's < FX_CACHE_TTL_MS
+// old, otherwise re-fetches and writes back. Returns null if both the
+// cache miss and the live fetch fail (caller should hide AUD display).
+async function getCachedInrPerAud(): Promise<number | null> {
+  try {
+    const setting = await prisma.portalSetting.findUnique({
+      where: { key: INR_AUD_CACHE_KEY },
+      select: { value: true },
+    });
+    const cached = (setting?.value as CachedFxRate | null | undefined);
+    if (cached && typeof cached.inrPerAud === "number" && cached.fetchedAt) {
+      const age = Date.now() - new Date(cached.fetchedAt).getTime();
+      if (Number.isFinite(age) && age < FX_CACHE_TTL_MS && cached.inrPerAud > 0) {
+        return cached.inrPerAud;
+      }
+    }
+  } catch (e) {
+    console.warn("[fx] cache read failed:", e);
+  }
+  const live = await fetchLiveInrPerAud();
+  if (live === null) return null;
+  try {
+    const payload: CachedFxRate = { inrPerAud: live, fetchedAt: new Date().toISOString() };
+    await prisma.portalSetting.upsert({
+      where: { key: INR_AUD_CACHE_KEY },
+      create: { key: INR_AUD_CACHE_KEY, value: payload },
+      update: { value: payload },
+    });
+  } catch (e) {
+    console.warn("[fx] cache write failed:", e);
+  }
+  return live;
+}
+
+// Convert rupees to AUD using the supplied INR-per-AUD rate, with the
+// FX_RUPEE_BUFFER applied (so if rate is 68, we divide by 66). Returns
+// null when the rate isn't usable or rupees <= 0.
+function convertRupeesToAud(rupees: number, inrPerAud: number | null | undefined): number | null {
+  if (!Number.isFinite(rupees) || rupees <= 0) return null;
+  if (!Number.isFinite(inrPerAud ?? NaN) || (inrPerAud as number) <= FX_RUPEE_BUFFER) return null;
+  return rupees / ((inrPerAud as number) - FX_RUPEE_BUFFER);
+}
+
 function getFabricSheets(
   overridesValue?: unknown,
   customRowsValue?: unknown,
@@ -5081,6 +5206,8 @@ export default function PortalDashboard() {
     openPackingLists,
     restockTotalsAll,
     restockTotalsFiltered,
+    inrPerAudCachedRate,
+    fxRupeeBuffer,
     sortBy,
     page,
     columnWidths: savedColumnWidths,
@@ -5488,6 +5615,7 @@ export default function PortalDashboard() {
             isAdmin={Boolean(currentUser?.admin)}
             shopDomain={shopDomain}
             styleCostLookup={styleCostLookup}
+            inrPerAudCachedRate={inrPerAudCachedRate}
           />
         ) : page === "fabric" ? (
           <CombinedFabricStockPanel
@@ -5596,6 +5724,8 @@ export default function PortalDashboard() {
                     packingListBadges={order.productId ? (packingListsByProductId as Record<string, PackingListBadge[]>)[order.productId] ?? [] : []}
                     openPackingLists={openPackingLists as PackingListBadge[]}
                     costPerPiece={styleCostLookup.costForTitle(order.productTitle)}
+                    inrPerAudCachedRate={inrPerAudCachedRate}
+                    fxRupeeBuffer={fxRupeeBuffer}
                   />
                   );
                 })}
@@ -11190,6 +11320,7 @@ function PackingListsPanel({
   isAdmin,
   shopDomain,
   styleCostLookup,
+  inrPerAudCachedRate,
 }: {
   packingLists: PackingListWithLines[];
   selectedPackingList: PackingListWithLines | null;
@@ -11208,6 +11339,7 @@ function PackingListsPanel({
   isAdmin: boolean;
   shopDomain: string | null;
   styleCostLookup: StyleCostLookup;
+  inrPerAudCachedRate: number | null;
 }) {
   const fetcher = useFetcher();
 
@@ -11234,6 +11366,7 @@ function PackingListsPanel({
             isAdmin={isAdmin}
             shopDomain={shopDomain}
             styleCostLookup={styleCostLookup}
+            inrPerAudCachedRate={inrPerAudCachedRate}
           />
         </section>
       )}
@@ -11413,6 +11546,7 @@ function PackingListDetail({
   isAdmin,
   shopDomain,
   styleCostLookup,
+  inrPerAudCachedRate,
 }: {
   packingList: PackingListWithLines;
   savedPackingColumnWidths: Record<string, number>;
@@ -11430,6 +11564,7 @@ function PackingListDetail({
   isAdmin: boolean;
   shopDomain: string | null;
   styleCostLookup: StyleCostLookup;
+  inrPerAudCachedRate: number | null;
 }) {
   const fetcher = useFetcher();
   const loadInventoryFetcher = useFetcher();
@@ -11899,6 +12034,7 @@ function PackingListDetail({
                   onCellClick={handleCellClick}
                   onCellContextMenu={handleCellContextMenu}
                   sizes={packingSizes}
+                  inrPerAudRate={(packingList as { lockedFxRate?: number | null }).lockedFxRate ?? inrPerAudCachedRate}
                 />
               ));
             })() : (visiblePackingLines.length ? visiblePackingLines.map((line, rowIndex) => {
@@ -11924,6 +12060,7 @@ function PackingListDetail({
                 showShopifyColumn={combineView}
                 sizes={packingSizes}
                 autoPriceRupees={styleCostLookup.costForTitle(line.productTitle)}
+                inrPerAudRate={(packingList as { lockedFxRate?: number | null }).lockedFxRate ?? inrPerAudCachedRate}
               />
               );
             }) : (
@@ -12046,6 +12183,7 @@ function PackingListLineRow({
   showShopifyColumn,
   sizes,
   autoPriceRupees,
+  inrPerAudRate,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -12060,6 +12198,7 @@ function PackingListLineRow({
   showShopifyColumn: boolean;
   sizes: string[];
   autoPriceRupees: number;
+  inrPerAudRate: number | null;
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -12147,7 +12286,11 @@ function PackingListLineRow({
       <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center placeholder={autoPriceRupees > 0 ? String(Math.round(autoPriceRupees)) : undefined} onCommit={(v) => setManualPriceLocal(Number(v) || 0)} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center>
-        <span style={{ color: "#9ca3af", fontSize: 11 }} title="AUD conversion coming in Phase 2 (FX lock on shipment)">—</span>
+        {(() => {
+          const aud = convertRupeesToAud(value, inrPerAudRate);
+          if (aud === null) return <span style={{ color: "#9ca3af" }}>—</span>;
+          return <span style={s.total}>{aud.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>;
+        })()}
       </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
       {showShopifyColumn && (
@@ -12279,6 +12422,7 @@ function PackingCombinedRow({
   onCellClick,
   onCellContextMenu,
   sizes,
+  inrPerAudRate,
 }: {
   row: CombinedPackingRow;
   rowIndex: number;
@@ -12290,6 +12434,7 @@ function PackingCombinedRow({
   onCellClick: (rowKey: string, size: string, event: React.MouseEvent) => void;
   onCellContextMenu: (rowKey: string, size: string, event: React.MouseEvent) => void;
   sizes: string[];
+  inrPerAudRate: number | null;
 }) {
   const fetcher = useFetcher();
   const isLoadedForSize = (size: string) => {
@@ -12408,7 +12553,11 @@ function PackingCombinedRow({
       <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><span style={s.total}>{row.totalPrice ? Math.round(row.totalPrice) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center>
-        <span style={{ color: "#9ca3af", fontSize: 11 }} title="AUD conversion coming in Phase 2 (FX lock on shipment)">—</span>
+        {(() => {
+          const aud = convertRupeesToAud(value, inrPerAudRate);
+          if (aud === null) return <span style={{ color: "#9ca3af" }}>—</span>;
+          return <span style={s.total}>{aud.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>;
+        })()}
       </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center><span style={s.total}>{row.totalWeight ? Math.round(row.totalWeight) : ""}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={10 + sizes.length} center>
@@ -13179,6 +13328,8 @@ function OrderRow({
   packingListBadges,
   openPackingLists,
   costPerPiece,
+  inrPerAudCachedRate,
+  fxRupeeBuffer,
 }: {
   order: Order;
   rowIndex: number;
@@ -13193,6 +13344,8 @@ function OrderRow({
   packingListBadges: PackingListBadge[];
   openPackingLists: PackingListBadge[];
   costPerPiece: number;
+  inrPerAudCachedRate: number | null;
+  fxRupeeBuffer: number;
 }) {
   const fetcher = useFetcher();
   const [inventoryOpen, setInventoryOpen] = useState(false);
@@ -13386,9 +13539,30 @@ function OrderRow({
           )}
         </Td>
 
-        {/* Cost in AUD — placeholder until Phase 2 wires the FX rate. */}
+        {/* Cost in AUD — converted from the rupee per-piece cost using
+            the cached live INR/AUD rate, with the FX_RUPEE_BUFFER baked
+            into the rate. Once the row's destination packing list ships
+            (status → on_the_way), the AUD will lock to that list's
+            snapshot rate via the packing list page. */}
         <Td rowIndex={rowIndex} colIndex={costAudCol} center>
-          <span style={{ color: "#9ca3af", fontSize: 11 }} title="AUD conversion coming in Phase 2 (FX lock on shipment)">—</span>
+          {(() => {
+            void fxRupeeBuffer; // buffer is already applied inside convertRupeesToAud
+            const aud = convertRupeesToAud(costPerPiece, inrPerAudCachedRate);
+            if (aud === null) return <span style={{ color: "#9ca3af" }}>—</span>;
+            const totalAud = convertRupeesToAud(costPerPiece * order.totalQty, inrPerAudCachedRate);
+            return (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+                <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
+                  A${aud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </span>
+                {totalAud !== null && order.totalQty > 0 && (
+                  <span style={{ fontSize: 11, color: "#6b7280" }}>
+                    Total A${totalAud.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
         </Td>
 
         {/* Fabric in stock — looked up from the fabric name in the product title */}

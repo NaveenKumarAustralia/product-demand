@@ -1,0 +1,2 @@
+ALTER TABLE "PackingList" ADD COLUMN "lockedFxRate" DOUBLE PRECISION;
+ALTER TABLE "PackingList" ADD COLUMN "lockedFxRateAt" TIMESTAMP(3);
