@@ -1863,9 +1863,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "update_product_info_grid") {
     const gridColumns = Number(form.get("gridColumns"));
-    if (gridColumns !== 3 && gridColumns !== 4) return null;
+    if (gridColumns !== 3 && gridColumns !== 4 && gridColumns !== 5 && gridColumns !== 6) return null;
     const productInfo = await loadProductInfoForAction();
-    productInfo.gridColumns = gridColumns;
+    productInfo.gridColumns = gridColumns as 3 | 4 | 5 | 6;
     await saveProductInfo(productInfo);
     return null;
   }
@@ -3241,7 +3241,7 @@ type ProductInfoCategory = {
   styles: ProductInfoStyle[];
 };
 type ProductInfo = {
-  gridColumns?: 3 | 4;
+  gridColumns?: 3 | 4 | 5 | 6;
   categories: ProductInfoCategory[];
 };
 type ProductStyleCosting = Pick<
@@ -3686,7 +3686,8 @@ function normalizeProductInfo(value: unknown): ProductInfo {
     return id && name ? { id, name, styles } : null;
   }).filter(Boolean) as ProductInfoCategory[];
 
-  const gridColumns = (value as Record<string, unknown>).gridColumns === 3 ? 3 : 4;
+  const rawGrid = Number((value as Record<string, unknown>).gridColumns);
+  const gridColumns: 3 | 4 | 5 | 6 = rawGrid === 3 ? 3 : rawGrid === 5 ? 5 : rawGrid === 6 ? 6 : 4;
   return categories.length ? { gridColumns, categories } : structuredClone(DEFAULT_PRODUCT_INFO);
 }
 
@@ -8243,7 +8244,10 @@ function ProductInformationPanel({
     : [];
   const hiddenStyleCount = selectedCategory?.styles.filter((style) => style.hidden).length ?? 0;
   const isSubmitting = fetcher.state !== "idle";
-  const gridColumns = productInfo.gridColumns === 3 ? 3 : 4;
+  const gridColumns: 3 | 4 | 5 | 6 = productInfo.gridColumns === 3 ? 3
+    : productInfo.gridColumns === 5 ? 5
+    : productInfo.gridColumns === 6 ? 6
+    : 4;
 
   const submitProductInfo = (fields: Record<string, string>) => {
     fetcher.submit(fields, { method: "post" });
@@ -8288,7 +8292,7 @@ function ProductInformationPanel({
     reader.readAsDataURL(file);
   };
 
-  const updateGridColumns = (nextColumns: 3 | 4) => {
+  const updateGridColumns = (nextColumns: 3 | 4 | 5 | 6) => {
     submitProductInfo({ intent: "update_product_info_grid", gridColumns: String(nextColumns) });
   };
 
@@ -8368,12 +8372,12 @@ function ProductInformationPanel({
         </div>
         <div style={s.productInfoActions}>
           <div style={s.productInfoSegmented} aria-label="Style cards per row">
-            {[3, 4].map((count) => (
+            {[3, 4, 5, 6].map((count) => (
               <button
                 key={count}
                 type="button"
                 style={gridColumns === count ? { ...s.productInfoSegmentButton, ...s.productInfoSegmentButtonActive } : s.productInfoSegmentButton}
-                onClick={() => updateGridColumns(count as 3 | 4)}
+                onClick={() => updateGridColumns(count as 3 | 4 | 5 | 6)}
                 disabled={isSubmitting}
               >
                 {count}
