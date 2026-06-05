@@ -519,12 +519,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     } catch (e) {
       console.warn("[shippingMethod] hydration failed:", e);
     }
-    // Defensive: lockedFxRate / lockedFxRateAt are Phase 2 additions. Use
+    // Defensive: lockedFxRate / lockedFxRateAt are Phase 2 additions,
+    // and PackingListLine.costPushedAt is a Phase 3 addition. Use
     // ADD COLUMN IF NOT EXISTS so a stale DB doesn't crash; hydrate via
     // raw SQL so it works even if the Prisma client wasn't regenerated.
     try {
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRate" DOUBLE PRECISION`);
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRateAt" TIMESTAMP(3)`);
+      await prisma.$executeRawUnsafe(`ALTER TABLE "PackingListLine" ADD COLUMN IF NOT EXISTS "costPushedAt" TIMESTAMP(3)`);
       const fxRows = await prisma.$queryRawUnsafe<Array<{ id: number; lockedFxRate: number | null; lockedFxRateAt: Date | null }>>(
         `SELECT id, "lockedFxRate", "lockedFxRateAt" FROM "PackingList"`,
       );
@@ -1224,6 +1226,48 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // end-of-life for an in-shipment restock request.
     const loadedProductIds = new Set<string>();
 
+    // Phase 3: weighted-average cost push to Shopify. Decide once per
+    // load action whether cost-push is allowed at all for this list.
+    // If masterInventoryLoadedAt is already set (e.g. Invoice no-7,
+    // which was loaded before Phase 3 shipped) we NEVER push cost —
+    // the prior WAC stays whatever Shopify already has.
+    const lockedFx = (packingList as { lockedFxRate?: number | null }).lockedFxRate ?? null;
+    const costPushAllowedForList =
+      !packingList.masterInventoryLoadedAt
+      && lockedFx != null
+      && lockedFx > FX_RUPEE_BUFFER;
+
+    // Phase 3: load the cost lookup so we can derive each line's
+    // effective rupee price the same way the packing list UI does
+    // (manual priceRupees if set, else the auto-derived ₹10-rounded
+    // value from styleCostLookup). The AUD we push to Shopify equals
+    // effective_rupees / (lockedFx - FX_RUPEE_BUFFER).
+    let styleCostLookupForPush: StyleCostLookup | null = null;
+    if (costPushAllowedForList) {
+      try {
+        const [productInfoSetting, customSheetsValue, customRowsValue, deletedRowsValue, manualSheetsSetting, deletedSheetsSetting] = await Promise.all([
+          prisma.portalSetting.findUnique({ where: { key: PRODUCT_INFO_KEY }, select: { value: true } }),
+          prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } }).then((s) => s?.value),
+          prisma.portalSetting.findUnique({ where: { key: FABRIC_CELL_OVERRIDES_KEY }, select: { value: true } }).then((s) => s?.value),
+          prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_ROWS_KEY }, select: { value: true } }).then((s) => s?.value),
+          prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } }),
+          prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_SHEETS_KEY }, select: { value: true } }),
+        ]);
+        const productInfo = normalizeProductInfo(productInfoSetting?.value);
+        const manualFabricSheets = await getManualFabricSheets({
+          savedValue: manualSheetsSetting?.value,
+          customSheetsValue,
+          customRowsValue,
+          deletedRowsValue,
+          deletedSheetsValue: deletedSheetsSetting?.value,
+        });
+        const fabricStockIndex = buildFabricStockIndex(manualFabricSheets);
+        styleCostLookupForPush = buildStyleCostLookup(productInfo, fabricStockIndex);
+      } catch (e) {
+        console.warn("[cost push] failed to build cost lookup; auto-derived prices won't be pushed:", e);
+      }
+    }
+
     for (const line of packingList.lines) {
       const title = line.productTitle.toLowerCase();
       if (!line.productId || line.isCustom || skipWords.some((word) => title.includes(word))) continue;
@@ -1245,14 +1289,66 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       if (!changes.length) continue;
+
+      // Phase 3: decide if cost-push runs for THIS line and snapshot
+      // each affected variant's CURRENT cost+qty BEFORE we adjust the
+      // qty — otherwise "existing_qty" would include the load we're
+      // about to make and the WAC math would be wrong.
+      //
+      // Effective rupees = manual line.priceRupees if set, else the
+      // auto-derived ₹10-rounded value the UI shows in the placeholder.
+      // This is the SAME source the AUD column on the packing list
+      // uses, so what Shopify gets matches what staff already see.
+      const manualPriceRupees = (line as { priceRupees?: number | null }).priceRupees ?? 0;
+      const autoPriceRupees = styleCostLookupForPush ? styleCostLookupForPush.costForTitle(line.productTitle) : 0;
+      const effectiveRupees = manualPriceRupees > 0 ? manualPriceRupees : autoPriceRupees;
+      const lineCostPushedAt = (line as { costPushedAt?: Date | null }).costPushedAt ?? null;
+      const costPushAllowedForLine = costPushAllowedForList && !lineCostPushedAt && effectiveRupees > 0;
+      const preSnapshots = new Map<string, InventoryItemSnapshot>();
+      if (costPushAllowedForLine) {
+        for (const change of changes) {
+          const snap = await fetchInventoryItemCostAndQty(session.shop, session.accessToken, change.inventoryItemId);
+          if (snap) preSnapshots.set(change.inventoryItemId, snap);
+        }
+      }
+
       const loadedSizes = await addShopifyInventory(session.shop, session.accessToken, changes);
       if (!loadedSizes.length) continue;
       for (const size of loadedSizes) {
         nextLoadedQtys[size] = qtys[size] ?? 0;
       }
+
+      // Phase 3: push WAC for each successfully-loaded variant. Per
+      // user-confirmed rules:
+      //   - existing_qty = 0      → new_WAC = new_cost
+      //   - existing_cost null/0  → new_WAC = new_cost (treat as init)
+      //   - else                  → weighted average
+      let anyCostPushed = false;
+      if (costPushAllowedForLine && lockedFx != null) {
+        const newCostAud = effectiveRupees / (lockedFx - FX_RUPEE_BUFFER);
+        if (newCostAud > 0 && Number.isFinite(newCostAud)) {
+          for (const change of changes) {
+            if (!loadedSizes.includes(change.size)) continue;
+            const pre = preSnapshots.get(change.inventoryItemId);
+            if (!pre) continue;
+            let newWac: number;
+            if (pre.totalQty <= 0 || pre.unitCost == null || pre.unitCost <= 0) {
+              newWac = newCostAud;
+            } else {
+              newWac = (pre.totalQty * pre.unitCost + change.qty * newCostAud) / (pre.totalQty + change.qty);
+            }
+            const ok = await updateInventoryItemUnitCost(session.shop, session.accessToken, change.inventoryItemId, newWac);
+            if (ok) anyCostPushed = true;
+          }
+        }
+      }
+
       await prisma.packingListLine.update({
         where: { id: line.id },
-        data: { shopifyLoadedQtys: nextLoadedQtys },
+        data: {
+          shopifyLoadedQtys: nextLoadedQtys,
+          ...(anyCostPushed ? { costPushedAt: new Date() } : {}),
+        },
       });
       loadedProductIds.add(line.productId);
     }
@@ -5154,6 +5250,76 @@ async function addShopifyInventory(shop: string, accessToken: string, changes: S
   const userErrors = json?.data?.inventoryAdjustQuantities?.userErrors ?? [];
   if (userErrors.length || !json?.data?.inventoryAdjustQuantities?.inventoryAdjustmentGroup) return [];
   return changes.map((change) => change.size);
+}
+
+// ─── Phase 3: weighted-average cost push to Shopify ──────────────
+// fetchInventoryItemCostAndQty returns the variant's current unitCost
+// (in store currency, typically AUD) and the sum of its "available"
+// inventory across all locations. Called BEFORE the qty bump so we
+// can compute a weighted average from the prior state.
+type InventoryItemSnapshot = { unitCost: number | null; totalQty: number };
+async function fetchInventoryItemCostAndQty(
+  shop: string,
+  accessToken: string,
+  inventoryItemId: string,
+): Promise<InventoryItemSnapshot | null> {
+  const json = await shopifyGraphql<any>(shop, accessToken, `
+    query InventoryItemCostAndQty($id: ID!) {
+      inventoryItem(id: $id) {
+        id
+        unitCost { amount }
+        inventoryLevels(first: 20) {
+          nodes {
+            quantities(names: ["available"]) {
+              name
+              quantity
+            }
+          }
+        }
+      }
+    }
+  `, { id: inventoryItemId });
+  const item = json?.data?.inventoryItem;
+  if (!item) return null;
+  const rawCost = item.unitCost?.amount;
+  const unitCost = rawCost != null && Number.isFinite(Number(rawCost)) ? Number(rawCost) : null;
+  let totalQty = 0;
+  for (const level of (item.inventoryLevels?.nodes ?? [])) {
+    for (const q of (level.quantities ?? [])) {
+      if (q?.name === "available" && Number.isFinite(Number(q.quantity))) {
+        totalQty += Number(q.quantity);
+      }
+    }
+  }
+  return { unitCost, totalQty };
+}
+
+// updateInventoryItemUnitCost pushes a new cost (in store currency) to
+// the variant's inventoryItem. Returns true on success, false on any
+// userError so the caller can decide whether to mark the line pushed.
+async function updateInventoryItemUnitCost(
+  shop: string,
+  accessToken: string,
+  inventoryItemId: string,
+  newCost: number,
+): Promise<boolean> {
+  if (!Number.isFinite(newCost) || newCost <= 0) return false;
+  // Shopify expects the cost as a string with 2 decimal places.
+  const costStr = newCost.toFixed(2);
+  const json = await shopifyGraphql<any>(shop, accessToken, `
+    mutation UpdateInventoryItemCost($id: ID!, $input: InventoryItemInput!) {
+      inventoryItemUpdate(id: $id, input: $input) {
+        userErrors { field message }
+        inventoryItem { id unitCost { amount } }
+      }
+    }
+  `, { id: inventoryItemId, input: { cost: costStr } });
+  const userErrors = json?.data?.inventoryItemUpdate?.userErrors ?? [];
+  if (userErrors.length) {
+    console.warn("[cost push] userErrors:", userErrors);
+    return false;
+  }
+  return Boolean(json?.data?.inventoryItemUpdate?.inventoryItem);
 }
 
 async function enrichOrdersWithShopifyVariants<T extends {

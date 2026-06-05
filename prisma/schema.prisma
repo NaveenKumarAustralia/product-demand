@@ -150,6 +150,7 @@ model PackingListLine {
   weight          Float?
   notes           String?
   sortOrder       Int         @default(0)
+  costPushedAt    DateTime?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 }
