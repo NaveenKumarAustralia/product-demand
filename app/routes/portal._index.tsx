@@ -3617,10 +3617,25 @@ function normalizeUniversalSettings(value: unknown): UniversalSettings {
 // these is missing, costForTitle returns 0 and the UI leaves the
 // Price ₹ cell blank as a cue to fill the missing piece (most often
 // the cost-per-meter on the Fabric in Stock page).
+type CostBreakdown = {
+  styleName: string;
+  fabricName: string;
+  meters: number;
+  metersSource: "fabric-override" | "style-average";
+  costPerMeter: number;
+  fabricCost: number;
+  stitching: number;
+  factoryCost: number;
+  factoryProfit: number;
+  zipButtons: number;
+  liningTrim: number;
+  total: number;
+};
 type StyleCostLookup = {
   // Resolve a product title to its per-piece cost in rupees, or 0 if
   // anything required is missing.
   costForTitle: (title: string | null | undefined) => number;
+  breakdownForTitle: (title: string | null | undefined) => CostBreakdown | null;
 };
 function buildStyleCostLookup(
   productInfo: ProductInfo,
@@ -3664,43 +3679,96 @@ function buildStyleCostLookup(
     }
     return null;
   };
+  // Shared resolver used by both costForTitle and breakdownForTitle.
+  // Returns the full breakdown shape; required-fields gate is applied
+  // by the callers based on what they need.
+  type Resolved = {
+    style: ProductInfoStyle;
+    fabricName: string;
+    meters: number;
+    metersSource: "fabric-override" | "style-average";
+    costPerMeter: number;
+    fabricCost: number;
+  };
+  const resolve = (title: string | null | undefined): Resolved | null => {
+    const haystack = (title ?? "").trim().toLowerCase();
+    if (!haystack) return null;
+    let matchedStyle: ProductInfoStyle | null = null;
+    for (const entry of styles) {
+      if (haystack === entry.name || haystack.startsWith(entry.name + " ")) {
+        matchedStyle = entry.style;
+        break;
+      }
+    }
+    if (!matchedStyle) return null;
+    // Manual repeat of findFabricInTitle so we can also surface the
+    // matched fabric label for the breakdown UI.
+    let matchedFabricName: string | null = null;
+    let matchedFabricInfo: FabricInfo | null = null;
+    for (const name of fabricNamesByLength) {
+      if (name.length < 3) continue;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`\\b${escaped}\\b`, "i");
+      if (re.test(haystack)) {
+        matchedFabricName = name;
+        matchedFabricInfo = fabricInfoByName.get(name) ?? null;
+        break;
+      }
+    }
+    if (!matchedFabricInfo || !matchedFabricName) return null;
+    const fabricOverrideMeters = matchedFabricInfo.styleMeters?.[matchedStyle.id];
+    const usingOverride = isFilled(fabricOverrideMeters);
+    const meters = usingOverride
+      ? fabricOverrideMeters!
+      : (matchedStyle.averageMeters ?? 0);
+    return {
+      style: matchedStyle,
+      fabricName: matchedFabricName,
+      meters,
+      metersSource: usingOverride ? "fabric-override" : "style-average",
+      costPerMeter: matchedFabricInfo.costPerMeter,
+      fabricCost: meters * matchedFabricInfo.costPerMeter,
+    };
+  };
   return {
     costForTitle: (title) => {
-      const haystack = (title ?? "").trim().toLowerCase();
-      if (!haystack) return 0;
-      // 1. Find the style via longest-prefix match.
-      let matchedStyle: ProductInfoStyle | null = null;
-      for (const entry of styles) {
-        if (haystack === entry.name || haystack.startsWith(entry.name + " ")) {
-          matchedStyle = entry.style;
-          break;
-        }
-      }
-      if (!matchedStyle) return 0;
-      // 2. Find the matching fabric in the title.
-      const fabric = findFabricInTitle(haystack);
-      if (!fabric) return 0;
-      // 3. Meters per piece: prefer the fabric's per-style override
-      // (set via the Products popup on the Fabric in Stock page), fall
-      // back to the style's own averageMeters from product info.
-      const fabricOverrideMeters = fabric.styleMeters?.[matchedStyle.id];
-      const meters = isFilled(fabricOverrideMeters)
-        ? fabricOverrideMeters!
-        : (matchedStyle.averageMeters ?? 0);
-      const fabricCost = meters * fabric.costPerMeter;
-      // 4. Required-fields gate.
+      const r = resolve(title);
+      if (!r) return 0;
       const hasAllRequired =
-        fabricCost > 0
-        && isFilled(matchedStyle.stitchingCost)
-        && isFilled(matchedStyle.factoryCost)
-        && isFilled(matchedStyle.factoryProfit);
+        r.fabricCost > 0
+        && isFilled(r.style.stitchingCost)
+        && isFilled(r.style.factoryCost)
+        && isFilled(r.style.factoryProfit);
       if (!hasAllRequired) return 0;
-      return fabricCost
-        + (matchedStyle.stitchingCost ?? 0)
-        + (matchedStyle.factoryCost ?? 0)
-        + (matchedStyle.factoryProfit ?? 0)
-        + (matchedStyle.zipButtonsCost ?? 0)
-        + (matchedStyle.liningTrimCost ?? 0);
+      return r.fabricCost
+        + (r.style.stitchingCost ?? 0)
+        + (r.style.factoryCost ?? 0)
+        + (r.style.factoryProfit ?? 0)
+        + (r.style.zipButtonsCost ?? 0)
+        + (r.style.liningTrimCost ?? 0);
+    },
+    breakdownForTitle: (title) => {
+      const r = resolve(title);
+      if (!r) return null;
+      const stitching = r.style.stitchingCost ?? 0;
+      const factoryCost = r.style.factoryCost ?? 0;
+      const factoryProfit = r.style.factoryProfit ?? 0;
+      const zipButtons = r.style.zipButtonsCost ?? 0;
+      const liningTrim = r.style.liningTrimCost ?? 0;
+      return {
+        styleName: r.style.name ?? "",
+        fabricName: r.fabricName,
+        meters: r.meters,
+        metersSource: r.metersSource,
+        costPerMeter: r.costPerMeter,
+        fabricCost: r.fabricCost,
+        stitching,
+        factoryCost,
+        factoryProfit,
+        zipButtons,
+        liningTrim,
+        total: r.fabricCost + stitching + factoryCost + factoryProfit + zipButtons + liningTrim,
+      };
     },
   };
 }
@@ -5293,6 +5361,17 @@ export default function PortalDashboard() {
     document.addEventListener("show-cell-history", handler);
     return () => document.removeEventListener("show-cell-history", handler);
   }, []);
+  const [costBreakdownMenu, setCostBreakdownMenu] = useState<
+    { x: number; y: number; breakdown: CostBreakdown; productTitle: string; totalQty: number } | null
+  >(null);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { x: number; y: number; breakdown: CostBreakdown; productTitle: string; totalQty: number };
+      setCostBreakdownMenu(detail);
+    };
+    document.addEventListener("show-cost-breakdown", handler);
+    return () => document.removeEventListener("show-cost-breakdown", handler);
+  }, []);
   useEffect(() => {
     const handleUndoKey = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.key.toLowerCase() !== "z") return;
@@ -5728,6 +5807,7 @@ export default function PortalDashboard() {
                     packingListBadges={order.productId ? (packingListsByProductId as Record<string, PackingListBadge[]>)[order.productId] ?? [] : []}
                     openPackingLists={openPackingLists as PackingListBadge[]}
                     costPerPiece={styleCostLookup.costForTitle(order.productTitle)}
+                    costBreakdown={styleCostLookup.breakdownForTitle(order.productTitle)}
                     inrPerAudCachedRate={inrPerAudCachedRate}
                     fxRupeeBuffer={fxRupeeBuffer}
                   />
@@ -5768,6 +5848,16 @@ export default function PortalDashboard() {
           entityName={historyMenu.entityName}
           activityLogs={activityLogs}
           onClose={() => setHistoryMenu(null)}
+        />
+      )}
+      {costBreakdownMenu && typeof document !== "undefined" && (
+        <CostBreakdownMenu
+          x={costBreakdownMenu.x}
+          y={costBreakdownMenu.y}
+          breakdown={costBreakdownMenu.breakdown}
+          productTitle={costBreakdownMenu.productTitle}
+          totalQty={costBreakdownMenu.totalQty}
+          onClose={() => setCostBreakdownMenu(null)}
         />
       )}
     </div>
@@ -6354,6 +6444,105 @@ function CellHistoryMenu({
           </div>
         ))
       )}
+    </div>
+  );
+
+  return createPortal(panel, document.body);
+}
+
+function CostBreakdownMenu({
+  x, y, breakdown, productTitle, totalQty, onClose,
+}: {
+  x: number; y: number;
+  breakdown: CostBreakdown;
+  productTitle: string;
+  totalQty: number;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    const handleKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [onClose]);
+
+  const menuW = 340;
+  const menuMaxH = 420;
+  const left = x + menuW > window.innerWidth ? x - menuW : x;
+  const top = y + menuMaxH > window.innerHeight ? Math.max(0, y - menuMaxH) : y;
+  const fmt = (n: number) => `₹${n.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+
+  const lines: Array<{ label: string; value: string; faint?: boolean }> = [
+    {
+      label: `Fabric: ${breakdown.fabricName}`,
+      value: `${breakdown.meters.toLocaleString(undefined, { maximumFractionDigits: 2 })}m × ${fmt(breakdown.costPerMeter)}/m`,
+      faint: true,
+    },
+    { label: "Fabric cost", value: fmt(breakdown.fabricCost) },
+    { label: "Stitching", value: fmt(breakdown.stitching) },
+    { label: "Factory cost", value: fmt(breakdown.factoryCost) },
+    { label: "Factory profit", value: fmt(breakdown.factoryProfit) },
+  ];
+  if (breakdown.zipButtons > 0) lines.push({ label: "Zip / buttons", value: fmt(breakdown.zipButtons) });
+  if (breakdown.liningTrim > 0) lines.push({ label: "Lining / trim", value: fmt(breakdown.liningTrim) });
+
+  const panel = (
+    <div
+      ref={ref}
+      style={{
+        position: "fixed", top, left, zIndex: 99999,
+        background: "#fff", borderRadius: 10,
+        boxShadow: "0 8px 32px rgba(0,0,0,0.22)", border: "1px solid #e5e7eb",
+        width: menuW, maxHeight: menuMaxH, overflowY: "auto",
+      }}
+    >
+      <div style={{ padding: "12px 16px 10px", borderBottom: "1px solid #f3f4f6" }}>
+        <div style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>Cost breakdown</div>
+        <div style={{ fontSize: 11, color: "#6b7280", marginTop: 2 }}>{productTitle}</div>
+        <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 1 }}>
+          Style: {breakdown.styleName} · meters from {breakdown.metersSource === "fabric-override" ? "fabric override" : "style average"}
+        </div>
+      </div>
+      <div style={{ padding: "6px 16px" }}>
+        {lines.map((line, idx) => (
+          <div
+            key={idx}
+            style={{
+              display: "flex", justifyContent: "space-between", alignItems: "baseline",
+              padding: "7px 0", borderBottom: idx < lines.length - 1 ? "1px solid #f9fafb" : "none",
+              fontSize: 13,
+              color: line.faint ? "#6b7280" : "#111827",
+            }}
+          >
+            <span>{line.label}</span>
+            <span style={{ fontWeight: line.faint ? 400 : 600 }}>{line.value}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{
+        padding: "10px 16px",
+        borderTop: "1px solid #e5e7eb",
+        background: "#f9fafb",
+        display: "flex", flexDirection: "column", gap: 4,
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Per piece</span>
+          <span style={{ fontSize: 15, fontWeight: 700, color: "#111827" }}>{fmt(breakdown.total)}</span>
+        </div>
+        {totalQty > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <span style={{ fontSize: 12, color: "#6b7280" }}>Total ({totalQty.toLocaleString()} pcs)</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>{fmt(breakdown.total * totalQty)}</span>
+          </div>
+        )}
+      </div>
     </div>
   );
 
@@ -13370,6 +13559,7 @@ function OrderRow({
   packingListBadges,
   openPackingLists,
   costPerPiece,
+  costBreakdown,
   inrPerAudCachedRate,
   fxRupeeBuffer,
 }: {
@@ -13386,6 +13576,7 @@ function OrderRow({
   packingListBadges: PackingListBadge[];
   openPackingLists: PackingListBadge[];
   costPerPiece: number;
+  costBreakdown: CostBreakdown | null;
   inrPerAudCachedRate: number | null;
   fxRupeeBuffer: number;
 }) {
@@ -13566,7 +13757,18 @@ function OrderRow({
             qty. Shows "—" if no matching style is found. */}
         <Td rowIndex={rowIndex} colIndex={costRupeesCol} center>
           {costPerPiece > 0 ? (
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+            <div
+              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "context-menu" }}
+              title="Right-click to see cost breakdown"
+              onContextMenu={(e) => {
+                if (!costBreakdown) return;
+                e.preventDefault();
+                e.stopPropagation();
+                document.dispatchEvent(new CustomEvent("show-cost-breakdown", {
+                  detail: { x: e.clientX, y: e.clientY, breakdown: costBreakdown, productTitle: order.productTitle, totalQty: order.totalQty },
+                }));
+              }}
+            >
               <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
                 ₹{costPerPiece.toLocaleString(undefined, { maximumFractionDigits: 2 })}
               </span>
