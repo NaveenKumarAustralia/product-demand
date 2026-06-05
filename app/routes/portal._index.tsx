@@ -918,14 +918,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if ((current?.status ?? "still_packing") !== "still_packing") return null;
       }
       data.status = nextStatus;
-      // FX lock + price snapshot: the first time a packing list
-      // transitions into "on_the_way", snapshot:
-      //   1. The current INR/AUD rate onto the list (FX lock).
-      //   2. The current auto-derived rupee cost onto every line that
-      //      doesn't already have a manual priceRupees set — turning
-      //      the live "auto X" placeholder into a permanent value so
-      //      later changes to product info / fabric stock can't shift
-      //      what we already shipped.
+      // FX lock: the first time a packing list transitions into the
+      // "on_the_way" status, snapshot the current INR/AUD rate. From
+      // then on, the AUD values displayed on this list are derived
+      // live from priceRupees × this locked rate — independent of
+      // later FX moves. priceRupees itself is never written by this
+      // hook; manual rupee entries stay manual, blank entries fall
+      // back to the live auto-derived value at render time.
       if (nextStatus === "on_the_way" && packingId) {
         try {
           const existingRows = await prisma.$queryRawUnsafe<Array<{ lockedFxRate: number | null }>>(
@@ -946,45 +945,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
         } catch (e) {
           console.warn("[fx lock] on_the_way snapshot failed:", e);
-        }
-        try {
-          // Snapshot auto-derived prices for every line that has no
-          // manual override yet. Once we ship, the value the user saw
-          // becomes the value we keep.
-          const [productInfoSetting, fabricLines, customSheetsValue, customRowsValue, deletedRowsValue, manualSheetsSetting, deletedSheetsSetting] = await Promise.all([
-            prisma.portalSetting.findUnique({ where: { key: PRODUCT_INFO_KEY }, select: { value: true } }),
-            prisma.packingListLine.findMany({
-              where: { packingListId: packingId },
-              select: { id: true, productTitle: true, priceRupees: true },
-            }),
-            prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } }).then((s) => s?.value),
-            prisma.portalSetting.findUnique({ where: { key: FABRIC_CELL_OVERRIDES_KEY }, select: { value: true } }).then((s) => s?.value),
-            prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_ROWS_KEY }, select: { value: true } }).then((s) => s?.value),
-            prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } }),
-            prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_SHEETS_KEY }, select: { value: true } }),
-          ]);
-          const productInfo = normalizeProductInfo(productInfoSetting?.value);
-          const manualFabricSheets = await getManualFabricSheets({
-            savedValue: manualSheetsSetting?.value,
-            customSheetsValue,
-            customRowsValue,
-            deletedRowsValue,
-            deletedSheetsValue: deletedSheetsSetting?.value,
-          });
-          const fabricStockIndex = buildFabricStockIndex(manualFabricSheets);
-          const styleCostLookup = buildStyleCostLookup(productInfo, fabricStockIndex);
-          const toSnapshot = fabricLines.filter((line) => (line.priceRupees ?? 0) <= 0);
-          for (const line of toSnapshot) {
-            const auto = styleCostLookup.costForTitle(line.productTitle);
-            if (auto > 0) {
-              await prisma.packingListLine.update({
-                where: { id: line.id },
-                data: { priceRupees: auto },
-              });
-            }
-          }
-        } catch (e) {
-          console.warn("[price snapshot] on_the_way snapshot failed:", e);
         }
       }
     }
