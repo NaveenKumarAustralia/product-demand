@@ -3,12 +3,15 @@ import PDFDocument from "pdfkit";
 import prisma from "../db.server";
 
 // Landscape A4 PDF, one sub-table per box. Each sub-table mirrors the
-// packing list columns: Box | Name | XS | S | M | L | XL | 2XL | 3XL |
-// (any extras) | Total. The Box cell is drawn as a tall "merged" cell
-// down the left of the sub-table. User prints + cuts between boxes to
-// make a sticker per box.
+// packing list columns: Box | Name | Free Size | XS | S | M | L | XL |
+// 2XL | 3XL | (any extras) | Total. The Box cell is drawn as a tall
+// "merged" cell down the left of the sub-table. If a box has more
+// lines than fit on one page, the sub-table splits across pages — the
+// table header and the merged box cell are redrawn at the top of each
+// new page so rows remain aligned. Row heights auto-grow to fit
+// wrapped names so text never escapes its cell.
 
-const BASELINE_SIZES = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
+const BASELINE_SIZES = ["Free Size", "XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
 
 function canonicalSizeKey(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, "").replace(/-/g, "/");
@@ -36,9 +39,7 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
   });
   if (!list) throw new Response("Packing list not found", { status: 404 });
 
-  // Build the master size-column list for the whole packing list: every
-  // baseline column (so users have a familiar layout) plus any extra
-  // canonical key that appears in the data with qty > 0.
+  // Master size-column list for the whole packing list.
   const baselineCanon = new Set(BASELINE_SIZES.map(canonicalSizeKey));
   const extraLabelByCanon = new Map<string, string>();
   for (const line of list.lines) {
@@ -53,8 +54,6 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
   }
   const sizeColumns = [...BASELINE_SIZES, ...extraLabelByCanon.values()];
 
-  // Resolve a line's qty for a given column label using canonical
-  // matching so "S-M" data fills the "S/M" column.
   const qtyForSize = (qtys: Record<string, number>, label: string): number => {
     if (qtys[label]) return qtys[label];
     const canon = canonicalSizeKey(label);
@@ -64,9 +63,7 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
     return 0;
   };
 
-  // Group lines by effective box number (first line of a box has the
-  // number; later lines inherit until a new box appears). Skip lines
-  // with zero total qty.
+  // Group lines by effective box number.
   type LineRow = { name: string; qtys: Record<string, number>; total: number };
   type Box = { boxNo: string; lines: LineRow[] };
   const boxes: Box[] = [];
@@ -102,22 +99,29 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
   const listLabel = (list.invoiceNumber || list.title || `Packing list #${list.id}`).trim();
   const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
 
-  // Column widths. Box and Total are fixed; Name takes a generous chunk;
-  // the remaining width is split equally between size columns.
   const boxColWidth = 60;
   const totalColWidth = 60;
   const nameColWidth = 180;
   const sizeColsTotalWidth = pageWidth - boxColWidth - nameColWidth - totalColWidth;
-  const sizeColWidth = Math.max(34, Math.floor(sizeColsTotalWidth / Math.max(1, sizeColumns.length)));
+  const sizeColWidth = Math.max(30, Math.floor(sizeColsTotalWidth / Math.max(1, sizeColumns.length)));
 
-  const dataRowHeight = 22;
+  const baseRowHeight = 22;
+  const rowPadY = 6;
   const headerRowHeight = 22;
   const boxGap = 14;
 
   const HEADER_FILL = "#f0c8b8";
   const BORDER = "#94a3b8";
 
-  // Header label for the page (shipment).
+  // Measure how tall a single data row needs to be so wrapped name text
+  // fits inside its cell. PDFKit's heightOfString gives the height the
+  // text would occupy at the given width.
+  const measureRowHeight = (line: LineRow): number => {
+    doc.fontSize(11);
+    const nameHeight = doc.heightOfString(line.name, { width: nameColWidth - 12 });
+    return Math.max(baseRowHeight, Math.ceil(nameHeight) + rowPadY * 2);
+  };
+
   const drawPageHeader = () => {
     doc.y = doc.page.margins.top;
     doc.fontSize(13).fillColor("#111827")
@@ -125,18 +129,20 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
     doc.moveDown(0.4);
   };
 
-  // Draw one box's sub-table at the current y. Returns the ending y.
-  const drawBox = (box: Box) => {
+  // Draw one chunk of a box's data rows at the current y. Chunk may be
+  // the full box or just the rows that fit on the remainder of the
+  // page. The table header is always drawn above the chunk and the box
+  // cell is drawn as a merged cell spanning the chunk's data height.
+  const drawBoxChunk = (boxNo: string, chunkLines: LineRow[], chunkHeights: number[]) => {
     const x0 = doc.page.margins.left;
-    let y = doc.y;
-    const dataHeight = box.lines.length * dataRowHeight;
-    const tableHeight = headerRowHeight + dataHeight;
+    const y = doc.y;
+    const dataHeight = chunkHeights.reduce((sum, h) => sum + h, 0);
 
-    // ── HEADER ROW ───────────────────────────────────────────────
+    // Header row.
     doc.save().rect(x0, y, pageWidth, headerRowHeight).fill(HEADER_FILL).restore();
     doc.lineWidth(0.6).strokeColor(BORDER);
     let hx = x0;
-    const cells: Array<{ label: string; width: number; align: "left" | "center" }> = [
+    const cells: Array<{ label: string; width: number; align: "center" }> = [
       { label: "Box", width: boxColWidth, align: "center" },
       { label: "Name", width: nameColWidth, align: "center" },
       ...sizeColumns.map((label) => ({ label, width: sizeColWidth, align: "center" as const })),
@@ -144,60 +150,91 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
     ];
     for (const cell of cells) {
       doc.rect(hx, y, cell.width, headerRowHeight).stroke();
-      doc.fillColor("#111827").fontSize(11)
+      doc.fillColor("#111827").fontSize(10)
         .text(cell.label, hx + 2, y + 6, { width: cell.width - 4, align: cell.align });
       hx += cell.width;
     }
 
-    // ── BOX CELL (merged across the data rows) ───────────────────
+    // Box cell merged across this chunk's data rows.
     const dataY = y + headerRowHeight;
     doc.save().rect(x0, dataY, boxColWidth, dataHeight).fill(HEADER_FILL).restore();
     doc.rect(x0, dataY, boxColWidth, dataHeight).stroke();
     doc.fillColor("#111827").fontSize(20)
-      .text(box.boxNo, x0, dataY + (dataHeight / 2) - 12, {
+      .text(boxNo, x0, dataY + (dataHeight / 2) - 12, {
         width: boxColWidth,
         align: "center",
       });
 
-    // ── DATA ROWS ────────────────────────────────────────────────
-    box.lines.forEach((line, lineIdx) => {
-      const ry = dataY + (lineIdx * dataRowHeight);
+    // Data rows with variable heights.
+    let ry = dataY;
+    chunkLines.forEach((line, idx) => {
+      const rowH = chunkHeights[idx];
       let cx = x0 + boxColWidth;
-      // Name cell
-      doc.rect(cx, ry, nameColWidth, dataRowHeight).stroke();
+      // Name cell — wraps within its width; row height grew to fit.
+      doc.rect(cx, ry, nameColWidth, rowH).stroke();
       doc.fillColor("#111827").fontSize(11)
-        .text(line.name, cx + 6, ry + 6, { width: nameColWidth - 12, align: "left", lineBreak: false, ellipsis: true });
+        .text(line.name, cx + 6, ry + rowPadY, { width: nameColWidth - 12, align: "left" });
       cx += nameColWidth;
-      // Size cells
+      // Size cells.
       for (const size of sizeColumns) {
-        doc.rect(cx, ry, sizeColWidth, dataRowHeight).stroke();
+        doc.rect(cx, ry, sizeColWidth, rowH).stroke();
         const qty = qtyForSize(line.qtys, size);
         if (qty > 0) {
           doc.fillColor("#111827").fontSize(11)
-            .text(String(qty), cx, ry + 6, { width: sizeColWidth, align: "center" });
+            .text(String(qty), cx, ry + rowPadY, { width: sizeColWidth, align: "center" });
         }
         cx += sizeColWidth;
       }
-      // Total cell
-      doc.rect(cx, ry, totalColWidth, dataRowHeight).stroke();
+      // Total cell.
+      doc.rect(cx, ry, totalColWidth, rowH).stroke();
       doc.fillColor("#111827").fontSize(11)
-        .text(String(line.total), cx, ry + 6, { width: totalColWidth, align: "center" });
+        .text(String(line.total), cx, ry + rowPadY, { width: totalColWidth, align: "center" });
+      ry += rowH;
     });
 
     doc.y = dataY + dataHeight;
-    return tableHeight;
   };
 
   drawPageHeader();
 
   for (const box of boxes) {
-    const tableHeight = headerRowHeight + (box.lines.length * dataRowHeight);
-    const bottomLimit = doc.page.height - doc.page.margins.bottom;
-    if (doc.y + tableHeight > bottomLimit) {
-      doc.addPage();
-      drawPageHeader();
+    // Pre-measure every row for this box.
+    const allHeights = box.lines.map(measureRowHeight);
+
+    let cursor = 0;
+    while (cursor < box.lines.length) {
+      const bottomLimit = doc.page.height - doc.page.margins.bottom;
+      // Need room for header + at least the next row.
+      const minNeeded = headerRowHeight + allHeights[cursor];
+      if (doc.y + minNeeded > bottomLimit) {
+        doc.addPage();
+        drawPageHeader();
+      }
+      // Fit as many rows as possible on this page.
+      let used = doc.y + headerRowHeight;
+      let endIdx = cursor;
+      while (endIdx < box.lines.length) {
+        const h = allHeights[endIdx];
+        if (used + h > bottomLimit) break;
+        used += h;
+        endIdx++;
+      }
+      // Always advance at least one row (single-row taller than a page
+      // would otherwise loop forever — clamp to one row).
+      if (endIdx === cursor) endIdx = cursor + 1;
+
+      const chunkLines = box.lines.slice(cursor, endIdx);
+      const chunkHeights = allHeights.slice(cursor, endIdx);
+      drawBoxChunk(box.boxNo, chunkLines, chunkHeights);
+      cursor = endIdx;
+
+      // If more rows remain for this box, start a new page so the
+      // remaining rows get a fresh header + merged box cell.
+      if (cursor < box.lines.length) {
+        doc.addPage();
+        drawPageHeader();
+      }
     }
-    drawBox(box);
     doc.y += boxGap;
   }
 

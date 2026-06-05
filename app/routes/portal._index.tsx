@@ -2709,7 +2709,7 @@ const PACKING_STATUS_OPTIONS = [
   { value: "partially_loaded", label: "Partially loaded" },
   { value: "loaded", label: "Inventory loaded" },
 ];
-const PACKING_SIZES = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
+const PACKING_SIZES = ["Free Size", "XS", "S", "M", "L", "XL", "2XL", "3XL", "S/M", "M/L", "L/XL"];
 const DEFAULT_PACKING_ROWS = 5;
 const PACKING_COLUMNS_BEFORE_SIZES = [
   { id: "box", label: "Box", width: 70, center: true },
