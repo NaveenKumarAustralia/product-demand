@@ -12296,9 +12296,9 @@ function PackingListLineRow({
           return (
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
               <span style={s.total}>{unitAud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-              {inrPerAudRate && inrPerAudRate > 0 && (
+              {inrPerAudRate && inrPerAudRate - FX_RUPEE_BUFFER > 0 && (
                 <span style={{ fontSize: 10, color: "#9ca3af" }}>
-                  ₹{inrPerAudRate.toFixed(2)}/A$
+                  ₹{(inrPerAudRate - FX_RUPEE_BUFFER).toFixed(2)}/A$
                 </span>
               )}
             </div>
@@ -12584,9 +12584,9 @@ function PackingCombinedRow({
           return (
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
               <span style={s.total}>{unitAud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-              {inrPerAudRate && inrPerAudRate > 0 && (
+              {inrPerAudRate && inrPerAudRate - FX_RUPEE_BUFFER > 0 && (
                 <span style={{ fontSize: 10, color: "#9ca3af" }}>
-                  ₹{inrPerAudRate.toFixed(2)}/A$
+                  ₹{(inrPerAudRate - FX_RUPEE_BUFFER).toFixed(2)}/A$
                 </span>
               )}
             </div>
@@ -13602,9 +13602,9 @@ function OrderRow({
                     Total A${totalAud.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                   </span>
                 )}
-                {inrPerAudCachedRate && inrPerAudCachedRate > 0 && (
+                {inrPerAudCachedRate && inrPerAudCachedRate - FX_RUPEE_BUFFER > 0 && (
                   <span style={{ fontSize: 10, color: "#9ca3af" }}>
-                    ₹{inrPerAudCachedRate.toFixed(2)}/A$
+                    ₹{(inrPerAudCachedRate - FX_RUPEE_BUFFER).toFixed(2)}/A$
                   </span>
                 )}
               </div>
