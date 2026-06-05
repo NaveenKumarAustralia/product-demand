@@ -3636,6 +3636,11 @@ type StyleCostLookup = {
   // anything required is missing.
   costForTitle: (title: string | null | undefined) => number;
   breakdownForTitle: (title: string | null | undefined) => CostBreakdown | null;
+  // When the matcher saw a fabric name in the title but couldn't pick
+  // a single fabric (e.g. style is linked to TWO different "Black"
+  // fabrics), this returns a short warning to surface on the price
+  // cell so the user knows to fix the link.
+  warningForTitle: (title: string | null | undefined) => string | null;
 };
 function buildStyleCostLookup(
   productInfo: ProductInfo,
@@ -3653,35 +3658,67 @@ function buildStyleCostLookup(
     }
   }
   styles.sort((a, b) => b.name.length - a.name.length);
-  // Fabric name → { costPerMeter, styleMeters }. Names lowercased.
-  // First entry wins if the same fabric appears more than once.
-  type FabricInfo = { costPerMeter: number; styleMeters?: Record<string, number> };
-  const fabricInfoByName = new Map<string, FabricInfo>();
+  // Group every fabric stock entry by lowercase name so we can
+  // disambiguate same-named fabrics (e.g. multiple "Black"s) using
+  // each entry's per-style meters override from the Products popup.
+  type FabricCandidate = { costPerMeter: number; styleMeters?: Record<string, number>; sheetName: string };
+  const candidatesByName = new Map<string, FabricCandidate[]>();
   for (const entry of fabricStockIndex) {
     if (entry.kind !== "stock") continue;
     if (!isFilled(entry.costPerMeter)) continue;
     const key = entry.name.trim().toLowerCase();
-    if (!fabricInfoByName.has(key)) {
-      fabricInfoByName.set(key, {
-        costPerMeter: entry.costPerMeter!,
-        styleMeters: entry.styleMeters,
-      });
-    }
+    const bucket = candidatesByName.get(key) ?? [];
+    bucket.push({ costPerMeter: entry.costPerMeter!, styleMeters: entry.styleMeters, sheetName: entry.sheetName });
+    candidatesByName.set(key, bucket);
   }
   // Pre-sort fabric names by length desc for whole-word matching.
-  const fabricNamesByLength = Array.from(fabricInfoByName.keys()).sort((a, b) => b.length - a.length);
-  const findFabricInTitle = (lowercaseTitle: string): FabricInfo | null => {
+  const fabricNamesByLength = Array.from(candidatesByName.keys()).sort((a, b) => b.length - a.length);
+  // Find the best fabric in the title for a given style. Returns:
+  //   { kind: "ok", fabric, fabricName }     — unambiguous match
+  //   { kind: "ambiguous", fabricName, sheets } — multiple linked fabrics, can't pick
+  //   { kind: "no-match" }                    — no fabric word in title we know about
+  //   { kind: "unlinked", fabricName }        — fabric word in title but no candidate
+  //                                              is linked to this style via Products popup
+  type FabricMatch =
+    | { kind: "ok"; fabric: FabricCandidate; fabricName: string }
+    | { kind: "ambiguous"; fabricName: string; sheets: string[] }
+    | { kind: "unlinked"; fabricName: string }
+    | { kind: "no-match" };
+  const findFabricForStyle = (style: ProductInfoStyle, lowercaseTitle: string): FabricMatch => {
     for (const name of fabricNamesByLength) {
       if (name.length < 3) continue;
       const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const re = new RegExp(`\\b${escaped}\\b`, "i");
-      if (re.test(lowercaseTitle)) return fabricInfoByName.get(name) ?? null;
+      if (!re.test(lowercaseTitle)) continue;
+      const candidates = candidatesByName.get(name) ?? [];
+      if (candidates.length === 1) {
+        // Unique fabric name → match without requiring a style link.
+        return { kind: "ok", fabric: candidates[0], fabricName: name };
+      }
+      // Multiple candidates → disambiguate via the per-style meters
+      // override that staff set in the Products popup on Fabric in
+      // Stock. A style is "linked" to a fabric if that fabric has a
+      // meters value > 0 for this style.id.
+      const linked = candidates.filter((c) => isFilled(c.styleMeters?.[style.id]));
+      if (linked.length === 1) return { kind: "ok", fabric: linked[0], fabricName: name };
+      if (linked.length > 1) return { kind: "ambiguous", fabricName: name, sheets: linked.map((c) => c.sheetName) };
+      // No candidates linked. Don't keep searching for shorter names —
+      // the user clearly intended this fabric word, they just haven't
+      // told us which stock entry it is. Surface that so they know.
+      return { kind: "unlinked", fabricName: name };
+    }
+    return { kind: "no-match" };
+  };
+  // Shared style resolver — find the style entry for a title via
+  // longest-prefix match. Returns null when no style matches.
+  const findStyle = (haystack: string): ProductInfoStyle | null => {
+    for (const entry of styles) {
+      if (haystack === entry.name || haystack.startsWith(entry.name + " ")) return entry.style;
     }
     return null;
   };
-  // Shared resolver used by both costForTitle and breakdownForTitle.
-  // Returns the full breakdown shape; required-fields gate is applied
-  // by the callers based on what they need.
+  // Full resolver — style + fabric + meters + cost. Returns null when
+  // anything is missing or ambiguous (so cost can't be computed).
   type Resolved = {
     style: ProductInfoStyle;
     fabricName: string;
@@ -3693,41 +3730,20 @@ function buildStyleCostLookup(
   const resolve = (title: string | null | undefined): Resolved | null => {
     const haystack = (title ?? "").trim().toLowerCase();
     if (!haystack) return null;
-    let matchedStyle: ProductInfoStyle | null = null;
-    for (const entry of styles) {
-      if (haystack === entry.name || haystack.startsWith(entry.name + " ")) {
-        matchedStyle = entry.style;
-        break;
-      }
-    }
-    if (!matchedStyle) return null;
-    // Manual repeat of findFabricInTitle so we can also surface the
-    // matched fabric label for the breakdown UI.
-    let matchedFabricName: string | null = null;
-    let matchedFabricInfo: FabricInfo | null = null;
-    for (const name of fabricNamesByLength) {
-      if (name.length < 3) continue;
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const re = new RegExp(`\\b${escaped}\\b`, "i");
-      if (re.test(haystack)) {
-        matchedFabricName = name;
-        matchedFabricInfo = fabricInfoByName.get(name) ?? null;
-        break;
-      }
-    }
-    if (!matchedFabricInfo || !matchedFabricName) return null;
-    const fabricOverrideMeters = matchedFabricInfo.styleMeters?.[matchedStyle.id];
+    const style = findStyle(haystack);
+    if (!style) return null;
+    const match = findFabricForStyle(style, haystack);
+    if (match.kind !== "ok") return null;
+    const fabricOverrideMeters = match.fabric.styleMeters?.[style.id];
     const usingOverride = isFilled(fabricOverrideMeters);
-    const meters = usingOverride
-      ? fabricOverrideMeters!
-      : (matchedStyle.averageMeters ?? 0);
+    const meters = usingOverride ? fabricOverrideMeters! : (style.averageMeters ?? 0);
     return {
-      style: matchedStyle,
-      fabricName: matchedFabricName,
+      style,
+      fabricName: match.fabricName,
       meters,
       metersSource: usingOverride ? "fabric-override" : "style-average",
-      costPerMeter: matchedFabricInfo.costPerMeter,
-      fabricCost: meters * matchedFabricInfo.costPerMeter,
+      costPerMeter: match.fabric.costPerMeter,
+      fabricCost: meters * match.fabric.costPerMeter,
     };
   };
   return {
@@ -3769,6 +3785,17 @@ function buildStyleCostLookup(
         liningTrim,
         total: r.fabricCost + stitching + factoryCost + factoryProfit + zipButtons + liningTrim,
       };
+    },
+    warningForTitle: (title) => {
+      const haystack = (title ?? "").trim().toLowerCase();
+      if (!haystack) return null;
+      const style = findStyle(haystack);
+      if (!style) return null;
+      const match = findFabricForStyle(style, haystack);
+      if (match.kind === "ambiguous") {
+        return `Fabric "${match.fabricName}" is linked to this style in ${match.sheets.length} fabric sheets (${match.sheets.join(", ")}). Pick one in the Products popup on Fabric in Stock so the cost can be calculated.`;
+      }
+      return null;
     },
   };
 }
@@ -5808,6 +5835,7 @@ export default function PortalDashboard() {
                     openPackingLists={openPackingLists as PackingListBadge[]}
                     costPerPiece={styleCostLookup.costForTitle(order.productTitle)}
                     costBreakdown={styleCostLookup.breakdownForTitle(order.productTitle)}
+                    costWarning={styleCostLookup.warningForTitle(order.productTitle)}
                     inrPerAudCachedRate={inrPerAudCachedRate}
                     fxRupeeBuffer={fxRupeeBuffer}
                   />
@@ -13560,6 +13588,7 @@ function OrderRow({
   openPackingLists,
   costPerPiece,
   costBreakdown,
+  costWarning,
   inrPerAudCachedRate,
   fxRupeeBuffer,
 }: {
@@ -13577,6 +13606,7 @@ function OrderRow({
   openPackingLists: PackingListBadge[];
   costPerPiece: number;
   costBreakdown: CostBreakdown | null;
+  costWarning: string | null;
   inrPerAudCachedRate: number | null;
   fxRupeeBuffer: number;
 }) {
@@ -13778,6 +13808,16 @@ function OrderRow({
                 </span>
               )}
             </div>
+          ) : costWarning ? (
+            <span
+              title={costWarning}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 4,
+                color: "#b45309", fontSize: 12, fontWeight: 600, cursor: "help",
+              }}
+            >
+              ⚠ Ambiguous fabric
+            </span>
           ) : (
             <span style={{ color: "#9ca3af" }}>—</span>
           )}
