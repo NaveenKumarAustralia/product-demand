@@ -3636,7 +3636,9 @@ type CostBreakdown = {
   factoryProfit: number;
   zipButtons: number;
   liningTrim: number;
-  total: number;
+  rawTotal: number;                // sum of all components before rounding
+  roundingAdjustment: number;      // total - rawTotal (so reader sees the +/-)
+  total: number;                   // rounded to nearest ₹10
 };
 type StyleCostLookup = {
   // Resolve a product title to its per-piece cost in rupees, or 0 if
@@ -3769,12 +3771,14 @@ function buildStyleCostLookup(
         && isFilled(r.style.factoryCost)
         && isFilled(r.style.factoryProfit);
       if (!hasAllRequired) return 0;
-      return r.fabricCost
+      const raw = r.fabricCost
         + (r.style.stitchingCost ?? 0)
         + (r.style.factoryCost ?? 0)
         + (r.style.factoryProfit ?? 0)
         + (r.style.zipButtonsCost ?? 0)
         + (r.style.liningTrimCost ?? 0);
+      // Round to nearest ₹10 so the displayed cost is "tidy".
+      return Math.round(raw / 10) * 10;
     },
     breakdownForTitle: (title) => {
       const r = resolve(title);
@@ -3784,6 +3788,8 @@ function buildStyleCostLookup(
       const factoryProfit = r.style.factoryProfit ?? 0;
       const zipButtons = r.style.zipButtonsCost ?? 0;
       const liningTrim = r.style.liningTrimCost ?? 0;
+      const rawTotal = r.fabricCost + stitching + factoryCost + factoryProfit + zipButtons + liningTrim;
+      const total = Math.round(rawTotal / 10) * 10;
       return {
         styleName: r.style.name ?? "",
         fabricName: r.fabricName,
@@ -3798,7 +3804,9 @@ function buildStyleCostLookup(
         factoryProfit,
         zipButtons,
         liningTrim,
-        total: r.fabricCost + stitching + factoryCost + factoryProfit + zipButtons + liningTrim,
+        rawTotal,
+        roundingAdjustment: total - rawTotal,
+        total,
       };
     },
     warningForTitle: (title) => {
@@ -6578,6 +6586,16 @@ function CostBreakdownMenu({
         display: "flex", flexDirection: "column", gap: 4,
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>Subtotal</span>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>{fmt(breakdown.rawTotal)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>Rounded to nearest ₹10</span>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>
+            {breakdown.roundingAdjustment >= 0 ? "+" : ""}{fmt(breakdown.roundingAdjustment).replace("₹", "₹")}
+          </span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", borderTop: "1px solid #e5e7eb", paddingTop: 6, marginTop: 2 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: "#111827" }}>Per piece</span>
           <span style={{ fontSize: 15, fontWeight: 700, color: "#111827" }}>{fmt(breakdown.total)}</span>
         </div>
