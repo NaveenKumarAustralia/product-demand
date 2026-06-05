@@ -107,11 +107,28 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
 
   const baseRowHeight = 22;
   const rowPadY = 6;
-  const headerRowHeight = 22;
   const boxGap = 14;
 
   const HEADER_FILL = "#f0c8b8";
   const BORDER = "#94a3b8";
+
+  // Header height auto-fits the tallest wrapping label (e.g. "Free
+  // Size" wraps to two lines in narrow size columns).
+  const headerRowHeight = (() => {
+    doc.fontSize(10);
+    let max = 22;
+    const labels: Array<[string, number]> = [
+      ["Box", boxColWidth],
+      ["Name", nameColWidth],
+      ...sizeColumns.map((label) => [label, sizeColWidth] as [string, number]),
+      ["Total", totalColWidth],
+    ];
+    for (const [label, width] of labels) {
+      const h = doc.heightOfString(label, { width: width - 4 });
+      max = Math.max(max, Math.ceil(h) + rowPadY * 2);
+    }
+    return max;
+  })();
 
   // Measure how tall a single data row needs to be so wrapped name text
   // fits inside its cell. PDFKit's heightOfString gives the height the
