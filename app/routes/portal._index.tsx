@@ -496,9 +496,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
   const restockTotalsAll = totalsFor(normalizedOrders);
   const restockTotalsFiltered = totalsFor(filteredOrders);
-  const orders = page === "restock"
-    ? await enrichOrdersWithShopifyVariants(filteredOrders)
-    : filteredOrders;
+  // Previously enrichOrdersWithShopifyVariants ran here for every open
+  // order on every restock-page load — N sequential Shopify GraphQL
+  // round-trips, the dominant 5-10s page-load cost. Variants are now
+  // fetched on-demand by OrderRow when staff expand the ▼ inventory
+  // panel, via /api/product-inventory.
+  const orders = filteredOrders;
   // Defensive: hydrate shippingMethod from the DB in case the Prisma client
   // wasn't regenerated on this environment to know about the field. The
   // ADD COLUMN IF NOT EXISTS makes this safe on a stale schema too.
@@ -5320,88 +5323,6 @@ async function updateInventoryItemUnitCost(
     return false;
   }
   return Boolean(json?.data?.inventoryItemUpdate?.inventoryItem);
-}
-
-async function enrichOrdersWithShopifyVariants<T extends {
-  id: number;
-  shop: string;
-  productId: string;
-  createdAt: Date;
-  lines: Array<{
-    id: number;
-    orderId: number;
-    variantId: string;
-    variantTitle: string;
-    sku: string | null;
-    qtyOrdered: number;
-    qtyReceived: number;
-    costPrice: number | null;
-    createdAt: Date;
-    availableInventory?: number | null;
-  }>;
-}>(orders: T[]): Promise<T[]> {
-  const variantEntries = await Promise.all(
-    Array.from(new Set(orders.map((order) => `${order.shop}|||${order.productId}`))).map(async (key) => {
-      const [shop, productId] = key.split("|||");
-      return [key, await getShopifyProductVariants(shop, productId)] as const;
-    }),
-  );
-  const variantsByProduct = new Map(variantEntries);
-
-  return orders.map((order) => {
-    const variants = variantsByProduct.get(`${order.shop}|||${order.productId}`) ?? [];
-    if (!variants.length) return order;
-
-    const linesByVariantId = new Map(order.lines.map((line) => [line.variantId, line]));
-    const linesByTitle = new Map(order.lines.map((line) => [line.variantTitle.trim().toLowerCase(), line]));
-    const usedLineIds = new Set<number>();
-    const nextLines: Array<T["lines"][number]> = [];
-
-    for (const variant of variants) {
-      const exactLine = linesByVariantId.get(variant.id);
-      if (exactLine) {
-        usedLineIds.add(exactLine.id);
-        nextLines.push({ ...exactLine, availableInventory: variant.availableInventory });
-        continue;
-      }
-      const titleMatch = linesByTitle.get(variant.title.trim().toLowerCase());
-      if (titleMatch) {
-        usedLineIds.add(titleMatch.id);
-        nextLines.push({
-          ...titleMatch,
-          id: -Math.abs(titleMatch.id),
-          variantId: variant.id,
-          variantTitle: variant.title,
-          sku: variant.sku ?? titleMatch.sku,
-          availableInventory: variant.availableInventory,
-        });
-        continue;
-      }
-
-      nextLines.push({
-        id: -Number(`${order.id}${nextLines.length + 1}`),
-        orderId: order.id,
-        variantId: variant.id,
-        variantTitle: variant.title,
-        sku: variant.sku,
-        qtyOrdered: 0,
-        qtyReceived: 0,
-        costPrice: null,
-        createdAt: order.createdAt,
-        availableInventory: variant.availableInventory,
-      });
-    }
-
-    for (const line of order.lines) {
-      if (usedLineIds.has(line.id)) continue;
-      nextLines.push(line);
-    }
-
-    return {
-      ...order,
-      lines: nextLines,
-    };
-  });
 }
 
 function sizeColumnId(size: string) {
@@ -13812,25 +13733,38 @@ function OrderRow({
   fxRupeeBuffer: number;
 }) {
   const fetcher = useFetcher();
+  // On-demand Shopify inventory fetch — populated the first time staff
+  // open the ▼ inventory row for this order. Removed from the page
+  // loader so the restock page renders fast; we only pay the Shopify
+  // round-trip for products the user actually inspects.
+  const inventoryFetcher = useFetcher<{ variantsBySize?: Record<string, number>; total?: number }>();
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
     return acc;
   }, {});
-  const inventoryBySize = order.lines.reduce<Record<string, number | null>>((acc, line) => {
-    const availableInventory = "availableInventory" in line ? line.availableInventory : null;
-    if (Number.isFinite(Number(availableInventory))) {
-      acc[line.variantTitle] = Number(availableInventory);
-    } else if (!(line.variantTitle in acc)) {
-      acc[line.variantTitle] = null;
+  const fetchedInventory = inventoryFetcher.data?.variantsBySize ?? null;
+  const inventoryBySize: Record<string, number | null> = (() => {
+    if (fetchedInventory) {
+      const out: Record<string, number | null> = {};
+      for (const size of sizes) out[size] = fetchedInventory[size] ?? 0;
+      // Also include any variant titles the API returned that aren't in
+      // the size list (rare — e.g. an extra size in Shopify staff
+      // haven't ordered yet).
+      for (const [title, qty] of Object.entries(fetchedInventory)) {
+        if (!(title in out)) out[title] = qty;
+      }
+      return out;
     }
-    return acc;
-  }, {});
+    // Pre-fetch placeholder so the row shows "—" until we have data.
+    return Object.fromEntries(sizes.map((size) => [size, null]));
+  })();
+  const inventoryLoading = inventoryFetcher.state !== "idle";
   const allSkus = order.lines.map((l) => l.sku).filter(Boolean).join("\n");
   const etaValue = formatPortalDate(order.eta);
   const orderDate = formatPortalDate(order.createdAt);
-  const inventoryTotal = sizes.reduce((sum, size) => sum + (inventoryBySize[size] ?? 0), 0);
+  const inventoryTotal = fetchedInventory ? (inventoryFetcher.data?.total ?? 0) : 0;
   const totalCol = 5 + sizes.length;
   const statusCol = totalCol + 1;
   const notesCol = totalCol + 2;
@@ -13946,7 +13880,17 @@ function OrderRow({
             <span style={s.sku}>{allSkus || "—"}</span>
             <button
               type="button"
-              onClick={() => setInventoryOpen((current) => !current)}
+              onClick={() => {
+                setInventoryOpen((current) => {
+                  const next = !current;
+                  // First open: trigger the on-demand fetch. Subsequent
+                  // toggles reuse cached data so re-opening is instant.
+                  if (next && !fetchedInventory && order.productId && inventoryFetcher.state === "idle") {
+                    inventoryFetcher.load(`/api/product-inventory?productId=${encodeURIComponent(order.productId)}`);
+                  }
+                  return next;
+                });
+              }}
               style={{ ...s.inventoryToggle, color: restockSettings.inventoryArrowColor }}
               aria-label={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
               title={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
@@ -14140,11 +14084,11 @@ function OrderRow({
           <td style={s.inventoryLabelCell}>Shopify</td>
           {sizes.map((size) => (
             <td key={size} style={{ ...s.td, ...s.inventoryQtyCell }}>
-              {inventoryBySize[size] == null ? "—" : inventoryBySize[size]}
+              {inventoryLoading && !fetchedInventory ? "…" : (inventoryBySize[size] == null ? "—" : inventoryBySize[size])}
             </td>
           ))}
-          <td style={{ ...s.td, ...s.inventoryQtyCell }}><span style={s.total}>{inventoryTotal}</span></td>
-          <td style={{ ...s.td, ...s.inventoryStatusCell }}>Available</td>
+          <td style={{ ...s.td, ...s.inventoryQtyCell }}><span style={s.total}>{inventoryLoading && !fetchedInventory ? "…" : inventoryTotal}</span></td>
+          <td style={{ ...s.td, ...s.inventoryStatusCell }}>{inventoryLoading && !fetchedInventory ? "Loading…" : "Available"}</td>
           <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
