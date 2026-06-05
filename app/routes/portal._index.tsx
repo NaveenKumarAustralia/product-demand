@@ -12293,7 +12293,16 @@ function PackingListLineRow({
         {(() => {
           const unitAud = convertRupeesToAud(effectivePrice, inrPerAudRate);
           if (unitAud === null) return <span style={{ color: "#9ca3af" }}>—</span>;
-          return <span style={s.total}>{unitAud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>;
+          return (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+              <span style={s.total}>{unitAud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              {inrPerAudRate && inrPerAudRate > 0 && (
+                <span style={{ fontSize: 10, color: "#9ca3af" }}>
+                  ₹{inrPerAudRate.toFixed(2)}/A$
+                </span>
+              )}
+            </div>
+          );
         })()}
       </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
@@ -12572,7 +12581,16 @@ function PackingCombinedRow({
             : 0;
           const unitAud = convertRupeesToAud(perPiece, inrPerAudRate);
           if (unitAud === null) return <span style={{ color: "#9ca3af" }}>—</span>;
-          return <span style={s.total}>{unitAud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>;
+          return (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+              <span style={s.total}>{unitAud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+              {inrPerAudRate && inrPerAudRate > 0 && (
+                <span style={{ fontSize: 10, color: "#9ca3af" }}>
+                  ₹{inrPerAudRate.toFixed(2)}/A$
+                </span>
+              )}
+            </div>
+          );
         })()}
       </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
@@ -13582,6 +13600,11 @@ function OrderRow({
                 {totalAud !== null && order.totalQty > 0 && (
                   <span style={{ fontSize: 11, color: "#6b7280" }}>
                     Total A${totalAud.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  </span>
+                )}
+                {inrPerAudCachedRate && inrPerAudCachedRate > 0 && (
+                  <span style={{ fontSize: 10, color: "#9ca3af" }}>
+                    ₹{inrPerAudCachedRate.toFixed(2)}/A$
                   </span>
                 )}
               </div>
