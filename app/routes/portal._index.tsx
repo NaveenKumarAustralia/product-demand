@@ -2678,6 +2678,7 @@ const PACKING_COLUMNS_BEFORE_SIZES = [
 const PACKING_COLUMNS_AFTER_SIZES = [
   { id: "total", label: "Total", width: 82, center: true },
   { id: "price", label: "Price ₹", width: 92, center: true },
+  { id: "unitAud", label: "Unit A$", width: 92, center: true },
   { id: "value", label: "Total ₹", width: 96, center: true },
   { id: "costAud", label: "Total A$", width: 96, center: true },
   { id: "weight", label: "Weight", width: 90, center: true },
@@ -11714,6 +11715,7 @@ function PackingListDetail({
         <div style={s.packingTopRow}>
           <a href="/portal?page=packing" style={s.secondaryButton}>Back</a>
           <button type="button" style={s.secondaryButton} onClick={exportPackingList}>Export packing list</button>
+          <a href={`/portal/packing/${packingList.id}/stickers`} target="_blank" rel="noopener noreferrer" style={s.secondaryButton}>Download box stickers (PDF)</a>
           <label style={s.packingToolbarLabel}>
             <span>Invoice number</span>
             <input
@@ -12284,17 +12286,24 @@ function PackingListLineRow({
       ))}
       <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center placeholder={autoPriceRupees > 0 ? String(Math.round(autoPriceRupees)) : undefined} onCommit={(v) => setManualPriceLocal(Number(v) || 0)} /></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center>
+      <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center>
+        {(() => {
+          const unitAud = convertRupeesToAud(effectivePrice, inrPerAudRate);
+          if (unitAud === null) return <span style={{ color: "#9ca3af" }}>—</span>;
+          return <span style={s.total}>{unitAud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>;
+        })()}
+      </PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center>
         {(() => {
           const aud = convertRupeesToAud(value, inrPerAudRate);
           if (aud === null) return <span style={{ color: "#9ca3af" }}>—</span>;
           return <span style={s.total}>{aud.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>;
         })()}
       </PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={10 + sizes.length} center><PackingTextInput lineId={line.id} field="weight" value={line.weight?.toString() ?? ""} center /></PackingTd>
       {showShopifyColumn && (
-        <PackingTd rowIndex={rowIndex} colIndex={10 + sizes.length} center>
+        <PackingTd rowIndex={rowIndex} colIndex={11 + sizes.length} center>
           {isAdmin && line.productId && shopDomain ? (
             <a
               href={`https://${shopDomain}/admin/products/${line.productId.replace(/^gid:\/\/shopify\/Product\//, "")}`}
@@ -12321,7 +12330,7 @@ function PackingListLineRow({
         </PackingTd>
       )}
       {customColumns.map((column, customIndex) => (
-        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={11 + sizes.length + customIndex}>
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={12 + sizes.length + customIndex}>
           <TableCustomCell cellKey={`packing:${line.id}:${column.id}`} value={customCells[`packing:${line.id}:${column.id}`] ?? ""} />
         </PackingTd>
       ))}
@@ -12551,16 +12560,28 @@ function PackingCombinedRow({
       })}
       <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><span style={s.total}>{row.totalPrice ? Math.round(row.totalPrice) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center>
+      <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center>
+        {(() => {
+          // Per-piece AUD for the combined row uses totalPrice / lineCount
+          // as the effective price-per-piece (matches how Total ₹ is computed).
+          const perPiece = row.totalPrice && row.boxNumbers.length
+            ? row.totalPrice / Math.max(1, row.boxNumbers.length)
+            : 0;
+          const unitAud = convertRupeesToAud(perPiece, inrPerAudRate);
+          if (unitAud === null) return <span style={{ color: "#9ca3af" }}>—</span>;
+          return <span style={s.total}>{unitAud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>;
+        })()}
+      </PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={8 + sizes.length} center><span style={s.total}>{value ? Math.round(value) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center>
         {(() => {
           const aud = convertRupeesToAud(value, inrPerAudRate);
           if (aud === null) return <span style={{ color: "#9ca3af" }}>—</span>;
           return <span style={s.total}>{aud.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>;
         })()}
       </PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={9 + sizes.length} center><span style={s.total}>{row.totalWeight ? Math.round(row.totalWeight) : ""}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={10 + sizes.length} center>
+      <PackingTd rowIndex={rowIndex} colIndex={10 + sizes.length} center><span style={s.total}>{row.totalWeight ? Math.round(row.totalWeight) : ""}</span></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={11 + sizes.length} center>
         {adminUrl ? (
           <a
             href={adminUrl}
@@ -12586,7 +12607,7 @@ function PackingCombinedRow({
         ) : null}
       </PackingTd>
       {customColumns.map((column, customIndex) => (
-        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={11 + sizes.length + customIndex} />
+        <PackingTd key={column.id} rowIndex={rowIndex} colIndex={12 + sizes.length + customIndex} />
       ))}
     </tr>
   );
