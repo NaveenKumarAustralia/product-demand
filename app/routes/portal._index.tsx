@@ -2888,6 +2888,11 @@ const INR_AUD_CACHE_KEY = "production-portal-inr-aud-rate-v1";
 // bank fees / conversion losses so the AUD value we display (and push to
 // Shopify in Phase 3) is conservative.
 const FX_RUPEE_BUFFER = 2;
+// 5% fabric wastage added on top of the base fabric cost (meters ×
+// cost-per-meter) to account for offcuts and pattern losses during
+// cutting. Applied inside buildStyleCostLookup; surfaced as its own
+// line in the cost-breakdown popup.
+const FABRIC_WASTAGE_PCT = 0.05;
 // How long the cached live rate is reused before re-fetching from the
 // free FX API. 12 hours is plenty for restock-page display where the
 // rate is informational; the packing list flow snapshots it explicitly
@@ -3623,7 +3628,9 @@ type CostBreakdown = {
   meters: number;
   metersSource: "fabric-override" | "style-average";
   costPerMeter: number;
-  fabricCost: number;
+  fabricBaseCost: number;          // meters × costPerMeter
+  fabricWastage: number;           // fabricBaseCost × FABRIC_WASTAGE_PCT
+  fabricCost: number;              // base + wastage (used in total)
   stitching: number;
   factoryCost: number;
   factoryProfit: number;
@@ -3725,6 +3732,8 @@ function buildStyleCostLookup(
     meters: number;
     metersSource: "fabric-override" | "style-average";
     costPerMeter: number;
+    fabricBaseCost: number;
+    fabricWastage: number;
     fabricCost: number;
   };
   const resolve = (title: string | null | undefined): Resolved | null => {
@@ -3737,13 +3746,17 @@ function buildStyleCostLookup(
     const fabricOverrideMeters = match.fabric.styleMeters?.[style.id];
     const usingOverride = isFilled(fabricOverrideMeters);
     const meters = usingOverride ? fabricOverrideMeters! : (style.averageMeters ?? 0);
+    const baseCost = meters * match.fabric.costPerMeter;
+    const wastage = baseCost * FABRIC_WASTAGE_PCT;
     return {
       style,
       fabricName: match.fabricName,
       meters,
       metersSource: usingOverride ? "fabric-override" : "style-average",
       costPerMeter: match.fabric.costPerMeter,
-      fabricCost: meters * match.fabric.costPerMeter,
+      fabricBaseCost: baseCost,
+      fabricWastage: wastage,
+      fabricCost: baseCost + wastage,
     };
   };
   return {
@@ -3777,6 +3790,8 @@ function buildStyleCostLookup(
         meters: r.meters,
         metersSource: r.metersSource,
         costPerMeter: r.costPerMeter,
+        fabricBaseCost: r.fabricBaseCost,
+        fabricWastage: r.fabricWastage,
         fabricCost: r.fabricCost,
         stitching,
         factoryCost,
@@ -6513,6 +6528,8 @@ function CostBreakdownMenu({
       value: `${breakdown.meters.toLocaleString(undefined, { maximumFractionDigits: 2 })}m × ${fmt(breakdown.costPerMeter)}/m`,
       faint: true,
     },
+    { label: "Fabric (base)", value: fmt(breakdown.fabricBaseCost) },
+    { label: "Fabric wastage (5%)", value: fmt(breakdown.fabricWastage), faint: true },
     { label: "Fabric cost", value: fmt(breakdown.fabricCost) },
     { label: "Stitching", value: fmt(breakdown.stitching) },
     { label: "Factory cost", value: fmt(breakdown.factoryCost) },
