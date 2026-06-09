@@ -12058,6 +12058,7 @@ function PackingListDetail({
           <a href="/portal?page=packing" style={s.secondaryButton}>Back</a>
           <button type="button" style={s.secondaryButton} onClick={exportPackingList}>Export packing list</button>
           <a href={`/portal/packing/${packingList.id}/stickers`} target="_blank" rel="noopener noreferrer" style={s.secondaryButton}>Download box stickers (PDF)</a>
+          <a href={`/portal/packing/${packingList.id}/shipping-labels`} target="_blank" rel="noopener noreferrer" style={s.secondaryButton}>Download shipping labels (PDF)</a>
           <label style={s.packingToolbarLabel}>
             <span>Invoice number</span>
             <input
