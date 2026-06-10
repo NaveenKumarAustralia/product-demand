@@ -1165,7 +1165,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "update_packing_qty") {
     const lineId = Number(form.get("lineId"));
-    const size = String(form.get("size") ?? "");
+    // Trim the incoming size key so a stray space from copy/paste or
+    // a legacy column label can't fork the data into two keys (e.g.
+    // "XS" vs "XS ") which would break the green-fill render.
+    const size = String(form.get("size") ?? "").trim();
     const value = Math.max(0, Number(form.get("value") ?? 0) || 0);
     const line = await prisma.packingListLine.findUnique({
       where: { id: lineId },
@@ -12549,11 +12552,28 @@ function PackingListLineRow({
   const qtys = normalizeQtys(line.qtys);
   const shopifyLoadedQtys = normalizeQtys(line.shopifyLoadedQtys);
   const manuallyLoadedQtys = normalizeQtys(line.manuallyLoadedQtys);
+  // Defensive size-key lookup. The cell uses size strings from
+  // PACKING_SIZES (e.g. "XS") but the stored qty / shopifyLoadedQtys
+  // maps could have keys with stray whitespace or different casing
+  // (e.g. a legacy "xs " or " XS"). Normalising both sides catches
+  // those without needing a data migration so the green fill renders
+  // correctly even for old data.
+  const lookupQty = (map: Record<string, number>, size: string): number | undefined => {
+    if (map[size] != null) return map[size];
+    const target = size.trim().toLowerCase();
+    for (const [key, qty] of Object.entries(map)) {
+      if (key.trim().toLowerCase() === target) return qty;
+    }
+    return undefined;
+  };
   // A size is considered "loaded" if either the real Shopify push or the
   // manual-mark matches the current packed quantity.
-  const isLoadedForSize = (size: string) => qtys[size] > 0 && (
-    shopifyLoadedQtys[size] === qtys[size] || manuallyLoadedQtys[size] === qtys[size]
-  );
+  const isLoadedForSize = (size: string) => {
+    const want = lookupQty(qtys, size) ?? 0;
+    if (want <= 0) return false;
+    return lookupQty(shopifyLoadedQtys, size) === want
+      || lookupQty(manuallyLoadedQtys, size) === want;
+  };
   const total = packingTotal(qtys);
   // Track manual price locally so Total ₹ recalculates instantly after
   // the user blurs the Price input. shouldRevalidate skips
