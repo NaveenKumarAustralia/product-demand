@@ -72,7 +72,7 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
   const invoiceNumber = (list.invoiceNumber || list.title || `Packing list #${list.id}`).trim();
 
   // ── PDF setup ────────────────────────────────────────────────────
-  const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 40 });
+  const doc = new PDFDocument({ size: "A4", layout: "landscape", margin: 24 });
   const chunks: Buffer[] = [];
   doc.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
   const finished = new Promise<Buffer>((resolve, reject) => {
@@ -94,24 +94,32 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
       .rect(leftX, labelY0, pageWidth, labelHeight).stroke();
 
     // Inner padding.
-    const padX = 24;
-    const padY = 22;
+    const padX = 18;
+    const padY = 14;
     const innerX = leftX + padX;
     const innerWidth = pageWidth - padX * 2;
     let y = labelY0 + padY;
 
+    // Sizes tuned so the entire label fits on a single A4-landscape
+    // page even with the longest address block. lineBreak: false on
+    // every text call prevents PDFKit from auto-paginating mid-label.
+    const HEADER_FS = 40;
+    const SECTION_LABEL_FS = 22;
+    const ADDRESS_FS = 26;
+    const FOOTER_FS = 11;
+
     // ── HEADER: INV. NO. + BOX NO. ──────────────────────────────
-    doc.font("Helvetica-Bold").fontSize(44).fillColor("#111827");
-    doc.text(`INV. NO.   # ${invoiceNumber}`, innerX, y, { width: innerWidth, align: "left" });
-    y = doc.y + 8;
-    doc.text(`BOX NO.    # ${boxNo}/${totalBoxes}`, innerX, y, { width: innerWidth, align: "left" });
-    y = doc.y + 24;
+    doc.font("Helvetica-Bold").fontSize(HEADER_FS).fillColor("#111827");
+    doc.text(`INV. NO.   # ${invoiceNumber}`, innerX, y, { width: innerWidth, align: "left", lineBreak: false });
+    y = doc.y + 6;
+    doc.text(`BOX NO.    # ${boxNo}/${totalBoxes}`, innerX, y, { width: innerWidth, align: "left", lineBreak: false });
+    y = doc.y + 16;
 
     // Horizontal separator under the header.
     doc.lineWidth(0.8).strokeColor("#9ca3af").dash(4, { space: 4 });
     doc.moveTo(innerX, y).lineTo(innerX + innerWidth, y).stroke();
     doc.undash();
-    y += 32;
+    y += 18;
 
     // ── BODY: To / From side-by-side ────────────────────────────
     const colWidth = (innerWidth - 30) / 2;
@@ -120,33 +128,34 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
     const bodyTop = y;
 
     // To column.
-    doc.font("Helvetica-Bold").fontSize(26).fillColor("#374151");
-    doc.text("To: -", toX, bodyTop);
-    let toY = doc.y + 10;
-    doc.font("Helvetica-Bold").fontSize(30).fillColor("#111827");
+    doc.font("Helvetica-Bold").fontSize(SECTION_LABEL_FS).fillColor("#374151");
+    doc.text("To: -", toX, bodyTop, { width: colWidth, align: "left", lineBreak: false });
+    let toY = doc.y + 8;
+    doc.font("Helvetica-Bold").fontSize(ADDRESS_FS).fillColor("#111827");
     for (const line of TO_ADDRESS_LINES) {
-      doc.text(line, toX, toY, { width: colWidth, align: "left" });
-      toY = doc.y + 4;
+      doc.text(line, toX, toY, { width: colWidth, align: "left", lineBreak: false });
+      toY = doc.y + 2;
     }
 
     // From column — anchored toward the bottom of the body, matching
     // the example label.
-    const fromBlockHeight = 26 + (FROM_ADDRESS_LINES.length * 40);
-    const bodyBottom = labelY0 + labelHeight - padY - 40; // leave 40 for instructions
+    const addressLineH = ADDRESS_FS * 1.15;
+    const fromBlockHeight = SECTION_LABEL_FS + 8 + (FROM_ADDRESS_LINES.length * (addressLineH + 2));
+    const bodyBottom = labelY0 + labelHeight - padY - 26; // leave room for instructions
     const fromTop = Math.max(bodyTop, bodyBottom - fromBlockHeight);
-    doc.font("Helvetica-Bold").fontSize(26).fillColor("#374151");
-    doc.text("From: -", fromX, fromTop, { width: colWidth, align: "left" });
-    let fromY = doc.y + 10;
-    doc.font("Helvetica-Bold").fontSize(30).fillColor("#111827");
+    doc.font("Helvetica-Bold").fontSize(SECTION_LABEL_FS).fillColor("#374151");
+    doc.text("From: -", fromX, fromTop, { width: colWidth, align: "left", lineBreak: false });
+    let fromY = doc.y + 8;
+    doc.font("Helvetica-Bold").fontSize(ADDRESS_FS).fillColor("#111827");
     for (const line of FROM_ADDRESS_LINES) {
-      doc.text(line, fromX, fromY, { width: colWidth, align: "left" });
-      fromY = doc.y + 4;
+      doc.text(line, fromX, fromY, { width: colWidth, align: "left", lineBreak: false });
+      fromY = doc.y + 2;
     }
 
     // ── FOOTER: Delivery instructions ───────────────────────────
-    const footerY = labelY0 + labelHeight - padY - 18;
-    doc.font("Helvetica").fontSize(11).fillColor("#111827");
-    doc.text(DELIVERY_INSTRUCTIONS, innerX, footerY, { width: innerWidth, align: "left" });
+    const footerY = labelY0 + labelHeight - padY - 14;
+    doc.font("Helvetica").fontSize(FOOTER_FS).fillColor("#111827");
+    doc.text(DELIVERY_INSTRUCTIONS, innerX, footerY, { width: innerWidth, align: "left", lineBreak: false });
   });
 
   doc.end();
