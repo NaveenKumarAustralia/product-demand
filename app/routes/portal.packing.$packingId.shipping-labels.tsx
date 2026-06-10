@@ -101,17 +101,17 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
     let y = labelY0 + padY;
 
     // ── HEADER: INV. NO. + BOX NO. ──────────────────────────────
-    doc.font("Helvetica-Bold").fontSize(22).fillColor("#111827");
+    doc.font("Helvetica-Bold").fontSize(44).fillColor("#111827");
     doc.text(`INV. NO.   # ${invoiceNumber}`, innerX, y, { width: innerWidth, align: "left" });
-    y = doc.y + 6;
+    y = doc.y + 8;
     doc.text(`BOX NO.    # ${boxNo}/${totalBoxes}`, innerX, y, { width: innerWidth, align: "left" });
-    y = doc.y + 20;
+    y = doc.y + 24;
 
     // Horizontal separator under the header.
     doc.lineWidth(0.8).strokeColor("#9ca3af").dash(4, { space: 4 });
     doc.moveTo(innerX, y).lineTo(innerX + innerWidth, y).stroke();
     doc.undash();
-    y += 28;
+    y += 32;
 
     // ── BODY: To / From side-by-side ────────────────────────────
     const colWidth = (innerWidth - 30) / 2;
@@ -120,27 +120,27 @@ export const loader = async ({ params }: LoaderFunctionArgs) => {
     const bodyTop = y;
 
     // To column.
-    doc.font("Helvetica-Bold").fontSize(13).fillColor("#374151");
+    doc.font("Helvetica-Bold").fontSize(26).fillColor("#374151");
     doc.text("To: -", toX, bodyTop);
-    let toY = doc.y + 6;
-    doc.font("Helvetica-Bold").fontSize(15).fillColor("#111827");
+    let toY = doc.y + 10;
+    doc.font("Helvetica-Bold").fontSize(30).fillColor("#111827");
     for (const line of TO_ADDRESS_LINES) {
       doc.text(line, toX, toY, { width: colWidth, align: "left" });
-      toY = doc.y + 2;
+      toY = doc.y + 4;
     }
 
     // From column — anchored toward the bottom of the body, matching
     // the example label.
-    const fromBlockHeight = 14 + (FROM_ADDRESS_LINES.length * 22);
+    const fromBlockHeight = 26 + (FROM_ADDRESS_LINES.length * 40);
     const bodyBottom = labelY0 + labelHeight - padY - 40; // leave 40 for instructions
     const fromTop = Math.max(bodyTop, bodyBottom - fromBlockHeight);
-    doc.font("Helvetica-Bold").fontSize(13).fillColor("#374151");
+    doc.font("Helvetica-Bold").fontSize(26).fillColor("#374151");
     doc.text("From: -", fromX, fromTop, { width: colWidth, align: "left" });
-    let fromY = doc.y + 6;
-    doc.font("Helvetica-Bold").fontSize(15).fillColor("#111827");
+    let fromY = doc.y + 10;
+    doc.font("Helvetica-Bold").fontSize(30).fillColor("#111827");
     for (const line of FROM_ADDRESS_LINES) {
       doc.text(line, fromX, fromY, { width: colWidth, align: "left" });
-      fromY = doc.y + 2;
+      fromY = doc.y + 4;
     }
 
     // ── FOOTER: Delivery instructions ───────────────────────────
