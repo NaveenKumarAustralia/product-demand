@@ -43,6 +43,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     PORTAL_USERS_KEY,
     PORTAL_ACTIVE_USERS_KEY,
     PORTAL_NAV_ORDER_KEY,
+    WAREHOUSE_SETTINGS_KEY,
   ];
   const needsOrders = page === "restock" || page === "packing";
   const needsPackingLists = page === "packing" || packingId !== null;
@@ -530,6 +531,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRate" DOUBLE PRECISION`);
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRateAt" TIMESTAMP(3)`);
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingListLine" ADD COLUMN IF NOT EXISTS "costPushedAt" TIMESTAMP(3)`);
+      // Warehouse Data: daily metrics table. CREATE IF NOT EXISTS so a
+      // stale DB doesn't crash the loader; the page itself only reads
+      // from this table after the user triggers a Refresh.
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "WarehouseDailyMetric" (
+          "date" TIMESTAMP(3) NOT NULL,
+          "staffCount" INTEGER NOT NULL DEFAULT 0,
+          "staffHours" DOUBLE PRECISION NOT NULL DEFAULT 0,
+          "ordersFulfilled" INTEGER NOT NULL DEFAULT 0,
+          "unitsFulfilled" INTEGER NOT NULL DEFAULT 0,
+          "deputyFetchedAt" TIMESTAMP(3),
+          "shopifyFetchedAt" TIMESTAMP(3),
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL,
+          CONSTRAINT "WarehouseDailyMetric_pkey" PRIMARY KEY ("date")
+        )
+      `);
       const fxRows = await prisma.$queryRawUnsafe<Array<{ id: number; lockedFxRate: number | null; lockedFxRateAt: Date | null }>>(
         `SELECT id, "lockedFxRate", "lockedFxRateAt" FROM "PackingList"`,
       );
@@ -673,6 +691,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     fxRupeeBuffer: FX_RUPEE_BUFFER,
     sortBy,
     page,
+    warehouseSettings: normalizeWarehouseSettings(settingsMap.get(WAREHOUSE_SETTINGS_KEY)),
+    warehouseMetrics: page === "warehouse"
+      ? await prisma.$queryRawUnsafe<Array<{ date: Date; staffCount: number; staffHours: number; ordersFulfilled: number; unitsFulfilled: number; deputyFetchedAt: Date | null; shopifyFetchedAt: Date | null }>>(
+          `SELECT "date", "staffCount", "staffHours", "ordersFulfilled", "unitsFulfilled", "deputyFetchedAt", "shopifyFetchedAt" FROM "WarehouseDailyMetric" ORDER BY "date" DESC LIMIT 180`,
+        )
+      : [],
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
     packingColumnWidths: normalizeColumnWidths(packingColumnWidthsSetting?.value),
     tableHeaderLabels: normalizeTableHeaderLabels(headerLabelsSetting?.value),
@@ -1888,6 +1912,97 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       update: { value: settings },
     });
     return null;
+  }
+
+  if (intent === "save_warehouse_settings") {
+    if (!currentUser?.admin) return null;
+    let parsed: unknown = {};
+    try { parsed = JSON.parse(String(form.get("value") ?? "{}")); } catch { /* keep empty */ }
+    const settings = normalizeWarehouseSettings(parsed);
+    await prisma.portalSetting.upsert({
+      where: { key: WAREHOUSE_SETTINGS_KEY },
+      create: { key: WAREHOUSE_SETTINGS_KEY, value: settings as unknown as object },
+      update: { value: settings as unknown as object },
+    });
+    return null;
+  }
+
+  if (intent === "load_deputy_areas") {
+    // Used by the warehouse panel's "Load areas from Deputy" button.
+    // Returns the OperationalUnits so the user can tick which ones
+    // count as warehouse. Does NOT save — UI calls save_warehouse_settings.
+    if (!currentUser?.admin) return Response.json({ areas: [], error: "forbidden" });
+    const existing = await prisma.portalSetting.findUnique({
+      where: { key: WAREHOUSE_SETTINGS_KEY }, select: { value: true },
+    });
+    const settings = normalizeWarehouseSettings(existing?.value);
+    const areas = await fetchDeputyAreas(settings);
+    if (!areas) return Response.json({ areas: [], error: "fetch_failed" });
+    return Response.json({ areas });
+  }
+
+  if (intent === "sync_warehouse_data") {
+    if (!currentUser?.admin) return Response.json({ ok: false, error: "forbidden" });
+    const startDate = String(form.get("startDate") ?? "").slice(0, 10);
+    const endDate = String(form.get("endDate") ?? "").slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+      return Response.json({ ok: false, error: "bad_range" });
+    }
+    const settingsRow = await prisma.portalSetting.findUnique({
+      where: { key: WAREHOUSE_SETTINGS_KEY }, select: { value: true },
+    });
+    const settings = normalizeWarehouseSettings(settingsRow?.value);
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }).catch(() => null);
+
+    // Fetch both sources in parallel.
+    const [deputyByDate, shopifyByDate] = await Promise.all([
+      fetchDeputyTimesheets(settings, startDate, endDate),
+      session?.shop && session.accessToken
+        ? fetchShopifyFulfillments(session.shop, session.accessToken, startDate, endDate)
+        : Promise.resolve(new Map<string, { ordersFulfilled: number; unitsFulfilled: number }>()),
+    ]);
+
+    // Walk every date in the range and upsert one row. Dates with no
+    // data on either side are stored as zeros — that's meaningful
+    // (e.g. Sunday: 0 staff, 0 units fulfilled).
+    const now = new Date();
+    const cursor = new Date(`${startDate}T00:00:00Z`);
+    const endCursor = new Date(`${endDate}T00:00:00Z`);
+    let processed = 0;
+    while (cursor <= endCursor) {
+      const dateKey = cursor.toISOString().slice(0, 10);
+      const dep = deputyByDate?.get(dateKey);
+      const shop = shopifyByDate.get(dateKey);
+      const row = {
+        date: new Date(`${dateKey}T00:00:00Z`),
+        staffCount: dep?.staffCount ?? 0,
+        staffHours: dep?.staffHours ?? 0,
+        ordersFulfilled: shop?.ordersFulfilled ?? 0,
+        unitsFulfilled: shop?.unitsFulfilled ?? 0,
+        deputyFetchedAt: deputyByDate ? now : null,
+        shopifyFetchedAt: shopifyByDate ? now : null,
+      };
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "WarehouseDailyMetric" ("date", "staffCount", "staffHours", "ordersFulfilled", "unitsFulfilled", "deputyFetchedAt", "shopifyFetchedAt", "updatedAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT ("date") DO UPDATE SET
+           "staffCount" = EXCLUDED."staffCount",
+           "staffHours" = EXCLUDED."staffHours",
+           "ordersFulfilled" = EXCLUDED."ordersFulfilled",
+           "unitsFulfilled" = EXCLUDED."unitsFulfilled",
+           "deputyFetchedAt" = COALESCE(EXCLUDED."deputyFetchedAt", "WarehouseDailyMetric"."deputyFetchedAt"),
+           "shopifyFetchedAt" = COALESCE(EXCLUDED."shopifyFetchedAt", "WarehouseDailyMetric"."shopifyFetchedAt"),
+           "updatedAt" = EXCLUDED."updatedAt"`,
+        row.date, row.staffCount, row.staffHours, row.ordersFulfilled, row.unitsFulfilled,
+        row.deputyFetchedAt, row.shopifyFetchedAt, now,
+      );
+      processed++;
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+    return Response.json({ ok: true, processed });
   }
 
   if (intent === "update_fabric_settings") {
@@ -3305,13 +3420,43 @@ const ALL_NAV_ITEMS = [
   { id: "newproduct", label: "New Product Orders", href: "/portal?page=newproduct" },
   { id: "visionboard", label: "Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
   { id: "collections", label: "Collections", href: "/portal?page=collections" },
+  { id: "warehouse", label: "Warehouse Data", href: "/portal?page=warehouse" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboard", "collections"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboard", "collections", "warehouse"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
 const PORTAL_USERS_KEY = "supplier-portal-users-v1";
+const WAREHOUSE_SETTINGS_KEY = "warehouse-data-settings-v1";
+// Stored shape (PortalSetting.value JSON):
+//   { deputySubdomain: string, deputyToken: string, areaIds: number[],
+//     areaLabels: Record<number, string> }
+// areaIds is the OperationalUnits we count as "warehouse". areaLabels
+// is a cache so the Settings UI can show names without re-hitting
+// Deputy.
+type WarehouseSettings = {
+  deputySubdomain: string;
+  deputyToken: string;
+  areaIds: number[];
+  areaLabels: Record<string, string>;
+};
+function normalizeWarehouseSettings(value: unknown): WarehouseSettings {
+  const v = (value && typeof value === "object" && !Array.isArray(value)) ? value as Record<string, unknown> : {};
+  const subdomain = typeof v.deputySubdomain === "string" ? v.deputySubdomain.trim() : "";
+  const token = typeof v.deputyToken === "string" ? v.deputyToken : "";
+  const areaIds = Array.isArray(v.areaIds)
+    ? v.areaIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)
+    : [];
+  const labelsRaw = (v.areaLabels && typeof v.areaLabels === "object" && !Array.isArray(v.areaLabels))
+    ? v.areaLabels as Record<string, unknown>
+    : {};
+  const areaLabels: Record<string, string> = {};
+  for (const [k, val] of Object.entries(labelsRaw)) {
+    if (typeof val === "string") areaLabels[k] = val;
+  }
+  return { deputySubdomain: subdomain, deputyToken: token, areaIds, areaLabels };
+}
 const PORTAL_ACTIVE_USERS_KEY = "supplier-portal-active-users-v1";
 const PORTAL_USER_COOKIE = "supplier_portal_user";
 const ACTIVE_USER_WINDOW_MS = 5 * 60 * 1000;
@@ -5328,6 +5473,170 @@ async function updateInventoryItemUnitCost(
   return Boolean(json?.data?.inventoryItemUpdate?.inventoryItem);
 }
 
+// ─── Warehouse Data — Deputy + Shopify fetch helpers ─────────────
+// Pulls actual worked timesheets from Deputy for a date range,
+// filtered to the OperationalUnits the user tagged as "warehouse"
+// in Settings. Aggregates to per-day { staffCount, staffHours }.
+async function fetchDeputyTimesheets(
+  settings: WarehouseSettings,
+  startDate: string, // YYYY-MM-DD
+  endDate: string,   // YYYY-MM-DD
+): Promise<Map<string, { staffCount: number; staffHours: number }> | null> {
+  if (!settings.deputySubdomain || !settings.deputyToken) return null;
+  // Deputy URL pattern: https://{sub}.{region?}.deputy.com — the user
+  // supplies the full sub including region (e.g. "myco.au").
+  const url = `https://${settings.deputySubdomain}.deputy.com/api/v1/resource/Timesheet/QUERY`;
+  // Build the search filter. Date is inclusive; OperationalUnit filter
+  // only applied if at least one area was selected.
+  const search: Record<string, unknown> = {
+    s1: { field: "Date", type: "ge", data: startDate },
+    s2: { field: "Date", type: "le", data: endDate },
+  };
+  if (settings.areaIds.length > 0) {
+    search.s3 = { field: "OperationalUnit", type: "in", data: settings.areaIds };
+  }
+  let body: unknown[] | null = null;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${settings.deputyToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ search, max: 5000 }),
+    });
+    if (!res.ok) {
+      console.warn("[deputy] timesheets non-ok:", res.status);
+      return null;
+    }
+    body = await res.json();
+  } catch (e) {
+    console.warn("[deputy] timesheets fetch failed:", e);
+    return null;
+  }
+  if (!Array.isArray(body)) return null;
+  // Aggregate per local date.
+  // Timesheet fields used: Date (YYYY-MM-DD), TotalTime (minutes), Employee (id).
+  type AggCell = { hours: number; staff: Set<number> };
+  const byDate = new Map<string, AggCell>();
+  for (const row of body) {
+    const r = row as Record<string, unknown>;
+    const dateStr = typeof r.Date === "string" ? r.Date.slice(0, 10) : null;
+    if (!dateStr) continue;
+    const totalMinutes = Number(r.TotalTime ?? 0);
+    const employeeId = Number(r.Employee ?? 0);
+    const cell = byDate.get(dateStr) ?? { hours: 0, staff: new Set() };
+    cell.hours += (Number.isFinite(totalMinutes) ? totalMinutes : 0) / 60;
+    if (employeeId > 0) cell.staff.add(employeeId);
+    byDate.set(dateStr, cell);
+  }
+  const out = new Map<string, { staffCount: number; staffHours: number }>();
+  for (const [date, cell] of byDate) {
+    out.set(date, { staffCount: cell.staff.size, staffHours: Math.round(cell.hours * 100) / 100 });
+  }
+  return out;
+}
+
+// Lists Deputy OperationalUnits so the user can pick which areas
+// count as "warehouse" in Settings.
+async function fetchDeputyAreas(settings: WarehouseSettings): Promise<Array<{ id: number; name: string }> | null> {
+  if (!settings.deputySubdomain || !settings.deputyToken) return null;
+  const url = `https://${settings.deputySubdomain}.deputy.com/api/v1/resource/OperationalUnit`;
+  try {
+    const res = await fetch(url, {
+      headers: { "Authorization": `Bearer ${settings.deputyToken}` },
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    if (!Array.isArray(body)) return null;
+    return body
+      .map((row) => {
+        const r = row as Record<string, unknown>;
+        const id = Number(r.Id ?? 0);
+        const name = String(r.OperationalUnitName ?? r.Name ?? "").trim() || `Area ${id}`;
+        return { id, name };
+      })
+      .filter((a) => a.id > 0)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  } catch (e) {
+    console.warn("[deputy] areas fetch failed:", e);
+    return null;
+  }
+}
+
+// Pulls Shopify orders that were FULFILLED in the given date range
+// and aggregates to per-day { ordersFulfilled, unitsFulfilled }.
+// "Fulfilled date" = the earliest fulfillment.createdAt on the order
+// (a single order may have multiple fulfillments; first one is when
+// the warehouse actually packed it). Paginated via cursors.
+async function fetchShopifyFulfillments(
+  shop: string,
+  accessToken: string,
+  startDate: string, // YYYY-MM-DD
+  endDate: string,   // YYYY-MM-DD inclusive
+): Promise<Map<string, { ordersFulfilled: number; unitsFulfilled: number }>> {
+  const out = new Map<string, { ordersFulfilled: number; unitsFulfilled: number }>();
+  // We filter by updated_at to catch any order whose fulfillment fell
+  // in the window even if it was created earlier. Then per-order we
+  // check fulfillment.createdAt and only count fulfillments INSIDE
+  // the window.
+  const startIso = `${startDate}T00:00:00Z`;
+  // endDate is INCLUSIVE so we want anything before the next day starts.
+  const endNext = new Date(`${endDate}T00:00:00Z`);
+  endNext.setUTCDate(endNext.getUTCDate() + 1);
+  const endIso = endNext.toISOString();
+  const seenOrdersByDate = new Map<string, Set<string>>();
+  let cursor: string | null = null;
+  let safety = 50; // up to 50 pages = 12,500 orders. Bail beyond that.
+  while (safety-- > 0) {
+    const filter = `fulfillment_status:fulfilled updated_at:>=${startIso} updated_at:<=${endIso}`;
+    const query = `
+      query FulfilledOrders($cursor: String, $filter: String!) {
+        orders(first: 250, after: $cursor, query: $filter, sortKey: UPDATED_AT) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            id
+            fulfillments(first: 20) {
+              createdAt
+              fulfillmentLineItems(first: 100) {
+                nodes { quantity }
+              }
+            }
+          }
+        }
+      }
+    `;
+    const json: any = await shopifyGraphql(shop, accessToken, query, { cursor, filter });
+    const orders = json?.data?.orders;
+    if (!orders) break;
+    for (const order of (orders.nodes ?? [])) {
+      for (const fulfillment of (order.fulfillments ?? [])) {
+        const created = fulfillment?.createdAt;
+        if (typeof created !== "string") continue;
+        const date = created.slice(0, 10);
+        if (date < startDate || date > endDate) continue;
+        const cell = out.get(date) ?? { ordersFulfilled: 0, unitsFulfilled: 0 };
+        // Count this order once per date (dedupe via set).
+        const seenSet = seenOrdersByDate.get(date) ?? new Set<string>();
+        if (!seenSet.has(order.id)) {
+          cell.ordersFulfilled += 1;
+          seenSet.add(order.id);
+          seenOrdersByDate.set(date, seenSet);
+        }
+        // Units: sum every line item's quantity in this fulfillment.
+        for (const line of (fulfillment?.fulfillmentLineItems?.nodes ?? [])) {
+          const q = Number(line?.quantity ?? 0);
+          if (Number.isFinite(q) && q > 0) cell.unitsFulfilled += q;
+        }
+        out.set(date, cell);
+      }
+    }
+    cursor = orders.pageInfo?.hasNextPage ? orders.pageInfo.endCursor : null;
+    if (!cursor) break;
+  }
+  return out;
+}
+
 function sizeColumnId(size: string) {
   return `size:${size}`;
 }
@@ -5593,6 +5902,7 @@ export default function PortalDashboard() {
     : page === "visionboard" ? "Vision Board"
     : page === "collections" ? "Collections"
     : page === "newproduct" ? "New Product Orders"
+    : page === "warehouse" ? "Warehouse Data"
     : selectedProductGroup || "Existing Products Restock";
   const orderedNavItems = navOrder
     .map((id) => ALL_NAV_ITEMS.find((item) => item.id === id))
@@ -5873,6 +6183,12 @@ export default function PortalDashboard() {
         ) : page === "collections" ? (
           <CollectionsPanel
             collections={collections}
+          />
+        ) : page === "warehouse" ? (
+          <WarehouseDataPanel
+            warehouseSettings={warehouseSettings}
+            warehouseMetrics={warehouseMetrics}
+            isAdmin={Boolean(currentUser?.admin)}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -8126,6 +8442,272 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
     for (const [k, v] of Object.entries(row ?? {})) out[k] = v == null ? "" : String(v);
     return out;
   });
+}
+
+type WarehouseMetricRow = {
+  date: Date | string;
+  staffCount: number;
+  staffHours: number;
+  ordersFulfilled: number;
+  unitsFulfilled: number;
+  deputyFetchedAt: Date | string | null;
+  shopifyFetchedAt: Date | string | null;
+};
+function WarehouseDataPanel({
+  warehouseSettings,
+  warehouseMetrics,
+  isAdmin,
+}: {
+  warehouseSettings: WarehouseSettings;
+  warehouseMetrics: WarehouseMetricRow[];
+  isAdmin: boolean;
+}) {
+  const syncFetcher = useFetcher<{ ok?: boolean; processed?: number; error?: string }>();
+  const areasFetcher = useFetcher<{ areas?: Array<{ id: number; name: string }>; error?: string }>();
+  const settingsFetcher = useFetcher();
+
+  const [showSettings, setShowSettings] = useState(false);
+  const [subdomain, setSubdomain] = useState(warehouseSettings.deputySubdomain);
+  const [token, setToken] = useState(warehouseSettings.deputyToken);
+  const [areaIds, setAreaIds] = useState<number[]>(warehouseSettings.areaIds);
+  const [areaLabels, setAreaLabels] = useState<Record<string, string>>(warehouseSettings.areaLabels);
+
+  const today = new Date();
+  const toIso = (d: Date) => d.toISOString().slice(0, 10);
+  const defaultEnd = toIso(today);
+  const startDefault = new Date(today);
+  startDefault.setDate(startDefault.getDate() - 89);
+  const defaultStart = toIso(startDefault);
+  const [rangeStart, setRangeStart] = useState(defaultStart);
+  const [rangeEnd, setRangeEnd] = useState(defaultEnd);
+
+  const [targetUnits, setTargetUnits] = useState<number>(1000);
+  const [targetDays, setTargetDays] = useState<number>(30);
+
+  const inWindow = warehouseMetrics
+    .map((m) => ({ ...m, dateStr: (typeof m.date === "string" ? m.date : m.date.toISOString()).slice(0, 10) }))
+    .filter((m) => m.dateStr >= rangeStart && m.dateStr <= rangeEnd)
+    .sort((a, b) => (a.dateStr < b.dateStr ? -1 : 1));
+
+  const totals = inWindow.reduce(
+    (acc, m) => {
+      acc.hours += m.staffHours;
+      acc.units += m.unitsFulfilled;
+      acc.orders += m.ordersFulfilled;
+      if (m.staffHours > 0) acc.workingDays += 1;
+      acc.staffDays += m.staffCount;
+      return acc;
+    },
+    { hours: 0, units: 0, orders: 0, workingDays: 0, staffDays: 0 },
+  );
+
+  const unitsPerHour = totals.hours > 0 ? totals.units / totals.hours : 0;
+  const unitsPerStaffDay = totals.staffDays > 0 ? totals.units / totals.staffDays : 0;
+  const avgStaffPerWorkingDay = totals.workingDays > 0 ? totals.staffDays / totals.workingDays : 0;
+
+  // Prediction: assume target is even across days. Per-day target =
+  // targetUnits / targetDays. Hours needed = perDay / unitsPerHour.
+  // Staff needed (at 8h shifts) = hours / 8.
+  const perDayTarget = targetDays > 0 ? targetUnits / targetDays : 0;
+  const predictedHoursPerDay = unitsPerHour > 0 ? perDayTarget / unitsPerHour : 0;
+  const predictedStaffPerDay = predictedHoursPerDay > 0 ? predictedHoursPerDay / 8 : 0;
+
+  const handleSaveSettings = () => {
+    const next: WarehouseSettings = {
+      deputySubdomain: subdomain.trim(),
+      deputyToken: token,
+      areaIds,
+      areaLabels,
+    };
+    const fd = new FormData();
+    fd.set("intent", "save_warehouse_settings");
+    fd.set("value", JSON.stringify(next));
+    settingsFetcher.submit(fd, { method: "post" });
+  };
+
+  const handleLoadAreas = () => {
+    // Save first so the server-side fetch sees the latest token/sub.
+    handleSaveSettings();
+    const fd = new FormData();
+    fd.set("intent", "load_deputy_areas");
+    areasFetcher.submit(fd, { method: "post" });
+  };
+
+  const handleRefresh = () => {
+    const fd = new FormData();
+    fd.set("intent", "sync_warehouse_data");
+    fd.set("startDate", rangeStart);
+    fd.set("endDate", rangeEnd);
+    syncFetcher.submit(fd, { method: "post" });
+  };
+
+  const areasFromFetch = areasFetcher.data?.areas ?? [];
+  const isSyncing = syncFetcher.state !== "idle";
+  const isLoadingAreas = areasFetcher.state !== "idle";
+  const isSavingSettings = settingsFetcher.state !== "idle";
+  const cardStyle: React.CSSProperties = { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: 14, minWidth: 180 };
+  const cardLabel: React.CSSProperties = { fontSize: 11, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 700 };
+  const cardValue: React.CSSProperties = { fontSize: 24, fontWeight: 700, color: "#111827", marginTop: 4 };
+  const cardSub: React.CSSProperties = { fontSize: 11, color: "#6b7280", marginTop: 2 };
+
+  return (
+    <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+      {/* Date range + refresh */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <label style={{ fontSize: 12, color: "#374151" }}>From</label>
+        <input type="date" value={rangeStart} max={rangeEnd} onChange={(e) => setRangeStart(e.target.value)} style={{ padding: "6px 8px", border: "1px solid #d1d5db", borderRadius: 6 }} />
+        <label style={{ fontSize: 12, color: "#374151" }}>To</label>
+        <input type="date" value={rangeEnd} min={rangeStart} max={toIso(today)} onChange={(e) => setRangeEnd(e.target.value)} style={{ padding: "6px 8px", border: "1px solid #d1d5db", borderRadius: 6 }} />
+        <button type="button" onClick={handleRefresh} disabled={isSyncing} style={{ padding: "8px 16px", background: "#111827", color: "#fff", borderRadius: 6, border: "none", cursor: isSyncing ? "wait" : "pointer", fontWeight: 600 }}>
+          {isSyncing ? "Syncing…" : "Refresh from Deputy + Shopify"}
+        </button>
+        {syncFetcher.data?.ok && <span style={{ fontSize: 12, color: "#059669" }}>Synced {syncFetcher.data.processed} day(s)</span>}
+        {syncFetcher.data?.error && <span style={{ fontSize: 12, color: "#dc2626" }}>Error: {syncFetcher.data.error}</span>}
+        {isAdmin && (
+          <button type="button" onClick={() => setShowSettings((s) => !s)} style={{ marginLeft: "auto", padding: "8px 12px", background: "#f3f4f6", color: "#111827", borderRadius: 6, border: "1px solid #d1d5db", cursor: "pointer", fontSize: 13 }}>
+            {showSettings ? "Hide settings" : "Settings"}
+          </button>
+        )}
+      </div>
+
+      {/* Settings panel (admin only) */}
+      {isAdmin && showSettings && (
+        <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>Deputy connection</div>
+          <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", gap: 10, alignItems: "center" }}>
+            <label style={{ fontSize: 13 }}>Subdomain (incl. region)</label>
+            <input type="text" placeholder="e.g. myco.au" value={subdomain} onChange={(e) => setSubdomain(e.target.value)} style={{ padding: "6px 8px", border: "1px solid #d1d5db", borderRadius: 6 }} />
+            <label style={{ fontSize: 13 }}>Permanent API Token</label>
+            <input type="password" placeholder="Paste from Deputy admin" value={token} onChange={(e) => setToken(e.target.value)} style={{ padding: "6px 8px", border: "1px solid #d1d5db", borderRadius: 6 }} />
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button type="button" onClick={handleSaveSettings} disabled={isSavingSettings} style={{ padding: "6px 14px", background: "#111827", color: "#fff", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+              {isSavingSettings ? "Saving…" : "Save"}
+            </button>
+            <button type="button" onClick={handleLoadAreas} disabled={isLoadingAreas} style={{ padding: "6px 14px", background: "#f3f4f6", color: "#111827", borderRadius: 6, border: "1px solid #d1d5db", cursor: "pointer", fontSize: 13 }}>
+              {isLoadingAreas ? "Loading…" : "Load areas from Deputy"}
+            </button>
+          </div>
+
+          {(areasFromFetch.length > 0 || areaIds.length > 0) && (
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13, marginTop: 4, marginBottom: 6 }}>Warehouse areas (only timesheets from these areas count)</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 6 }}>
+                {(areasFromFetch.length > 0 ? areasFromFetch : areaIds.map((id) => ({ id, name: areaLabels[id] ?? `Area ${id}` }))).map((a) => (
+                  <label key={a.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={areaIds.includes(a.id)}
+                      onChange={(e) => {
+                        const next = e.target.checked
+                          ? Array.from(new Set([...areaIds, a.id]))
+                          : areaIds.filter((id) => id !== a.id);
+                        setAreaIds(next);
+                        setAreaLabels((prev) => ({ ...prev, [a.id]: a.name }));
+                      }}
+                    />
+                    {a.name}
+                  </label>
+                ))}
+              </div>
+              <button type="button" onClick={handleSaveSettings} disabled={isSavingSettings} style={{ marginTop: 10, padding: "6px 14px", background: "#111827", color: "#fff", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+                Save area selection
+              </button>
+            </div>
+          )}
+          {areasFetcher.data?.error && <div style={{ fontSize: 12, color: "#dc2626" }}>Couldn't load areas: {areasFetcher.data.error}. Check the subdomain + token.</div>}
+        </div>
+      )}
+
+      {/* Summary cards */}
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <div style={cardStyle}>
+          <div style={cardLabel}>Total staff hours</div>
+          <div style={cardValue}>{totals.hours.toLocaleString(undefined, { maximumFractionDigits: 1 })}</div>
+          <div style={cardSub}>over {inWindow.length} day(s)</div>
+        </div>
+        <div style={cardStyle}>
+          <div style={cardLabel}>Units fulfilled</div>
+          <div style={cardValue}>{totals.units.toLocaleString()}</div>
+          <div style={cardSub}>{totals.orders.toLocaleString()} orders</div>
+        </div>
+        <div style={cardStyle}>
+          <div style={cardLabel}>Units per staff hour</div>
+          <div style={cardValue}>{unitsPerHour.toFixed(1)}</div>
+          <div style={cardSub}>productivity</div>
+        </div>
+        <div style={cardStyle}>
+          <div style={cardLabel}>Avg staff per working day</div>
+          <div style={cardValue}>{avgStaffPerWorkingDay.toFixed(1)}</div>
+          <div style={cardSub}>{totals.workingDays} working day(s)</div>
+        </div>
+        <div style={cardStyle}>
+          <div style={cardLabel}>Units per staff-day</div>
+          <div style={cardValue}>{unitsPerStaffDay.toFixed(1)}</div>
+          <div style={cardSub}>output per shift</div>
+        </div>
+      </div>
+
+      {/* Prediction widget */}
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ fontWeight: 700, fontSize: 14 }}>Predict staffing for upcoming work</div>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ fontSize: 13 }}>Need to fulfil</label>
+          <input type="number" min={0} value={targetUnits} onChange={(e) => setTargetUnits(Number(e.target.value) || 0)} style={{ padding: "6px 8px", border: "1px solid #d1d5db", borderRadius: 6, width: 100 }} />
+          <label style={{ fontSize: 13 }}>units over</label>
+          <input type="number" min={1} value={targetDays} onChange={(e) => setTargetDays(Number(e.target.value) || 1)} style={{ padding: "6px 8px", border: "1px solid #d1d5db", borderRadius: 6, width: 80 }} />
+          <label style={{ fontSize: 13 }}>days.</label>
+        </div>
+        {unitsPerHour > 0 ? (
+          <div style={{ fontSize: 14, color: "#111827", lineHeight: 1.6 }}>
+            At your historical pace of <strong>{unitsPerHour.toFixed(1)} units/hour</strong>, you'd need about{" "}
+            <strong>{predictedHoursPerDay.toFixed(1)} staff hours/day</strong> — roughly{" "}
+            <strong>{predictedStaffPerDay.toFixed(1)} staff</strong> on 8h shifts.
+          </div>
+        ) : (
+          <div style={{ fontSize: 13, color: "#6b7280" }}>Run a refresh to populate productivity data, then this widget will compute predictions.</div>
+        )}
+      </div>
+
+      {/* Daily breakdown table */}
+      <div style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "10px 16px", fontWeight: 700, fontSize: 14, borderBottom: "1px solid #e5e7eb" }}>Daily breakdown</div>
+        <div style={{ maxHeight: 480, overflowY: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead style={{ background: "#f9fafb", position: "sticky", top: 0 }}>
+              <tr>
+                <th style={{ padding: "8px 12px", textAlign: "left", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb" }}>Date</th>
+                <th style={{ padding: "8px 12px", textAlign: "right", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb" }}>Staff</th>
+                <th style={{ padding: "8px 12px", textAlign: "right", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb" }}>Hours</th>
+                <th style={{ padding: "8px 12px", textAlign: "right", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb" }}>Orders</th>
+                <th style={{ padding: "8px 12px", textAlign: "right", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb" }}>Units</th>
+                <th style={{ padding: "8px 12px", textAlign: "right", fontWeight: 700, color: "#374151", borderBottom: "1px solid #e5e7eb" }}>Units/hr</th>
+              </tr>
+            </thead>
+            <tbody>
+              {inWindow.length === 0 ? (
+                <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "#9ca3af" }}>No data in this range yet — click "Refresh" to pull from Deputy and Shopify.</td></tr>
+              ) : (
+                [...inWindow].reverse().map((m) => {
+                  const uph = m.staffHours > 0 ? m.unitsFulfilled / m.staffHours : 0;
+                  return (
+                    <tr key={m.dateStr}>
+                      <td style={{ padding: "6px 12px", borderBottom: "1px solid #f3f4f6" }}>{m.dateStr}</td>
+                      <td style={{ padding: "6px 12px", borderBottom: "1px solid #f3f4f6", textAlign: "right" }}>{m.staffCount || ""}</td>
+                      <td style={{ padding: "6px 12px", borderBottom: "1px solid #f3f4f6", textAlign: "right" }}>{m.staffHours ? m.staffHours.toFixed(1) : ""}</td>
+                      <td style={{ padding: "6px 12px", borderBottom: "1px solid #f3f4f6", textAlign: "right" }}>{m.ordersFulfilled || ""}</td>
+                      <td style={{ padding: "6px 12px", borderBottom: "1px solid #f3f4f6", textAlign: "right" }}>{m.unitsFulfilled || ""}</td>
+                      <td style={{ padding: "6px 12px", borderBottom: "1px solid #f3f4f6", textAlign: "right", color: "#6b7280" }}>{uph > 0 ? uph.toFixed(1) : ""}</td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function CollectionsPanel({ collections: initialCollections }: { collections: CollectionListItem[] }) {
