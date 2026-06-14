@@ -9523,10 +9523,22 @@ function CollectionSpreadsheetPage({
                           </Td>
                         );
                       }
-                      // Linked rows lock all editable cells. Tickbox /
-                      // readonly / release still render through
-                      // CollectionCell so they look consistent.
-                      const lockedDisplay = linked && col.type !== "readonly" && col.id !== "totalOrdered";
+                      // Linked rows lock plain text/number/date inputs
+                      // so the source-of-truth is Shopify admin. But
+                      // cells with custom rendering (images, tickboxes,
+                      // chips, release styling, readonly auto-values)
+                      // must still go through CollectionCell or they'd
+                      // render as raw JSON / 1 / blank text.
+                      const isSpecialRender =
+                        col.type === "readonly"
+                        || col.type === "tickbox"
+                        || col.type === "chip"
+                        || col.type === "release"
+                        || col.id === "totalOrdered"
+                        || col.id === "modelPicture"
+                        || col.id === "fabric"
+                        || col.id === "maniPicsTaken";
+                      const lockedDisplay = linked && !isSpecialRender;
                       return (
                         <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
                           {lockedDisplay ? (
