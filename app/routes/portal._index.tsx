@@ -5397,11 +5397,30 @@ const COL_ROW_SHOPIFY_CREATED_AT = "__shopifyCreatedAt";
 const COL_ROW_SHOPIFY_STATUS = "__shopifyStatus";
 
 // Maps collection size column ids to display labels for variant names.
+// Note: "freeSize" is intentionally NOT here — when the row has Free Size
+// qty > 0, the product is created with NO variants (single product).
 const COLLECTION_SIZE_COLUMN_LABELS: Array<[string, string]> = [
   ["xs", "XS"], ["s", "S"], ["m", "M"], ["l", "L"], ["xl", "XL"],
   ["xxl", "2XL"], ["xxxl", "3XL"],
   ["sm", "S/M"], ["ml", "M/L"], ["lxl", "L/XL"],
 ];
+
+// All column ids that contribute to TOTAL Ordered (Free Size + regular).
+const COLLECTION_QTY_COLUMN_IDS = ["freeSize", ...COLLECTION_SIZE_COLUMN_LABELS.map(([id]) => id)];
+
+function sumCollectionRowQuantity(row: Record<string, string>): number {
+  let n = 0;
+  for (const id of COLLECTION_QTY_COLUMN_IDS) n += Number(row[id] ?? 0) || 0;
+  return n;
+}
+
+// Derives the Shopify admin URL for a linked row, or "" if not linked.
+function shopifyAdminLinkForRow(row: Record<string, string>): string {
+  const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+  if (!pid) return "";
+  const numeric = pid.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
+  return numeric ? `https://admin.shopify.com/store/products/${numeric}` : "";
+}
 
 type CollectionPushResult = {
   ok: boolean;
@@ -5422,16 +5441,26 @@ async function createShopifyProductFromRow(
   row: Record<string, string>,
   opts: { status: "DRAFT" | "ACTIVE" } = { status: "DRAFT" },
 ): Promise<CollectionPushResult> {
-  // Title is required. Try `title` first, fall back to `name`.
-  const title = (row.title || row.name || "").trim();
-  if (!title) return { ok: false, errors: ["Title (or Name) is required"] };
+  // Title is required. Name is the title column (Title column was
+  // removed in V2). We still fall back to legacy `title` for any rows
+  // saved before the rename.
+  const title = (row.name || row.title || "").trim();
+  if (!title) return { ok: false, errors: ["Name (title) is required"] };
+
+  // Free Size mode: if Free Size qty > 0, create the product with NO
+  // option / NO variants (single default variant). Skip the per-size
+  // variant build below.
+  const freeSizeQty = Number(row.freeSize ?? 0) || 0;
+  const useFreeSize = freeSizeQty > 0;
 
   // Collect variants from size columns with qty > 0.
   const variantRows: Array<{ size: string; qty: number }> = [];
-  for (const [colId, label] of COLLECTION_SIZE_COLUMN_LABELS) {
-    const raw = (row[colId] ?? "").trim();
-    const qty = Number(raw) || 0;
-    if (qty > 0) variantRows.push({ size: label, qty });
+  if (!useFreeSize) {
+    for (const [colId, label] of COLLECTION_SIZE_COLUMN_LABELS) {
+      const raw = (row[colId] ?? "").trim();
+      const qty = Number(raw) || 0;
+      if (qty > 0) variantRows.push({ size: label, qty });
+    }
   }
 
   const baseSku = (row.sku ?? "").trim();
@@ -5441,32 +5470,53 @@ async function createShopifyProductFromRow(
   const compareAt = compareAtRaw ? String(Number(compareAtRaw) || 0) : null;
   const costRaw = (row.cost ?? "").trim();
   const cost = costRaw ? String(Number(costRaw) || 0) : null;
+  const hsCode = (row.hsCode ?? "").trim();
+  const countryCode = (row.countryOfOrigin ?? "").trim().toUpperCase().slice(0, 2);
 
   type Variant = {
     optionValues?: Array<{ optionName: string; name: string }>;
     price: string;
     compareAtPrice?: string;
     sku?: string;
-    inventoryItem?: { cost?: string; tracked?: boolean };
+    inventoryItem?: {
+      cost?: string;
+      tracked?: boolean;
+      harmonizedSystemCode?: string;
+      countryCodeOfOrigin?: string;
+    };
   };
-  const variants: Variant[] = variantRows.length
+  const buildInventoryItem = () => {
+    const ii: Record<string, unknown> = { tracked: true };
+    if (cost) ii.cost = cost;
+    if (hsCode) ii.harmonizedSystemCode = hsCode;
+    if (countryCode.length === 2) ii.countryCodeOfOrigin = countryCode;
+    return ii;
+  };
+  const variants: Variant[] = useFreeSize
+    ? [{
+        price,
+        ...(compareAt ? { compareAtPrice: compareAt } : {}),
+        ...(baseSku ? { sku: baseSku } : {}),
+        inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
+      }]
+    : variantRows.length
     ? variantRows.map((v) => ({
         optionValues: [{ optionName: "Size", name: v.size }],
         price,
         ...(compareAt ? { compareAtPrice: compareAt } : {}),
         ...(baseSku ? { sku: `${baseSku}-${v.size.replace("/", "-")}` } : {}),
-        ...(cost ? { inventoryItem: { cost, tracked: true } } : { inventoryItem: { tracked: true } }),
+        inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
       }))
     : [{
         price,
         ...(compareAt ? { compareAtPrice: compareAt } : {}),
         ...(baseSku ? { sku: baseSku } : {}),
-        ...(cost ? { inventoryItem: { cost, tracked: true } } : { inventoryItem: { tracked: true } }),
+        inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
       }];
 
-  const productOptions = variantRows.length
-    ? [{ name: "Size", values: variantRows.map((v) => ({ name: v.size })) }]
-    : undefined;
+  const productOptions = useFreeSize || variantRows.length === 0
+    ? undefined
+    : [{ name: "Size", values: variantRows.map((v) => ({ name: v.size })) }];
 
   // Tags: comma-separated string in the row → array.
   const tagsRaw = (row.tags ?? "").trim();
@@ -5485,6 +5535,25 @@ async function createShopifyProductFromRow(
   const vendor = (row.vendor ?? "").trim();
   if (vendor) input.vendor = vendor;
   if (tags.length) input.tags = tags;
+
+  // SEO: split columns map to seo.title and seo.description.
+  const seoTitle = (row.seoTitle ?? "").trim();
+  const seoDesc = (row.seoDescription ?? "").trim();
+  if (seoTitle || seoDesc) {
+    input.seo = {
+      ...(seoTitle ? { title: seoTitle } : {}),
+      ...(seoDesc ? { description: seoDesc } : {}),
+    };
+  }
+
+  // Metafields: colour + categories live as custom metafields. Strings
+  // for now — the next push can introduce typed (list.single_line, etc).
+  const colour = (row.colour ?? "").trim();
+  const categories = (row.categories ?? "").trim();
+  const metafields: Array<{ namespace: string; key: string; type: string; value: string }> = [];
+  if (colour) metafields.push({ namespace: "custom", key: "colour", type: "single_line_text_field", value: colour });
+  if (categories) metafields.push({ namespace: "custom", key: "categories", type: "single_line_text_field", value: categories });
+  if (metafields.length) input.metafields = metafields;
 
   const json = await shopifyGraphql<any>(shop, accessToken, `
     mutation CreateCollectionRowProduct($input: ProductSetInput!) {
@@ -5838,6 +5907,19 @@ export default function PortalDashboard() {
           }
 
           .no-number-spinner {
+            appearance: textfield;
+            -moz-appearance: textfield;
+          }
+          /* Hide the up/down arrows on number inputs everywhere we use
+             the .no-number-arrows class — the Collections cells are
+             tighter than a normal form so the spinner buttons crowd
+             the column. */
+          input.no-number-arrows::-webkit-outer-spin-button,
+          input.no-number-arrows::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+          }
+          input.no-number-arrows {
             appearance: textfield;
             -moz-appearance: textfield;
           }
@@ -8215,10 +8297,16 @@ type CollectionListItem = {
   updatedAt: Date | string;
 };
 
+// Cell types — drives the input rendered in CollectionCell:
+//   text / number / date — plain inputs
+//   tickbox              — checkbox (Schedules / Reviews / Swatches / Compl)
+//   readonly             — auto-computed display (Total Ordered)
+//   release              — big bold maroon text (Release column)
+//   chip                 — chip dropdown (Status, Sample) — added next push
 type CollectionColumnDef = {
   id: string;
   label: string;
-  type?: "text" | "number" | "date";
+  type?: "text" | "number" | "date" | "tickbox" | "readonly" | "release" | "chip";
   width?: number;
 };
 
@@ -8233,16 +8321,19 @@ type CollectionFullType = {
   updatedAt: Date | string;
 };
 
-// Default columns for a fresh collection — modelled after the spreadsheet
-// layout the user shared. Each column is just a string field for v1; image /
-// dropdown / date-picker cell types can be added per-column later.
+// Default columns for a fresh collection — restructured per user's V2 spec.
+// Removed: Title (Name is the title), Collections (controlled by type+tags),
+// Variants (built from qty cols), Size guide (tag-driven). Added: Free Size
+// variant, Colour column (for the colour metafield), split SEO into title +
+// description. Some cells changed to tickbox / readonly / release / chip.
 const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
-  { id: "release", label: "Release", width: 90 },
+  { id: "release", label: "Release", type: "release", width: 90 },
   { id: "modelPicture", label: "Model PICTURE", width: 120 },
   { id: "fabric", label: "FABRIC", width: 120 },
   { id: "name", label: "Name", width: 160 },
   { id: "notes", label: "Notes", width: 140 },
-  { id: "sku", label: "SKU", width: 80 },
+  { id: "sku", label: "SKU", width: 90 },
+  { id: "freeSize", label: "Free Size", type: "number", width: 60 },
   { id: "xs", label: "XS", type: "number", width: 50 },
   { id: "s", label: "S", type: "number", width: 50 },
   { id: "m", label: "M", type: "number", width: 50 },
@@ -8253,45 +8344,42 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "sm", label: "S/M", type: "number", width: 50 },
   { id: "ml", label: "M/L", type: "number", width: 50 },
   { id: "lxl", label: "L/XL", type: "number", width: 50 },
-  { id: "totalOrdered", label: "TOTAL Ordered", type: "number", width: 100 },
-  { id: "status", label: "STATUS", width: 110 },
-  { id: "sample", label: "Sample", width: 110 },
+  { id: "totalOrdered", label: "TOTAL Ordered", type: "readonly", width: 100 },
+  { id: "status", label: "STATUS", type: "chip", width: 130 },
+  { id: "sample", label: "Sample", type: "chip", width: 130 },
   { id: "sampleReceived", label: "Sample RECEIVED", type: "date", width: 120 },
-  { id: "price", label: "Price", type: "number", width: 70 },
-  { id: "cost", label: "Cost", type: "number", width: 70 },
+  { id: "price", label: "Price (RRP)", type: "number", width: 80 },
+  { id: "cost", label: "Cost (AUD)", type: "number", width: 80 },
   { id: "eta", label: "ETA", type: "date", width: 90 },
   { id: "maniPicsTaken", label: "mani Pics Taken", width: 130 },
   { id: "loadingNotes", label: "Loading Notes", width: 140 },
   { id: "duplicateFrom", label: "DUPLICATE FROM", width: 140 },
   { id: "modelHeightSize", label: "Model height and size", width: 130 },
   { id: "createdBy", label: "Created by", width: 100 },
-  { id: "link", label: "Link", width: 130 },
-  { id: "title", label: "Title", width: 120 },
-  { id: "description", label: "Description", width: 160 },
-  { id: "categories", label: "Categories", width: 110 },
-  { id: "productType", label: "Product type", width: 110 },
-  { id: "collectionsField", label: "Collections", width: 110 },
-  { id: "tags", label: "Tags", width: 100 },
-  { id: "variants", label: "Variants", width: 100 },
+  { id: "link", label: "Link", type: "readonly", width: 130 },
+  { id: "description", label: "Description", width: 200 },
+  { id: "categories", label: "Categories", width: 130 },
+  { id: "productType", label: "Product type", width: 120 },
+  { id: "tags", label: "Tags", width: 140 },
   { id: "hsCode", label: "HS Code", width: 90 },
   { id: "countryOfOrigin", label: "Country of Origin", width: 130 },
   { id: "compareAtPrice", label: "Compare at price", type: "number", width: 110 },
-  { id: "complProducts", label: "Compl. products", width: 130 },
+  { id: "complProducts", label: "Compl. products", type: "tickbox", width: 110 },
   { id: "colour", label: "Colour", width: 90 },
-  { id: "sizeGuide", label: "Size guide", width: 110 },
-  { id: "seoTitleDesc", label: "SEO (title, desc)", width: 130 },
-  { id: "activation", label: "Activation", width: 100 },
-  { id: "schedules", label: "Schedules", width: 100 },
-  { id: "reviews", label: "Reviews", width: 90 },
-  { id: "swatches", label: "Swatches", width: 100 },
+  { id: "seoTitle", label: "SEO Title", width: 160 },
+  { id: "seoDescription", label: "SEO Description", width: 200 },
+  { id: "schedules", label: "Schedules", type: "tickbox", width: 90 },
+  { id: "reviews", label: "Reviews", type: "tickbox", width: 80 },
+  { id: "swatches", label: "Swatches", type: "tickbox", width: 90 },
 ];
 
 function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   if (!Array.isArray(value) || value.length === 0) return DEFAULT_COLLECTION_COLUMNS;
+  const VALID_TYPES = new Set(["text", "number", "date", "tickbox", "readonly", "release", "chip"]);
   return (value as Array<Record<string, unknown>>).map((c, i) => ({
     id: typeof c?.id === "string" ? c.id : `col_${i}`,
     label: typeof c?.label === "string" ? c.label : `Column ${i + 1}`,
-    type: c?.type === "number" || c?.type === "date" ? c.type : "text",
+    type: typeof c?.type === "string" && VALID_TYPES.has(c.type) ? c.type as CollectionColumnDef["type"] : "text",
     width: typeof c?.width === "number" ? c.width : undefined,
   }));
 }
@@ -8620,9 +8708,9 @@ function CollectionSpreadsheetPage({
   const pushRow = (idx: number) => {
     const row = rows[idx];
     if ((row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
-    const title = (row.title || row.name || "").trim();
+    const title = (row.name || row.title || "").trim();
     if (!title) {
-      setPushStatus({ msg: `Row ${idx + 1}: Title is required`, tone: "err" });
+      setPushStatus({ msg: `Row ${idx + 1}: Name is required`, tone: "err" });
       return;
     }
     setPushStatus(null);
@@ -8805,10 +8893,15 @@ function CollectionSpreadsheetPage({
               {rows.map((row, rIdx) => {
                 const linkedProductId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
                 const linked = Boolean(linkedProductId);
-                const shopifyAdminUrl = linked
-                  ? `https://${(typeof window !== "undefined" && window.location.hostname) || "admin"}.shopify.com` // not real — see anchor below
-                  : "";
-                void shopifyAdminUrl;
+                const totalOrdered = sumCollectionRowQuantity(row);
+                const adminLink = shopifyAdminLinkForRow(row);
+                // Computed values for readonly cells. Rendered through
+                // CollectionCell so the readonly type shows the value.
+                const computedValueFor = (colId: string): string | null => {
+                  if (colId === "totalOrdered") return totalOrdered ? String(totalOrdered) : "";
+                  if (colId === "link") return adminLink;
+                  return null;
+                };
                 return (
                   <tr key={rIdx} style={s.row}>
                     <RowNumberCell
@@ -8834,20 +8927,39 @@ function CollectionSpreadsheetPage({
                         >Create in Shopify</button>
                       )}
                     </Td>
-                    {columns.map((col, colIdx) => (
-                      <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
-                        {linked ? (
-                          <span style={{ fontSize: 12, color: "#374151", padding: "2px 4px" }}>{row[col.id] ?? ""}</span>
-                        ) : (
-                          <CollectionCell
-                            value={row[col.id] ?? ""}
-                            type={col.type ?? "text"}
-                            columnId={col.id}
-                            onCommit={(v) => updateCell(rIdx, col.id, v)}
-                          />
-                        )}
-                      </Td>
-                    ))}
+                    {columns.map((col, colIdx) => {
+                      const computed = computedValueFor(col.id);
+                      // For the Link readonly cell, render as a clickable
+                      // anchor when a Shopify URL is present.
+                      if (col.id === "link" && computed) {
+                        return (
+                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
+                            <a href={computed} target="_blank" rel="noopener noreferrer"
+                              style={{ fontSize: 12, color: "#0d9488", fontWeight: 600, padding: "6px 8px", display: "inline-block" }}
+                            >Open in Shopify</a>
+                          </Td>
+                        );
+                      }
+                      const value = computed !== null ? computed : (row[col.id] ?? "");
+                      // Linked rows lock all editable cells. Tickbox /
+                      // readonly / release still render through
+                      // CollectionCell so they look consistent.
+                      const lockedDisplay = linked && col.type !== "readonly" && col.id !== "totalOrdered";
+                      return (
+                        <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
+                          {lockedDisplay ? (
+                            <span style={{ fontSize: 12, color: "#374151", padding: "2px 4px" }}>{value}</span>
+                          ) : (
+                            <CollectionCell
+                              value={value}
+                              type={col.type ?? "text"}
+                              columnId={col.id}
+                              onCommit={(v) => updateCell(rIdx, col.id, v)}
+                            />
+                          )}
+                        </Td>
+                      );
+                    })}
                   </tr>
                 );
               })}
@@ -8893,13 +9005,39 @@ function CollectionCell({
   onCommit,
 }: {
   value: string;
-  type: "text" | "number" | "date";
+  type: CollectionColumnDef["type"];
   columnId: string;
   onCommit: (next: string) => void;
 }) {
-  const isImageColumn = columnId === "modelPicture" || columnId === "fabric";
+  const isImageColumn = columnId === "modelPicture" || columnId === "fabric" || columnId === "maniPicsTaken";
   if (isImageColumn) {
     return <CollectionImageCell value={value} onCommit={onCommit} />;
+  }
+  // Release column: big bold maroon text. Click to edit.
+  if (type === "release") {
+    return <CollectionReleaseCell value={value} onCommit={onCommit} />;
+  }
+  // Tickbox column (Schedules / Reviews / Swatches / Compl products).
+  // Stored as "1" / "" on the row.
+  if (type === "tickbox") {
+    return (
+      <label style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 8, cursor: "pointer", width: "100%" }}>
+        <input
+          type="checkbox"
+          checked={value === "1"}
+          onChange={(e) => onCommit(e.target.checked ? "1" : "")}
+          style={{ width: 18, height: 18, cursor: "pointer" }}
+        />
+      </label>
+    );
+  }
+  // Chip column (Status / Sample). Full chip-picker comes in next push;
+  // for now render the stored value as a plain editable text input so
+  // the column doesn't lose data in the meantime.
+  // Readonly cells are filled by the row's auto-computed value (Total
+  // Ordered, Link) and rendered as plain text — onCommit is ignored.
+  if (type === "readonly") {
+    return <span style={{ display: "inline-block", padding: "6px 8px", fontSize: 12, color: "#374151", fontWeight: 600 }}>{value || ""}</span>;
   }
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
@@ -8911,8 +9049,48 @@ function CollectionCell({
       onChange={(e) => setDraft(e.target.value)}
       onBlur={() => { if (draft !== value) onCommit(draft); }}
       onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+      className={inputType === "number" ? "no-number-arrows" : undefined}
       style={{ width: "100%", border: "none", outline: "none", padding: "6px 8px", fontSize: 12, fontFamily: "inherit", background: "transparent", boxSizing: "border-box" }}
     />
+  );
+}
+
+function CollectionReleaseCell({ value, onCommit }: { value: string; onCommit: (next: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => { setEditing(false); if (draft !== value) onCommit(draft); }}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setDraft(value); setEditing(false); } }}
+        placeholder="Release"
+        style={{
+          width: "100%", border: "1px solid #d1d5db", outline: "none",
+          padding: "6px 8px", fontSize: 18, fontWeight: 800,
+          color: "#7f1d1d", background: "#fff", boxSizing: "border-box",
+        }}
+      />
+    );
+  }
+  return (
+    <div
+      onClick={() => setEditing(true)}
+      style={{
+        padding: "8px 6px",
+        fontSize: 18, fontWeight: 800,
+        color: "#7f1d1d", // maroon
+        textAlign: "center", cursor: "text",
+        minHeight: 36,
+        textTransform: "uppercase",
+      }}
+      title="Click to edit"
+    >
+      {value || <span style={{ color: "#d6d3d1", fontWeight: 400, fontSize: 12 }}>—</span>}
+    </div>
   );
 }
 
