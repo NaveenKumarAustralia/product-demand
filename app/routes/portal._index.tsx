@@ -2498,16 +2498,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             out[COL_ROW_SHOPIFY_PRODUCT_ID] = productGid;
             out[COL_ROW_SHOPIFY_STATUS] = "ACTIVE";
             linkedCount++;
-            // Pull the product's existing media so modelPicture shows
-            // the same images the storefront shows.
+            // Pull product meta (handle + media) so the row has both
+            // the storefront URL (via handle) and the current images.
             if (shop && accessToken) {
               try {
-                const imageUrls = await fetchShopifyProductImages(shop, accessToken, productGid);
-                if (imageUrls.length) {
-                  out.modelPicture = JSON.stringify(imageUrls);
+                const meta = await fetchShopifyProductMeta(shop, accessToken, productGid);
+                if (meta.handle) out[COL_ROW_SHOPIFY_HANDLE] = meta.handle;
+                if (meta.images.length) {
+                  out.modelPicture = JSON.stringify(meta.images);
                 }
               } catch (e) {
-                console.warn(`[import] image fetch failed for ${productGid}:`, e);
+                console.warn(`[import] meta fetch failed for ${productGid}:`, e);
               }
             }
           }
@@ -2530,6 +2531,45 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     return jsonResponse({ ok: true, totalCollections, summary });
+  }
+
+  if (intent === "backfill_collection_handles") {
+    // For every collection row that's linked to a Shopify product but
+    // missing __shopifyHandle (older imports), fetch the handle so the
+    // Link column can render a storefront URL.
+    if (!currentUser?.admin) return jsonResponse({ ok: false, error: "forbidden" });
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+    const collections = await prisma.collection.findMany({ select: { id: true, rows: true } });
+    let updated = 0;
+    let scanned = 0;
+    for (const c of collections) {
+      const rows = normalizeCollectionRows(c.rows);
+      let changed = false;
+      for (const row of rows) {
+        const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+        if (!pid) continue;
+        if ((row[COL_ROW_SHOPIFY_HANDLE] ?? "").trim()) continue;
+        scanned++;
+        try {
+          const meta = await fetchShopifyProductMeta(session.shop, session.accessToken, pid);
+          if (meta.handle) {
+            row[COL_ROW_SHOPIFY_HANDLE] = meta.handle;
+            changed = true;
+            updated++;
+          }
+        } catch (e) {
+          console.warn(`[backfill] handle fetch failed for ${pid}:`, e);
+        }
+      }
+      if (changed) {
+        await prisma.collection.update({ where: { id: c.id }, data: { rows: rows as unknown as object, updatedAt: new Date() } });
+      }
+    }
+    return jsonResponse({ ok: true, scanned, updated });
   }
 
   if (intent === "duplicate_from_shopify_product") {
@@ -5679,12 +5719,36 @@ function extractStyleFromName(name: string, productInfo: ProductInfo): string {
   return "";
 }
 
-// Derives the Shopify admin URL for a linked row, or "" if not linked.
-function shopifyAdminLinkForRow(row: Record<string, string>): string {
+// Builds the Shopify ADMIN URL for a linked row — clicking opens the
+// edit page in Shopify admin. Prefers the row's `link` column when
+// it's already an admin URL (rows imported from the sheet already
+// have the right store handle baked in). Otherwise constructs from
+// shopDomain so the URL targets the right store and doesn't trip the
+// "Your account doesn't have permission" page.
+function shopifyAdminLinkForRow(row: Record<string, string>, shopDomain?: string | null): string {
+  const stored = (row.link ?? "").trim();
+  if (stored && /admin\.shopify\.com/i.test(stored)) return stored;
   const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
   if (!pid) return "";
   const numeric = pid.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
-  return numeric ? `https://admin.shopify.com/store/products/${numeric}` : "";
+  if (!numeric) return "";
+  const handle = (shopDomain ?? "").replace(/\.myshopify\.com$/i, "").trim();
+  if (handle) return `https://admin.shopify.com/store/${handle}/products/${numeric}`;
+  return `https://admin.shopify.com/store/products/${numeric}`;
+}
+
+// Builds the PUBLIC STOREFRONT URL for a linked row — clicking opens
+// the live product page customers see. Used by the Link column so it
+// gives different info than the Shopify ✓ badge (which opens admin).
+// Needs the product handle (saved on the row by the Shopify push) and
+// the shop's myshopify domain. Returns "" if either is missing.
+function shopifyStorefrontLinkForRow(row: Record<string, string>, shopDomain?: string | null): string {
+  const handle = (row[COL_ROW_SHOPIFY_HANDLE] ?? "").trim();
+  if (!handle || !shopDomain) return "";
+  // We could swap to the custom domain (e.g. karma-east.com.au) but
+  // not every shop has one configured; the myshopify.com URL always
+  // works and 301s through to whatever custom domain is set.
+  return `https://${shopDomain}/products/${handle}`;
 }
 
 type CollectionPushResult = {
@@ -5865,17 +5929,18 @@ function parseCSV(text: string): string[][] {
   return rows;
 }
 
-// Fetches Shopify product media URLs for a single product (used by the
-// bulk import to pre-fill the row's modelPicture with images already
-// uploaded to Shopify).
-async function fetchShopifyProductImages(
+// Fetches Shopify product meta (handle + media URLs) for a single
+// product. Used by the bulk import to pre-fill modelPicture AND store
+// the handle so the Link column can build a public-storefront URL.
+async function fetchShopifyProductMeta(
   shop: string,
   accessToken: string,
   productGid: string,
-): Promise<string[]> {
+): Promise<{ handle: string; images: string[] }> {
   const json = await shopifyGraphql<any>(shop, accessToken, `
-    query ProductImagesForImport($id: ID!) {
+    query ProductMetaForImport($id: ID!) {
       product(id: $id) {
+        handle
         media(first: 20) {
           nodes {
             ... on MediaImage { image { url } }
@@ -5884,10 +5949,12 @@ async function fetchShopifyProductImages(
       }
     }
   `, { id: productGid });
+  const handle = String(json?.data?.product?.handle ?? "");
   const nodes = json?.data?.product?.media?.nodes ?? [];
-  return nodes
+  const images = nodes
     .map((n: { image?: { url?: string } }) => n?.image?.url ?? "")
     .filter((u: string) => !!u);
+  return { handle, images };
 }
 
 // Convert a sheet status/sample value to the portal chip value by
@@ -6600,6 +6667,7 @@ export default function PortalDashboard() {
             collectionSettings={collectionSettings}
             productInfo={productInfo}
             isAdmin={Boolean(currentUser?.admin)}
+            shopDomain={shopDomain}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -8862,9 +8930,10 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
   });
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, isAdmin }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; isAdmin: boolean }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, isAdmin, shopDomain }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; isAdmin: boolean; shopDomain: string | null }) {
   const fetcher = useFetcher();
   const importFetcher = useFetcher<{ ok?: boolean; totalCollections?: number; summary?: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }>; error?: string }>();
+  const backfillFetcher = useFetcher<{ ok?: boolean; scanned?: number; updated?: number; error?: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const collectionIdParam = searchParams.get("collectionId");
   const selectedId = collectionIdParam ? Number(collectionIdParam) : null;
@@ -8930,6 +8999,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         listItem={selectedCollection}
         collectionSettings={collectionSettings}
         productInfo={productInfo}
+        shopDomain={shopDomain}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
       />
@@ -8947,23 +9017,42 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
         <div style={s.productInfoActions}>
           {isAdmin && (
-            <button
-              type="button"
-              onClick={() => {
-                if (importFetcher.state !== "idle") return;
-                if (!window.confirm("Import all collections from Google Sheet?\n\nThis will:\n• Fetch ~48 tabs from the master sheet\n• Create one collection per tab\n• Pre-link rows whose Link column has a Shopify URL\n• Pull Shopify images for linked rows\n\nCollections that already exist (by name) are skipped. This can take several minutes.")) return;
-                importFetcher.submit({ intent: "import_collections_from_google_sheet" }, { method: "post" });
-              }}
-              disabled={importFetcher.state !== "idle"}
-              style={{
-                background: "#7e22ce", color: "#fff", border: "none",
-                borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600,
-                cursor: importFetcher.state !== "idle" ? "wait" : "pointer",
-              }}
-              title="One-off import from the master Google Sheet"
-            >
-              {importFetcher.state !== "idle" ? "Importing…" : "Import from Google Sheet"}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  if (importFetcher.state !== "idle") return;
+                  if (!window.confirm("Import all collections from Google Sheet?\n\nThis will:\n• Fetch ~48 tabs from the master sheet\n• Create one collection per tab\n• Pre-link rows whose Link column has a Shopify URL\n• Pull Shopify images for linked rows\n\nCollections that already exist (by name) are skipped. This can take several minutes.")) return;
+                  importFetcher.submit({ intent: "import_collections_from_google_sheet" }, { method: "post" });
+                }}
+                disabled={importFetcher.state !== "idle"}
+                style={{
+                  background: "#7e22ce", color: "#fff", border: "none",
+                  borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600,
+                  cursor: importFetcher.state !== "idle" ? "wait" : "pointer",
+                }}
+                title="One-off import from the master Google Sheet"
+              >
+                {importFetcher.state !== "idle" ? "Importing…" : "Import from Google Sheet"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (backfillFetcher.state !== "idle") return;
+                  if (!window.confirm("Backfill storefront links for every linked row that doesn't have a product handle yet?\n\nFetches the handle from Shopify for each row. Can take a few minutes for hundreds of rows.")) return;
+                  backfillFetcher.submit({ intent: "backfill_collection_handles" }, { method: "post" });
+                }}
+                disabled={backfillFetcher.state !== "idle"}
+                style={{
+                  background: "#0d9488", color: "#fff", border: "none",
+                  borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600,
+                  cursor: backfillFetcher.state !== "idle" ? "wait" : "pointer",
+                }}
+                title="Pull product handles so the Link column can show the live storefront URL"
+              >
+                {backfillFetcher.state !== "idle" ? "Backfilling…" : "Backfill storefront links"}
+              </button>
+            </>
           )}
           <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
             Add Collection
@@ -8971,6 +9060,11 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
       </div>
 
+      {backfillFetcher.data?.ok && (
+        <div style={{ margin: "0 14px 10px", padding: "8px 12px", background: "#ecfdf5", border: "1px solid #a7f3d0", color: "#065f46", borderRadius: 6, fontSize: 12 }}>
+          Scanned {backfillFetcher.data.scanned ?? 0} linked rows, backfilled handles for {backfillFetcher.data.updated ?? 0}. Refresh to see the storefront links.
+        </div>
+      )}
       {importFetcher.data?.ok && importFetcher.data.summary && (
         <div style={{ margin: "0 14px 14px", padding: 12, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, fontSize: 12 }}>
           <div style={{ fontWeight: 700, color: "#065f46", marginBottom: 6 }}>
@@ -9143,12 +9237,14 @@ function CollectionSpreadsheetPage({
   listItem,
   collectionSettings,
   productInfo,
+  shopDomain,
   onBack,
   onLocalNameChange,
 }: {
   listItem: CollectionListItem;
   collectionSettings: CollectionSettings;
   productInfo: ProductInfo;
+  shopDomain: string | null;
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
 }) {
@@ -9435,14 +9531,19 @@ function CollectionSpreadsheetPage({
                 const linkedProductId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
                 const linked = Boolean(linkedProductId);
                 const totalOrdered = sumCollectionRowQuantity(row);
-                const adminLink = shopifyAdminLinkForRow(row);
+                const adminLink = shopifyAdminLinkForRow(row, shopDomain);
+                const storefrontLink = shopifyStorefrontLinkForRow(row, shopDomain);
                 // Computed values for readonly cells. Rendered through
                 // CollectionCell so the readonly type shows the value.
                 const computedValueFor = (colId: string): string | null => {
                   if (colId === "totalOrdered") return totalOrdered ? String(totalOrdered) : "";
-                  if (colId === "link") return adminLink;
+                  // Link column → storefront URL (the ✓ Shopify badge
+                  // already covers admin, so these two clicks now
+                  // surface different destinations).
+                  if (colId === "link") return storefrontLink;
                   return null;
                 };
+                void adminLink;
                 return (
                   <tr key={rIdx} style={s.row}>
                     <RowNumberCell
@@ -9453,7 +9554,7 @@ function CollectionSpreadsheetPage({
                     />
                     <Td rowIndex={rIdx} colIndex={-1} center>
                       {linked ? (
-                        <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} />
+                        <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
                       ) : (
                         <button
                           type="button"
@@ -9477,7 +9578,20 @@ function CollectionSpreadsheetPage({
                           <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
                             <a href={computed} target="_blank" rel="noopener noreferrer"
                               style={{ fontSize: 12, color: "#0d9488", fontWeight: 600, padding: "6px 8px", display: "inline-block" }}
-                            >Open in Shopify</a>
+                              title="Open live storefront product page"
+                            >View live page</a>
+                          </Td>
+                        );
+                      }
+                      // Linked row but no handle yet (older import): show
+                      // a hint so the user knows it'll backfill once the
+                      // "Backfill storefront links" action runs.
+                      if (col.id === "link" && linked && !computed) {
+                        return (
+                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
+                            <span style={{ fontSize: 11, color: "#9ca3af", padding: "6px 8px", display: "inline-block" }}
+                              title="Run 'Backfill storefront links' on the Collections list page"
+                            >(no handle yet)</span>
                           </Td>
                         );
                       }
@@ -9734,11 +9848,16 @@ function CollectionChipDropdown({
   );
 }
 
-function CollectionShopifyLinkedCell({ productId, status }: { productId: string; status: string }) {
-  // Build the Shopify admin link from the productId GID. Falls back to
-  // a plain ✓ if we can't extract a numeric id.
+function CollectionShopifyLinkedCell({ productId, status, shopDomain, linkOverride }: { productId: string; status: string; shopDomain?: string | null; linkOverride?: string }) {
+  // Prefer the row's stored Link (which is the actual Shopify admin
+  // URL imported from the sheet) so the click takes the user to the
+  // right store. Fallback to shopDomain-aware construction.
+  const stored = (linkOverride ?? "").trim();
   const numeric = productId.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
-  const href = numeric ? `https://admin.shopify.com/store/products/${numeric}` : "#";
+  const handle = (shopDomain ?? "").replace(/\.myshopify\.com$/i, "").trim();
+  const href = stored && /admin\.shopify\.com/i.test(stored)
+    ? stored
+    : (numeric && handle ? `https://admin.shopify.com/store/${handle}/products/${numeric}` : (numeric ? `https://admin.shopify.com/store/products/${numeric}` : "#"));
   const dot = status === "ACTIVE" ? "#10b981" : "#9ca3af";
   return (
     <a
