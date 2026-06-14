@@ -9890,28 +9890,33 @@ function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit
         onClick={() => setOpen(true)}
         style={{
           position: "relative",
-          width: "100%", height: 80,
+          width: "100%",
+          // Match the fabric image cell's height (172) so the row is
+          // already this tall — the picture then fills the cell with
+          // objectFit: cover instead of floating in whitespace.
+          height: 172,
           borderRadius: 4,
           border: images.length === 0 ? "1px dashed #d1d5db" : "1px solid #d1d5db",
           background: "#f9fafb", overflow: "hidden", cursor: "pointer",
-          display: "flex", alignItems: "center", justifyContent: "center",
           color: "#6b7280", fontSize: 12, fontWeight: 500,
         }}
         title={images.length > 0 ? `Open image manager (${images.length} image${images.length === 1 ? "" : "s"})` : "Add images"}
       >
         {images.length > 0 ? (
           <>
-            <img src={images[0]} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            <img src={images[0]} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
             {images.length > 1 && (
               <span style={{
-                position: "absolute", bottom: 4, right: 4,
+                position: "absolute", bottom: 6, right: 6,
                 background: "rgba(17,24,39,0.85)", color: "#fff",
-                fontSize: 11, fontWeight: 700, padding: "2px 6px", borderRadius: 3,
+                fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
               }}>+{images.length - 1}</span>
             )}
           </>
         ) : (
-          <span>+ Add images</span>
+          <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            + Add images
+          </div>
         )}
       </div>
       {open && typeof document !== "undefined" && createPortal(
