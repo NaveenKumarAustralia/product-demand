@@ -226,22 +226,6 @@ model Collection {
   updatedAt DateTime @updatedAt
 }
 
-// Daily snapshot of warehouse productivity inputs:
-//   - Deputy timesheets aggregated to staff count + hours worked
-//   - Shopify fulfilled orders aggregated to order count + units shipped
-// One row per local date. Refresh action upserts by date.
-model WarehouseDailyMetric {
-  date             DateTime @id  // local date at 00:00 UTC for stable keying
-  staffCount       Int      @default(0)
-  staffHours       Float    @default(0)
-  ordersFulfilled  Int      @default(0)
-  unitsFulfilled   Int      @default(0)
-  deputyFetchedAt  DateTime?
-  shopifyFetchedAt DateTime?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-}
-
 model SampleIteration {
   id          Int      @id @default(autoincrement())
   sampleId    Int
