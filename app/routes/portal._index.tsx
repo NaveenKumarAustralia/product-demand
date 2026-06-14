@@ -9514,10 +9514,9 @@ function serializeMultiImageValue(images: string[]): string {
 }
 function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit: (next: string) => void }) {
   const images = useMemo(() => parseMultiImageValue(value), [value]);
+  const [open, setOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
-
   const commit = (next: string[]) => onCommit(serializeMultiImageValue(next));
 
   const addFiles = async (files: FileList | File[] | null | undefined) => {
@@ -9531,78 +9530,202 @@ function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit
     } finally { setBusy(false); }
   };
 
-  const removeAt = (idx: number) => {
-    if (!window.confirm(`Remove image ${idx + 1}?`)) return;
-    commit(images.filter((_, i) => i !== idx));
-  };
-
-  const onDragStart = (idx: number) => (e: React.DragEvent<HTMLDivElement>) => {
-    setDragIdx(idx);
-    e.dataTransfer.effectAllowed = "move";
-  };
-  const onDragOver = (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); };
-  const onDropAt = (idx: number) => (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    if (dragIdx === null || dragIdx === idx) { setDragIdx(null); return; }
-    const next = [...images];
-    const [moved] = next.splice(dragIdx, 1);
-    next.splice(idx, 0, moved);
-    setDragIdx(null);
-    commit(next);
-  };
-
+  // Cell-level (in the row): show only the first image filling the
+  // cell. Click anywhere on the cell to open the full manager modal.
+  // Empty state shows a dashed "+ Add" tile that also opens the modal.
   return (
-    <div
-      style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: 4, alignItems: "flex-start", minHeight: 56 }}
-      onPaste={(e) => {
-        const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
-        if (files.length) void addFiles(files);
-      }}
-    >
-      {images.map((src, idx) => (
-        <div
-          key={`${idx}-${src.slice(0, 20)}`}
-          draggable
-          onDragStart={onDragStart(idx)}
-          onDragOver={onDragOver}
-          onDrop={onDropAt(idx)}
-          style={{
-            position: "relative", width: 48, height: 60,
-            border: dragIdx === idx ? "2px solid #0d9488" : "1px solid #d1d5db",
-            borderRadius: 4, overflow: "hidden", cursor: "grab", background: "#f9fafb",
-          }}
-          title={`Position ${idx + 1} — drag to reorder`}
-        >
-          <img src={src} alt={`pos ${idx + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-          <span style={{
-            position: "absolute", top: 1, left: 1,
-            background: "rgba(17,24,39,0.85)", color: "#fff",
-            fontSize: 10, fontWeight: 700, padding: "1px 4px", borderRadius: 3,
-          }}>{idx + 1}</span>
-          <button type="button" onClick={(e) => { e.stopPropagation(); removeAt(idx); }}
-            style={{
-              position: "absolute", top: 1, right: 1,
-              background: "rgba(220,38,38,0.9)", color: "#fff", border: "none",
-              borderRadius: 3, width: 14, height: 14, lineHeight: "12px",
-              fontSize: 10, fontWeight: 700, cursor: "pointer", padding: 0,
-            }}
-            title="Remove image"
-          >×</button>
-        </div>
-      ))}
-      <button type="button" onClick={() => fileRef.current?.click()} disabled={busy}
+    <>
+      <div
+        onClick={() => setOpen(true)}
         style={{
-          width: 48, height: 60, borderRadius: 4, border: "1px dashed #d1d5db",
-          background: busy ? "#f3f4f6" : "transparent",
-          color: "#6b7280", fontSize: 18, cursor: busy ? "wait" : "pointer",
+          position: "relative",
+          width: "100%", height: 80,
+          borderRadius: 4,
+          border: images.length === 0 ? "1px dashed #d1d5db" : "1px solid #d1d5db",
+          background: "#f9fafb", overflow: "hidden", cursor: "pointer",
           display: "flex", alignItems: "center", justifyContent: "center",
+          color: "#6b7280", fontSize: 12, fontWeight: 500,
         }}
-        title="Add image(s)"
-      >{busy ? "…" : "+"}</button>
+        title={images.length > 0 ? `Open image manager (${images.length} image${images.length === 1 ? "" : "s"})` : "Add images"}
+      >
+        {images.length > 0 ? (
+          <>
+            <img src={images[0]} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            {images.length > 1 && (
+              <span style={{
+                position: "absolute", bottom: 4, right: 4,
+                background: "rgba(17,24,39,0.85)", color: "#fff",
+                fontSize: 11, fontWeight: 700, padding: "2px 6px", borderRadius: 3,
+              }}>+{images.length - 1}</span>
+            )}
+          </>
+        ) : (
+          <span>+ Add images</span>
+        )}
+      </div>
+      {open && typeof document !== "undefined" && createPortal(
+        <CollectionImageManagerModal
+          images={images}
+          busy={busy}
+          onClose={() => setOpen(false)}
+          onAddFiles={addFiles}
+          onCommit={commit}
+          onPickFile={() => fileRef.current?.click()}
+          fileRef={fileRef}
+        />,
+        document.body,
+      )}
       <input
         ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
         onChange={(e) => { void addFiles(e.target.files); e.target.value = ""; }}
       />
+    </>
+  );
+}
+
+// Image manager modal: drag-drop to reorder, position badges, remove,
+// add more. Saves immediately via onCommit on every change so the user
+// can close at any time without losing edits.
+function CollectionImageManagerModal({
+  images, busy, onClose, onAddFiles, onCommit, onPickFile, fileRef,
+}: {
+  images: string[];
+  busy: boolean;
+  onClose: () => void;
+  onAddFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
+  onCommit: (next: string[]) => void;
+  onPickFile: () => void;
+  fileRef: React.RefObject<HTMLInputElement | null>;
+}) {
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+  void fileRef;
+  const onDragStart = (idx: number) => (e: React.DragEvent<HTMLDivElement>) => {
+    setDragIdx(idx);
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onDragOver = (idx: number) => (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (dragOverIdx !== idx) setDragOverIdx(idx);
+  };
+  const onDrop = (idx: number) => (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (dragIdx === null || dragIdx === idx) { setDragIdx(null); setDragOverIdx(null); return; }
+    const next = [...images];
+    const [moved] = next.splice(dragIdx, 1);
+    next.splice(idx, 0, moved);
+    setDragIdx(null);
+    setDragOverIdx(null);
+    onCommit(next);
+  };
+  const onDragEnd = () => { setDragIdx(null); setDragOverIdx(null); };
+  const removeAt = (idx: number) => {
+    if (!window.confirm(`Remove image ${idx + 1}?`)) return;
+    onCommit(images.filter((_, i) => i !== idx));
+  };
+  const moveBy = (idx: number, delta: number) => {
+    const dest = idx + delta;
+    if (dest < 0 || dest >= images.length) return;
+    const next = [...images];
+    const [moved] = next.splice(idx, 1);
+    next.splice(dest, 0, moved);
+    onCommit(next);
+  };
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }}
+      onClick={onClose}
+      onPaste={(e) => {
+        const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
+        if (files.length) void onAddFiles(files);
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "#fff", borderRadius: 12, width: 720, maxWidth: "92vw",
+          maxHeight: "86vh", display: "flex", flexDirection: "column",
+          boxShadow: "0 24px 60px rgba(0,0,0,0.3)",
+        }}
+      >
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>Model pictures</div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+              {images.length} image{images.length === 1 ? "" : "s"} — drag to reorder. Position number = image order in Shopify.
+            </div>
+          </div>
+          <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", fontWeight: 600 }}>Done</button>
+        </div>
+        <div style={{ padding: 18, overflowY: "auto", flex: 1 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 12 }}>
+            {images.map((src, idx) => (
+              <div
+                key={`${idx}-${src.slice(0, 24)}`}
+                draggable
+                onDragStart={onDragStart(idx)}
+                onDragOver={onDragOver(idx)}
+                onDrop={onDrop(idx)}
+                onDragEnd={onDragEnd}
+                style={{
+                  position: "relative",
+                  borderRadius: 8,
+                  border: dragOverIdx === idx && dragIdx !== idx ? "2px solid #0d9488"
+                        : dragIdx === idx ? "2px solid #94a3b8"
+                        : "1px solid #d1d5db",
+                  overflow: "hidden", cursor: "grab", background: "#f9fafb",
+                  aspectRatio: "3 / 4", opacity: dragIdx === idx ? 0.6 : 1,
+                }}
+                title={`Position ${idx + 1} — drag to reorder`}
+              >
+                <img src={src} alt={`pos ${idx + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                <span style={{
+                  position: "absolute", top: 6, left: 6,
+                  background: "rgba(17,24,39,0.9)", color: "#fff",
+                  fontSize: 12, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
+                }}>{idx + 1}</span>
+                <button type="button" onClick={(e) => { e.stopPropagation(); removeAt(idx); }}
+                  style={{
+                    position: "absolute", top: 6, right: 6,
+                    background: "rgba(220,38,38,0.92)", color: "#fff", border: "none",
+                    borderRadius: 4, width: 22, height: 22, lineHeight: "20px",
+                    fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0,
+                  }}
+                  title="Remove image"
+                >×</button>
+                <div style={{ position: "absolute", bottom: 6, right: 6, display: "flex", gap: 4 }}>
+                  <button type="button" onClick={(e) => { e.stopPropagation(); moveBy(idx, -1); }} disabled={idx === 0}
+                    style={{ background: "rgba(255,255,255,0.92)", border: "1px solid #d1d5db", borderRadius: 4, width: 22, height: 22, fontSize: 11, cursor: idx === 0 ? "default" : "pointer", padding: 0, color: idx === 0 ? "#cbd5e1" : "#111827" }}
+                    title="Move earlier"
+                  >◀</button>
+                  <button type="button" onClick={(e) => { e.stopPropagation(); moveBy(idx, 1); }} disabled={idx === images.length - 1}
+                    style={{ background: "rgba(255,255,255,0.92)", border: "1px solid #d1d5db", borderRadius: 4, width: 22, height: 22, fontSize: 11, cursor: idx === images.length - 1 ? "default" : "pointer", padding: 0, color: idx === images.length - 1 ? "#cbd5e1" : "#111827" }}
+                    title="Move later"
+                  >▶</button>
+                </div>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={onPickFile}
+              disabled={busy}
+              style={{
+                borderRadius: 8, border: "2px dashed #d1d5db", background: busy ? "#f3f4f6" : "transparent",
+                color: "#6b7280", fontSize: 28, cursor: busy ? "wait" : "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                aspectRatio: "3 / 4",
+              }}
+              title="Add image(s)"
+            >{busy ? "…" : "+"}</button>
+          </div>
+          {images.length === 0 && (
+            <div style={{ marginTop: 14, padding: 14, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 13, color: "#6b7280", textAlign: "center" }}>
+              No images yet. Click + to add, or paste images directly in this modal.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
