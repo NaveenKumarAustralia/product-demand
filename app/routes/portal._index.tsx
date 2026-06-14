@@ -2418,6 +2418,120 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "import_collections_from_google_sheet") {
+    // One-shot importer: fetch each tab from the user's Google Sheet,
+    // parse the CSV, build collection rows, link rows whose Link cell
+    // contains a Shopify admin URL (extract the product GID), and for
+    // those linked rows pull the product's media images so the row
+    // has its modelPicture pre-filled.
+    if (!currentUser?.admin) return jsonResponse({ ok: false, error: "forbidden" });
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }).catch(() => null);
+    const shop = session?.shop ?? "";
+    const accessToken = session?.accessToken ?? "";
+
+    const summary: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }> = [];
+    let totalCollections = 0;
+
+    // Lookup of existing collection names so reruns don't duplicate.
+    const existingNames = new Set(
+      (await prisma.collection.findMany({ select: { name: true } })).map((c) => c.name),
+    );
+
+    const chipStatusOptions = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_SETTINGS_KEY }, select: { value: true } })
+      .then((s) => normalizeCollectionSettings(s?.value).statusOptions);
+    const chipSampleOptions = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_SETTINGS_KEY }, select: { value: true } })
+      .then((s) => normalizeCollectionSettings(s?.value).sampleOptions);
+
+    for (const tabName of SHEET_IMPORT_ALL_TABS) {
+      if (SHEET_IMPORT_SKIP_TABS.has(tabName)) continue;
+      if (existingNames.has(tabName)) {
+        summary.push({ tab: tabName, rows: 0, linked: 0, skipped: 0, error: "already exists" });
+        continue;
+      }
+      try {
+        const csvUrl = `https://docs.google.com/spreadsheets/d/${SHEET_IMPORT_SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
+        const res = await fetch(csvUrl);
+        if (!res.ok) { summary.push({ tab: tabName, rows: 0, linked: 0, skipped: 0, error: `fetch ${res.status}` }); continue; }
+        const csv = await res.text();
+        const parsed = parseCSV(csv);
+        if (parsed.length < 2) { summary.push({ tab: tabName, rows: 0, linked: 0, skipped: 0, error: "empty" }); continue; }
+        const headers = parsed[0].map(normalizeSheetHeader);
+        const colIdByIndex: Array<string | null> = headers.map((h) => SHEET_HEADER_MAP[h] ?? null);
+
+        const rowsOut: Record<string, string>[] = [];
+        let linkedCount = 0;
+        let skippedCount = 0;
+        for (let r = 1; r < parsed.length; r++) {
+          const sheetRow = parsed[r];
+          if (sheetRow.every((c) => !c.trim())) { skippedCount++; continue; }
+          const out: Record<string, string> = {};
+          let hasContent = false;
+          for (let i = 0; i < sheetRow.length; i++) {
+            const portalCol = colIdByIndex[i];
+            if (!portalCol) continue;
+            let val = (sheetRow[i] ?? "").trim();
+            if (!val) continue;
+            if (portalCol === "price" || portalCol === "cost" || portalCol === "compareAtPrice") {
+              val = parsePriceCell(val);
+              if (!val) continue;
+            }
+            if (portalCol === "status") val = mapToChipValue(val, chipStatusOptions);
+            if (portalCol === "sample") val = mapToChipValue(val, chipSampleOptions);
+            if (portalCol === "complProducts" || portalCol === "schedules" || portalCol === "reviews" || portalCol === "swatches") {
+              val = /^true$/i.test(val) ? "1" : "";
+              if (!val) continue;
+            }
+            if (val) {
+              out[portalCol] = val;
+              hasContent = true;
+            }
+          }
+          if (!hasContent) { skippedCount++; continue; }
+
+          // Pre-link via Link column → Shopify product GID.
+          const linkVal = out.link ?? "";
+          const productGid = extractShopifyProductIdFromLink(linkVal);
+          if (productGid) {
+            out[COL_ROW_SHOPIFY_PRODUCT_ID] = productGid;
+            out[COL_ROW_SHOPIFY_STATUS] = "ACTIVE";
+            linkedCount++;
+            // Pull the product's existing media so modelPicture shows
+            // the same images the storefront shows.
+            if (shop && accessToken) {
+              try {
+                const imageUrls = await fetchShopifyProductImages(shop, accessToken, productGid);
+                if (imageUrls.length) {
+                  out.modelPicture = JSON.stringify(imageUrls);
+                }
+              } catch (e) {
+                console.warn(`[import] image fetch failed for ${productGid}:`, e);
+              }
+            }
+          }
+          rowsOut.push(out);
+        }
+
+        await prisma.collection.create({
+          data: {
+            name: tabName,
+            sortOrder: existingNames.size + totalCollections,
+            rows: rowsOut as unknown as object,
+            columns: DEFAULT_COLLECTION_COLUMNS as unknown as object,
+          },
+        });
+        totalCollections++;
+        summary.push({ tab: tabName, rows: rowsOut.length, linked: linkedCount, skipped: skippedCount });
+      } catch (e) {
+        summary.push({ tab: tabName, rows: 0, linked: 0, skipped: 0, error: (e as Error).message });
+      }
+    }
+
+    return jsonResponse({ ok: true, totalCollections, summary });
+  }
+
   if (intent === "duplicate_from_shopify_product") {
     // For the Collections "Duplicate From" picker: given a Shopify
     // product GID, return the fields we want to copy into a row:
@@ -5724,6 +5838,206 @@ async function createShopifyProductFromRow(
   return { ok: true, productId: String(product.id), handle: String(product.handle ?? "") };
 }
 
+// ─── Google Sheet bulk import ───────────────────────────────────
+// CSV parser that handles quoted multi-line cells (Google Sheets CSV
+// export does this for cells with line breaks). Returns rows of cells.
+function parseCSV(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { cell += '"'; i++; }
+        else { inQuotes = false; }
+      } else { cell += c; }
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ",") { row.push(cell); cell = ""; }
+      else if (c === "\n") { row.push(cell); cell = ""; rows.push(row); row = []; }
+      else if (c === "\r") { /* skip */ }
+      else { cell += c; }
+    }
+  }
+  if (cell.length || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+// Fetches Shopify product media URLs for a single product (used by the
+// bulk import to pre-fill the row's modelPicture with images already
+// uploaded to Shopify).
+async function fetchShopifyProductImages(
+  shop: string,
+  accessToken: string,
+  productGid: string,
+): Promise<string[]> {
+  const json = await shopifyGraphql<any>(shop, accessToken, `
+    query ProductImagesForImport($id: ID!) {
+      product(id: $id) {
+        media(first: 20) {
+          nodes {
+            ... on MediaImage { image { url } }
+          }
+        }
+      }
+    }
+  `, { id: productGid });
+  const nodes = json?.data?.product?.media?.nodes ?? [];
+  return nodes
+    .map((n: { image?: { url?: string } }) => n?.image?.url ?? "")
+    .filter((u: string) => !!u);
+}
+
+// Convert a sheet status/sample value to the portal chip value by
+// matching against the available chip labels. Returns "" on no match.
+function mapToChipValue(raw: string, options: { value: string; label: string }[]): string {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (!v) return "";
+  // Exact label match
+  for (const opt of options) {
+    if (opt.label.toLowerCase() === v || opt.value === v) return opt.value;
+  }
+  // Fuzzy: chip label is contained in raw value (e.g. "Arrived and
+  // Loaded" contains "arrived")
+  for (const opt of options) {
+    const labelLow = opt.label.toLowerCase();
+    if (v.includes(labelLow)) return opt.value;
+  }
+  return "";
+}
+
+// Tabs from the user's Google Sheet to import as collections. Skip
+// the meta tabs (planner, calendar, templates, copies, forecast).
+const SHEET_IMPORT_SPREADSHEET_ID = "1urZd4GSzKl-ztTpNjc9xPvagXxCLhLMGRsLrGBleVTk";
+const SHEET_IMPORT_SKIP_TABS = new Set([
+  "2026 Production Planner",
+  "Releases + Promo Dates",
+  "2026 40x40 Plain not in use",
+  "Template",
+  "Copy of Nocturne ✅",
+  "Copy of Sample Ideas Jun 2025",
+  "Copy of Sample Ideas Jun 2025 1",
+  "Forcast",
+]);
+const SHEET_IMPORT_ALL_TABS = [
+  "Moonflower",
+  "August 26- Blue Mango + Amla ✅",
+  "Nila-Indian Summer",
+  "Isha 40x40",
+  "Fabric Arrived soft Collection 1",
+  "Fabric Arrived Soft Collection 3",
+  "Fabric Arrived -Soft Collection 5",
+  "Soft Collection 2",
+  "Soft Collection 4",
+  "Soft Collection 6",
+  "Slips",
+  "AUTUMN - Resonance ✅",
+  "May 15th Ochre ✅",
+  "May 29th Velvet",
+  "Corduroy 2026 ✅",
+  "New JJ Products",
+  "Autumn Rose Print 40/40 ✅",
+  "Autumn Rose Print 60/60 ✅",
+  "Peacock 60/60",
+  "Peacock 40/40",
+  "Peacock Rayon",
+  "August 26-Shikari 40/40",
+  "August 26- Clematis 60/60",
+  "August 26- Blue Tulip",
+  "Remnant 40/40 (Vintage Folk Collection ❯❯❯❯ ✅",
+  "Keepsake 40/40 (collection Vintage Folk) ✅",
+  "Spring 26 C1 Joy ✅",
+  "SS 26 Neon Jungle ✅",
+  "August 26- Blue Mango ✅",
+  "Autumn 26Tallowwood ✅",
+  "Autumn Sorrel",
+  "SS26-C2 -Primrose",
+  "40x40 Blue paisly print",
+  "60x60 Plain \"The Core Range\"",
+  "Autumn Green 60",
+  "40x40 Plain \"The Core Range\"",
+  "40x40 Plain 2026",
+  "Spring26 C1 -Petal Parade",
+  "Wild Garland Collection (Nov/Dec) 2025",
+  "Spring26 C1-Wildflower",
+  "Summer 26",
+  "Blue 40x40",
+  "Blue 60x60",
+  "All your Christmases",
+  "Revival Jul-Aug 2025",
+  "Maia & Sage Aug 2025",
+  "Scarves 2025",
+  "Denim 2026",
+];
+
+// Mapping from Google Sheet header → portal column id. Headers are
+// normalised by lowercase + trim + collapse whitespace before lookup.
+const SHEET_HEADER_MAP: Record<string, string> = {
+  "notes": "notes",
+  "release": "release",
+  "model picture": "modelPicture",
+  "fabric": "fabric",
+  "name": "name",
+  "sku": "sku",
+  "xs": "xs",
+  "s": "s",
+  "m": "m",
+  "l": "l",
+  "xl": "xl",
+  "2xl": "xxl",
+  "3xl": "xxxl",
+  "s/m": "sm",
+  "m/l": "ml",
+  "l/xl": "lxl",
+  "status": "status",
+  "sample": "sample",
+  "sample received": "sampleSizesReceived", // sheet text → new portal col
+  "price": "price",
+  "sale price": "compareAtPrice",
+  "cost": "cost",
+  "eta": "eta",
+  "mani pics taken": "maniPicsTaken",
+  "duplicate from": "duplicateFrom",
+  "model height and size": "modelHeightSize",
+  "model height + size": "modelHeightSize",
+  "loading notes": "loadingNotes",
+  "created or updated by": "createdBy",
+  "link": "link",
+  "description": "description",
+  "category": "categories",
+  "product type": "productType",
+  "tags": "tags",
+  "hs code": "hsCode",
+  "country of origin": "countryOfOrigin",
+  "compl. products": "complProducts",
+  "colour": "colour",
+  "scheduled activation": "schedules",
+  "reviews": "reviews",
+  "swatches": "swatches",
+};
+function normalizeSheetHeader(h: string): string {
+  return (h ?? "").trim().toLowerCase().replace(/\s+/g, " ").replace(/[​ ]/g, "");
+}
+
+// Extract a Shopify product GID from a sheet's Link cell value. The
+// sheet stores them as admin URLs like
+// https://admin.shopify.com/store/<shop>/products/<numeric_id>
+function extractShopifyProductIdFromLink(link: string): string {
+  const m = link?.match(/\/products\/(\d+)/);
+  if (!m) return "";
+  return `gid://shopify/Product/${m[1]}`;
+}
+
+// Parse a price string like "$59" or "$87.20" into a number string.
+function parsePriceCell(raw: string): string {
+  const cleaned = (raw ?? "").replace(/[^0-9.]/g, "");
+  if (!cleaned) return "";
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? String(n) : "";
+}
+
 function sizeColumnId(size: string) {
   return `size:${size}`;
 }
@@ -6285,6 +6599,7 @@ export default function PortalDashboard() {
             collections={collections}
             collectionSettings={collectionSettings}
             productInfo={productInfo}
+            isAdmin={Boolean(currentUser?.admin)}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -8502,6 +8817,7 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "status", label: "STATUS", type: "chip", width: 130 },
   { id: "sample", label: "Sample", type: "chip", width: 130 },
   { id: "sampleReceived", label: "Sample RECEIVED", type: "date", width: 120 },
+  { id: "sampleSizesReceived", label: "Sample sizes received", width: 140 },
   { id: "price", label: "Price (RRP)", type: "number", width: 80 },
   { id: "cost", label: "Cost (AUD)", type: "number", width: 80 },
   { id: "eta", label: "ETA", type: "date", width: 90 },
@@ -8546,8 +8862,9 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
   });
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, isAdmin }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; isAdmin: boolean }) {
   const fetcher = useFetcher();
+  const importFetcher = useFetcher<{ ok?: boolean; totalCollections?: number; summary?: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }>; error?: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const collectionIdParam = searchParams.get("collectionId");
   const selectedId = collectionIdParam ? Number(collectionIdParam) : null;
@@ -8629,11 +8946,45 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           </div>
         </div>
         <div style={s.productInfoActions}>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                if (importFetcher.state !== "idle") return;
+                if (!window.confirm("Import all collections from Google Sheet?\n\nThis will:\n• Fetch ~48 tabs from the master sheet\n• Create one collection per tab\n• Pre-link rows whose Link column has a Shopify URL\n• Pull Shopify images for linked rows\n\nCollections that already exist (by name) are skipped. This can take several minutes.")) return;
+                importFetcher.submit({ intent: "import_collections_from_google_sheet" }, { method: "post" });
+              }}
+              disabled={importFetcher.state !== "idle"}
+              style={{
+                background: "#7e22ce", color: "#fff", border: "none",
+                borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600,
+                cursor: importFetcher.state !== "idle" ? "wait" : "pointer",
+              }}
+              title="One-off import from the master Google Sheet"
+            >
+              {importFetcher.state !== "idle" ? "Importing…" : "Import from Google Sheet"}
+            </button>
+          )}
           <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
             Add Collection
           </button>
         </div>
       </div>
+
+      {importFetcher.data?.ok && importFetcher.data.summary && (
+        <div style={{ margin: "0 14px 14px", padding: 12, background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, fontSize: 12 }}>
+          <div style={{ fontWeight: 700, color: "#065f46", marginBottom: 6 }}>
+            Imported {importFetcher.data.totalCollections ?? 0} collection{importFetcher.data.totalCollections === 1 ? "" : "s"}. Reload to see them.
+          </div>
+          <div style={{ maxHeight: 180, overflowY: "auto", color: "#374151" }}>
+            {importFetcher.data.summary.map((s) => (
+              <div key={s.tab} style={{ padding: "3px 0", borderBottom: "1px solid #f3f4f6" }}>
+                <strong>{s.tab}</strong> — {s.error ? <span style={{ color: "#b45309" }}>{s.error}</span> : `${s.rows} rows imported, ${s.linked} pre-linked, ${s.skipped} blank rows skipped`}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
         {collections.map((c) => (
