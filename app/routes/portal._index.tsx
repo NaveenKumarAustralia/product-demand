@@ -2402,6 +2402,66 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "push_collection_row_to_shopify" || intent === "push_collection_rows_to_shopify") {
+    // Collections → Shopify: turn one row (single intent) or every
+    // unsynced row (batch intent) into a Shopify product. Successful
+    // push writes the returned productId/handle/timestamp back into
+    // the row's reserved __shopify* fields and saves the collection.
+    const id = Number(form.get("collectionId"));
+    if (!id) return jsonResponse({ ok: false, error: "no_collection" });
+    const collection = await prisma.collection.findUnique({ where: { id } }).catch(() => null);
+    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
+
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+
+    const rows = normalizeCollectionRows(collection.rows);
+    const statusOpt = String(form.get("status") ?? "DRAFT").toUpperCase() === "ACTIVE" ? "ACTIVE" : "DRAFT";
+
+    let targetIndexes: number[];
+    if (intent === "push_collection_row_to_shopify") {
+      const idx = Number(form.get("rowIndex"));
+      if (!Number.isFinite(idx) || idx < 0 || idx >= rows.length) return jsonResponse({ ok: false, error: "bad_index" });
+      targetIndexes = [idx];
+    } else {
+      targetIndexes = rows
+        .map((row, i) => ({ row, i }))
+        .filter(({ row }) => !(row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim())
+        .map(({ i }) => i);
+    }
+
+    const results: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }> = [];
+    const now = new Date().toISOString();
+    for (const idx of targetIndexes) {
+      const row = rows[idx];
+      // Idempotency: skip if this row already has a linked product.
+      if ((row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) {
+        results.push({ index: idx, ok: true, productId: row[COL_ROW_SHOPIFY_PRODUCT_ID] });
+        continue;
+      }
+      const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE" });
+      if (res.ok && res.productId) {
+        rows[idx] = {
+          ...row,
+          [COL_ROW_SHOPIFY_PRODUCT_ID]: res.productId,
+          [COL_ROW_SHOPIFY_HANDLE]: res.handle ?? "",
+          [COL_ROW_SHOPIFY_CREATED_AT]: now,
+          [COL_ROW_SHOPIFY_STATUS]: statusOpt,
+        };
+        results.push({ index: idx, ok: true, productId: res.productId });
+      } else {
+        results.push({ index: idx, ok: false, errors: res.errors });
+      }
+    }
+
+    // Save the collection with any successful pushes written back.
+    await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+    return jsonResponse({ ok: true, results });
+  }
+
   if (intent === "update_fabric_cell") {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
@@ -5326,6 +5386,122 @@ async function updateInventoryItemUnitCost(
     return false;
   }
   return Boolean(json?.data?.inventoryItemUpdate?.inventoryItem);
+}
+
+// ─── Collections → Shopify product creation ──────────────────────
+// Reserved row keys used by the Collections push-to-Shopify feature.
+// Prefixed with __ so they can't collide with user-defined column ids.
+const COL_ROW_SHOPIFY_PRODUCT_ID = "__shopifyProductId";
+const COL_ROW_SHOPIFY_HANDLE = "__shopifyHandle";
+const COL_ROW_SHOPIFY_CREATED_AT = "__shopifyCreatedAt";
+const COL_ROW_SHOPIFY_STATUS = "__shopifyStatus";
+
+// Maps collection size column ids to display labels for variant names.
+const COLLECTION_SIZE_COLUMN_LABELS: Array<[string, string]> = [
+  ["xs", "XS"], ["s", "S"], ["m", "M"], ["l", "L"], ["xl", "XL"],
+  ["xxl", "2XL"], ["xxxl", "3XL"],
+  ["sm", "S/M"], ["ml", "M/L"], ["lxl", "L/XL"],
+];
+
+type CollectionPushResult = {
+  ok: boolean;
+  productId?: string;
+  handle?: string;
+  errors?: string[];
+};
+
+// Creates a Shopify product from a collection row. Title + Description
+// + Product Type + Tags + Vendor come from the row's standard columns;
+// variants are built from any size column with qty > 0 (Price uses the
+// row's price; SKU uses row.sku + "-" + size; Inventory item Cost
+// uses row.cost). Status defaults to DRAFT. Returns the created
+// product id + handle so the caller can store it back on the row.
+async function createShopifyProductFromRow(
+  shop: string,
+  accessToken: string,
+  row: Record<string, string>,
+  opts: { status: "DRAFT" | "ACTIVE" } = { status: "DRAFT" },
+): Promise<CollectionPushResult> {
+  // Title is required. Try `title` first, fall back to `name`.
+  const title = (row.title || row.name || "").trim();
+  if (!title) return { ok: false, errors: ["Title (or Name) is required"] };
+
+  // Collect variants from size columns with qty > 0.
+  const variantRows: Array<{ size: string; qty: number }> = [];
+  for (const [colId, label] of COLLECTION_SIZE_COLUMN_LABELS) {
+    const raw = (row[colId] ?? "").trim();
+    const qty = Number(raw) || 0;
+    if (qty > 0) variantRows.push({ size: label, qty });
+  }
+
+  const baseSku = (row.sku ?? "").trim();
+  const priceRaw = (row.price ?? "").trim();
+  const price = priceRaw ? String(Number(priceRaw) || 0) : "0";
+  const compareAtRaw = (row.compareAtPrice ?? "").trim();
+  const compareAt = compareAtRaw ? String(Number(compareAtRaw) || 0) : null;
+  const costRaw = (row.cost ?? "").trim();
+  const cost = costRaw ? String(Number(costRaw) || 0) : null;
+
+  type Variant = {
+    optionValues?: Array<{ optionName: string; name: string }>;
+    price: string;
+    compareAtPrice?: string;
+    sku?: string;
+    inventoryItem?: { cost?: string; tracked?: boolean };
+  };
+  const variants: Variant[] = variantRows.length
+    ? variantRows.map((v) => ({
+        optionValues: [{ optionName: "Size", name: v.size }],
+        price,
+        ...(compareAt ? { compareAtPrice: compareAt } : {}),
+        ...(baseSku ? { sku: `${baseSku}-${v.size.replace("/", "-")}` } : {}),
+        ...(cost ? { inventoryItem: { cost, tracked: true } } : { inventoryItem: { tracked: true } }),
+      }))
+    : [{
+        price,
+        ...(compareAt ? { compareAtPrice: compareAt } : {}),
+        ...(baseSku ? { sku: baseSku } : {}),
+        ...(cost ? { inventoryItem: { cost, tracked: true } } : { inventoryItem: { tracked: true } }),
+      }];
+
+  const productOptions = variantRows.length
+    ? [{ name: "Size", values: variantRows.map((v) => ({ name: v.size })) }]
+    : undefined;
+
+  // Tags: comma-separated string in the row → array.
+  const tagsRaw = (row.tags ?? "").trim();
+  const tags = tagsRaw ? tagsRaw.split(/\s*,\s*/).filter(Boolean) : [];
+
+  const input: Record<string, unknown> = {
+    title,
+    status: opts.status,
+    productOptions,
+    variants,
+  };
+  const description = (row.description ?? "").trim();
+  if (description) input.descriptionHtml = description;
+  const productType = (row.productType ?? "").trim();
+  if (productType) input.productType = productType;
+  const vendor = (row.vendor ?? "").trim();
+  if (vendor) input.vendor = vendor;
+  if (tags.length) input.tags = tags;
+
+  const json = await shopifyGraphql<any>(shop, accessToken, `
+    mutation CreateCollectionRowProduct($input: ProductSetInput!) {
+      productSet(input: $input, synchronous: true) {
+        product { id handle status }
+        userErrors { field message }
+      }
+    }
+  `, { input });
+
+  const userErrors = json?.data?.productSet?.userErrors ?? [];
+  if (userErrors.length) {
+    return { ok: false, errors: userErrors.map((e: { message?: string }) => e.message || "Unknown error") };
+  }
+  const product = json?.data?.productSet?.product;
+  if (!product?.id) return { ok: false, errors: ["Shopify returned no product"] };
+  return { ok: true, productId: String(product.id), handle: String(product.handle ?? "") };
 }
 
 function sizeColumnId(size: string) {
@@ -8379,12 +8555,14 @@ function CollectionSpreadsheetPage({
 }) {
   const fetcher = useFetcher();
   const loadFetcher = useFetcher<{ collection: CollectionFullType | null }>();
+  const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
   const [columns, setColumns] = useState<CollectionColumnDef[]>(DEFAULT_COLLECTION_COLUMNS);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [nameDraft, setNameDraft] = useState(listItem.name);
   const [editingName, setEditingName] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [pushStatus, setPushStatus] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
 
   useEffect(() => {
     loadFetcher.submit(
@@ -8434,6 +8612,71 @@ function CollectionSpreadsheetPage({
       return next;
     });
   };
+
+  // Shopify push (single row or batch). On success, we patch local
+  // state with the returned product IDs so the row visibly flips to
+  // "linked" without waiting for a full reload.
+  const isPushing = pushFetcher.state !== "idle";
+  const pushRow = (idx: number) => {
+    const row = rows[idx];
+    if ((row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
+    const title = (row.title || row.name || "").trim();
+    if (!title) {
+      setPushStatus({ msg: `Row ${idx + 1}: Title is required`, tone: "err" });
+      return;
+    }
+    setPushStatus(null);
+    const fd = new FormData();
+    fd.set("intent", "push_collection_row_to_shopify");
+    fd.set("collectionId", String(listItem.id));
+    fd.set("rowIndex", String(idx));
+    fd.set("status", "DRAFT");
+    pushFetcher.submit(fd, { method: "post" });
+  };
+  const pushAllUnsynced = () => {
+    const unsynced = rows.filter((r) => !(r[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()).length;
+    if (unsynced === 0) {
+      setPushStatus({ msg: "All rows are already linked to Shopify", tone: "ok" });
+      return;
+    }
+    if (!window.confirm(`Create ${unsynced} draft product(s) in Shopify?`)) return;
+    setPushStatus(null);
+    const fd = new FormData();
+    fd.set("intent", "push_collection_rows_to_shopify");
+    fd.set("collectionId", String(listItem.id));
+    fd.set("status", "DRAFT");
+    pushFetcher.submit(fd, { method: "post" });
+  };
+  useEffect(() => {
+    const data = pushFetcher.data;
+    if (!data || !data.ok || !data.results) return;
+    // Patch rows in place with successful pushes; surface failures.
+    const now = new Date().toISOString();
+    setRows((prev) => {
+      const next = [...prev];
+      let okCount = 0;
+      const failures: string[] = [];
+      for (const r of data.results!) {
+        if (r.ok && r.productId && next[r.index]) {
+          next[r.index] = {
+            ...next[r.index],
+            [COL_ROW_SHOPIFY_PRODUCT_ID]: r.productId,
+            [COL_ROW_SHOPIFY_CREATED_AT]: now,
+            [COL_ROW_SHOPIFY_STATUS]: "DRAFT",
+          };
+          okCount++;
+        } else if (!r.ok) {
+          failures.push(`Row ${r.index + 1}: ${(r.errors ?? []).join("; ") || "Unknown error"}`);
+        }
+      }
+      if (failures.length) {
+        setPushStatus({ msg: `${okCount} created. ${failures.length} failed — ${failures[0]}`, tone: "err" });
+      } else {
+        setPushStatus({ msg: `${okCount} product${okCount === 1 ? "" : "s"} created as DRAFT in Shopify`, tone: "ok" });
+      }
+      return next;
+    });
+  }, [pushFetcher.data]);
 
   const saveName = () => {
     setEditingName(false);
@@ -8502,8 +8745,33 @@ function CollectionSpreadsheetPage({
             }}
           />
           <button type="button" onClick={addRow} style={s.primaryActionButton}>+ Add row</button>
+          <button
+            type="button"
+            onClick={pushAllUnsynced}
+            disabled={isPushing || !loaded}
+            style={{
+              background: isPushing ? "#9ca3af" : "#0d9488",
+              color: "#fff", border: "none", borderRadius: 6,
+              padding: "6px 14px", fontSize: 13, fontWeight: 600,
+              cursor: isPushing ? "wait" : "pointer",
+            }}
+            title="Create a Shopify draft product for every row that isn't linked yet"
+          >
+            {isPushing ? "Pushing…" : "Create all in Shopify (DRAFT)"}
+          </button>
         </div>
       </div>
+      {pushStatus && (
+        <div style={{
+          margin: "0 0 0 4px",
+          padding: "8px 12px",
+          borderRadius: 6,
+          fontSize: 13,
+          background: pushStatus.tone === "ok" ? "#ecfdf5" : "#fef2f2",
+          color: pushStatus.tone === "ok" ? "#065f46" : "#991b1b",
+          border: `1px solid ${pushStatus.tone === "ok" ? "#a7f3d0" : "#fecaca"}`,
+        }}>{pushStatus.msg}</div>
+      )}
 
       <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, maxHeight: "none", minHeight: 0 }}>
         {!loaded ? (
@@ -8512,6 +8780,7 @@ function CollectionSpreadsheetPage({
           <table style={s.table}>
             <colgroup>
               <col style={{ width: 48 }} />
+              <col style={{ width: 140 }} />
               {columns.map((col) => (
                 <col key={col.id} style={{ width: col.width ?? 110 }} />
               ))}
@@ -8519,6 +8788,7 @@ function CollectionSpreadsheetPage({
             <thead>
               <tr style={s.headerRow}>
                 <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
+                <th style={{ ...s.th, textAlign: "center" }}>Shopify</th>
                 {columns.map((col) => (
                   <Th
                     key={col.id}
@@ -8532,29 +8802,58 @@ function CollectionSpreadsheetPage({
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, rIdx) => (
-                <tr key={rIdx} style={s.row}>
-                  <RowNumberCell
-                    rowNumber={rIdx + 1}
-                    actions={[
-                      { label: "Delete row", danger: true, onClick: () => removeRow(rIdx) },
-                    ]}
-                  />
-                  {columns.map((col, colIdx) => (
-                    <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
-                      <CollectionCell
-                        value={row[col.id] ?? ""}
-                        type={col.type ?? "text"}
-                        columnId={col.id}
-                        onCommit={(v) => updateCell(rIdx, col.id, v)}
-                      />
+              {rows.map((row, rIdx) => {
+                const linkedProductId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+                const linked = Boolean(linkedProductId);
+                const shopifyAdminUrl = linked
+                  ? `https://${(typeof window !== "undefined" && window.location.hostname) || "admin"}.shopify.com` // not real — see anchor below
+                  : "";
+                void shopifyAdminUrl;
+                return (
+                  <tr key={rIdx} style={s.row}>
+                    <RowNumberCell
+                      rowNumber={rIdx + 1}
+                      actions={[
+                        { label: "Delete row", danger: true, onClick: () => removeRow(rIdx) },
+                      ]}
+                    />
+                    <Td rowIndex={rIdx} colIndex={-1} center>
+                      {linked ? (
+                        <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} />
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => pushRow(rIdx)}
+                          disabled={isPushing}
+                          style={{
+                            background: "#0d9488", color: "#fff", border: "none",
+                            borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600,
+                            cursor: isPushing ? "wait" : "pointer", width: "100%",
+                          }}
+                          title="Create a Shopify draft product from this row"
+                        >Create in Shopify</button>
+                      )}
                     </Td>
-                  ))}
-                </tr>
-              ))}
+                    {columns.map((col, colIdx) => (
+                      <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
+                        {linked ? (
+                          <span style={{ fontSize: 12, color: "#374151", padding: "2px 4px" }}>{row[col.id] ?? ""}</span>
+                        ) : (
+                          <CollectionCell
+                            value={row[col.id] ?? ""}
+                            type={col.type ?? "text"}
+                            columnId={col.id}
+                            onCommit={(v) => updateCell(rIdx, col.id, v)}
+                          />
+                        )}
+                      </Td>
+                    ))}
+                  </tr>
+                );
+              })}
               {rows.length === 0 && (
                 <tr style={s.row}>
-                  <td colSpan={columns.length + 1} style={{ ...s.td, padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                  <td colSpan={columns.length + 2} style={{ ...s.td, padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
                     No rows yet. Click + Add row above to add one.
                   </td>
                 </tr>
@@ -8564,6 +8863,26 @@ function CollectionSpreadsheetPage({
         )}
       </div>
     </div>
+  );
+}
+
+function CollectionShopifyLinkedCell({ productId, status }: { productId: string; status: string }) {
+  // Build the Shopify admin link from the productId GID. Falls back to
+  // a plain ✓ if we can't extract a numeric id.
+  const numeric = productId.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
+  const href = numeric ? `https://admin.shopify.com/store/products/${numeric}` : "#";
+  const dot = status === "ACTIVE" ? "#10b981" : "#9ca3af";
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "#0f766e", fontSize: 12, fontWeight: 600, textDecoration: "none" }}
+      title={`${status} — open in Shopify admin`}
+    >
+      <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: dot }} />
+      ✓ Linked
+    </a>
   );
 }
 
