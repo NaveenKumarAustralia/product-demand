@@ -692,11 +692,36 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     sortBy,
     page,
     warehouseSettings: normalizeWarehouseSettings(settingsMap.get(WAREHOUSE_SETTINGS_KEY)),
-    warehouseMetrics: page === "warehouse"
-      ? await prisma.$queryRawUnsafe<Array<{ date: Date; staffCount: number; staffHours: number; ordersFulfilled: number; unitsFulfilled: number; deputyFetchedAt: Date | null; shopifyFetchedAt: Date | null }>>(
+    warehouseMetrics: page === "warehouse" ? await (async () => {
+      // Defensive: make sure the table exists before we read from it.
+      // The same CREATE IF NOT EXISTS lives in the packing/restock
+      // hydration block, but that block doesn't run for the warehouse
+      // page — so a fresh deploy without the migration would crash
+      // here. Wrap both the ensure-table and the read in try so the
+      // page degrades to "no data" instead of a 500.
+      try {
+        await prisma.$executeRawUnsafe(`
+          CREATE TABLE IF NOT EXISTS "WarehouseDailyMetric" (
+            "date" TIMESTAMP(3) NOT NULL,
+            "staffCount" INTEGER NOT NULL DEFAULT 0,
+            "staffHours" DOUBLE PRECISION NOT NULL DEFAULT 0,
+            "ordersFulfilled" INTEGER NOT NULL DEFAULT 0,
+            "unitsFulfilled" INTEGER NOT NULL DEFAULT 0,
+            "deputyFetchedAt" TIMESTAMP(3),
+            "shopifyFetchedAt" TIMESTAMP(3),
+            "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            "updatedAt" TIMESTAMP(3) NOT NULL,
+            CONSTRAINT "WarehouseDailyMetric_pkey" PRIMARY KEY ("date")
+          )
+        `);
+        return await prisma.$queryRawUnsafe<Array<{ date: Date; staffCount: number; staffHours: number; ordersFulfilled: number; unitsFulfilled: number; deputyFetchedAt: Date | null; shopifyFetchedAt: Date | null }>>(
           `SELECT "date", "staffCount", "staffHours", "ordersFulfilled", "unitsFulfilled", "deputyFetchedAt", "shopifyFetchedAt" FROM "WarehouseDailyMetric" ORDER BY "date" DESC LIMIT 180`,
-        )
-      : [],
+        );
+      } catch (e) {
+        console.warn("[warehouse] metrics fetch failed:", e);
+        return [];
+      }
+    })() : [],
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
     packingColumnWidths: normalizeColumnWidths(packingColumnWidthsSetting?.value),
     tableHeaderLabels: normalizeTableHeaderLabels(headerLabelsSetting?.value),
