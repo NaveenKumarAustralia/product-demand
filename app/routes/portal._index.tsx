@@ -37,6 +37,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     FABRIC_CUSTOM_SHEETS_KEY,
     FABRIC_MANUAL_SHEETS_KEY,
     RESTOCK_SETTINGS_KEY,
+    COLLECTION_SETTINGS_KEY,
     UNIVERSAL_SETTINGS_KEY,
     FABRIC_SETTINGS_KEY,
     PRODUCT_INFO_KEY,
@@ -109,6 +110,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const fabricCustomSheetsSetting = wrap(FABRIC_CUSTOM_SHEETS_KEY);
   const fabricManualSheetsSetting = wrap(FABRIC_MANUAL_SHEETS_KEY);
   const restockSettingsSetting = wrap(RESTOCK_SETTINGS_KEY);
+  const collectionSettings: CollectionSettings = normalizeCollectionSettings(settingsMap.get(COLLECTION_SETTINGS_KEY));
   const universalSettingsSetting = wrap(UNIVERSAL_SETTINGS_KEY);
   const fabricSettingsSetting = wrap(FABRIC_SETTINGS_KEY);
   const productInfoSetting = wrap(PRODUCT_INFO_KEY);
@@ -671,6 +673,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     restockTotalsFiltered,
     inrPerAudCachedRate: (page === "restock" || page === "packing") ? await getCachedInrPerAud() : null,
     fxRupeeBuffer: FX_RUPEE_BUFFER,
+    collectionSettings,
     sortBy,
     page,
     columnWidths: normalizeColumnWidths(columnWidthsSetting?.value),
@@ -1874,6 +1877,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "update_collection_settings") {
+    let settings: CollectionSettings;
+    try {
+      settings = normalizeCollectionSettings(JSON.parse(String(form.get("value") ?? "{}")));
+    } catch { return null; }
+    await prisma.portalSetting.upsert({
+      where: { key: COLLECTION_SETTINGS_KEY },
+      create: { key: COLLECTION_SETTINGS_KEY, value: settings as unknown as object },
+      update: { value: settings as unknown as object },
+    });
+    return null;
+  }
+
   if (intent === "update_universal_settings") {
     let settings: UniversalSettings;
     try {
@@ -2400,6 +2416,61 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     await prisma.collection.update({ where: { id }, data });
     return null;
+  }
+
+  if (intent === "duplicate_from_shopify_product") {
+    // For the Collections "Duplicate From" picker: given a Shopify
+    // product GID, return the fields we want to copy into a row:
+    // descriptionHtml, productType, tags, hsCode, countryCodeOfOrigin,
+    // compareAtPrice. Colour is intentionally NOT copied.
+    const productId = String(form.get("productId") ?? "").trim();
+    if (!productId) return jsonResponse({ ok: false, error: "no_product" });
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+
+    const json = await shopifyGraphql<any>(session.shop, session.accessToken, `
+      query DuplicateFromProduct($id: ID!) {
+        product(id: $id) {
+          id
+          title
+          descriptionHtml
+          productType
+          tags
+          vendor
+          seo { title description }
+          variants(first: 1) {
+            nodes {
+              compareAtPrice
+              inventoryItem {
+                harmonizedSystemCode
+                countryCodeOfOrigin
+              }
+            }
+          }
+        }
+      }
+    `, { id: productId });
+
+    const product = json?.data?.product;
+    if (!product) return jsonResponse({ ok: false, error: "not_found" });
+    const v0 = product.variants?.nodes?.[0] ?? {};
+    return jsonResponse({
+      ok: true,
+      fields: {
+        description: String(product.descriptionHtml ?? ""),
+        productType: String(product.productType ?? ""),
+        tags: Array.isArray(product.tags) ? product.tags.join(", ") : "",
+        vendor: String(product.vendor ?? ""),
+        seoTitle: String(product.seo?.title ?? ""),
+        seoDescription: String(product.seo?.description ?? ""),
+        compareAtPrice: v0.compareAtPrice ? String(v0.compareAtPrice) : "",
+        hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
+        countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
+      },
+    });
   }
 
   if (intent === "push_collection_row_to_shopify" || intent === "push_collection_rows_to_shopify") {
@@ -3035,6 +3106,64 @@ const TABLE_CUSTOM_COLUMNS_KEY = "production-portal-table-custom-columns-v1";
 const TABLE_CUSTOM_CELLS_KEY = "production-portal-table-custom-cells-v1";
 const TABLE_ROW_HEIGHTS_KEY = "production-portal-table-row-heights-v1";
 const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
+const COLLECTION_SETTINGS_KEY = "collections-settings-v1";
+// Chip catalogs for the Collections Status + Sample columns. Reuses
+// the same shape as RestockOption so the dropdown UI can be reused.
+type CollectionChipOption = { value: string; label: string; bg: string; color: string };
+type CollectionSettings = {
+  statusOptions: CollectionChipOption[];
+  sampleOptions: CollectionChipOption[];
+  // The Sample chip whose selection should auto-fill the Sample
+  // RECEIVED date column with today's date. Stored as the chip value.
+  sampleReceivedChipValue: string;
+};
+const DEFAULT_COLLECTION_STATUS_OPTIONS: CollectionChipOption[] = [
+  { value: "on_order", label: "On Order", bg: "#fef3c7", color: "#92400e" },
+  { value: "on_production", label: "On Production", bg: "#dbeafe", color: "#1e3a8a" },
+  { value: "in_shipment", label: "In Shipment", bg: "#fde68a", color: "#78350f" },
+  { value: "arrived", label: "Arrived", bg: "#bbf7d0", color: "#065f46" },
+];
+const DEFAULT_COLLECTION_SAMPLE_OPTIONS: CollectionChipOption[] = [
+  { value: "sample_needed", label: "Sample Needed", bg: "#fee2e2", color: "#991b1b" },
+  { value: "photos_done", label: "Photos Done", bg: "#fde68a", color: "#78350f" },
+  { value: "sample_sent", label: "Sample Sent", bg: "#dbeafe", color: "#1e3a8a" },
+  { value: "sent_bijour", label: "Sent Bijour", bg: "#e9d5ff", color: "#5b21b6" },
+  { value: "sample_received", label: "Sample Received", bg: "#bbf7d0", color: "#065f46" },
+];
+const DEFAULT_COLLECTION_SETTINGS: CollectionSettings = {
+  statusOptions: DEFAULT_COLLECTION_STATUS_OPTIONS,
+  sampleOptions: DEFAULT_COLLECTION_SAMPLE_OPTIONS,
+  sampleReceivedChipValue: "sample_received",
+};
+function normalizeCollectionChipOptions(value: unknown, fallback: CollectionChipOption[]): CollectionChipOption[] {
+  if (!Array.isArray(value)) return fallback;
+  const seen = new Set<string>();
+  const out: CollectionChipOption[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const r = item as Record<string, unknown>;
+    const val = String(r.value ?? "").trim();
+    if (!val || seen.has(val)) continue;
+    seen.add(val);
+    out.push({
+      value: val,
+      label: typeof r.label === "string" ? r.label : val,
+      bg: typeof r.bg === "string" ? r.bg : "#f3f4f6",
+      color: typeof r.color === "string" ? r.color : "#374151",
+    });
+  }
+  return out.length ? out : fallback;
+}
+function normalizeCollectionSettings(value: unknown): CollectionSettings {
+  const v = (value && typeof value === "object" && !Array.isArray(value)) ? value as Record<string, unknown> : {};
+  return {
+    statusOptions: normalizeCollectionChipOptions(v.statusOptions, DEFAULT_COLLECTION_STATUS_OPTIONS),
+    sampleOptions: normalizeCollectionChipOptions(v.sampleOptions, DEFAULT_COLLECTION_SAMPLE_OPTIONS),
+    sampleReceivedChipValue: typeof v.sampleReceivedChipValue === "string" && v.sampleReceivedChipValue.trim()
+      ? v.sampleReceivedChipValue
+      : DEFAULT_COLLECTION_SETTINGS.sampleReceivedChipValue,
+  };
+}
 const UNIVERSAL_SETTINGS_KEY = "production-portal-universal-settings-v1";
 const PORTAL_NAV_ORDER_KEY = "production-portal-nav-order-v1";
 const FABRIC_SETTINGS_KEY = "production-portal-fabric-settings-v1";
@@ -5414,6 +5543,28 @@ function sumCollectionRowQuantity(row: Record<string, string>): number {
   return n;
 }
 
+// Longest-prefix-match a product name against the styles in product info.
+// Returns the matched style name (e.g. "Corduroy Jacket" from "Corduroy
+// Jacket Black") or empty string when nothing matches. Used by the
+// Collections "Duplicate From" picker to search Shopify by exact style.
+function extractStyleFromName(name: string, productInfo: ProductInfo): string {
+  const haystack = (name ?? "").trim().toLowerCase();
+  if (!haystack) return "";
+  const candidates: string[] = [];
+  for (const cat of productInfo.categories ?? []) {
+    for (const style of cat.styles ?? []) {
+      const sName = (style.name ?? "").trim();
+      if (sName) candidates.push(sName);
+    }
+  }
+  candidates.sort((a, b) => b.length - a.length);
+  for (const s of candidates) {
+    const lower = s.toLowerCase();
+    if (haystack === lower || haystack.startsWith(lower + " ")) return s;
+  }
+  return "";
+}
+
 // Derives the Shopify admin URL for a linked row, or "" if not linked.
 function shopifyAdminLinkForRow(row: Record<string, string>): string {
   const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
@@ -5674,6 +5825,7 @@ export default function PortalDashboard() {
     customCells,
     rowHeights,
     restockSettings,
+    collectionSettings,
     universalSettings,
     fabricSettings,
     productInfo,
@@ -6131,6 +6283,8 @@ export default function PortalDashboard() {
         ) : page === "collections" ? (
           <CollectionsPanel
             collections={collections}
+            collectionSettings={collectionSettings}
+            productInfo={productInfo}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -8392,7 +8546,7 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
   });
 }
 
-function CollectionsPanel({ collections: initialCollections }: { collections: CollectionListItem[] }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo }) {
   const fetcher = useFetcher();
   const [searchParams, setSearchParams] = useSearchParams();
   const collectionIdParam = searchParams.get("collectionId");
@@ -8457,6 +8611,8 @@ function CollectionsPanel({ collections: initialCollections }: { collections: Co
     return (
       <CollectionSpreadsheetPage
         listItem={selectedCollection}
+        collectionSettings={collectionSettings}
+        productInfo={productInfo}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
       />
@@ -8634,10 +8790,14 @@ function CollectionCard({
 
 function CollectionSpreadsheetPage({
   listItem,
+  collectionSettings,
+  productInfo,
   onBack,
   onLocalNameChange,
 }: {
   listItem: CollectionListItem;
+  collectionSettings: CollectionSettings;
+  productInfo: ProductInfo;
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
 }) {
@@ -8669,6 +8829,27 @@ function CollectionSpreadsheetPage({
     }
   }, [loadFetcher.data, listItem.id]);
 
+  // Local copy of chip option lists so edits show immediately. Seeded
+  // from collectionSettings; saves go via update_collection_settings.
+  const [localStatusOptions, setLocalStatusOptions] = useState(collectionSettings.statusOptions);
+  const [localSampleOptions, setLocalSampleOptions] = useState(collectionSettings.sampleOptions);
+  useEffect(() => { setLocalStatusOptions(collectionSettings.statusOptions); }, [collectionSettings.statusOptions]);
+  useEffect(() => { setLocalSampleOptions(collectionSettings.sampleOptions); }, [collectionSettings.sampleOptions]);
+  const settingsFetcher = useFetcher();
+  const saveChipOptions = (which: "statusOptions" | "sampleOptions", next: CollectionChipOption[]) => {
+    if (which === "statusOptions") setLocalStatusOptions(next);
+    else setLocalSampleOptions(next);
+    const payload: CollectionSettings = {
+      statusOptions: which === "statusOptions" ? next : localStatusOptions,
+      sampleOptions: which === "sampleOptions" ? next : localSampleOptions,
+      sampleReceivedChipValue: collectionSettings.sampleReceivedChipValue,
+    };
+    settingsFetcher.submit(
+      { intent: "update_collection_settings", value: JSON.stringify(payload) },
+      { method: "post" },
+    );
+  };
+
   const persistRows = (next: Record<string, string>[]) => {
     fetcher.submit(
       { intent: "update_collection", collectionId: String(listItem.id), rows: JSON.stringify(next) },
@@ -8678,7 +8859,16 @@ function CollectionSpreadsheetPage({
 
   const updateCell = (rowIdx: number, colId: string, value: string) => {
     setRows((prev) => {
-      const next = prev.map((r, i) => i === rowIdx ? { ...r, [colId]: value } : r);
+      const next = prev.map((r, i) => {
+        if (i !== rowIdx) return r;
+        const patched: Record<string, string> = { ...r, [colId]: value };
+        // Auto-fill Sample RECEIVED date when the Sample chip flips to
+        // the configured "received" value AND the date column is empty.
+        if (colId === "sample" && value === collectionSettings.sampleReceivedChipValue && !(patched.sampleReceived ?? "").trim()) {
+          patched.sampleReceived = new Date().toISOString().slice(0, 10);
+        }
+        return patched;
+      });
       persistRows(next);
       return next;
     });
@@ -8941,6 +9131,47 @@ function CollectionSpreadsheetPage({
                         );
                       }
                       const value = computed !== null ? computed : (row[col.id] ?? "");
+                      // Chip columns get the inline chip dropdown.
+                      if (col.type === "chip" && (col.id === "status" || col.id === "sample")) {
+                        const opts = col.id === "status" ? localStatusOptions : localSampleOptions;
+                        return (
+                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center>
+                            <CollectionChipDropdown
+                              value={value}
+                              options={opts}
+                              emptyLabel="—"
+                              onChange={(v) => updateCell(rIdx, col.id, v)}
+                              onOptionsChange={(next) => saveChipOptions(col.id === "status" ? "statusOptions" : "sampleOptions", next)}
+                            />
+                          </Td>
+                        );
+                      }
+                      // Duplicate From picker: opens a Shopify product
+                      // search, then patches the row with the picked
+                      // product's fields (description, tags, type, HS,
+                      // COO, compare-at-price, SEO).
+                      if (col.id === "duplicateFrom" && !linked) {
+                        const style = extractStyleFromName(row.name ?? "", productInfo);
+                        return (
+                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
+                            <CollectionDuplicateFromCell
+                              value={value}
+                              currentName={row.name ?? ""}
+                              styleHint={style}
+                              onPick={(label, fields) => {
+                                setRows((prev) => {
+                                  const next = prev.map((r, i) => {
+                                    if (i !== rIdx) return r;
+                                    return { ...r, duplicateFrom: label, ...fields };
+                                  });
+                                  persistRows(next);
+                                  return next;
+                                });
+                              }}
+                            />
+                          </Td>
+                        );
+                      }
                       // Linked rows lock all editable cells. Tickbox /
                       // readonly / release still render through
                       // CollectionCell so they look consistent.
@@ -8978,6 +9209,168 @@ function CollectionSpreadsheetPage({
   );
 }
 
+// Chip dropdown for Collections Status + Sample columns. Reuses the
+// same visual style as the restock chip dropdown but stripped down —
+// just value/onChange + the options list. Settings can be edited
+// inline (click a chip to rename / recolour, "+ Add" for a new one).
+function CollectionChipDropdown({
+  value,
+  options,
+  emptyLabel,
+  onChange,
+  onOptionsChange,
+}: {
+  value: string;
+  options: CollectionChipOption[];
+  emptyLabel?: string;
+  onChange: (next: string) => void;
+  onOptionsChange: (next: CollectionChipOption[]) => void;
+}) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const [editing, setEditing] = useState<CollectionChipOption | null>(null);
+  const [isAdding, setIsAdding] = useState(false);
+  const [editLabel, setEditLabel] = useState("");
+  const [editBg, setEditBg] = useState("#f3f4f6");
+  const [editColor, setEditColor] = useState("#374151");
+  const option = options.find((o) => o.value === value) ?? null;
+
+  useEffect(() => {
+    if (!open) return;
+    if (buttonRef.current) setRect(buttonRef.current.getBoundingClientRect());
+    const close = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (buttonRef.current?.contains(target)) return;
+      const menu = document.querySelector(`[data-collection-chip-menu="1"]`);
+      if (menu?.contains(target)) return;
+      setOpen(false);
+      setEditing(null);
+      setIsAdding(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const startEdit = (opt: CollectionChipOption | null) => {
+    setEditing(opt);
+    setIsAdding(opt === null);
+    setEditLabel(opt?.label ?? "");
+    setEditBg(opt?.bg ?? "#f3f4f6");
+    setEditColor(opt?.color ?? "#374151");
+  };
+
+  const saveEdit = () => {
+    const label = editLabel.trim();
+    if (!label) { setEditing(null); setIsAdding(false); return; }
+    let next: CollectionChipOption[];
+    if (isAdding) {
+      const base = label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || `chip_${Date.now()}`;
+      let unique = base;
+      let n = 2;
+      while (options.some((o) => o.value === unique)) { unique = `${base}_${n++}`; }
+      next = [...options, { value: unique, label, bg: editBg, color: editColor }];
+    } else if (editing) {
+      next = options.map((o) => o.value === editing.value ? { ...o, label, bg: editBg, color: editColor } : o);
+    } else {
+      next = options;
+    }
+    onOptionsChange(next);
+    setEditing(null);
+    setIsAdding(false);
+  };
+
+  const removeOption = (opt: CollectionChipOption) => {
+    if (!window.confirm(`Delete chip "${opt.label}"?`)) return;
+    onOptionsChange(options.filter((o) => o.value !== opt.value));
+    if (value === opt.value) onChange("");
+  };
+
+  const chipStyle: React.CSSProperties = option
+    ? { background: option.bg, color: option.color }
+    : { background: "#f3f4f6", color: "#6b7280" };
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          ...chipStyle,
+          border: "none", borderRadius: 6, padding: "5px 10px",
+          fontSize: 12, fontWeight: 600, cursor: "pointer",
+          minWidth: 96, maxWidth: "100%", textAlign: "center",
+        }}
+      >
+        {option ? option.label : (emptyLabel ?? "—")}
+      </button>
+      {open && rect && typeof document !== "undefined" && createPortal(
+        <div
+          data-collection-chip-menu="1"
+          style={{
+            position: "fixed",
+            top: rect.bottom + 4, left: rect.left, zIndex: 99999,
+            background: "#fff", border: "1px solid #e5e7eb",
+            borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+            minWidth: Math.max(rect.width, 200), maxHeight: 360, overflowY: "auto",
+          }}
+        >
+          {options.map((opt) => {
+            const isEditing = editing?.value === opt.value;
+            if (isEditing) {
+              return (
+                <div key={opt.value} style={{ padding: 10, borderBottom: "1px solid #f3f4f6" }}>
+                  <input autoFocus value={editLabel} onChange={(e) => setEditLabel(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditing(null); }}
+                    style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 4, padding: "4px 6px", fontSize: 12, marginBottom: 6 }} />
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, marginBottom: 4 }}>
+                    <span>BG</span><input type="color" value={editBg} onChange={(e) => setEditBg(e.target.value)} />
+                    <span>Text</span><input type="color" value={editColor} onChange={(e) => setEditColor(e.target.value)} />
+                  </div>
+                  <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                    <button type="button" onClick={() => removeOption(opt)} style={{ background: "transparent", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 4, padding: "3px 8px", fontSize: 11, cursor: "pointer" }}>Delete</button>
+                    <button type="button" onClick={() => setEditing(null)} style={{ background: "#f3f4f6", border: "none", borderRadius: 4, padding: "3px 8px", fontSize: 11, cursor: "pointer" }}>Cancel</button>
+                    <button type="button" onClick={saveEdit} style={{ background: "#111827", color: "#fff", border: "none", borderRadius: 4, padding: "3px 8px", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Save</button>
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <div key={opt.value} style={{ display: "flex", alignItems: "center", padding: "6px 10px", gap: 6, borderBottom: "1px solid #f9fafb" }}>
+                <button type="button" onClick={() => { onChange(opt.value); setOpen(false); }} style={{ background: opt.bg, color: opt.color, border: "none", borderRadius: 5, padding: "3px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer", flex: 1, textAlign: "left" }}>
+                  {opt.label}
+                </button>
+                <button type="button" onClick={() => startEdit(opt)} title="Edit chip" style={{ background: "transparent", border: "1px solid #e5e7eb", borderRadius: 4, padding: "2px 6px", fontSize: 10, color: "#6b7280", cursor: "pointer" }}>Edit</button>
+              </div>
+            );
+          })}
+          {isAdding ? (
+            <div style={{ padding: 10, borderTop: "1px solid #e5e7eb" }}>
+              <input autoFocus value={editLabel} onChange={(e) => setEditLabel(e.target.value)} placeholder="New chip label"
+                onKeyDown={(e) => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setIsAdding(false); }}
+                style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 4, padding: "4px 6px", fontSize: 12, marginBottom: 6 }} />
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, marginBottom: 4 }}>
+                <span>BG</span><input type="color" value={editBg} onChange={(e) => setEditBg(e.target.value)} />
+                <span>Text</span><input type="color" value={editColor} onChange={(e) => setEditColor(e.target.value)} />
+              </div>
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                <button type="button" onClick={() => setIsAdding(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 4, padding: "3px 8px", fontSize: 11, cursor: "pointer" }}>Cancel</button>
+                <button type="button" onClick={saveEdit} style={{ background: "#111827", color: "#fff", border: "none", borderRadius: 4, padding: "3px 8px", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Add</button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" onClick={() => startEdit(null)} style={{ width: "100%", padding: "8px 10px", background: "transparent", border: "none", borderTop: "1px solid #e5e7eb", textAlign: "left", fontSize: 12, color: "#0d9488", fontWeight: 600, cursor: "pointer" }}>
+              + Add chip
+            </button>
+          )}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 function CollectionShopifyLinkedCell({ productId, status }: { productId: string; status: string }) {
   // Build the Shopify admin link from the productId GID. Falls back to
   // a plain ✓ if we can't extract a numeric id.
@@ -9009,8 +9402,12 @@ function CollectionCell({
   columnId: string;
   onCommit: (next: string) => void;
 }) {
-  const isImageColumn = columnId === "modelPicture" || columnId === "fabric" || columnId === "maniPicsTaken";
-  if (isImageColumn) {
+  // modelPicture is the multi-image product gallery (numbered, sortable,
+  // uploaded to Shopify). Fabric + mani-pic columns are single images.
+  if (columnId === "modelPicture") {
+    return <CollectionMultiImageCell value={value} onCommit={onCommit} />;
+  }
+  if (columnId === "fabric" || columnId === "maniPicsTaken") {
     return <CollectionImageCell value={value} onCommit={onCommit} />;
   }
   // Release column: big bold maroon text. Click to edit.
@@ -9091,6 +9488,252 @@ function CollectionReleaseCell({ value, onCommit }: { value: string; onCommit: (
     >
       {value || <span style={{ color: "#d6d3d1", fontWeight: 400, fontSize: 12 }}>—</span>}
     </div>
+  );
+}
+
+// Multi-image cell for Model Picture: stores a JSON array of data URLs
+// (or a single legacy string). Renders each as a numbered thumbnail —
+// the number IS the Shopify product image position. Drag a thumb to
+// reorder, × to remove, + to add more.
+function parseMultiImageValue(value: string): string[] {
+  const v = value?.trim() ?? "";
+  if (!v) return [];
+  if (v.startsWith("[")) {
+    try {
+      const arr = JSON.parse(v);
+      if (Array.isArray(arr)) return arr.filter((x) => typeof x === "string" && x);
+    } catch { /* fall through to single */ }
+  }
+  // Legacy: single data URL stored as a string.
+  return [v];
+}
+function serializeMultiImageValue(images: string[]): string {
+  if (images.length === 0) return "";
+  if (images.length === 1) return JSON.stringify(images);
+  return JSON.stringify(images);
+}
+function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit: (next: string) => void }) {
+  const images = useMemo(() => parseMultiImageValue(value), [value]);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const commit = (next: string[]) => onCommit(serializeMultiImageValue(next));
+
+  const addFiles = async (files: FileList | File[] | null | undefined) => {
+    if (!files) return;
+    const arr = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    if (!arr.length) return;
+    setBusy(true);
+    try {
+      const dataUrls = await Promise.all(arr.map((f) => compressImageToDataUrl(f)));
+      commit([...images, ...dataUrls]);
+    } finally { setBusy(false); }
+  };
+
+  const removeAt = (idx: number) => {
+    if (!window.confirm(`Remove image ${idx + 1}?`)) return;
+    commit(images.filter((_, i) => i !== idx));
+  };
+
+  const onDragStart = (idx: number) => (e: React.DragEvent<HTMLDivElement>) => {
+    setDragIdx(idx);
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onDragOver = (e: React.DragEvent<HTMLDivElement>) => { e.preventDefault(); };
+  const onDropAt = (idx: number) => (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if (dragIdx === null || dragIdx === idx) { setDragIdx(null); return; }
+    const next = [...images];
+    const [moved] = next.splice(dragIdx, 1);
+    next.splice(idx, 0, moved);
+    setDragIdx(null);
+    commit(next);
+  };
+
+  return (
+    <div
+      style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: 4, alignItems: "flex-start", minHeight: 56 }}
+      onPaste={(e) => {
+        const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
+        if (files.length) void addFiles(files);
+      }}
+    >
+      {images.map((src, idx) => (
+        <div
+          key={`${idx}-${src.slice(0, 20)}`}
+          draggable
+          onDragStart={onDragStart(idx)}
+          onDragOver={onDragOver}
+          onDrop={onDropAt(idx)}
+          style={{
+            position: "relative", width: 48, height: 60,
+            border: dragIdx === idx ? "2px solid #0d9488" : "1px solid #d1d5db",
+            borderRadius: 4, overflow: "hidden", cursor: "grab", background: "#f9fafb",
+          }}
+          title={`Position ${idx + 1} — drag to reorder`}
+        >
+          <img src={src} alt={`pos ${idx + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <span style={{
+            position: "absolute", top: 1, left: 1,
+            background: "rgba(17,24,39,0.85)", color: "#fff",
+            fontSize: 10, fontWeight: 700, padding: "1px 4px", borderRadius: 3,
+          }}>{idx + 1}</span>
+          <button type="button" onClick={(e) => { e.stopPropagation(); removeAt(idx); }}
+            style={{
+              position: "absolute", top: 1, right: 1,
+              background: "rgba(220,38,38,0.9)", color: "#fff", border: "none",
+              borderRadius: 3, width: 14, height: 14, lineHeight: "12px",
+              fontSize: 10, fontWeight: 700, cursor: "pointer", padding: 0,
+            }}
+            title="Remove image"
+          >×</button>
+        </div>
+      ))}
+      <button type="button" onClick={() => fileRef.current?.click()} disabled={busy}
+        style={{
+          width: 48, height: 60, borderRadius: 4, border: "1px dashed #d1d5db",
+          background: busy ? "#f3f4f6" : "transparent",
+          color: "#6b7280", fontSize: 18, cursor: busy ? "wait" : "pointer",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}
+        title="Add image(s)"
+      >{busy ? "…" : "+"}</button>
+      <input
+        ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+        onChange={(e) => { void addFiles(e.target.files); e.target.value = ""; }}
+      />
+    </div>
+  );
+}
+
+// Duplicate From: opens a modal picker, searches recent Shopify
+// products by STYLE (the style name from product info matched against
+// the row's name — e.g. "Corduroy Jacket Black" matches style
+// "Corduroy Jacket"). On selection calls onPick(label, fields). Caller
+// patches the row with the returned fields so Description / Tags /
+// Type / HS Code / Country / Compare-at-price / SEO are auto-populated.
+type DuplicateProductSummary = { id: string; title: string; productType: string; thumbnail: string };
+function CollectionDuplicateFromCell({
+  value,
+  currentName,
+  styleHint,
+  onPick,
+}: {
+  value: string;
+  currentName: string;
+  styleHint: string;
+  onPick: (label: string, fields: Record<string, string>) => void;
+}) {
+  const searchFetcher = useFetcher<{ products?: DuplicateProductSummary[]; error?: string }>();
+  const pickFetcher = useFetcher<{ ok?: boolean; fields?: Record<string, string>; error?: string }>();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState(styleHint || currentName.trim().split(/\s+/).slice(0, -1).join(" "));
+  const [pickedLabelPending, setPickedLabelPending] = useState<string | null>(null);
+
+  const runSearch = (q: string) => {
+    const params = new URLSearchParams();
+    if (q.trim()) params.set("q", q.trim());
+    searchFetcher.load(`/api/collection-duplicate-search?${params.toString()}`);
+  };
+  useEffect(() => {
+    if (!open) return;
+    // Default the search to the matched style (or, if no style match,
+    // the row's name minus its last word — the colour usually).
+    const initial = styleHint || currentName.trim().split(/\s+/).slice(0, -1).join(" ");
+    setQuery(initial);
+    runSearch(initial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, styleHint, currentName]);
+
+  const pick = (p: DuplicateProductSummary) => {
+    setPickedLabelPending(p.title);
+    const fd = new FormData();
+    fd.set("intent", "duplicate_from_shopify_product");
+    fd.set("productId", p.id);
+    pickFetcher.submit(fd, { method: "post" });
+  };
+  useEffect(() => {
+    if (pickFetcher.data?.ok && pickFetcher.data.fields && pickedLabelPending) {
+      onPick(pickedLabelPending, pickFetcher.data.fields);
+      setPickedLabelPending(null);
+      setOpen(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickFetcher.data]);
+
+  const isSearching = searchFetcher.state !== "idle";
+  const isFetching = pickFetcher.state !== "idle";
+  const products = searchFetcher.data?.products ?? [];
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        style={{
+          width: "100%", textAlign: "left",
+          background: "transparent", border: "1px dashed #d1d5db",
+          borderRadius: 5, padding: "5px 8px", fontSize: 12,
+          color: value ? "#111827" : "#6b7280",
+          cursor: "pointer",
+        }}
+        title="Pick a Shopify product to duplicate from"
+      >
+        {value || "+ Duplicate from…"}
+      </button>
+      {open && typeof document !== "undefined" && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setOpen(false)}>
+          <div style={{ background: "#fff", borderRadius: 10, width: 540, maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb" }}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Duplicate from Shopify product</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 8 }}>
+                {styleHint
+                  ? <>Searching for products in style: <strong>{styleHint}</strong> — clear the box to browse recent products.</>
+                  : "No matching style from this row's Name. Type to search, or clear to browse recent products."}
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => { setQuery(e.target.value); runSearch(e.target.value); }}
+                placeholder="Search by title…"
+                style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 10px", fontSize: 13, boxSizing: "border-box" }}
+              />
+            </div>
+            <div style={{ overflowY: "auto", flex: 1 }}>
+              {isSearching && <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>Loading…</div>}
+              {!isSearching && products.length === 0 && (
+                <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>No products found.</div>
+              )}
+              {products.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => pick(p)}
+                  disabled={isFetching}
+                  style={{
+                    width: "100%", display: "flex", alignItems: "center", gap: 10,
+                    padding: "8px 16px", background: "transparent", border: "none",
+                    borderBottom: "1px solid #f3f4f6", cursor: isFetching ? "wait" : "pointer", textAlign: "left",
+                  }}
+                >
+                  {p.thumbnail ? <img src={p.thumbnail} alt="" style={{ width: 40, height: 40, objectFit: "cover", borderRadius: 4, background: "#f3f4f6" }} /> : <div style={{ width: 40, height: 40, borderRadius: 4, background: "#f3f4f6" }} />}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#111827", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.title}</div>
+                    <div style={{ fontSize: 11, color: "#6b7280" }}>{p.productType || "—"}</div>
+                  </div>
+                  {pickFetcher.state !== "idle" && pickedLabelPending === p.title && <span style={{ fontSize: 11, color: "#0d9488" }}>Fetching…</span>}
+                </button>
+              ))}
+            </div>
+            <div style={{ padding: 10, borderTop: "1px solid #e5e7eb", textAlign: "right" }}>
+              <button type="button" onClick={() => setOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, cursor: "pointer" }}>Close</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
