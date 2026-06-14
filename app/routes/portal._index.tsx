@@ -2533,6 +2533,72 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, totalCollections, summary });
   }
 
+  if (intent === "pull_sheet_images") {
+    // Downloads the master Google Sheet as XLSX, extracts every embedded
+    // image with its sheet-row position, and patches each portal row's
+    // modelPicture. Matches by SHEET ROW POSITION: portal row N gets the
+    // images attached to the Nth NON-BLANK row in the source tab (we
+    // need to refetch the CSV per tab to mirror the importer's skip-
+    // blank-rows behaviour). Skips rows that already have modelPicture
+    // populated (so reruns are idempotent).
+    if (!currentUser?.admin) return jsonResponse({ ok: false, error: "forbidden" });
+
+    const xlsxRes = await fetch(`https://docs.google.com/spreadsheets/d/${SHEET_IMPORT_SPREADSHEET_ID}/export?format=xlsx`);
+    if (!xlsxRes.ok) return jsonResponse({ ok: false, error: `xlsx fetch ${xlsxRes.status}` });
+    const xlsxBuf = Buffer.from(await xlsxRes.arrayBuffer());
+    let imagesBySheet: Map<string, Map<number, string[]>>;
+    try {
+      imagesBySheet = await extractImagesFromXlsx(xlsxBuf);
+    } catch (e) {
+      return jsonResponse({ ok: false, error: `parse failed: ${(e as Error).message}` });
+    }
+
+    const collections = await prisma.collection.findMany({ select: { id: true, name: true, rows: true } });
+    const summary: Array<{ tab: string; imagesFound: number; rowsPatched: number; error?: string }> = [];
+
+    for (const c of collections) {
+      const sheetImages = imagesBySheet.get(c.name);
+      if (!sheetImages || sheetImages.size === 0) {
+        summary.push({ tab: c.name, imagesFound: 0, rowsPatched: 0 });
+        continue;
+      }
+      // Refetch CSV so we can mirror the same row-skipping logic the
+      // importer used — portal row N corresponds to the Nth non-blank
+      // data row in the source tab.
+      const csvUrl = `https://docs.google.com/spreadsheets/d/${SHEET_IMPORT_SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(c.name)}`;
+      const csvRes = await fetch(csvUrl);
+      if (!csvRes.ok) { summary.push({ tab: c.name, imagesFound: sheetImages.size, rowsPatched: 0, error: `csv fetch ${csvRes.status}` }); continue; }
+      const csv = await csvRes.text();
+      const parsed = parseCSV(csv);
+      // Build a map: portal row index → sheet row index (zero-based,
+      // INCLUDING the header row). parsed[0] is the header, so portal
+      // row 0 corresponds to the first non-blank parsed[i] for i>=1.
+      const portalRowToSheetRow: number[] = [];
+      for (let i = 1; i < parsed.length; i++) {
+        if (parsed[i].some((c) => c.trim())) portalRowToSheetRow.push(i);
+      }
+
+      const rows = normalizeCollectionRows(c.rows);
+      let patched = 0;
+      for (let portalIdx = 0; portalIdx < rows.length; portalIdx++) {
+        const sheetRowIdx = portalRowToSheetRow[portalIdx];
+        if (sheetRowIdx === undefined) continue;
+        // Skip rows that already have images (idempotent reruns).
+        if ((rows[portalIdx].modelPicture ?? "").trim().startsWith("[")) continue;
+        const imgs = sheetImages.get(sheetRowIdx);
+        if (!imgs || imgs.length === 0) continue;
+        rows[portalIdx].modelPicture = JSON.stringify(imgs);
+        patched++;
+      }
+      if (patched > 0) {
+        await prisma.collection.update({ where: { id: c.id }, data: { rows: rows as unknown as object, updatedAt: new Date() } });
+      }
+      summary.push({ tab: c.name, imagesFound: Array.from(sheetImages.values()).reduce((a, b) => a + b.length, 0), rowsPatched: patched });
+    }
+
+    return jsonResponse({ ok: true, summary });
+  }
+
   if (intent === "backfill_collection_handles") {
     // For every collection row that's linked to a Shopify product but
     // missing __shopifyHandle (older imports), fetch the handle so the
@@ -5957,6 +6023,116 @@ async function fetchShopifyProductMeta(
   return { handle, images };
 }
 
+// ─── XLSX image extractor (for Sheet images that don't come via CSV) ───
+// Google Sheets stores "inserted" images as drawings — they don't appear
+// in CSV/gviz outputs. But the same sheet exported as XLSX is a zip that
+// embeds every image plus an XML file mapping each picture to its anchor
+// row/column. We download the XLSX (public URL works for shared sheets),
+// unzip, parse the drawing XMLs, and return images grouped by sheet name
+// and zero-based sheet-row index.
+//
+// Returns Map<sheetName, Map<rowIndex, dataUrl[]>> so callers can patch
+// portal rows by mapping portal-row-position → sheet-row-position.
+async function extractImagesFromXlsx(xlsxBuffer: Buffer): Promise<Map<string, Map<number, string[]>>> {
+  const JSZip = (await import("jszip")).default;
+  const { XMLParser } = await import("fast-xml-parser");
+  const zip = await JSZip.loadAsync(xlsxBuffer);
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" });
+
+  // Map sheetName → sheetN (workbook.xml ↔ sheets/sheetN.xml).
+  const workbookXml = await zip.file("xl/workbook.xml")?.async("string");
+  if (!workbookXml) return new Map();
+  const workbookRelsXml = await zip.file("xl/_rels/workbook.xml.rels")?.async("string");
+  const workbook = parser.parse(workbookXml);
+  const workbookRels = workbookRelsXml ? parser.parse(workbookRelsXml) : {};
+  const relRows = Array.isArray(workbookRels?.Relationships?.Relationship)
+    ? workbookRels.Relationships.Relationship
+    : workbookRels?.Relationships?.Relationship ? [workbookRels.Relationships.Relationship] : [];
+  const relById: Record<string, string> = {};
+  for (const r of relRows) relById[r["@_Id"]] = String(r["@_Target"] ?? "");
+  const sheets = Array.isArray(workbook?.workbook?.sheets?.sheet)
+    ? workbook.workbook.sheets.sheet
+    : workbook?.workbook?.sheets?.sheet ? [workbook.workbook.sheets.sheet] : [];
+
+  // For each sheet, look at its rels to find the drawing reference, then
+  // parse the drawing for picture anchors and resolve each blip to its
+  // embedded media.
+  const out = new Map<string, Map<number, string[]>>();
+  for (const sheet of sheets) {
+    const name = String(sheet["@_name"] ?? "").trim();
+    const rid = String(sheet["@_r:id"] ?? sheet["@_id"] ?? "");
+    const target = relById[rid] ?? "";
+    if (!name || !target) continue;
+    // target like "worksheets/sheet5.xml". Sheet rels live at
+    // "worksheets/_rels/sheet5.xml.rels".
+    const sheetPath = `xl/${target}`;
+    const relsPath = sheetPath.replace(/(worksheets)\/(sheet\d+)\.xml$/, "$1/_rels/$2.xml.rels");
+    const sheetRelsXml = await zip.file(relsPath)?.async("string");
+    if (!sheetRelsXml) continue;
+    const sheetRels = parser.parse(sheetRelsXml);
+    const sheetRelRows = Array.isArray(sheetRels?.Relationships?.Relationship)
+      ? sheetRels.Relationships.Relationship
+      : sheetRels?.Relationships?.Relationship ? [sheetRels.Relationships.Relationship] : [];
+    const drawingRel = sheetRelRows.find((r: { "@_Type"?: string }) =>
+      String(r["@_Type"] ?? "").endsWith("/drawing"),
+    );
+    if (!drawingRel) continue;
+    const drawingTarget = String(drawingRel["@_Target"] ?? "");
+    // drawingTarget like "../drawings/drawing3.xml" relative to sheetPath.
+    const drawingPath = new URL(drawingTarget, `https://x/${sheetPath}`).pathname.replace(/^\//, "");
+    const drawingXml = await zip.file(drawingPath)?.async("string");
+    if (!drawingXml) continue;
+    const drawingRelsPath = drawingPath.replace(/(drawings)\/(drawing\d+)\.xml$/, "$1/_rels/$2.xml.rels");
+    const drawingRelsXml = await zip.file(drawingRelsPath)?.async("string");
+    const drawingRels = drawingRelsXml ? parser.parse(drawingRelsXml) : {};
+    const drawingRelRows = Array.isArray(drawingRels?.Relationships?.Relationship)
+      ? drawingRels.Relationships.Relationship
+      : drawingRels?.Relationships?.Relationship ? [drawingRels.Relationships.Relationship] : [];
+    const mediaByRid: Record<string, string> = {};
+    for (const r of drawingRelRows) mediaByRid[r["@_Id"]] = String(r["@_Target"] ?? "");
+
+    const drawing = parser.parse(drawingXml);
+    const root = drawing["xdr:wsDr"] ?? drawing.wsDr ?? {};
+    // Collect both oneCellAnchor and twoCellAnchor entries.
+    const anchorTypes = ["xdr:oneCellAnchor", "xdr:twoCellAnchor", "oneCellAnchor", "twoCellAnchor"];
+    const anchors: any[] = [];
+    for (const key of anchorTypes) {
+      const v = root[key];
+      if (Array.isArray(v)) anchors.push(...v);
+      else if (v) anchors.push(v);
+    }
+    const byRow = new Map<number, string[]>();
+    for (const anchor of anchors) {
+      const from = anchor["xdr:from"] ?? anchor.from;
+      if (!from) continue;
+      const rowIdx = Number(from["xdr:row"] ?? from.row ?? -1);
+      if (!Number.isFinite(rowIdx) || rowIdx < 0) continue;
+      const pic = anchor["xdr:pic"] ?? anchor.pic;
+      const blipFill = pic?.["xdr:blipFill"] ?? pic?.blipFill;
+      const blip = blipFill?.["a:blip"] ?? blipFill?.blip;
+      const embed = String(blip?.["@_r:embed"] ?? blip?.["@_embed"] ?? "");
+      if (!embed) continue;
+      const mediaRel = mediaByRid[embed];
+      if (!mediaRel) continue;
+      const mediaPath = new URL(mediaRel, `https://x/${drawingPath}`).pathname.replace(/^\//, "");
+      const mediaFile = zip.file(mediaPath);
+      if (!mediaFile) continue;
+      const buf = await mediaFile.async("base64");
+      const ext = (mediaPath.split(".").pop() ?? "png").toLowerCase();
+      const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg"
+        : ext === "gif" ? "image/gif"
+        : ext === "webp" ? "image/webp"
+        : "image/png";
+      const dataUrl = `data:${mime};base64,${buf}`;
+      const bucket = byRow.get(rowIdx) ?? [];
+      bucket.push(dataUrl);
+      byRow.set(rowIdx, bucket);
+    }
+    out.set(name, byRow);
+  }
+  return out;
+}
+
 // Convert a sheet status/sample value to the portal chip value by
 // matching against the available chip labels. Returns "" on no match.
 function mapToChipValue(raw: string, options: { value: string; label: string }[]): string {
@@ -8934,6 +9110,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const fetcher = useFetcher();
   const importFetcher = useFetcher<{ ok?: boolean; totalCollections?: number; summary?: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }>; error?: string }>();
   const backfillFetcher = useFetcher<{ ok?: boolean; scanned?: number; updated?: number; error?: string }>();
+  const imagesFetcher = useFetcher<{ ok?: boolean; summary?: Array<{ tab: string; imagesFound: number; rowsPatched: number; error?: string }>; error?: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const collectionIdParam = searchParams.get("collectionId");
   const selectedId = collectionIdParam ? Number(collectionIdParam) : null;
@@ -9052,6 +9229,23 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               >
                 {backfillFetcher.state !== "idle" ? "Backfilling…" : "Backfill storefront links"}
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (imagesFetcher.state !== "idle") return;
+                  if (!window.confirm("Pull every inserted-image from the Google Sheet (XLSX) into the matching collection rows?\n\nDownloads the workbook as XLSX, extracts embedded images and their cell anchors, then maps to portal rows by sheet-row position.\n\nRows that already have a modelPicture set are skipped (idempotent). This can take a couple of minutes.")) return;
+                  imagesFetcher.submit({ intent: "pull_sheet_images" }, { method: "post" });
+                }}
+                disabled={imagesFetcher.state !== "idle"}
+                style={{
+                  background: "#1d4ed8", color: "#fff", border: "none",
+                  borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600,
+                  cursor: imagesFetcher.state !== "idle" ? "wait" : "pointer",
+                }}
+                title="Extract embedded images from the master Google Sheet and patch them onto unlinked rows"
+              >
+                {imagesFetcher.state !== "idle" ? "Pulling images…" : "Pull sheet images"}
+              </button>
             </>
           )}
           <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
@@ -9063,6 +9257,22 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
       {backfillFetcher.data?.ok && (
         <div style={{ margin: "0 14px 10px", padding: "8px 12px", background: "#ecfdf5", border: "1px solid #a7f3d0", color: "#065f46", borderRadius: 6, fontSize: 12 }}>
           Scanned {backfillFetcher.data.scanned ?? 0} linked rows, backfilled handles for {backfillFetcher.data.updated ?? 0}. Refresh to see the storefront links.
+        </div>
+      )}
+      {imagesFetcher.data?.ok && imagesFetcher.data.summary && (
+        <div style={{ margin: "0 14px 10px", padding: 12, background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 6, fontSize: 12, color: "#1e3a8a" }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>
+            Pulled sheet images. Total rows patched: {imagesFetcher.data.summary.reduce((a, b) => a + b.rowsPatched, 0)}.
+          </div>
+          <div style={{ maxHeight: 180, overflowY: "auto" }}>
+            {imagesFetcher.data.summary
+              .filter((s) => s.imagesFound > 0 || s.error)
+              .map((s) => (
+                <div key={s.tab} style={{ padding: "2px 0" }}>
+                  <strong>{s.tab}</strong> — {s.error ? <span style={{ color: "#b45309" }}>{s.error}</span> : `${s.rowsPatched} rows patched, ${s.imagesFound} images found in sheet`}
+                </div>
+              ))}
+          </div>
         </div>
       )}
       {importFetcher.data?.ok && importFetcher.data.summary && (
