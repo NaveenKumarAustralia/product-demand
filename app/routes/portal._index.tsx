@@ -10015,6 +10015,24 @@ function CollectionSpreadsheetPage({
   const [editingName, setEditingName] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pushStatus, setPushStatus] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
+  // Row drag-reorder state. dragRowIdx = the row currently being
+  // dragged, dragOverRowIdx = the row position the user is currently
+  // hovering over. Visual indicator: dragged row dims, drop target
+  // shows a teal top border.
+  const [dragRowIdx, setDragRowIdx] = useState<number | null>(null);
+  const [dragOverRowIdx, setDragOverRowIdx] = useState<number | null>(null);
+
+  const moveRow = (from: number, to: number) => {
+    if (from === to) return;
+    setRows((prev) => {
+      if (from < 0 || from >= prev.length || to < 0 || to >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      persistRows(next, prev, `Undo move row ${from + 1} → ${to + 1}`);
+      return next;
+    });
+  };
 
   useEffect(() => {
     loadFetcher.submit(
@@ -10394,7 +10412,44 @@ function CollectionSpreadsheetPage({
                 };
                 void adminLink;
                 return (
-                  <tr key={rIdx} style={s.row}>
+                  <tr
+                    key={rIdx}
+                    draggable
+                    onDragStart={(e) => {
+                      // Allow drag only when the user grabs from a
+                      // non-editable area (row number cell, plain text,
+                      // image cell). Dragging FROM an input/textarea
+                      // would interrupt text selection.
+                      const t = e.target as HTMLElement;
+                      const tag = t.tagName;
+                      if (tag === "INPUT" || tag === "TEXTAREA" || t.isContentEditable) {
+                        e.preventDefault();
+                        return;
+                      }
+                      setDragRowIdx(rIdx);
+                      e.dataTransfer.effectAllowed = "move";
+                      try { e.dataTransfer.setData("text/plain", String(rIdx)); } catch { /* ok */ }
+                    }}
+                    onDragOver={(e) => {
+                      if (dragRowIdx === null || dragRowIdx === rIdx) return;
+                      e.preventDefault();
+                      if (dragOverRowIdx !== rIdx) setDragOverRowIdx(rIdx);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      if (dragRowIdx !== null && dragRowIdx !== rIdx) {
+                        moveRow(dragRowIdx, rIdx);
+                      }
+                      setDragRowIdx(null);
+                      setDragOverRowIdx(null);
+                    }}
+                    onDragEnd={() => { setDragRowIdx(null); setDragOverRowIdx(null); }}
+                    style={{
+                      ...s.row,
+                      ...(dragRowIdx === rIdx ? { opacity: 0.4 } : {}),
+                      ...(dragOverRowIdx === rIdx ? { boxShadow: "inset 0 3px 0 #0d9488" } : {}),
+                    }}
+                  >
                     <RowNumberCell
                       rowNumber={rIdx + 1}
                       actions={[
@@ -10526,6 +10581,26 @@ function CollectionSpreadsheetPage({
                 <tr style={s.row}>
                   <td colSpan={columns.length + 2} style={{ ...s.td, padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
                     No rows yet. Click + Add row above to add one.
+                  </td>
+                </tr>
+              )}
+              {rows.length > 0 && (
+                <tr>
+                  <td colSpan={columns.length + 2} style={{ ...s.td, padding: 0, background: "#fafafa" }}>
+                    <button
+                      type="button"
+                      onClick={addRow}
+                      style={{
+                        width: "100%", padding: "10px 16px",
+                        background: "transparent", border: "none",
+                        borderTop: "1px dashed #d1d5db",
+                        color: "#0d9488", fontSize: 13, fontWeight: 700,
+                        cursor: "pointer", textAlign: "center",
+                      }}
+                      title="Append a blank row at the end"
+                    >
+                      + Add row
+                    </button>
                   </td>
                 </tr>
               )}
