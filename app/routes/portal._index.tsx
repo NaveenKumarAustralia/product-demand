@@ -11309,6 +11309,13 @@ function CollectionDuplicateFromCell({
   );
 }
 
+// Session-scoped clipboard for fabric/maniPics image cells: lets the
+// user hover Copy on one cell then Cmd/Ctrl+V to drop the same image
+// into other cells. Lives at module level so cells across the page
+// share it without prop-drilling. Cleared if the user navigates away
+// from the page (since the JS module is reloaded).
+let copiedCollectionImage: CollectionImageEntry | null = null;
+
 function CollectionImageCell({
   value,
   onCommit,
@@ -11319,15 +11326,13 @@ function CollectionImageCell({
   const [hover, setHover] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [copyFlash, setCopyFlash] = useState(false);
   const trimmed = value.trim();
   // Single-image columns (fabric / mani pics) accept the same value
   // formats as multi-image: legacy plain string OR JSON of
   // { thumb, key } entries. parseMultiImageValue normalises both.
   const entries = useMemo(() => parseMultiImageValue(trimmed), [trimmed]);
   const entry: CollectionImageEntry | null = entries.length > 0 ? entries[0] : null;
-  // For display in the row: prefer the small thumb. For higher-quality
-  // viewing on hover we COULD swap to full via key, but the cell is
-  // small enough that the thumb is already sharp.
   const displaySrc = entry ? (entry.thumb || (entry.key ? `/portal/collection-image/${entry.key}` : "")) : "";
   const hasImage = Boolean(displaySrc) || isFabricImageValue(trimmed);
 
@@ -11340,6 +11345,18 @@ function CollectionImageCell({
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleCopy = () => {
+    if (!entry) return;
+    copiedCollectionImage = entry;
+    setCopyFlash(true);
+    window.setTimeout(() => setCopyFlash(false), 900);
+  };
+  const handlePasteFromMemory = () => {
+    if (!copiedCollectionImage) return false;
+    onCommit(serializeMultiImageValue([copiedCollectionImage]));
+    return true;
   };
 
   return (
@@ -11355,8 +11372,23 @@ function CollectionImageCell({
         onFocus={() => setHover(true)}
         onBlur={() => setHover(false)}
         onPaste={(event) => {
+          // System clipboard image (screenshot, copied from external
+          // app) wins over the in-memory copy because it's the more
+          // explicit user action.
           const file = Array.from(event.clipboardData.files).find((item) => item.type.startsWith("image/"));
-          if (file) void handleFile(file);
+          if (file) { void handleFile(file); return; }
+          // Otherwise paste from the in-memory clipboard (set by the
+          // Copy button on another image cell on this page).
+          if (handlePasteFromMemory()) event.preventDefault();
+        }}
+        onKeyDown={(event) => {
+          // Cmd/Ctrl+C while focused on a cell with an image → copy
+          // into the session clipboard. Allow native behaviour
+          // otherwise so users can still arrow-navigate.
+          if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "c" && entry) {
+            event.preventDefault();
+            handleCopy();
+          }
         }}
         onDragOver={(event) => {
           event.preventDefault();
@@ -11386,16 +11418,64 @@ function CollectionImageCell({
           ? <img src={displaySrc || trimmed} alt="" style={s.fabricSheetImage} />
           : <span>{busy ? "Uploading…" : "Paste, drop or upload"}</span>}
         {hasImage && (
+          <>
+            <button
+              type="button"
+              style={{
+                position: "absolute", top: 8, right: 60,
+                background: copyFlash ? "#0d9488" : "rgba(13, 148, 136, 0.92)",
+                color: "#fff", border: "none", borderRadius: 6,
+                padding: "6px 12px", fontSize: 12, fontWeight: 700,
+                cursor: "pointer", opacity: hover || copyFlash ? 1 : 0,
+                transition: "opacity 0.15s, background 0.2s",
+                pointerEvents: hover ? "auto" : "none",
+                zIndex: 2, boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+              }}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                handleCopy();
+              }}
+              title="Copy this image — paste it into another cell with Cmd/Ctrl+V"
+            >
+              {copyFlash ? "Copied ✓" : "Copy"}
+            </button>
+            <button
+              type="button"
+              style={{ ...s.imageDeleteOverlay, ...(hover ? s.imageDeleteOverlayVisible : {}) }}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onCommit("");
+              }}
+            >
+              Delete
+            </button>
+          </>
+        )}
+        {!hasImage && copiedCollectionImage && hover && (
+          // Empty cell + we have something in the in-memory clipboard:
+          // surface a one-click paste button so the user doesn't have
+          // to focus the cell first and press Cmd/Ctrl+V.
           <button
             type="button"
-            style={{ ...s.imageDeleteOverlay, ...(hover ? s.imageDeleteOverlayVisible : {}) }}
+            style={{
+              position: "absolute", inset: 0, margin: "auto",
+              width: 90, height: 28,
+              background: "#0d9488", color: "#fff",
+              border: "none", borderRadius: 6,
+              fontSize: 12, fontWeight: 700, cursor: "pointer",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.25)",
+              zIndex: 2,
+            }}
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              onCommit("");
+              handlePasteFromMemory();
             }}
+            title="Paste the most recently copied image here"
           >
-            Delete
+            Paste image
           </button>
         )}
         <input
