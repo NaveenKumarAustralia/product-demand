@@ -9871,6 +9871,47 @@ function CollectionSpreadsheetPage({
     }
   }, [loadFetcher.data, listItem.id]);
 
+  // Cmd/Ctrl+Z handler that intercepts during the capture phase so we
+  // can both (a) apply the restored rows/columns to local state and
+  // (b) submit the undo intent. The page-level handler in the parent
+  // only does (b), so without this hook the UI would silently keep
+  // showing the new value even after the DB was reverted.
+  useEffect(() => {
+    if (!loaded) return;
+    const handler = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.key.toLowerCase() !== "z") return;
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isEditingText = activeElement instanceof HTMLInputElement
+        || activeElement instanceof HTMLTextAreaElement
+        || activeElement?.isContentEditable;
+      if (isEditingText) return; // let the native textarea undo work
+      const stack = readPortalUndoStack();
+      const top = stack[stack.length - 1];
+      if (!top || top.fields?.intent !== "update_collection") return;
+      if (String(top.fields?.collectionId) !== String(listItem.id)) return;
+      // Stop the page-level handler from also popping + submitting.
+      event.preventDefault();
+      event.stopPropagation();
+      stack.pop();
+      window.localStorage.setItem(PORTAL_UNDO_STACK_KEY, JSON.stringify(stack));
+      try {
+        if (top.fields.rows) {
+          const restored = JSON.parse(String(top.fields.rows));
+          if (Array.isArray(restored)) setRows(normalizeCollectionRows(restored));
+        }
+        if (top.fields.columns) {
+          const restored = JSON.parse(String(top.fields.columns));
+          if (Array.isArray(restored)) setColumns(normalizeCollectionColumns(restored));
+        }
+      } catch (e) {
+        console.warn("[undo] apply failed", e);
+      }
+      fetcher.submit(top.fields, { method: "post" });
+    };
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
+  }, [listItem.id, loaded, fetcher]);
+
   // Local copy of chip option lists so edits show immediately. Seeded
   // from collectionSettings; saves go via update_collection_settings.
   const [localStatusOptions, setLocalStatusOptions] = useState(collectionSettings.statusOptions);
@@ -9892,10 +9933,15 @@ function CollectionSpreadsheetPage({
     );
   };
 
-  const persistRows = (next: Record<string, string>[]) => {
-    fetcher.submit(
+  // persistRows takes the previous rows snapshot too so we can push
+  // it onto the global undo stack. Cmd/Ctrl+Z (handled at page top
+  // level) pops the most recent entry and resubmits — landing on
+  // update_collection with the older rows JSON, restoring state.
+  const persistRows = (next: Record<string, string>[], previous: Record<string, string>[], label: string) => {
+    submitPortalCell(
+      fetcher,
       { intent: "update_collection", collectionId: String(listItem.id), rows: JSON.stringify(next) },
-      { method: "post" },
+      { label, fields: { intent: "update_collection", collectionId: String(listItem.id), rows: JSON.stringify(previous) } },
     );
   };
 
@@ -9911,7 +9957,7 @@ function CollectionSpreadsheetPage({
         }
         return patched;
       });
-      persistRows(next);
+      persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
       return next;
     });
   };
@@ -9919,7 +9965,7 @@ function CollectionSpreadsheetPage({
   const addRow = () => {
     setRows((prev) => {
       const next = [...prev, {} as Record<string, string>];
-      persistRows(next);
+      persistRows(next, prev, "Undo add row");
       return next;
     });
   };
@@ -9928,7 +9974,7 @@ function CollectionSpreadsheetPage({
     if (!window.confirm("Delete this row?")) return;
     setRows((prev) => {
       const next = prev.filter((_, i) => i !== idx);
-      persistRows(next);
+      persistRows(next, prev, `Undo delete row ${idx + 1}`);
       return next;
     });
   };
@@ -10027,6 +10073,7 @@ function CollectionSpreadsheetPage({
     const startX = event.clientX;
     const target = columns.find((c) => c.id === columnId);
     const startWidth = target?.width ?? 110;
+    const startCols = columns;
     let nextCols = columns;
     const prevCursor = document.body.style.cursor;
     const prevUserSelect = document.body.style.userSelect;
@@ -10042,9 +10089,10 @@ function CollectionSpreadsheetPage({
       document.body.style.userSelect = prevUserSelect;
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
-      fetcher.submit(
+      submitPortalCell(
+        fetcher,
         { intent: "update_collection", collectionId: String(listItem.id), columns: JSON.stringify(nextCols) },
-        { method: "post" },
+        { label: `Undo resize ${columnId}`, fields: { intent: "update_collection", collectionId: String(listItem.id), columns: JSON.stringify(startCols) } },
       );
     };
     document.addEventListener("mousemove", handleMove);
