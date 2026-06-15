@@ -6088,6 +6088,29 @@ const COLLECTION_SIZE_COLUMN_LABELS: Array<[string, string]> = [
 // All column ids that contribute to TOTAL Ordered (Free Size + regular).
 const COLLECTION_QTY_COLUMN_IDS = ["freeSize", ...COLLECTION_SIZE_COLUMN_LABELS.map(([id]) => id)];
 
+// DD/MM/YYYY is the user's canonical date format across the portal.
+// Accepts ISO YYYY-MM-DD (legacy stored values), DD/MM/YY, D/M/YY,
+// D/M/YYYY, with "/" "-" or "." as separator. 2-digit years map to
+// 2000s (26 → 2026). Returns DD/MM/YYYY or the original string if
+// unparseable so the user can correct typos in-cell.
+function formatDateDDMMYYYY(input: string): string {
+  const s = (input ?? "").trim();
+  if (!s) return "";
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (iso) {
+    const [, y, mo, d] = iso;
+    return `${d.padStart(2, "0")}/${mo.padStart(2, "0")}/${y}`;
+  }
+  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+  if (m) {
+    let [, d, mo, y] = m;
+    if (y.length === 2) y = `20${y}`;
+    if (y.length !== 4) return s;
+    return `${d.padStart(2, "0")}/${mo.padStart(2, "0")}/${y}`;
+  }
+  return s;
+}
+
 // Size suffix for variant SKU/barcode. User's convention:
 //   XS / S / M / L / XL → as-is
 //   2XL → XXL, 3XL → XXXL
@@ -10195,7 +10218,8 @@ function CollectionSpreadsheetPage({
         // Auto-fill Sample RECEIVED date when the Sample chip flips to
         // the configured "received" value AND the date column is empty.
         if (colId === "sample" && value === collectionSettings.sampleReceivedChipValue && !(patched.sampleReceived ?? "").trim()) {
-          patched.sampleReceived = new Date().toISOString().slice(0, 10);
+          const d = new Date();
+          patched.sampleReceived = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
         }
         return patched;
       });
@@ -10950,28 +10974,35 @@ function CollectionCellInner({
       </div>
     );
   }
+  // Date cells: free-text DD/MM/YYYY input. Native date pickers force
+  // ISO and a calendar popup, both of which the user disliked — staff
+  // are much faster typing 15/06/26 than clicking through the picker.
+  // Legacy ISO values stored on existing rows render as DD/MM/YYYY via
+  // formatDateDDMMYYYY().
+  if (type === "date") {
+    return <CollectionDateCell value={value} onCommit={onCommit} />;
+  }
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
-  // Number + date stay as native inputs (single line, no wrap needed).
+  // Number stays as a native input (single line, no wrap needed).
   // Text becomes a textarea so long content wraps when the column is
   // resized narrower instead of overflowing or getting cut off.
-  if (type === "number" || type === "date") {
+  if (type === "number") {
     // Number cells are the size variant qty columns (XS, S, M, …).
     // User wanted these 4pt bigger than the text cells.
-    const isNumber = type === "number";
     return (
       <input
-        type={isNumber ? "number" : "date"}
+        type="number"
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => { if (draft !== value) onCommit(draft); }}
         onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-        className={isNumber ? "no-number-arrows" : undefined}
+        className="no-number-arrows"
         style={{
           width: "100%", border: "none", outline: "none",
           padding: "1px 2px",
-          fontSize: isNumber ? 16 : 14,
-          fontWeight: isNumber ? 600 : 400,
+          fontSize: 16,
+          fontWeight: 600,
           fontFamily: "inherit",
           background: "transparent", boxSizing: "border-box",
           textAlign: "center",
@@ -11042,6 +11073,34 @@ function CollectionSkuCell({
         </div>
       )}
     </div>
+  );
+}
+
+function CollectionDateCell({ value, onCommit }: { value: string; onCommit: (next: string) => void }) {
+  const [draft, setDraft] = useState(formatDateDDMMYYYY(value));
+  useEffect(() => { setDraft(formatDateDDMMYYYY(value)); }, [value]);
+  return (
+    <input
+      type="text"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        const next = formatDateDDMMYYYY(draft);
+        if (next !== draft) setDraft(next);
+        if (next !== value) onCommit(next);
+      }}
+      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+      placeholder="DD/MM/YYYY"
+      inputMode="numeric"
+      style={{
+        width: "100%", border: "none", outline: "none",
+        padding: "1px 2px",
+        fontSize: 14,
+        fontFamily: "inherit",
+        background: "transparent", boxSizing: "border-box",
+        textAlign: "center",
+      }}
+    />
   );
 }
 
