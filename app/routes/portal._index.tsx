@@ -10128,7 +10128,7 @@ function CollectionSpreadsheetPage({
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
         ) : (
-          <table style={s.table}>
+          <table style={{ ...s.table, width: 48 + 140 + columns.reduce((sum, c) => sum + (c.width ?? 110), 0), minWidth: 900 }}>
             <colgroup>
               <col style={{ width: 48 }} />
               <col style={{ width: 140 }} />
