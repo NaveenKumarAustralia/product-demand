@@ -615,7 +615,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         deletedSheetsValue: fabricDeletedSheetsSetting?.value,
       })
     : [];
-  const fabricStockIndex: FabricStockEntry[] = (page === "restock" || page === "packing")
+  const fabricStockIndex: FabricStockEntry[] = (page === "restock" || page === "packing" || page === "collections")
     ? buildFabricStockIndex(manualFabricSheets)
     : [];
   if (page === "fabric") {
@@ -682,7 +682,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     openPackingLists,
     restockTotalsAll,
     restockTotalsFiltered,
-    inrPerAudCachedRate: (page === "restock" || page === "packing") ? await getCachedInrPerAud() : null,
+    inrPerAudCachedRate: (page === "restock" || page === "packing" || page === "collections") ? await getCachedInrPerAud() : null,
     fxRupeeBuffer: FX_RUPEE_BUFFER,
     collectionSettings,
     sortBy,
@@ -7289,6 +7289,8 @@ export default function PortalDashboard() {
             collections={collections}
             collectionSettings={collectionSettings}
             productInfo={productInfo}
+            fabricStockIndex={fabricStockIndex}
+            inrPerAudCachedRate={inrPerAudCachedRate}
             isAdmin={Boolean(currentUser?.admin)}
             shopDomain={shopDomain}
           />
@@ -9566,7 +9568,7 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
   });
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, isAdmin, shopDomain }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; isAdmin: boolean; shopDomain: string | null }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null }) {
   const fetcher = useFetcher();
   const importFetcher = useFetcher<{ ok?: boolean; totalCollections?: number; summary?: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }>; error?: string }>();
   const backfillFetcher = useFetcher<{ ok?: boolean; scanned?: number; updated?: number; error?: string }>();
@@ -9659,6 +9661,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         listItem={selectedCollection}
         collectionSettings={collectionSettings}
         productInfo={productInfo}
+        fabricStockIndex={fabricStockIndex}
+        inrPerAudCachedRate={inrPerAudCachedRate}
         shopDomain={shopDomain}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
@@ -10070,6 +10074,8 @@ function CollectionSpreadsheetPage({
   listItem,
   collectionSettings,
   productInfo,
+  fabricStockIndex,
+  inrPerAudCachedRate,
   shopDomain,
   onBack,
   onLocalNameChange,
@@ -10077,6 +10083,8 @@ function CollectionSpreadsheetPage({
   listItem: CollectionListItem;
   collectionSettings: CollectionSettings;
   productInfo: ProductInfo;
+  fabricStockIndex: FabricStockEntry[];
+  inrPerAudCachedRate: number | null;
   shopDomain: string | null;
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
@@ -10126,6 +10134,40 @@ function CollectionSpreadsheetPage({
       setLoaded(true);
     }
   }, [loadFetcher.data, listItem.id]);
+
+  // Cost (AUD) auto-fill — same lookup the restock page uses:
+  // row.name + Product Information styles + Fabric in Stock fabrics
+  // resolve to a cost in rupees, converted to AUD via the cached live
+  // FX rate. Fills only empty Cost cells so manual overrides stick.
+  // Re-runs once on row load and whenever a row name changes.
+  const styleCostLookup = useMemo(
+    () => buildStyleCostLookup(productInfo, fabricStockIndex),
+    [productInfo, fabricStockIndex],
+  );
+  const autoCostAud = useCallback((rowName: string): string => {
+    const rupees = styleCostLookup.costForTitle(rowName);
+    if (!rupees) return "";
+    const aud = convertRupeesToAud(rupees, inrPerAudCachedRate);
+    if (aud == null || !Number.isFinite(aud) || aud <= 0) return "";
+    return String(Math.round(aud));
+  }, [styleCostLookup, inrPerAudCachedRate]);
+  useEffect(() => {
+    if (!loaded) return;
+    setRows((prev) => {
+      let changed = false;
+      const next = prev.map((r) => {
+        if ((r.cost ?? "").trim()) return r;
+        const name = (r.name ?? r.title ?? "").trim();
+        if (!name) return r;
+        const cost = autoCostAud(name);
+        if (!cost) return r;
+        changed = true;
+        return { ...r, cost };
+      });
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, autoCostAud]);
 
   // Cmd/Ctrl+Z handler — reads from the in-memory undo stack (NOT
   // localStorage, which can't hold base64 image rows). Intercepts in
@@ -10221,13 +10263,20 @@ function CollectionSpreadsheetPage({
           const d = new Date();
           patched.sampleReceived = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
         }
+        // Auto-fill Cost (AUD) when the Name resolves to a Product Info
+        // style + Fabric Stock fabric. Same lookup as the restock page.
+        // Only fills empty Cost cells — manual overrides stick.
+        if (colId === "name" && !(patched.cost ?? "").trim()) {
+          const cost = autoCostAud(value);
+          if (cost) patched.cost = cost;
+        }
         return patched;
       });
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
       return next;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collectionSettings.sampleReceivedChipValue, listItem.id]);
+  }, [collectionSettings.sampleReceivedChipValue, listItem.id, autoCostAud]);
 
   // Expand "+K" Generate click into per-variant SKU and barcode lines,
   // one line per size that has qty > 0 on this row. Free Size mode
