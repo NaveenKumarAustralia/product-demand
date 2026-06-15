@@ -11016,31 +11016,30 @@ function CollectionSkuCell({
     generateSkuAndBarcode(rowIndex, draft.trim());
   };
   return (
-    <div style={{ position: "relative", width: "100%" }}>
+    <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
       <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
       {showButton && (
-        <button
-          type="button"
-          onMouseDown={(e) => { e.preventDefault(); apply(); }}
-          title={`Generate K${draft.trim()}XS, K${draft.trim()}S, … for every ordered size`}
-          style={{
-            position: "absolute",
-            top: 2,
-            right: 2,
-            padding: "2px 6px",
-            fontSize: 10,
-            fontWeight: 700,
-            color: "#fff",
-            background: "#7a1f2b",
-            border: "none",
-            borderRadius: 3,
-            cursor: "pointer",
-            lineHeight: 1.2,
-            whiteSpace: "nowrap",
-          }}
-        >
-          Generate
-        </button>
+        <div style={{ display: "flex", justifyContent: "center", padding: "2px 0 3px" }}>
+          <button
+            type="button"
+            onMouseDown={(e) => { e.preventDefault(); apply(); }}
+            title={`Generate K${draft.trim()}XS, K${draft.trim()}S, … for every ordered size`}
+            style={{
+              padding: "2px 8px",
+              fontSize: 10,
+              fontWeight: 700,
+              color: "#fff",
+              background: "#7a1f2b",
+              border: "none",
+              borderRadius: 3,
+              cursor: "pointer",
+              lineHeight: 1.2,
+              whiteSpace: "nowrap",
+            }}
+          >
+            Generate
+          </button>
+        </div>
       )}
     </div>
   );
