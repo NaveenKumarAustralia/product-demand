@@ -9425,7 +9425,7 @@ type CollectionFullType = {
 // description. Some cells changed to tickbox / readonly / release / chip.
 const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "release", label: "Release", type: "release", width: 90 },
-  { id: "modelPicture", label: "Model PICTURE", width: 120 },
+  { id: "modelPicture", label: "Picture", width: 120 },
   { id: "fabric", label: "FABRIC", width: 120 },
   { id: "name", label: "Name", width: 160 },
   { id: "notes", label: "Notes", width: 140 },
@@ -10513,6 +10513,7 @@ function CollectionSpreadsheetPage({
                               columnId={col.id}
                               rowIndex={rIdx}
                               updateCell={updateCell}
+                              productInfo={productInfo}
                             />
                           )}
                         </Td>
@@ -10736,18 +10737,20 @@ function CollectionCellInner({
   columnId,
   rowIndex,
   updateCell,
+  productInfo,
 }: {
   value: string;
   type: CollectionColumnDef["type"];
   columnId: string;
   rowIndex: number;
   updateCell: (rowIdx: number, colId: string, value: string) => void;
+  productInfo?: ProductInfo;
 }) {
   const onCommit = useCallback((next: string) => updateCell(rowIndex, columnId, next), [updateCell, rowIndex, columnId]);
   // modelPicture is the multi-image product gallery (numbered, sortable,
   // uploaded to Shopify). Fabric + mani-pic columns are single images.
   if (columnId === "modelPicture") {
-    return <CollectionMultiImageCell value={value} onCommit={onCommit} />;
+    return <CollectionMultiImageCell value={value} onCommit={onCommit} productInfo={productInfo} />;
   }
   if (columnId === "fabric" || columnId === "maniPicsTaken") {
     return <CollectionImageCell value={value} onCommit={onCommit} />;
@@ -10948,7 +10951,7 @@ function serializeMultiImageValue(images: CollectionImageEntry[]): string {
   if (images.length === 0) return "";
   return JSON.stringify(images.map((i) => i.key ? { thumb: i.thumb, key: i.key } : i.thumb));
 }
-function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit: (next: string) => void }) {
+function CollectionMultiImageCell({ value, onCommit, productInfo }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo }) {
   const images = useMemo(() => parseMultiImageValue(value), [value]);
   const [open, setOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -11008,6 +11011,7 @@ function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit
         <CollectionImageManagerModal
           images={images}
           busy={busy}
+          productInfo={productInfo}
           onClose={() => setOpen(false)}
           onAddFiles={addFiles}
           onCommit={commit}
@@ -11028,16 +11032,34 @@ function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit
 // add more. Saves immediately via onCommit on every change so the user
 // can close at any time without losing edits.
 function CollectionImageManagerModal({
-  images, busy, onClose, onAddFiles, onCommit, onPickFile, fileRef,
+  images, busy, productInfo, onClose, onAddFiles, onCommit, onPickFile, fileRef,
 }: {
   images: CollectionImageEntry[];
   busy: boolean;
+  productInfo?: ProductInfo;
   onClose: () => void;
   onAddFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
   onCommit: (next: CollectionImageEntry[]) => void;
   onPickFile: () => void;
   fileRef: React.RefObject<HTMLInputElement | null>;
 }) {
+  // Flatten productInfo into a searchable style list (name + imageUrl).
+  const allStyles = useMemo(() => {
+    if (!productInfo) return [];
+    const out: Array<{ id: string; name: string; imageUrl: string }> = [];
+    for (const cat of productInfo.categories ?? []) {
+      for (const s of cat.styles ?? []) {
+        if (s.imageUrl && s.name) out.push({ id: s.id, name: s.name, imageUrl: s.imageUrl });
+      }
+    }
+    return out;
+  }, [productInfo]);
+  const [piSearch, setPiSearch] = useState("");
+  const piMatches = useMemo(() => {
+    const q = piSearch.trim().toLowerCase();
+    if (!q) return allStyles.slice(0, 24);
+    return allStyles.filter((s) => s.name.toLowerCase().includes(q)).slice(0, 24);
+  }, [piSearch, allStyles]);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   void fileRef;
@@ -11170,7 +11192,52 @@ function CollectionImageManagerModal({
           </div>
           {images.length === 0 && (
             <div style={{ marginTop: 14, padding: 14, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 13, color: "#6b7280", textAlign: "center" }}>
-              No images yet. Click + to add, or paste images directly in this modal.
+              No images yet. Click + to add, paste, or pick from Product Information below.
+            </div>
+          )}
+
+          {allStyles.length > 0 && (
+            <div style={{ marginTop: 22, paddingTop: 18, borderTop: "1px solid #e5e7eb" }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>Pick from Product Information</div>
+                <div style={{ fontSize: 11, color: "#6b7280" }}>Click a style to add its picture as the next image.</div>
+              </div>
+              <input
+                value={piSearch}
+                onChange={(e) => setPiSearch(e.target.value)}
+                placeholder={`Search ${allStyles.length} styles by name…`}
+                style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 10px", fontSize: 13, boxSizing: "border-box", marginBottom: 10 }}
+              />
+              {piMatches.length === 0 ? (
+                <div style={{ fontSize: 12, color: "#9ca3af", textAlign: "center", padding: 10 }}>No styles match.</div>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10 }}>
+                  {piMatches.map((s) => {
+                    const alreadyAdded = images.some((img) => img.thumb === s.imageUrl);
+                    return (
+                      <button
+                        key={s.id}
+                        type="button"
+                        onClick={() => onCommit([...images, { thumb: s.imageUrl }])}
+                        disabled={alreadyAdded}
+                        style={{
+                          background: "transparent", border: alreadyAdded ? "2px solid #0d9488" : "1px solid #d1d5db",
+                          borderRadius: 8, padding: 4, cursor: alreadyAdded ? "default" : "pointer",
+                          opacity: alreadyAdded ? 0.6 : 1,
+                          display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+                        }}
+                        title={alreadyAdded ? `${s.name} — already added` : `Add ${s.name}'s picture`}
+                      >
+                        <div style={{ width: "100%", aspectRatio: "3 / 4", background: "#f9fafb", borderRadius: 4, overflow: "hidden" }}>
+                          <img src={s.imageUrl} alt={s.name} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                        </div>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: "#111827", textAlign: "center", lineHeight: 1.2 }}>{s.name}</div>
+                        {alreadyAdded && <div style={{ fontSize: 10, color: "#0d9488", fontWeight: 700 }}>✓ Added</div>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>
