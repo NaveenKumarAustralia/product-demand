@@ -2534,18 +2534,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "pull_sheet_images") {
-    // Downloads the master Google Sheet as XLSX, extracts every embedded
-    // image with its sheet-row position, and patches each portal row's
-    // modelPicture. Matches by SHEET ROW POSITION: portal row N gets the
-    // images attached to the Nth NON-BLANK row in the source tab (we
-    // need to refetch the CSV per tab to mirror the importer's skip-
-    // blank-rows behaviour). Skips rows that already have modelPicture
-    // populated (so reruns are idempotent).
+    // Accepts an XLSX upload (the user downloads from Google Sheets via
+    // File → Download → Microsoft Excel). Extracts every embedded image
+    // with its sheet-row position, and patches each portal row's
+    // modelPicture. Matches by SHEET ROW POSITION: portal row N gets
+    // the images attached to the Nth NON-BLANK row in the source tab
+    // (we need to refetch the CSV per tab to mirror the importer's
+    // skip-blank-rows behaviour). Rows that already have a modelPicture
+    // are skipped (idempotent).
+    //
+    // Note: we don't fetch the XLSX from a Google URL because both the
+    // /export?format=xlsx and pub?output=xlsx endpoints require sign-in
+    // even when the sheet is "Published to web" — Google gates anything
+    // that exposes the embedded image bytes.
     if (!currentUser?.admin) return jsonResponse({ ok: false, error: "forbidden" });
 
-    const xlsxRes = await fetch(`https://docs.google.com/spreadsheets/d/${SHEET_IMPORT_SPREADSHEET_ID}/export?format=xlsx`);
-    if (!xlsxRes.ok) return jsonResponse({ ok: false, error: `xlsx fetch ${xlsxRes.status}` });
-    const xlsxBuf = Buffer.from(await xlsxRes.arrayBuffer());
+    const uploaded = form.get("xlsx");
+    if (!uploaded || typeof uploaded === "string") {
+      return jsonResponse({ ok: false, error: "no_file" });
+    }
+    const xlsxBuf = Buffer.from(await (uploaded as File).arrayBuffer());
+    if (xlsxBuf.length < 100) {
+      return jsonResponse({ ok: false, error: "empty_file" });
+    }
     let imagesBySheet: Map<string, Map<number, string[]>>;
     try {
       imagesBySheet = await extractImagesFromXlsx(xlsxBuf);
@@ -9111,6 +9122,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const importFetcher = useFetcher<{ ok?: boolean; totalCollections?: number; summary?: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }>; error?: string }>();
   const backfillFetcher = useFetcher<{ ok?: boolean; scanned?: number; updated?: number; error?: string }>();
   const imagesFetcher = useFetcher<{ ok?: boolean; summary?: Array<{ tab: string; imagesFound: number; rowsPatched: number; error?: string }>; error?: string }>();
+  const xlsxInputRef = useRef<HTMLInputElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const collectionIdParam = searchParams.get("collectionId");
   const selectedId = collectionIdParam ? Number(collectionIdParam) : null;
@@ -9233,8 +9245,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 type="button"
                 onClick={() => {
                   if (imagesFetcher.state !== "idle") return;
-                  if (!window.confirm("Pull every inserted-image from the Google Sheet (XLSX) into the matching collection rows?\n\nDownloads the workbook as XLSX, extracts embedded images and their cell anchors, then maps to portal rows by sheet-row position.\n\nRows that already have a modelPicture set are skipped (idempotent). This can take a couple of minutes.")) return;
-                  imagesFetcher.submit({ intent: "pull_sheet_images" }, { method: "post" });
+                  xlsxInputRef.current?.click();
                 }}
                 disabled={imagesFetcher.state !== "idle"}
                 style={{
@@ -9242,10 +9253,26 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                   borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600,
                   cursor: imagesFetcher.state !== "idle" ? "wait" : "pointer",
                 }}
-                title="Extract embedded images from the master Google Sheet and patch them onto unlinked rows"
+                title="Upload the Google Sheet as XLSX (File → Download → Microsoft Excel) to patch row images. Google blocks the runtime XLSX download even for public sheets."
               >
-                {imagesFetcher.state !== "idle" ? "Pulling images…" : "Pull sheet images"}
+                {imagesFetcher.state !== "idle" ? "Pulling images…" : "Upload sheet (XLSX) for images"}
               </button>
+              <input
+                ref={xlsxInputRef}
+                type="file"
+                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!f) return;
+                  if (!window.confirm(`Patch every collection row with images from "${f.name}"?\n\nMatches portal rows to sheet rows by position. Rows that already have a modelPicture are skipped. This can take a couple of minutes for a large workbook.`)) return;
+                  const fd = new FormData();
+                  fd.set("intent", "pull_sheet_images");
+                  fd.set("xlsx", f);
+                  imagesFetcher.submit(fd, { method: "post", encType: "multipart/form-data" });
+                }}
+              />
             </>
           )}
           <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
