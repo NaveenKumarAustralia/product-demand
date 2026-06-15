@@ -2665,12 +2665,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         // Patch images by column anchor → portal column. exceljs gives
         // image col/row as 0-based. Sheet column 1 (A) = col0 0, etc.
+        //
+        // Header text varies between tabs — some sheets label column D
+        // as "FABRIC", others as "40x40 Isha" or whatever the fabric
+        // type is. The LAYOUT is consistent across tabs though, so we
+        // apply a positional fallback for the IMAGE columns: column C
+        // (sheetCol1=3) → modelPicture, column D (sheetCol1=4) → fabric.
+        // This kicks in only when the header text didn't match a portal
+        // column. Header-based mapping still wins when it exists.
+        const POSITIONAL_IMAGE_FALLBACK: Record<number, string> = {
+          3: "modelPicture", // column C
+          4: "fabric",       // column D
+        };
         const imagesByPortalRow: Map<number, Map<string, string[]>> = new Map();
         for (const img of sheetImages) {
           // Sheet col (1-based) = col0 + 1.
           const sheetCol1 = img.col + 1;
-          // Find which portal column this corresponds to.
-          const portalCol = colIdToPortal[sheetCol1];
+          // Find which portal column this corresponds to. Header match
+          // first, positional fallback second.
+          let portalCol = colIdToPortal[sheetCol1] ?? null;
+          if (!portalCol) portalCol = POSITIONAL_IMAGE_FALLBACK[sheetCol1] ?? null;
           if (!portalCol) continue;
           if (portalCol !== "modelPicture" && portalCol !== "fabric" && portalCol !== "maniPicsTaken") continue;
           // Map sheet row 0-based → portal row index.
