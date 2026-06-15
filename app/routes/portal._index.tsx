@@ -2533,6 +2533,216 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, totalCollections, summary });
   }
 
+  if (intent === "delete_all_collections") {
+    if (!currentUser?.admin) return jsonResponse({ ok: false, error: "forbidden" });
+    const result = await prisma.collection.deleteMany({});
+    return jsonResponse({ ok: true, deleted: result.count });
+  }
+
+  if (intent === "import_collection_from_xlsx") {
+    // Per-tab importer: user uploads ONE downloaded tab's XLSX (or a
+    // single workbook with one sheet). For each worksheet we read both
+    // text cells AND image anchors, map columns to portal columns, and
+    // create one new collection per sheet. Pre-links rows via the Link
+    // column and pulls existing Shopify product images for those rows.
+    if (!currentUser?.admin) return jsonResponse({ ok: false, error: "forbidden" });
+    const uploaded = form.get("xlsx");
+    if (!uploaded || typeof uploaded === "string") return jsonResponse({ ok: false, error: "no_file" });
+    const xlsxBuf = Buffer.from(await (uploaded as File).arrayBuffer());
+    if (xlsxBuf.length < 200) return jsonResponse({ ok: false, error: "empty_file" });
+
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }).catch(() => null);
+    const shop = session?.shop ?? "";
+    const accessToken = session?.accessToken ?? "";
+
+    const ExcelJS = (await import("exceljs")).default;
+    const workbook = new ExcelJS.Workbook();
+    try {
+      await workbook.xlsx.load(xlsxBuf);
+    } catch (e) {
+      return jsonResponse({ ok: false, error: `xlsx parse: ${(e as Error).message}` });
+    }
+
+    const chipStatusOptions = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_SETTINGS_KEY }, select: { value: true } })
+      .then((s) => normalizeCollectionSettings(s?.value).statusOptions);
+    const chipSampleOptions = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_SETTINGS_KEY }, select: { value: true } })
+      .then((s) => normalizeCollectionSettings(s?.value).sampleOptions);
+
+    const summary: Array<{ tab: string; rows: number; images: number; linked: number; error?: string }> = [];
+    const existingNames = new Set(
+      (await prisma.collection.findMany({ select: { name: true } })).map((c) => c.name),
+    );
+
+    let collectionsCreated = 0;
+    for (const worksheet of workbook.worksheets) {
+      const sheetName = worksheet.name;
+      try {
+        // Headers from row 1.
+        const headerRow = worksheet.getRow(1);
+        const colIdToPortal: Array<string | null> = [];
+        const portalColToSheetCol: Record<string, number> = {};
+        const headerCount = headerRow.cellCount;
+        for (let c = 1; c <= headerCount; c++) {
+          const cell = headerRow.getCell(c);
+          const headerText = String(cell.value ?? "").toString().trim();
+          const normalized = normalizeSheetHeader(headerText);
+          const portalId = SHEET_HEADER_MAP[normalized] ?? null;
+          colIdToPortal[c] = portalId;
+          if (portalId) portalColToSheetCol[portalId] = c;
+        }
+
+        // Group all images by their from-anchor (row, col). exceljs
+        // returns col/row indices using 0-based numbering.
+        type SheetImg = { row: number; col: number; dataUrl: string };
+        const sheetImages: SheetImg[] = [];
+        const imgs = worksheet.getImages();
+        for (const imgRef of imgs) {
+          const range = imgRef.range as { tl?: { col?: number; row?: number; nativeCol?: number; nativeRow?: number } } | undefined;
+          const tl = range?.tl ?? {};
+          // exceljs uses 0-based col/row in image ranges
+          const col0 = Number((tl.nativeCol ?? tl.col) ?? -1);
+          const row0 = Number((tl.nativeRow ?? tl.row) ?? -1);
+          if (!Number.isFinite(col0) || col0 < 0 || !Number.isFinite(row0) || row0 < 0) continue;
+          const media = workbook.model.media.find((m) => m.index === imgRef.imageId);
+          if (!media?.buffer) continue;
+          const ext = (media.extension ?? "png").toString().toLowerCase();
+          const mime = ext === "jpg" || ext === "jpeg" ? "image/jpeg"
+            : ext === "gif" ? "image/gif"
+            : ext === "webp" ? "image/webp"
+            : "image/png";
+          const dataUrl = `data:${mime};base64,${Buffer.from(media.buffer).toString("base64")}`;
+          sheetImages.push({ row: row0, col: col0, dataUrl });
+        }
+
+        // Data rows start at row 2. Skip blank rows to mirror the CSV
+        // importer's behaviour. portalRowIdx → 0-based sheetRowIdx.
+        const portalRowToSheetRow0: number[] = [];
+        const rowsOut: Record<string, string>[] = [];
+        const lastRow = worksheet.actualRowCount;
+        for (let r = 2; r <= lastRow; r++) {
+          const sheetRow = worksheet.getRow(r);
+          // Build out row by iterating header cells.
+          const out: Record<string, string> = {};
+          let hasContent = false;
+          for (let c = 1; c <= headerCount; c++) {
+            const portalCol = colIdToPortal[c];
+            if (!portalCol) continue;
+            const cellVal = sheetRow.getCell(c).value;
+            // Skip image columns here — patched separately below.
+            if (portalCol === "modelPicture" || portalCol === "fabric" || portalCol === "maniPicsTaken") continue;
+            let val = cellVal == null ? "" : (typeof cellVal === "object" && "richText" in cellVal
+              ? (cellVal as { richText: Array<{ text: string }> }).richText.map((rt) => rt.text).join("")
+              : typeof cellVal === "object" && "text" in cellVal
+              ? String((cellVal as { text: string }).text)
+              : typeof cellVal === "object" && "result" in cellVal
+              ? String((cellVal as { result: unknown }).result ?? "")
+              : typeof cellVal === "object" && "hyperlink" in cellVal
+              ? String((cellVal as { text?: string; hyperlink?: string }).text ?? (cellVal as { hyperlink?: string }).hyperlink ?? "")
+              : String(cellVal)).trim();
+            if (!val) continue;
+            if (portalCol === "price" || portalCol === "cost" || portalCol === "compareAtPrice") {
+              val = parsePriceCell(val);
+              if (!val) continue;
+            }
+            if (portalCol === "status") val = mapToChipValue(val, chipStatusOptions);
+            if (portalCol === "sample") val = mapToChipValue(val, chipSampleOptions);
+            if (portalCol === "complProducts" || portalCol === "schedules" || portalCol === "reviews" || portalCol === "swatches") {
+              val = /^true$/i.test(val) ? "1" : "";
+              if (!val) continue;
+            }
+            if (val) {
+              out[portalCol] = val;
+              hasContent = true;
+            }
+          }
+          if (!hasContent) continue;
+          portalRowToSheetRow0.push(r - 1); // 0-based sheetRowIdx
+          rowsOut.push(out);
+        }
+
+        // Patch images by column anchor → portal column. exceljs gives
+        // image col/row as 0-based. Sheet column 1 (A) = col0 0, etc.
+        const imagesByPortalRow: Map<number, Map<string, string[]>> = new Map();
+        for (const img of sheetImages) {
+          // Sheet col (1-based) = col0 + 1.
+          const sheetCol1 = img.col + 1;
+          // Find which portal column this corresponds to.
+          const portalCol = colIdToPortal[sheetCol1];
+          if (!portalCol) continue;
+          if (portalCol !== "modelPicture" && portalCol !== "fabric" && portalCol !== "maniPicsTaken") continue;
+          // Map sheet row 0-based → portal row index.
+          const portalRowIdx = portalRowToSheetRow0.indexOf(img.row);
+          if (portalRowIdx < 0) continue;
+          let m = imagesByPortalRow.get(portalRowIdx);
+          if (!m) { m = new Map(); imagesByPortalRow.set(portalRowIdx, m); }
+          const arr = m.get(portalCol) ?? [];
+          arr.push(img.dataUrl);
+          m.set(portalCol, arr);
+        }
+        let imagesPatched = 0;
+        for (const [portalRowIdx, perCol] of imagesByPortalRow) {
+          const row = rowsOut[portalRowIdx];
+          if (!row) continue;
+          for (const [portalCol, urls] of perCol) {
+            // modelPicture supports multi-image JSON array; fabric is
+            // single. Use the first image for fabric, all for model.
+            if (portalCol === "modelPicture") {
+              row.modelPicture = JSON.stringify(urls);
+            } else if (portalCol === "fabric" || portalCol === "maniPicsTaken") {
+              row[portalCol] = urls[0] ?? "";
+            }
+            imagesPatched += urls.length;
+          }
+        }
+
+        // Pre-link via Link column → Shopify productId; pull product
+        // meta to fill handle + replace modelPicture with Shopify CDN
+        // versions for linked rows.
+        let linkedCount = 0;
+        for (const row of rowsOut) {
+          const linkVal = row.link ?? "";
+          const productGid = extractShopifyProductIdFromLink(linkVal);
+          if (!productGid) continue;
+          row[COL_ROW_SHOPIFY_PRODUCT_ID] = productGid;
+          row[COL_ROW_SHOPIFY_STATUS] = "ACTIVE";
+          linkedCount++;
+          if (shop && accessToken) {
+            try {
+              const meta = await fetchShopifyProductMeta(shop, accessToken, productGid);
+              if (meta.handle) row[COL_ROW_SHOPIFY_HANDLE] = meta.handle;
+              if (meta.images.length) row.modelPicture = JSON.stringify(meta.images);
+            } catch (e) {
+              console.warn(`[xlsx-import] meta fetch failed:`, e);
+            }
+          }
+        }
+
+        // Handle name collision: append (2) etc until unique.
+        let finalName = sheetName;
+        let n = 2;
+        while (existingNames.has(finalName)) { finalName = `${sheetName} (${n++})`; }
+        existingNames.add(finalName);
+
+        await prisma.collection.create({
+          data: {
+            name: finalName,
+            sortOrder: existingNames.size + collectionsCreated,
+            rows: rowsOut as unknown as object,
+            columns: DEFAULT_COLLECTION_COLUMNS as unknown as object,
+          },
+        });
+        collectionsCreated++;
+        summary.push({ tab: finalName, rows: rowsOut.length, images: imagesPatched, linked: linkedCount });
+      } catch (e) {
+        summary.push({ tab: sheetName, rows: 0, images: 0, linked: 0, error: (e as Error).message });
+      }
+    }
+    return jsonResponse({ ok: true, summary, collectionsCreated });
+  }
+
   if (intent === "pull_sheet_images") {
     // Accepts an XLSX upload (the user downloads from Google Sheets via
     // File → Download → Microsoft Excel). Extracts every embedded image
@@ -9123,6 +9333,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const backfillFetcher = useFetcher<{ ok?: boolean; scanned?: number; updated?: number; error?: string }>();
   const imagesFetcher = useFetcher<{ ok?: boolean; summary?: Array<{ tab: string; imagesFound: number; rowsPatched: number; error?: string }>; error?: string }>();
   const xlsxInputRef = useRef<HTMLInputElement>(null);
+  const tabImportFetcher = useFetcher<{ ok?: boolean; collectionsCreated?: number; summary?: Array<{ tab: string; rows: number; images: number; linked: number; error?: string }>; error?: string }>();
+  const tabImportInputRef = useRef<HTMLInputElement>(null);
+  const deleteAllFetcher = useFetcher<{ ok?: boolean; deleted?: number; error?: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const collectionIdParam = searchParams.get("collectionId");
   const selectedId = collectionIdParam ? Number(collectionIdParam) : null;
@@ -9210,6 +9423,56 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               <button
                 type="button"
                 onClick={() => {
+                  if (deleteAllFetcher.state !== "idle") return;
+                  if (!window.confirm("Delete EVERY collection in the portal?\n\nThis wipes all collections and their rows. Cannot be undone.\n\nUse this when you're ready to start fresh (re-importing tab by tab).")) return;
+                  if (!window.confirm("Really delete every collection? This is destructive and irreversible.")) return;
+                  deleteAllFetcher.submit({ intent: "delete_all_collections" }, { method: "post" });
+                }}
+                disabled={deleteAllFetcher.state !== "idle"}
+                style={{
+                  background: "#dc2626", color: "#fff", border: "none",
+                  borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600,
+                  cursor: deleteAllFetcher.state !== "idle" ? "wait" : "pointer",
+                }}
+                title="Wipe every collection — for starting fresh before tab-by-tab re-import"
+              >
+                {deleteAllFetcher.state !== "idle" ? "Deleting…" : "Delete all collections"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (tabImportFetcher.state !== "idle") return;
+                  tabImportInputRef.current?.click();
+                }}
+                disabled={tabImportFetcher.state !== "idle"}
+                style={{
+                  background: "#0d9488", color: "#fff", border: "none",
+                  borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600,
+                  cursor: tabImportFetcher.state !== "idle" ? "wait" : "pointer",
+                }}
+                title="Upload ONE tab's XLSX (downloaded from Google Sheets) to create the collection — text + images + fabric pictures all in one go"
+              >
+                {tabImportFetcher.state !== "idle" ? "Importing…" : "Upload tab (creates collection)"}
+              </button>
+              <input
+                ref={tabImportInputRef}
+                type="file"
+                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!f) return;
+                  if (!window.confirm(`Create collection(s) from "${f.name}"?\n\nFor each worksheet in the file:\n• Reads text into matching portal columns\n• Reads images and assigns them to MODEL PICTURE + FABRIC columns by anchor\n• Pre-links rows whose Link column has a Shopify URL\n• Replaces MODEL PICTURE with Shopify images for linked rows\n\nName collisions get "(2)", "(3)" suffix — won't overwrite existing collections.`)) return;
+                  const fd = new FormData();
+                  fd.set("intent", "import_collection_from_xlsx");
+                  fd.set("xlsx", f);
+                  tabImportFetcher.submit(fd, { method: "post", encType: "multipart/form-data" });
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => {
                   if (importFetcher.state !== "idle") return;
                   if (!window.confirm("Import all collections from Google Sheet?\n\nThis will:\n• Fetch ~48 tabs from the master sheet\n• Create one collection per tab\n• Pre-link rows whose Link column has a Shopify URL\n• Pull Shopify images for linked rows\n\nCollections that already exist (by name) are skipped. This can take several minutes.")) return;
                   importFetcher.submit({ intent: "import_collections_from_google_sheet" }, { method: "post" });
@@ -9220,9 +9483,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                   borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600,
                   cursor: importFetcher.state !== "idle" ? "wait" : "pointer",
                 }}
-                title="One-off import from the master Google Sheet"
+                title="Bulk CSV-only import for all tabs (no images from sheet — only Shopify pulls for linked rows)"
               >
-                {importFetcher.state !== "idle" ? "Importing…" : "Import from Google Sheet"}
+                {importFetcher.state !== "idle" ? "Importing…" : "Bulk CSV import"}
               </button>
               <button
                 type="button"
@@ -9281,6 +9544,25 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
       </div>
 
+      {deleteAllFetcher.data?.ok && (
+        <div style={{ margin: "0 14px 10px", padding: "8px 12px", background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b", borderRadius: 6, fontSize: 12 }}>
+          Deleted {deleteAllFetcher.data.deleted ?? 0} collection{deleteAllFetcher.data.deleted === 1 ? "" : "s"}. Ready for a fresh import.
+        </div>
+      )}
+      {tabImportFetcher.data?.ok && tabImportFetcher.data.summary && (
+        <div style={{ margin: "0 14px 10px", padding: 12, background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 8, fontSize: 12, color: "#065f46" }}>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>
+            Created {tabImportFetcher.data.collectionsCreated ?? 0} collection{tabImportFetcher.data.collectionsCreated === 1 ? "" : "s"}.
+          </div>
+          <div style={{ maxHeight: 180, overflowY: "auto" }}>
+            {tabImportFetcher.data.summary.map((s) => (
+              <div key={s.tab} style={{ padding: "3px 0", borderBottom: "1px solid #d1fae5" }}>
+                <strong>{s.tab}</strong> — {s.error ? <span style={{ color: "#b45309" }}>{s.error}</span> : `${s.rows} rows, ${s.images} images, ${s.linked} pre-linked`}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {backfillFetcher.data?.ok && (
         <div style={{ margin: "0 14px 10px", padding: "8px 12px", background: "#ecfdf5", border: "1px solid #a7f3d0", color: "#065f46", borderRadius: 6, fontSize: 12 }}>
           Scanned {backfillFetcher.data.scanned ?? 0} linked rows, backfilled handles for {backfillFetcher.data.updated ?? 0}. Refresh to see the storefront links.
