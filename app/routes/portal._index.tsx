@@ -3042,6 +3042,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     const rows = normalizeCollectionRows(collection.rows);
     const statusOpt = String(form.get("status") ?? "DRAFT").toUpperCase() === "ACTIVE" ? "ACTIVE" : "DRAFT";
+    // Convert row.priceRupees → AUD via the cached live FX rate so
+    // the per-variant inventory cost lands in Shopify's shop currency.
+    const inrPerAudForPush = await getCachedInrPerAud().catch(() => null);
 
     let targetIndexes: number[];
     if (intent === "push_collection_row_to_shopify") {
@@ -3064,7 +3067,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         results.push({ index: idx, ok: true, productId: row[COL_ROW_SHOPIFY_PRODUCT_ID] });
         continue;
       }
-      const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE" });
+      const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush });
       if (res.ok && res.productId) {
         rows[idx] = {
           ...row,
@@ -6201,7 +6204,7 @@ async function createShopifyProductFromRow(
   shop: string,
   accessToken: string,
   row: Record<string, string>,
-  opts: { status: "DRAFT" | "ACTIVE" } = { status: "DRAFT" },
+  opts: { status: "DRAFT" | "ACTIVE"; inrPerAud?: number | null } = { status: "DRAFT" },
 ): Promise<CollectionPushResult> {
   // Title is required. Name is the title column (Title column was
   // removed in V2). We still fall back to legacy `title` for any rows
@@ -6247,8 +6250,15 @@ async function createShopifyProductFromRow(
   const price = priceRaw ? String(Number(priceRaw) || 0) : "0";
   const compareAtRaw = (row.compareAtPrice ?? "").trim();
   const compareAt = compareAtRaw ? String(Number(compareAtRaw) || 0) : null;
-  const costRaw = (row.cost ?? "").trim();
-  const cost = costRaw ? String(Number(costRaw) || 0) : null;
+  // Inventory cost: convert Price ₹ to AUD via the cached FX rate
+  // (rate threaded from the push action). Legacy rows that still hold
+  // an AUD value in `row.cost` keep working as a fallback so we don't
+  // wipe pre-existing costs during the migration.
+  const priceRupeesRaw = Number((row.priceRupees ?? "").trim()) || 0;
+  const audFromRupees = priceRupeesRaw > 0 ? convertRupeesToAud(priceRupeesRaw, opts.inrPerAud) : null;
+  const legacyCostRaw = Number((row.cost ?? "").trim()) || 0;
+  const computedCost = audFromRupees ?? (legacyCostRaw > 0 ? legacyCostRaw : null);
+  const cost = computedCost != null ? String(Math.round(computedCost * 100) / 100) : null;
   const hsCode = (row.hsCode ?? "").trim();
   const countryCode = (row.countryOfOrigin ?? "").trim().toUpperCase().slice(0, 2);
 
@@ -9513,7 +9523,8 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "sampleReceived", label: "Sample RECEIVED", type: "date", width: 120 },
   { id: "sampleSizesReceived", label: "Sample sizes received", width: 140 },
   { id: "price", label: "Price (RRP)", type: "number", width: 80 },
-  { id: "cost", label: "Cost (AUD)", type: "number", width: 80 },
+  { id: "priceRupees", label: "Price ₹", type: "number", width: 90 },
+  { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 },
   { id: "eta", label: "ETA", type: "date", width: 90 },
   { id: "maniPicsTaken", label: "mani Pics Taken", width: 130 },
   { id: "loadingNotes", label: "Loading Notes", width: 140 },
@@ -9557,7 +9568,13 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
     else cols.splice(idx + 1, 0, col);
   };
   insertAfter("sku", { id: "barcode", label: "Barcode", width: 100 });
-  return cols;
+  insertAfter("price", { id: "priceRupees", label: "Price ₹", type: "number", width: 90 });
+  insertAfter("priceRupees", { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 });
+  // Legacy "cost" column was AUD-only and is superseded by the
+  // priceRupees + priceAud pair (matches packing list / restock).
+  // Drop it from the visible columns; any data on rows stays in row
+  // JSON but isn't shown.
+  return cols.filter((c) => c.id !== "cost");
 }
 function normalizeCollectionRows(value: unknown): Record<string, string>[] {
   if (!Array.isArray(value)) return [];
@@ -10135,39 +10152,37 @@ function CollectionSpreadsheetPage({
     }
   }, [loadFetcher.data, listItem.id]);
 
-  // Cost (AUD) auto-fill — same lookup the restock page uses:
-  // row.name + Product Information styles + Fabric in Stock fabrics
-  // resolve to a cost in rupees, converted to AUD via the cached live
-  // FX rate. Fills only empty Cost cells so manual overrides stick.
-  // Re-runs once on row load and whenever a row name changes.
+  // Price ₹ auto-fill — same lookup the restock + packing list pages
+  // use: row.name resolves via Product Information styles + Fabric in
+  // Stock to a cost in rupees. Fills only empty Price ₹ cells so
+  // manual overrides stick. Re-runs once on row load and whenever a
+  // row name changes.
   const styleCostLookup = useMemo(
     () => buildStyleCostLookup(productInfo, fabricStockIndex),
     [productInfo, fabricStockIndex],
   );
-  const autoCostAud = useCallback((rowName: string): string => {
+  const autoPriceRupees = useCallback((rowName: string): string => {
     const rupees = styleCostLookup.costForTitle(rowName);
     if (!rupees) return "";
-    const aud = convertRupeesToAud(rupees, inrPerAudCachedRate);
-    if (aud == null || !Number.isFinite(aud) || aud <= 0) return "";
-    return String(Math.round(aud));
-  }, [styleCostLookup, inrPerAudCachedRate]);
+    return String(Math.round(rupees));
+  }, [styleCostLookup]);
   useEffect(() => {
     if (!loaded) return;
     setRows((prev) => {
       let changed = false;
       const next = prev.map((r) => {
-        if ((r.cost ?? "").trim()) return r;
+        if ((r.priceRupees ?? "").trim()) return r;
         const name = (r.name ?? r.title ?? "").trim();
         if (!name) return r;
-        const cost = autoCostAud(name);
-        if (!cost) return r;
+        const rupees = autoPriceRupees(name);
+        if (!rupees) return r;
         changed = true;
-        return { ...r, cost };
+        return { ...r, priceRupees: rupees };
       });
       return changed ? next : prev;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, autoCostAud]);
+  }, [loaded, autoPriceRupees]);
 
   // Cmd/Ctrl+Z handler — reads from the in-memory undo stack (NOT
   // localStorage, which can't hold base64 image rows). Intercepts in
@@ -10263,12 +10278,13 @@ function CollectionSpreadsheetPage({
           const d = new Date();
           patched.sampleReceived = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
         }
-        // Auto-fill Cost (AUD) when the Name resolves to a Product Info
-        // style + Fabric Stock fabric. Same lookup as the restock page.
-        // Only fills empty Cost cells — manual overrides stick.
-        if (colId === "name" && !(patched.cost ?? "").trim()) {
-          const cost = autoCostAud(value);
-          if (cost) patched.cost = cost;
+        // Auto-fill Price ₹ when the Name resolves to a Product Info
+        // style + Fabric Stock fabric. Same lookup as the restock +
+        // packing list pages. Only fills empty Price ₹ — manual
+        // overrides stick.
+        if (colId === "name" && !(patched.priceRupees ?? "").trim()) {
+          const rupees = autoPriceRupees(value);
+          if (rupees) patched.priceRupees = rupees;
         }
         return patched;
       });
@@ -10276,7 +10292,7 @@ function CollectionSpreadsheetPage({
       return next;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collectionSettings.sampleReceivedChipValue, listItem.id, autoCostAud]);
+  }, [collectionSettings.sampleReceivedChipValue, listItem.id, autoPriceRupees]);
 
   // Expand "+K" Generate click into per-variant SKU and barcode lines,
   // one line per size that has qty > 0 on this row. Free Size mode
@@ -10698,6 +10714,26 @@ function CollectionSpreadsheetPage({
                           </Td>
                         );
                       }
+                      // Unit A$ (priceAud) is a live-computed readonly
+                      // cell: takes row.priceRupees + cached FX rate and
+                      // shows the per-piece AUD plus the rate subtext,
+                      // matching the packing list page.
+                      if (col.id === "priceAud") {
+                        return (
+                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
+                            <CollectionPriceAudCell
+                              rupees={Number(row.priceRupees ?? "0") || 0}
+                              inrPerAud={inrPerAudCachedRate}
+                            />
+                          </Td>
+                        );
+                      }
+                      // Price ₹ (priceRupees) needs the auto-computed
+                      // value as the placeholder so empty cells hint at
+                      // what they'll become — same pattern as packing.
+                      const placeholderText = col.id === "priceRupees" && !value
+                        ? autoPriceRupees((row.name ?? row.title ?? "").trim())
+                        : "";
                       // Linked rows lock plain text/number/date inputs
                       // so the source-of-truth is Shopify admin. But
                       // cells with custom rendering (images, tickboxes,
@@ -10727,6 +10763,7 @@ function CollectionSpreadsheetPage({
                               updateCell={updateCell}
                               productInfo={productInfo}
                               generateSkuAndBarcode={generateSkuAndBarcode}
+                              placeholder={placeholderText}
                             />
                           )}
                         </Td>
@@ -10972,6 +11009,7 @@ function CollectionCellInner({
   updateCell,
   productInfo,
   generateSkuAndBarcode,
+  placeholder,
 }: {
   value: string;
   type: CollectionColumnDef["type"];
@@ -10980,6 +11018,7 @@ function CollectionCellInner({
   updateCell: (rowIdx: number, colId: string, value: string) => void;
   productInfo?: ProductInfo;
   generateSkuAndBarcode?: (rowIdx: number, baseNumber: string) => void;
+  placeholder?: string;
 }) {
   const onCommit = useCallback((next: string) => updateCell(rowIndex, columnId, next), [updateCell, rowIndex, columnId]);
   // modelPicture is the multi-image product gallery (numbered, sortable,
@@ -11047,6 +11086,7 @@ function CollectionCellInner({
         onBlur={() => { if (draft !== value) onCommit(draft); }}
         onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
         className="no-number-arrows"
+        placeholder={placeholder || undefined}
         style={{
           width: "100%", border: "none", outline: "none",
           padding: "1px 2px",
@@ -11120,6 +11160,30 @@ function CollectionSkuCell({
             Generate
           </button>
         </div>
+      )}
+    </div>
+  );
+}
+
+// Live-computed per-piece AUD from the row's Price ₹ + cached FX
+// rate. Matches the packing list "Unit A$" cell: 2-decimal AUD on the
+// top line, "₹X.XX/A$" rate subtext underneath in light gray. Gray
+// "—" when the rate hasn't been fetched yet or rupees is empty.
+function CollectionPriceAudCell({ rupees, inrPerAud }: { rupees: number; inrPerAud: number | null }) {
+  const aud = convertRupeesToAud(rupees, inrPerAud);
+  if (aud == null) {
+    return <div style={{ textAlign: "center", color: "#9ca3af", fontSize: 14, padding: "1px 2px" }}>—</div>;
+  }
+  const effectiveRate = inrPerAud != null ? inrPerAud - FX_RUPEE_BUFFER : null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, padding: "1px 2px" }}>
+      <span style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>
+        {aud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+      </span>
+      {effectiveRate != null && effectiveRate > 0 && (
+        <span style={{ fontSize: 10, color: "#9ca3af" }}>
+          ₹{effectiveRate.toFixed(2)}/A$
+        </span>
       )}
     </div>
   );
