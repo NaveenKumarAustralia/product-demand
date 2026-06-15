@@ -9871,11 +9871,9 @@ function CollectionSpreadsheetPage({
     }
   }, [loadFetcher.data, listItem.id]);
 
-  // Cmd/Ctrl+Z handler that intercepts during the capture phase so we
-  // can both (a) apply the restored rows/columns to local state and
-  // (b) submit the undo intent. The page-level handler in the parent
-  // only does (b), so without this hook the UI would silently keep
-  // showing the new value even after the DB was reverted.
+  // Cmd/Ctrl+Z handler — reads from the in-memory undo stack (NOT
+  // localStorage, which can't hold base64 image rows). Intercepts in
+  // the capture phase so the page-level handler doesn't also fire.
   useEffect(() => {
     if (!loaded) return;
     const handler = (event: KeyboardEvent) => {
@@ -9884,29 +9882,24 @@ function CollectionSpreadsheetPage({
       const isEditingText = activeElement instanceof HTMLInputElement
         || activeElement instanceof HTMLTextAreaElement
         || activeElement?.isContentEditable;
-      if (isEditingText) return; // let the native textarea undo work
-      const stack = readPortalUndoStack();
-      const top = stack[stack.length - 1];
-      if (!top || top.fields?.intent !== "update_collection") return;
-      if (String(top.fields?.collectionId) !== String(listItem.id)) return;
-      // Stop the page-level handler from also popping + submitting.
+      if (isEditingText) return; // let native textarea undo win
+      const top = undoStackRef.current.pop();
+      if (!top) return;
       event.preventDefault();
       event.stopPropagation();
-      stack.pop();
-      window.localStorage.setItem(PORTAL_UNDO_STACK_KEY, JSON.stringify(stack));
-      try {
-        if (top.fields.rows) {
-          const restored = JSON.parse(String(top.fields.rows));
-          if (Array.isArray(restored)) setRows(normalizeCollectionRows(restored));
-        }
-        if (top.fields.columns) {
-          const restored = JSON.parse(String(top.fields.columns));
-          if (Array.isArray(restored)) setColumns(normalizeCollectionColumns(restored));
-        }
-      } catch (e) {
-        console.warn("[undo] apply failed", e);
+      const submitData: Record<string, string> = {
+        intent: "update_collection",
+        collectionId: String(listItem.id),
+      };
+      if (top.rows) {
+        setRows(top.rows);
+        submitData.rows = JSON.stringify(top.rows);
       }
-      fetcher.submit(top.fields, { method: "post" });
+      if (top.columns) {
+        setColumns(top.columns);
+        submitData.columns = JSON.stringify(top.columns);
+      }
+      fetcher.submit(submitData, { method: "post" });
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
@@ -9933,15 +9926,28 @@ function CollectionSpreadsheetPage({
     );
   };
 
-  // persistRows takes the previous rows snapshot too so we can push
-  // it onto the global undo stack. Cmd/Ctrl+Z (handled at page top
-  // level) pops the most recent entry and resubmits — landing on
-  // update_collection with the older rows JSON, restoring state.
+  // Per-collection in-memory undo stack. localStorage CAN'T hold the
+  // full rows JSON when rows contain base64 image data (a single edit
+  // can be several MB; the global undo stack would quota-error). We
+  // keep undo entries in a ref so they survive renders but die on
+  // page reload — acceptable tradeoff for the size.
+  type CollectionUndoEntry = { label: string; rows?: Record<string, string>[]; columns?: CollectionColumnDef[] };
+  const undoStackRef = useRef<CollectionUndoEntry[]>([]);
+  const MAX_UNDO = 50;
+  const pushUndo = (entry: CollectionUndoEntry) => {
+    undoStackRef.current.push(entry);
+    if (undoStackRef.current.length > MAX_UNDO) {
+      undoStackRef.current.splice(0, undoStackRef.current.length - MAX_UNDO);
+    }
+  };
+
+  // persistRows submits the new rows and stacks an undo entry with
+  // the previous snapshot (in-memory, no localStorage).
   const persistRows = (next: Record<string, string>[], previous: Record<string, string>[], label: string) => {
-    submitPortalCell(
-      fetcher,
+    pushUndo({ label, rows: previous });
+    fetcher.submit(
       { intent: "update_collection", collectionId: String(listItem.id), rows: JSON.stringify(next) },
-      { label, fields: { intent: "update_collection", collectionId: String(listItem.id), rows: JSON.stringify(previous) } },
+      { method: "post" },
     );
   };
 
@@ -10089,10 +10095,10 @@ function CollectionSpreadsheetPage({
       document.body.style.userSelect = prevUserSelect;
       document.removeEventListener("mousemove", handleMove);
       document.removeEventListener("mouseup", handleUp);
-      submitPortalCell(
-        fetcher,
+      pushUndo({ label: `Undo resize ${columnId}`, columns: startCols });
+      fetcher.submit(
         { intent: "update_collection", collectionId: String(listItem.id), columns: JSON.stringify(nextCols) },
-        { label: `Undo resize ${columnId}`, fields: { intent: "update_collection", collectionId: String(listItem.id), columns: JSON.stringify(startCols) } },
+        { method: "post" },
       );
     };
     document.addEventListener("mousemove", handleMove);
@@ -16634,9 +16640,36 @@ function readPortalUndoStack(): PortalUndoEntry[] {
 
 function pushPortalUndo(entry?: PortalUndoEntry | null) {
   if (!entry || typeof window === "undefined") return;
+  // Skip oversized entries so a single ~5MB+ row blob (e.g. a
+  // collection row carrying base64 images) doesn't blow the
+  // localStorage quota. Anything ≥1MB silently doesn't get stacked
+  // — callers that care about big-state undo (Collections) keep
+  // their own in-memory ref.
+  let serialized: string;
+  try { serialized = JSON.stringify(entry); } catch { return; }
+  if (serialized.length > 1_000_000) return;
   const stack = readPortalUndoStack();
   stack.push(entry);
-  window.localStorage.setItem(PORTAL_UNDO_STACK_KEY, JSON.stringify(stack.slice(-MAX_PORTAL_UNDO_ENTRIES)));
+  const trimmed = stack.slice(-MAX_PORTAL_UNDO_ENTRIES);
+  let payload: string;
+  try { payload = JSON.stringify(trimmed); } catch { return; }
+  const writeWithRetry = (s: PortalUndoEntry[], p: string) => {
+    try {
+      window.localStorage.setItem(PORTAL_UNDO_STACK_KEY, p);
+    } catch (err) {
+      // Quota likely exceeded — keep retrying with fewer entries
+      // until it fits, then bail completely if even one entry won't
+      // fit (means the entry itself is too big; we drop it).
+      if (s.length > 1) {
+        const shorter = s.slice(Math.floor(s.length / 2));
+        try { writeWithRetry(shorter, JSON.stringify(shorter)); } catch { /* drop */ }
+        return;
+      }
+      try { window.localStorage.removeItem(PORTAL_UNDO_STACK_KEY); } catch { /* ignore */ }
+      console.warn("[undo] dropped — entry too large for localStorage", err);
+    }
+  };
+  writeWithRetry(trimmed, payload);
 }
 
 function submitLastPortalUndo(fetcher: ReturnType<typeof useFetcher>) {
