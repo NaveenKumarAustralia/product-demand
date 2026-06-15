@@ -10614,8 +10614,11 @@ function CollectionCellInner({
   // Readonly cells are filled by the row's auto-computed value (Total
   // Ordered, Link) and rendered as plain text — onCommit is ignored.
   if (type === "readonly") {
+    // Total Ordered + Link readonly cells. Total Ordered is the
+    // running sum cell so user wanted the bigger 16pt qty/totals
+    // sizing here too. Link's text content is small anyway.
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "1px 2px", fontSize: 12, color: "#374151", fontWeight: 600, textAlign: "center", width: "100%", minHeight: 24, wordBreak: "break-word" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "1px 2px", fontSize: 16, color: "#374151", fontWeight: 700, textAlign: "center", width: "100%", minHeight: 24, wordBreak: "break-word" }}>
         {value || ""}
       </div>
     );
@@ -10626,15 +10629,26 @@ function CollectionCellInner({
   // Text becomes a textarea so long content wraps when the column is
   // resized narrower instead of overflowing or getting cut off.
   if (type === "number" || type === "date") {
+    // Number cells are the size variant qty columns (XS, S, M, …).
+    // User wanted these 4pt bigger than the text cells.
+    const isNumber = type === "number";
     return (
       <input
-        type={type === "number" ? "number" : "date"}
+        type={isNumber ? "number" : "date"}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => { if (draft !== value) onCommit(draft); }}
         onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-        className={type === "number" ? "no-number-arrows" : undefined}
-        style={{ width: "100%", border: "none", outline: "none", padding: "1px 2px", fontSize: 12, fontFamily: "inherit", background: "transparent", boxSizing: "border-box", textAlign: "center" }}
+        className={isNumber ? "no-number-arrows" : undefined}
+        style={{
+          width: "100%", border: "none", outline: "none",
+          padding: "1px 2px",
+          fontSize: isNumber ? 16 : 14,
+          fontWeight: isNumber ? 600 : 400,
+          fontFamily: "inherit",
+          background: "transparent", boxSizing: "border-box",
+          textAlign: "center",
+        }}
       />
     );
   }
@@ -10659,7 +10673,7 @@ function CollectionTextCell({
     const el = ref.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${Math.max(el.scrollHeight, 22)}px`;
+    el.style.height = `${Math.max(el.scrollHeight, 24)}px`;
   };
   useEffect(() => { fit(); }, [draft]);
   useEffect(() => {
@@ -10686,12 +10700,12 @@ function CollectionTextCell({
       style={{
         width: "100%", border: "none", outline: "none",
         padding: "1px 2px",
-        fontSize: 12, fontFamily: "inherit",
+        fontSize: 14, fontFamily: "inherit",
         background: "transparent", boxSizing: "border-box",
         textAlign: "center",
         resize: "none", overflow: "hidden",
         whiteSpace: "pre-wrap", wordBreak: "break-word",
-        minHeight: 22, lineHeight: "16px",
+        minHeight: 24, lineHeight: "18px",
       }}
     />
   );
