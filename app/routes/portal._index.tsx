@@ -6088,6 +6088,19 @@ const COLLECTION_SIZE_COLUMN_LABELS: Array<[string, string]> = [
 // All column ids that contribute to TOTAL Ordered (Free Size + regular).
 const COLLECTION_QTY_COLUMN_IDS = ["freeSize", ...COLLECTION_SIZE_COLUMN_LABELS.map(([id]) => id)];
 
+// Size suffix for variant SKU/barcode. User's convention:
+//   XS / S / M / L / XL → as-is
+//   2XL → XXL, 3XL → XXXL
+//   S/M or S-M → SM, M/L or M-L → ML, L/XL or L-XL → LXL
+// (separator between base + suffix is empty — K2596 + XS = K2596XS)
+function collectionSizeSfx(size: string): string {
+  switch (size) {
+    case "2XL": return "XXL";
+    case "3XL": return "XXXL";
+    default: return size.replace(/[/-]/g, "");
+  }
+}
+
 function sumCollectionRowQuantity(row: Record<string, string>): number {
   let n = 0;
   for (const id of COLLECTION_QTY_COLUMN_IDS) n += Number(row[id] ?? 0) || 0;
@@ -6189,8 +6202,24 @@ async function createShopifyProductFromRow(
     }
   }
 
-  const baseSku = (row.sku ?? "").trim();
-  const baseBarcode = (row.barcode ?? "").trim();
+  // SKU and Barcode cells can hold either a single base value
+  // (legacy: row.sku = "K2596") OR a per-variant multi-line list
+  // (after clicking the "+K" Generate button: one line per ordered
+  // size, e.g., "K2596XS\nK2596S\n…"). If line count matches the
+  // variant count, use them directly. Otherwise fall back to base +
+  // size suffix.
+  const skuLines = (row.sku ?? "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const barcodeLines = (row.barcode ?? "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const baseSku = skuLines[0] ?? "";
+  const baseBarcode = barcodeLines[0] ?? "";
+  const skuForVariant = (idx: number, size: string): string => {
+    if (skuLines.length === variantRows.length && skuLines[idx]) return skuLines[idx];
+    return baseSku ? `${baseSku}${collectionSizeSfx(size)}` : "";
+  };
+  const barcodeForVariant = (idx: number, size: string): string => {
+    if (barcodeLines.length === variantRows.length && barcodeLines[idx]) return barcodeLines[idx];
+    return baseBarcode ? `${baseBarcode}${collectionSizeSfx(size)}` : "";
+  };
   const priceRaw = (row.price ?? "").trim();
   const price = priceRaw ? String(Number(priceRaw) || 0) : "0";
   const compareAtRaw = (row.compareAtPrice ?? "").trim();
@@ -6199,19 +6228,6 @@ async function createShopifyProductFromRow(
   const cost = costRaw ? String(Number(costRaw) || 0) : null;
   const hsCode = (row.hsCode ?? "").trim();
   const countryCode = (row.countryOfOrigin ?? "").trim().toUpperCase().slice(0, 2);
-
-  // Size suffix for variant SKU/barcode. User's convention is:
-  //   XS / S / M / L / XL → as-is
-  //   2XL → XXL, 3XL → XXXL
-  //   S/M or S-M → SM, M/L or M-L → ML, L/XL or L-XL → LXL
-  // and no separator between base + suffix (so K2596 + XS = K2596XS).
-  const sizeSfx = (size: string): string => {
-    switch (size) {
-      case "2XL": return "XXL";
-      case "3XL": return "XXXL";
-      default: return size.replace(/[/-]/g, "");
-    }
-  };
 
   type Variant = {
     optionValues?: Array<{ optionName: string; name: string }>;
@@ -6242,14 +6258,15 @@ async function createShopifyProductFromRow(
         inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
       }]
     : variantRows.length
-    ? variantRows.map((v) => {
-        const sfx = sizeSfx(v.size);
+    ? variantRows.map((v, idx) => {
+        const sku = skuForVariant(idx, v.size);
+        const barcode = barcodeForVariant(idx, v.size);
         return {
           optionValues: [{ optionName: "Size", name: v.size }],
           price,
           ...(compareAt ? { compareAtPrice: compareAt } : {}),
-          ...(baseSku ? { sku: `${baseSku}${sfx}` } : {}),
-          ...(baseBarcode ? { barcode: `${baseBarcode}${sfx}` } : {}),
+          ...(sku ? { sku } : {}),
+          ...(barcode ? { barcode } : {}),
           inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
         };
       })
@@ -9498,12 +9515,24 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
 function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   if (!Array.isArray(value) || value.length === 0) return DEFAULT_COLLECTION_COLUMNS;
   const VALID_TYPES = new Set(["text", "number", "date", "tickbox", "readonly", "release", "chip"]);
-  return (value as Array<Record<string, unknown>>).map((c, i) => ({
+  const cols: CollectionColumnDef[] = (value as Array<Record<string, unknown>>).map((c, i) => ({
     id: typeof c?.id === "string" ? c.id : `col_${i}`,
     label: typeof c?.label === "string" ? c.label : `Column ${i + 1}`,
     type: typeof c?.type === "string" && VALID_TYPES.has(c.type) ? c.type as CollectionColumnDef["type"] : "text",
     width: typeof c?.width === "number" ? c.width : undefined,
   }));
+  // Auto-insert columns that were added to the default schema after the
+  // collection was first created. Without this, existing collections
+  // would never see new built-in columns (like Barcode). Inserted
+  // immediately after a known anchor column where possible.
+  const insertAfter = (anchorId: string, col: CollectionColumnDef) => {
+    if (cols.some((c) => c.id === col.id)) return;
+    const idx = cols.findIndex((c) => c.id === anchorId);
+    if (idx === -1) cols.push(col);
+    else cols.splice(idx + 1, 0, col);
+  };
+  insertAfter("sku", { id: "barcode", label: "Barcode", width: 100 });
+  return cols;
 }
 function normalizeCollectionRows(value: unknown): Record<string, string>[] {
   if (!Array.isArray(value)) return [];
@@ -10168,13 +10197,6 @@ function CollectionSpreadsheetPage({
         if (colId === "sample" && value === collectionSettings.sampleReceivedChipValue && !(patched.sampleReceived ?? "").trim()) {
           patched.sampleReceived = new Date().toISOString().slice(0, 10);
         }
-        // Auto-fill barcode from SKU by stripping any leading letters
-        // (matches the user's convention: SKU "K2596" → barcode "2596").
-        // Only fills when barcode is empty so manual overrides stick.
-        if (colId === "sku" && !(patched.barcode ?? "").trim()) {
-          const stripped = value.replace(/^[A-Za-z]+/, "");
-          if (stripped) patched.barcode = stripped;
-        }
         return patched;
       });
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
@@ -10182,6 +10204,37 @@ function CollectionSpreadsheetPage({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collectionSettings.sampleReceivedChipValue, listItem.id]);
+
+  // Expand "+K" Generate click into per-variant SKU and barcode lines,
+  // one line per size that has qty > 0 on this row. Free Size mode
+  // (single variant) gets a single value instead of a list.
+  const generateSkuAndBarcode = useCallback((rowIdx: number, baseNumber: string) => {
+    const num = baseNumber.trim();
+    if (!num) return;
+    setRows((prev) => {
+      const next = prev.map((r, i) => {
+        if (i !== rowIdx) return r;
+        const freeSizeQty = Number(r.freeSize) || 0;
+        if (freeSizeQty > 0) {
+          return { ...r, sku: `K${num}`, barcode: num };
+        }
+        const orderedSizes = COLLECTION_SIZE_COLUMN_LABELS
+          .filter(([id]) => (Number(r[id]) || 0) > 0)
+          .map(([, label]) => label);
+        if (orderedSizes.length === 0) {
+          // No sizes ordered yet — just set the base values; user can
+          // re-click "+K" once they've entered quantities.
+          return { ...r, sku: `K${num}`, barcode: num };
+        }
+        const skus = orderedSizes.map((s) => `K${num}${collectionSizeSfx(s)}`).join("\n");
+        const barcodes = orderedSizes.map((s) => `${num}${collectionSizeSfx(s)}`).join("\n");
+        return { ...r, sku: skus, barcode: barcodes };
+      });
+      persistRows(next, prev, `Undo SKU/barcode generate on row ${rowIdx + 1}`);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id]);
 
   const addRow = () => {
     setRows((prev) => {
@@ -10600,6 +10653,7 @@ function CollectionSpreadsheetPage({
                               rowIndex={rIdx}
                               updateCell={updateCell}
                               productInfo={productInfo}
+                              generateSkuAndBarcode={generateSkuAndBarcode}
                             />
                           )}
                         </Td>
@@ -10844,6 +10898,7 @@ function CollectionCellInner({
   rowIndex,
   updateCell,
   productInfo,
+  generateSkuAndBarcode,
 }: {
   value: string;
   type: CollectionColumnDef["type"];
@@ -10851,6 +10906,7 @@ function CollectionCellInner({
   rowIndex: number;
   updateCell: (rowIdx: number, colId: string, value: string) => void;
   productInfo?: ProductInfo;
+  generateSkuAndBarcode?: (rowIdx: number, baseNumber: string) => void;
 }) {
   const onCommit = useCallback((next: string) => updateCell(rowIndex, columnId, next), [updateCell, rowIndex, columnId]);
   // modelPicture is the multi-image product gallery (numbered, sortable,
@@ -10923,14 +10979,20 @@ function CollectionCellInner({
       />
     );
   }
-  // SKU column gets a small "+K" Generate button when the value is
-  // digits-only (e.g., "2596"). Click it and the SKU becomes "K2596"
-  // and the barcode auto-fills to "2596" (via the auto-derive in
-  // updateCell). Saves staff one keystroke per row and removes the
-  // chance of a typo'd K-prefix.
+  // SKU column gets a small "Generate" button when the value is a
+  // plain number (e.g., "2596"). Click it and the cell expands into
+  // one line per ordered size — SKU "K2596XS\nK2596S\n…" and Barcode
+  // "2596XS\n2596S\n…". Free Size rows get a single base value.
   if (columnId === "sku") {
     return (
-      <CollectionSkuCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+      <CollectionSkuCell
+        value={value}
+        draft={draft}
+        setDraft={setDraft}
+        onCommit={onCommit}
+        rowIndex={rowIndex}
+        generateSkuAndBarcode={generateSkuAndBarcode}
+      />
     );
   }
   return (
@@ -10939,18 +11001,19 @@ function CollectionCellInner({
 }
 
 function CollectionSkuCell({
-  value, draft, setDraft, onCommit,
+  value, draft, setDraft, onCommit, rowIndex, generateSkuAndBarcode,
 }: {
   value: string;
   draft: string;
   setDraft: (next: string) => void;
   onCommit: (next: string) => void;
+  rowIndex: number;
+  generateSkuAndBarcode?: (rowIdx: number, baseNumber: string) => void;
 }) {
   const showButton = /^\d+$/.test(draft.trim());
   const apply = () => {
-    const next = `K${draft.trim()}`;
-    setDraft(next);
-    onCommit(next);
+    if (!generateSkuAndBarcode) return;
+    generateSkuAndBarcode(rowIndex, draft.trim());
   };
   return (
     <div style={{ position: "relative", width: "100%" }}>
@@ -10959,12 +11022,12 @@ function CollectionSkuCell({
         <button
           type="button"
           onMouseDown={(e) => { e.preventDefault(); apply(); }}
-          title={`Generate SKU "K${draft.trim()}" and barcode "${draft.trim()}"`}
+          title={`Generate K${draft.trim()}XS, K${draft.trim()}S, … for every ordered size`}
           style={{
             position: "absolute",
             top: 2,
             right: 2,
-            padding: "1px 5px",
+            padding: "2px 6px",
             fontSize: 10,
             fontWeight: 700,
             color: "#fff",
@@ -10973,9 +11036,10 @@ function CollectionSkuCell({
             borderRadius: 3,
             cursor: "pointer",
             lineHeight: 1.2,
+            whiteSpace: "nowrap",
           }}
         >
-          +K
+          Generate
         </button>
       )}
     </div>
