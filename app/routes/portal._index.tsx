@@ -6867,6 +6867,17 @@ export default function PortalDashboard() {
             appearance: textfield;
             -moz-appearance: textfield;
           }
+          /* Excel-style cell focus: a teal outline around the focused
+             grid cell so the user knows exactly where they're typing.
+             Both :focus (Td itself focused via tabIndex) and
+             :focus-within (an input inside the cell focused) trigger
+             it. */
+          td[data-grid-row]:focus,
+          td[data-grid-row]:focus-within {
+            outline: 2px solid #0d9488 !important;
+            outline-offset: -2px;
+            background: #f0fdfa;
+          }
 
           /* Always-visible horizontal scrollbar on table wrappers (macOS overlay scrollbars auto-hide otherwise) */
           .portal-table-scroll::-webkit-scrollbar { height: 12px; width: 12px; }
@@ -9395,6 +9406,24 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     fetcher.submit({ intent: "rename_collection", collectionId: String(id), name }, { method: "post" });
   };
 
+  const handleSetCover = async (id: number, file: File) => {
+    try {
+      const dataUrl = await compressImageToDataUrl(file);
+      const thumb = await generateThumbnail(dataUrl);
+      // Update local card to show the new image immediately. The
+      // CollectionListItem's updatedAt is also bumped so the cache-
+      // busting query param in the thumbnail URL refreshes.
+      setCollections((prev) => prev.map((c) => c.id === id ? { ...c, hasThumbnail: true, updatedAt: new Date() } : c));
+      fetcher.submit(
+        { intent: "update_collection", collectionId: String(id), thumbnail: thumb || dataUrl },
+        { method: "post" },
+      );
+    } catch (e) {
+      console.warn("[cover] upload failed:", e);
+      window.alert("Couldn't upload that image. Try a different file.");
+    }
+  };
+
   const reorder = (targetId: number) => {
     if (!dragId || dragId === targetId) return;
     const fromIdx = collections.findIndex((c) => c.id === dragId);
@@ -9623,6 +9652,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             onOpen={() => openCollection(c.id)}
             onRename={(name) => handleRename(c.id, name)}
             onDelete={() => handleDelete(c.id)}
+            onSetCover={(file) => handleSetCover(c.id, file)}
             onDragStart={(e) => { setDragId(c.id); e.dataTransfer.effectAllowed = "move"; }}
             onDragOver={(e) => { if (!dragId) return; e.preventDefault(); setDragOverId(c.id); }}
             onDragLeave={() => setDragOverId((cur) => cur === c.id ? null : cur)}
@@ -9668,6 +9698,7 @@ function CollectionCard({
   onOpen,
   onRename,
   onDelete,
+  onSetCover,
   onDragStart,
   onDragOver,
   onDragLeave,
@@ -9680,6 +9711,7 @@ function CollectionCard({
   onOpen: () => void;
   onRename: (name: string) => void;
   onDelete: () => void;
+  onSetCover: (file: File) => void;
   onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragLeave: () => void;
@@ -9690,6 +9722,7 @@ function CollectionCard({
   const [hover, setHover] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(collection.name);
+  const coverInputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { setDraft(collection.name); }, [collection.name]);
 
   return (
@@ -9727,7 +9760,7 @@ function CollectionCard({
           </div>
         </div>
       )}
-      <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8" }}>
+      <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative" }}>
         {collection.hasThumbnail ? (
           <img
             src={`/portal/thumbnail/collection/${collection.id}?v=${new Date(collection.updatedAt).getTime()}`}
@@ -9739,6 +9772,35 @@ function CollectionCard({
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
         )}
+        {(hover || !collection.hasThumbnail) && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); coverInputRef.current?.click(); }}
+            style={{
+              position: "absolute", bottom: 8, right: 8,
+              padding: "4px 10px", borderRadius: 6,
+              border: "none", background: "rgba(17,24,39,0.85)",
+              color: "#fff", fontSize: 11, fontWeight: 600,
+              cursor: "pointer", zIndex: 3,
+              boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
+            }}
+            title="Pick a cover image for this collection"
+          >
+            {collection.hasThumbnail ? "Change cover" : "+ Cover image"}
+          </button>
+        )}
+        <input
+          ref={coverInputRef}
+          type="file"
+          accept="image/*"
+          style={{ display: "none" }}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = "";
+            if (file) onSetCover(file);
+          }}
+        />
       </div>
       <div style={{ ...s.productStyleCardBody, paddingBottom: 14 }}>
         {editing ? (
@@ -9956,7 +10018,38 @@ function CollectionSpreadsheetPage({
     );
   };
 
-  const noopResize = () => {};
+  // Column resize: track widths in local state, persist back into
+  // the collection's columns array on mouseup so it sticks per
+  // collection. Uses the same pattern as the restock page.
+  const startResize = (columnId: string, event: React.MouseEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const target = columns.find((c) => c.id === columnId);
+    const startWidth = target?.width ?? 110;
+    let nextCols = columns;
+    const prevCursor = document.body.style.cursor;
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const handleMove = (moveEvent: MouseEvent) => {
+      const nextWidth = Math.max(MIN_COLUMN_WIDTH, startWidth + moveEvent.clientX - startX);
+      nextCols = columns.map((c) => c.id === columnId ? { ...c, width: nextWidth } : c);
+      setColumns(nextCols);
+    };
+    const handleUp = () => {
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevUserSelect;
+      document.removeEventListener("mousemove", handleMove);
+      document.removeEventListener("mouseup", handleUp);
+      fetcher.submit(
+        { intent: "update_collection", collectionId: String(listItem.id), columns: JSON.stringify(nextCols) },
+        { method: "post" },
+      );
+    };
+    document.addEventListener("mousemove", handleMove);
+    document.addEventListener("mouseup", handleUp);
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 14 }}>
@@ -10052,7 +10145,7 @@ function CollectionSpreadsheetPage({
                     key={col.id}
                     headerKey={`collection:${col.id}`}
                     columnId={col.id}
-                    onResizeStart={noopResize}
+                    onResizeStart={(e) => startResize(col.id, e)}
                   >
                     {col.label}
                   </Th>
@@ -10311,9 +10404,11 @@ function CollectionChipDropdown({
           border: "none", borderRadius: 6, padding: "5px 10px",
           fontSize: 12, fontWeight: 600, cursor: "pointer",
           minWidth: 96, maxWidth: "100%", textAlign: "center",
+          display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4,
         }}
       >
-        {option ? option.label : (emptyLabel ?? "—")}
+        <span>{option ? option.label : (emptyLabel ?? "—")}</span>
+        <span style={{ fontSize: 9, opacity: 0.7, lineHeight: 1 }}>▼</span>
       </button>
       {open && rect && typeof document !== "undefined" && createPortal(
         <div
@@ -10449,20 +10544,85 @@ function CollectionCell({
   // Readonly cells are filled by the row's auto-computed value (Total
   // Ordered, Link) and rendered as plain text — onCommit is ignored.
   if (type === "readonly") {
-    return <span style={{ display: "inline-block", padding: "6px 8px", fontSize: 12, color: "#374151", fontWeight: 600 }}>{value || ""}</span>;
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "1px 2px", fontSize: 12, color: "#374151", fontWeight: 600, textAlign: "center", width: "100%", minHeight: 24, wordBreak: "break-word" }}>
+        {value || ""}
+      </div>
+    );
   }
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
-  const inputType = type === "number" ? "number" : type === "date" ? "date" : "text";
+  // Number + date stay as native inputs (single line, no wrap needed).
+  // Text becomes a textarea so long content wraps when the column is
+  // resized narrower instead of overflowing or getting cut off.
+  if (type === "number" || type === "date") {
+    return (
+      <input
+        type={type === "number" ? "number" : "date"}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => { if (draft !== value) onCommit(draft); }}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+        className={type === "number" ? "no-number-arrows" : undefined}
+        style={{ width: "100%", border: "none", outline: "none", padding: "1px 2px", fontSize: 12, fontFamily: "inherit", background: "transparent", boxSizing: "border-box", textAlign: "center" }}
+      />
+    );
+  }
   return (
-    <input
-      type={inputType}
+    <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+  );
+}
+
+// Auto-growing wrapping text cell. Uses a textarea so the value wraps
+// when the column is narrowed — height tracks scrollHeight via a tiny
+// resize observer + onInput so the row grows to fit the text.
+function CollectionTextCell({
+  value, draft, setDraft, onCommit,
+}: {
+  value: string;
+  draft: string;
+  setDraft: (next: string) => void;
+  onCommit: (next: string) => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const fit = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.max(el.scrollHeight, 22)}px`;
+  };
+  useEffect(() => { fit(); }, [draft]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => fit());
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <textarea
+      ref={ref}
       value={draft}
+      rows={1}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={() => { if (draft !== value) onCommit(draft); }}
-      onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-      className={inputType === "number" ? "no-number-arrows" : undefined}
-      style={{ width: "100%", border: "none", outline: "none", padding: "6px 8px", fontSize: 12, fontFamily: "inherit", background: "transparent", boxSizing: "border-box" }}
+      onKeyDown={(e) => {
+        // Cmd/Ctrl+Enter → newline; Enter alone commits (Excel-style).
+        if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
+          e.preventDefault();
+          (e.target as HTMLTextAreaElement).blur();
+        }
+      }}
+      style={{
+        width: "100%", border: "none", outline: "none",
+        padding: "1px 2px",
+        fontSize: 12, fontFamily: "inherit",
+        background: "transparent", boxSizing: "border-box",
+        textAlign: "center",
+        resize: "none", overflow: "hidden",
+        whiteSpace: "pre-wrap", wordBreak: "break-word",
+        minHeight: 22, lineHeight: "16px",
+      }}
     />
   );
 }
