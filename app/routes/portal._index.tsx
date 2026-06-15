@@ -532,6 +532,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRate" DOUBLE PRECISION`);
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRateAt" TIMESTAMP(3)`);
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingListLine" ADD COLUMN IF NOT EXISTS "costPushedAt" TIMESTAMP(3)`);
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "CollectionImage" (
+          "key" TEXT NOT NULL,
+          "collectionId" INTEGER NOT NULL,
+          "mimeType" TEXT NOT NULL,
+          "bytes" BYTEA NOT NULL,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT "CollectionImage_pkey" PRIMARY KEY ("key")
+        )
+      `);
+      await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "CollectionImage_collectionId_idx" ON "CollectionImage"("collectionId")`);
       const fxRows = await prisma.$queryRawUnsafe<Array<{ id: number; lockedFxRate: number | null; lockedFxRateAt: Date | null }>>(
         `SELECT id, "lockedFxRate", "lockedFxRateAt" FROM "PackingList"`,
       );
@@ -2533,6 +2544,78 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, totalCollections, summary });
   }
 
+  if (intent === "recompress_collection_images") {
+    // Walks every collection's rows. For each inline data URL image
+    // that's still bloated (legacy format from before split storage),
+    // re-compresses it to a small thumb and moves the full bytes to
+    // CollectionImage. Shopify CDN URLs are left alone. Idempotent —
+    // entries that already have a `key` are skipped.
+    if (!currentUser?.admin) return jsonResponse({ ok: false, error: "forbidden" });
+    const collections = await prisma.collection.findMany({ select: { id: true, name: true, rows: true } });
+    let collectionsTouched = 0;
+    let imagesProcessed = 0;
+    let bytesBefore = 0;
+    let bytesAfter = 0;
+    for (const c of collections) {
+      const rows = normalizeCollectionRows(c.rows);
+      let changed = false;
+      for (const row of rows) {
+        for (const col of ["modelPicture", "fabric", "maniPicsTaken"]) {
+          const raw = (row[col] ?? "").trim();
+          if (!raw) continue;
+          const entries = parseMultiImageValue(raw);
+          if (entries.length === 0) continue;
+          const next: CollectionImageEntry[] = [];
+          let rowChanged = false;
+          for (const e of entries) {
+            // Already split or external URL — keep as-is.
+            if (e.key || (!e.thumb.startsWith("data:") && /^https?:/i.test(e.thumb))) {
+              next.push(e);
+              continue;
+            }
+            // Decode base64 → buffer.
+            const m = e.thumb.match(/^data:([^;]+);base64,(.+)$/);
+            if (!m) { next.push(e); continue; }
+            const mime = m[1];
+            const buf = Buffer.from(m[2], "base64");
+            bytesBefore += buf.length;
+            // Skip if already small (under 200KB) — but still move to
+            // CollectionImage so the inline part is just the thumb.
+            try {
+              const thumb = await compressBufferToThumbDataUrl(buf);
+              const key = await persistFullCollectionImage(c.id, buf, mime);
+              next.push({ thumb, key });
+              const thumbBytes = Math.ceil((thumb.length - thumb.indexOf(",") - 1) * 3 / 4);
+              bytesAfter += thumbBytes;
+              imagesProcessed++;
+              rowChanged = true;
+            } catch (err) {
+              console.warn("[recompress] failed for", c.name, col, err);
+              next.push(e);
+            }
+          }
+          if (rowChanged) {
+            row[col] = serializeMultiImageValue(next);
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        await prisma.collection.update({
+          where: { id: c.id },
+          data: { rows: rows as unknown as object, updatedAt: new Date() },
+        });
+        collectionsTouched++;
+      }
+    }
+    return jsonResponse({
+      ok: true,
+      collectionsTouched,
+      imagesProcessed,
+      mbSavedApprox: Math.round((bytesBefore - bytesAfter) / (1024 * 1024)),
+    });
+  }
+
   if (intent === "delete_all_collections") {
     if (!currentUser?.admin) return jsonResponse({ ok: false, error: "forbidden" });
     const result = await prisma.collection.deleteMany({});
@@ -2595,14 +2678,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
 
         // Group all images by their from-anchor (row, col). exceljs
-        // returns col/row indices using 0-based numbering.
-        type SheetImg = { row: number; col: number; dataUrl: string };
+        // returns col/row indices using 0-based numbering. We keep the
+        // raw buffer + mimeType so we can persist the FULL bytes to
+        // CollectionImage AND generate a small thumb via sharp later.
+        type SheetImg = { row: number; col: number; buffer: Buffer; mimeType: string };
         const sheetImages: SheetImg[] = [];
         const imgs = worksheet.getImages();
         for (const imgRef of imgs) {
           const range = imgRef.range as { tl?: { col?: number; row?: number; nativeCol?: number; nativeRow?: number } } | undefined;
           const tl = range?.tl ?? {};
-          // exceljs uses 0-based col/row in image ranges
           const col0 = Number((tl.nativeCol ?? tl.col) ?? -1);
           const row0 = Number((tl.nativeRow ?? tl.row) ?? -1);
           if (!Number.isFinite(col0) || col0 < 0 || !Number.isFinite(row0) || row0 < 0) continue;
@@ -2613,8 +2697,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             : ext === "gif" ? "image/gif"
             : ext === "webp" ? "image/webp"
             : "image/png";
-          const dataUrl = `data:${mime};base64,${Buffer.from(media.buffer).toString("base64")}`;
-          sheetImages.push({ row: row0, col: col0, dataUrl });
+          sheetImages.push({ row: row0, col: col0, buffer: Buffer.from(media.buffer), mimeType: mime });
         }
 
         // Data rows start at row 2. Skip blank rows to mirror the CSV
@@ -2664,51 +2747,70 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
 
         // Patch images by column anchor → portal column. exceljs gives
-        // image col/row as 0-based. Sheet column 1 (A) = col0 0, etc.
-        //
-        // Header text varies between tabs — some sheets label column D
-        // as "FABRIC", others as "40x40 Isha" or whatever the fabric
-        // type is. The LAYOUT is consistent across tabs though, so we
-        // apply a positional fallback for the IMAGE columns: column C
-        // (sheetCol1=3) → modelPicture, column D (sheetCol1=4) → fabric.
-        // This kicks in only when the header text didn't match a portal
-        // column. Header-based mapping still wins when it exists.
+        // image col/row as 0-based. Header text varies between tabs
+        // (some say "FABRIC", others "40x40 Isha"), so we fall back to
+        // POSITION when header lookup misses: C → modelPicture, D →
+        // fabric. Header-based mapping wins when it exists.
         const POSITIONAL_IMAGE_FALLBACK: Record<number, string> = {
-          3: "modelPicture", // column C
-          4: "fabric",       // column D
+          3: "modelPicture",
+          4: "fabric",
         };
-        const imagesByPortalRow: Map<number, Map<string, string[]>> = new Map();
+        type RowImg = { col: string; buf: Buffer; mime: string };
+        const imagesByPortalRow: Map<number, RowImg[]> = new Map();
         for (const img of sheetImages) {
-          // Sheet col (1-based) = col0 + 1.
           const sheetCol1 = img.col + 1;
-          // Find which portal column this corresponds to. Header match
-          // first, positional fallback second.
           let portalCol = colIdToPortal[sheetCol1] ?? null;
           if (!portalCol) portalCol = POSITIONAL_IMAGE_FALLBACK[sheetCol1] ?? null;
           if (!portalCol) continue;
           if (portalCol !== "modelPicture" && portalCol !== "fabric" && portalCol !== "maniPicsTaken") continue;
-          // Map sheet row 0-based → portal row index.
           const portalRowIdx = portalRowToSheetRow0.indexOf(img.row);
           if (portalRowIdx < 0) continue;
-          let m = imagesByPortalRow.get(portalRowIdx);
-          if (!m) { m = new Map(); imagesByPortalRow.set(portalRowIdx, m); }
-          const arr = m.get(portalCol) ?? [];
-          arr.push(img.dataUrl);
-          m.set(portalCol, arr);
+          const bucket = imagesByPortalRow.get(portalRowIdx) ?? [];
+          bucket.push({ col: portalCol, buf: img.buffer, mime: img.mimeType });
+          imagesByPortalRow.set(portalRowIdx, bucket);
         }
+
+        // Name collision: append "(2)", "(3)" until unique.
+        let finalName = sheetName;
+        let n = 2;
+        while (existingNames.has(finalName)) { finalName = `${sheetName} (${n++})`; }
+        existingNames.add(finalName);
+
+        // Create the collection FIRST so we have a collectionId to
+        // attach CollectionImage rows to.
+        const created = await prisma.collection.create({
+          data: {
+            name: finalName,
+            sortOrder: existingNames.size + collectionsCreated,
+            rows: [] as unknown as object,
+            columns: DEFAULT_COLLECTION_COLUMNS as unknown as object,
+          },
+          select: { id: true },
+        });
+
+        // For each row's images: compress to thumb data URL + persist
+        // full bytes to CollectionImage. Store the inline entries as
+        // an array of { thumb, key } so the row JSON stays small.
         let imagesPatched = 0;
-        for (const [portalRowIdx, perCol] of imagesByPortalRow) {
+        for (const [portalRowIdx, imgsForRow] of imagesByPortalRow) {
           const row = rowsOut[portalRowIdx];
           if (!row) continue;
-          for (const [portalCol, urls] of perCol) {
-            // modelPicture supports multi-image JSON array; fabric is
-            // single. Use the first image for fabric, all for model.
+          const byCol = new Map<string, CollectionImageEntry[]>();
+          for (const img of imgsForRow) {
+            const thumb = await compressBufferToThumbDataUrl(img.buf);
+            const key = await persistFullCollectionImage(created.id, img.buf, img.mime);
+            const list = byCol.get(img.col) ?? [];
+            list.push({ thumb, key });
+            byCol.set(img.col, list);
+            imagesPatched++;
+          }
+          for (const [portalCol, list] of byCol) {
             if (portalCol === "modelPicture") {
-              row.modelPicture = JSON.stringify(urls);
+              row.modelPicture = serializeMultiImageValue(list);
             } else if (portalCol === "fabric" || portalCol === "maniPicsTaken") {
-              row[portalCol] = urls[0] ?? "";
+              // Single-image column: store first as JSON {thumb,key}.
+              row[portalCol] = serializeMultiImageValue([list[0]]);
             }
-            imagesPatched += urls.length;
           }
         }
 
@@ -2734,19 +2836,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
         }
 
-        // Handle name collision: append (2) etc until unique.
-        let finalName = sheetName;
-        let n = 2;
-        while (existingNames.has(finalName)) { finalName = `${sheetName} (${n++})`; }
-        existingNames.add(finalName);
-
-        await prisma.collection.create({
-          data: {
-            name: finalName,
-            sortOrder: existingNames.size + collectionsCreated,
-            rows: rowsOut as unknown as object,
-            columns: DEFAULT_COLLECTION_COLUMNS as unknown as object,
-          },
+        // Persist rows (with their {thumb,key} image entries) onto the
+        // already-created collection. The collection itself was
+        // created above before image processing so we had a
+        // collectionId to attach CollectionImage rows to.
+        await prisma.collection.update({
+          where: { id: created.id },
+          data: { rows: rowsOut as unknown as object, updatedAt: new Date() },
         });
         collectionsCreated++;
         summary.push({ tab: finalName, rows: rowsOut.length, images: imagesPatched, linked: linkedCount });
@@ -6268,6 +6364,48 @@ async function fetchShopifyProductMeta(
 //
 // Returns Map<sheetName, Map<rowIndex, dataUrl[]>> so callers can patch
 // portal rows by mapping portal-row-position → sheet-row-position.
+// ─── Collection image helpers ────────────────────────────────────
+// Server-side image pipeline used by the XLSX import + recompress
+// actions. Each source image (raw bytes from the XLSX) gets:
+//   - Stored in CollectionImage table at full quality (for popup +
+//     Shopify push later).
+//   - Compressed via sharp to a small JPEG thumbnail (~120KB target)
+//     for inline display in the row spreadsheet.
+// Returns the row-level entry { thumb, key } that downstream code
+// stores into the row's modelPicture / fabric / maniPicsTaken JSON.
+const THUMB_MAX_DIM = 1200;
+const THUMB_QUALITY = 80;
+
+async function compressBufferToThumbDataUrl(buf: Buffer): Promise<string> {
+  try {
+    const sharp = (await import("sharp")).default;
+    const out = await sharp(buf)
+      .rotate() // honour EXIF orientation
+      .resize({ width: THUMB_MAX_DIM, height: THUMB_MAX_DIM, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: THUMB_QUALITY, mozjpeg: true })
+      .toBuffer();
+    return `data:image/jpeg;base64,${out.toString("base64")}`;
+  } catch (e) {
+    console.warn("[image] sharp compress failed, falling back to original:", e);
+    return `data:image/png;base64,${buf.toString("base64")}`;
+  }
+}
+
+async function persistFullCollectionImage(
+  collectionId: number,
+  buf: Buffer,
+  mimeType: string,
+): Promise<string> {
+  const key = (typeof crypto !== "undefined" && "randomUUID" in crypto)
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await prisma.$executeRawUnsafe(
+    `INSERT INTO "CollectionImage" ("key", "collectionId", "mimeType", "bytes", "createdAt") VALUES ($1, $2, $3, $4, NOW())`,
+    key, collectionId, mimeType, buf,
+  );
+  return key;
+}
+
 async function extractImagesFromXlsx(xlsxBuffer: Buffer): Promise<Map<string, Map<number, string[]>>> {
   const JSZip = (await import("jszip")).default;
   const { XMLParser } = await import("fast-xml-parser");
@@ -9361,6 +9499,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const tabImportFetcher = useFetcher<{ ok?: boolean; collectionsCreated?: number; summary?: Array<{ tab: string; rows: number; images: number; linked: number; error?: string }>; error?: string }>();
   const tabImportInputRef = useRef<HTMLInputElement>(null);
   const deleteAllFetcher = useFetcher<{ ok?: boolean; deleted?: number; error?: string }>();
+  const recompressFetcher = useFetcher<{ ok?: boolean; collectionsTouched?: number; imagesProcessed?: number; mbSavedApprox?: number; error?: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const collectionIdParam = searchParams.get("collectionId");
   const selectedId = collectionIdParam ? Number(collectionIdParam) : null;
@@ -9484,6 +9623,23 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               <button
                 type="button"
                 onClick={() => {
+                  if (recompressFetcher.state !== "idle") return;
+                  if (!window.confirm("Recompress all images in existing collections?\n\nFor every inline image still stored as a fat base64 blob, this:\n• Generates a small thumbnail (1200px JPEG q80)\n• Moves full bytes into the CollectionImage table\n• Updates the row to point at the new thumbnail + key\n\nShopify CDN images are left alone. Safe to run multiple times.")) return;
+                  recompressFetcher.submit({ intent: "recompress_collection_images" }, { method: "post" });
+                }}
+                disabled={recompressFetcher.state !== "idle"}
+                style={{
+                  background: "#f59e0b", color: "#fff", border: "none",
+                  borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600,
+                  cursor: recompressFetcher.state !== "idle" ? "wait" : "pointer",
+                }}
+                title="Split inline images into thumbnail + lazy-loaded full bytes so the spreadsheet loads quickly"
+              >
+                {recompressFetcher.state !== "idle" ? "Recompressing…" : "Recompress images"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
                   if (tabImportFetcher.state !== "idle") return;
                   tabImportInputRef.current?.click();
                 }}
@@ -9587,6 +9743,12 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
       </div>
 
+      {recompressFetcher.data?.ok && (
+        <div style={{ margin: "0 14px 10px", padding: "8px 12px", background: "#fef3c7", border: "1px solid #fde68a", color: "#78350f", borderRadius: 6, fontSize: 12 }}>
+          Recompressed {recompressFetcher.data.imagesProcessed ?? 0} images across {recompressFetcher.data.collectionsTouched ?? 0} collection(s).
+          Approx {recompressFetcher.data.mbSavedApprox ?? 0} MB freed from inline storage. Refresh to see faster loads.
+        </div>
+      )}
       {deleteAllFetcher.data?.ok && (
         <div style={{ margin: "0 14px 10px", padding: "8px 12px", background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b", borderRadius: 6, fontSize: 12 }}>
           Deleted {deleteAllFetcher.data.deleted ?? 0} collection{deleteAllFetcher.data.deleted === 1 ? "" : "s"}. Ready for a fresh import.
@@ -10754,29 +10916,44 @@ function CollectionReleaseCell({ value, onCommit }: { value: string; onCommit: (
 // (or a single legacy string). Renders each as a numbered thumbnail —
 // the number IS the Shopify product image position. Drag a thumb to
 // reorder, × to remove, + to add more.
-function parseMultiImageValue(value: string): string[] {
+// An image entry can be:
+//   - A plain string: data URL (legacy) or http(s) URL (Shopify CDN)
+//   - { thumb, key }: thumb = small data URL for inline; key references
+//     the full bytes stored in CollectionImage and fetched lazily.
+// parseMultiImageValue normalises everything to { thumb, key? } so
+// downstream code can render uniformly.
+type CollectionImageEntry = { thumb: string; key?: string };
+function parseMultiImageValue(value: string): CollectionImageEntry[] {
   const v = value?.trim() ?? "";
   if (!v) return [];
   if (v.startsWith("[")) {
     try {
       const arr = JSON.parse(v);
-      if (Array.isArray(arr)) return arr.filter((x) => typeof x === "string" && x);
-    } catch { /* fall through to single */ }
+      if (!Array.isArray(arr)) return [];
+      return arr
+        .map((x): CollectionImageEntry | null => {
+          if (typeof x === "string" && x) return { thumb: x };
+          if (x && typeof x === "object" && typeof x.thumb === "string" && x.thumb) {
+            return { thumb: x.thumb, key: typeof x.key === "string" ? x.key : undefined };
+          }
+          return null;
+        })
+        .filter((x): x is CollectionImageEntry => x !== null);
+    } catch { /* fall through */ }
   }
-  // Legacy: single data URL stored as a string.
-  return [v];
+  // Legacy: single value stored as a plain string.
+  return [{ thumb: v }];
 }
-function serializeMultiImageValue(images: string[]): string {
+function serializeMultiImageValue(images: CollectionImageEntry[]): string {
   if (images.length === 0) return "";
-  if (images.length === 1) return JSON.stringify(images);
-  return JSON.stringify(images);
+  return JSON.stringify(images.map((i) => i.key ? { thumb: i.thumb, key: i.key } : i.thumb));
 }
 function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit: (next: string) => void }) {
   const images = useMemo(() => parseMultiImageValue(value), [value]);
   const [open, setOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
-  const commit = (next: string[]) => onCommit(serializeMultiImageValue(next));
+  const commit = (next: CollectionImageEntry[]) => onCommit(serializeMultiImageValue(next));
 
   const addFiles = async (files: FileList | File[] | null | undefined) => {
     if (!files) return;
@@ -10785,7 +10962,7 @@ function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit
     setBusy(true);
     try {
       const dataUrls = await Promise.all(arr.map((f) => compressImageToDataUrl(f)));
-      commit([...images, ...dataUrls]);
+      commit([...images, ...dataUrls.map((d): CollectionImageEntry => ({ thumb: d }))]);
     } finally { setBusy(false); }
   };
 
@@ -10812,7 +10989,7 @@ function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit
       >
         {images.length > 0 ? (
           <>
-            <img src={images[0]} alt="" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
+            <img src={images[0].thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
             {images.length > 1 && (
               <span style={{
                 position: "absolute", bottom: 6, right: 6,
@@ -10853,11 +11030,11 @@ function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit
 function CollectionImageManagerModal({
   images, busy, onClose, onAddFiles, onCommit, onPickFile, fileRef,
 }: {
-  images: string[];
+  images: CollectionImageEntry[];
   busy: boolean;
   onClose: () => void;
   onAddFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
-  onCommit: (next: string[]) => void;
+  onCommit: (next: CollectionImageEntry[]) => void;
   onPickFile: () => void;
   fileRef: React.RefObject<HTMLInputElement | null>;
 }) {
@@ -10924,9 +11101,16 @@ function CollectionImageManagerModal({
         </div>
         <div style={{ padding: 18, overflowY: "auto", flex: 1 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 12 }}>
-            {images.map((src, idx) => (
+            {images.map((entry, idx) => {
+              // Lazy-load the FULL-quality image from CollectionImage
+              // via its key. While loading we keep the small thumb
+              // visible so the modal doesn't flash. When there's no
+              // key (legacy single-string entry or Shopify CDN URL),
+              // use the thumb URL directly.
+              const fullSrc = entry.key ? `/portal/collection-image/${entry.key}` : entry.thumb;
+              return (
               <div
-                key={`${idx}-${src.slice(0, 24)}`}
+                key={`${idx}-${entry.thumb.slice(0, 24)}`}
                 draggable
                 onDragStart={onDragStart(idx)}
                 onDragOver={onDragOver(idx)}
@@ -10943,7 +11127,7 @@ function CollectionImageManagerModal({
                 }}
                 title={`Position ${idx + 1} — drag to reorder`}
               >
-                <img src={src} alt={`pos ${idx + 1}`} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />
+                <img src={fullSrc} alt={`pos ${idx + 1}`} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />
                 <span style={{
                   position: "absolute", top: 6, left: 6,
                   background: "rgba(17,24,39,0.9)", color: "#fff",
@@ -10969,7 +11153,8 @@ function CollectionImageManagerModal({
                   >▶</button>
                 </div>
               </div>
-            ))}
+              );
+            })}
             <button
               type="button"
               onClick={onPickFile}
@@ -11135,14 +11320,23 @@ function CollectionImageCell({
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
   const trimmed = value.trim();
-  const hasImage = isFabricImageValue(trimmed);
+  // Single-image columns (fabric / mani pics) accept the same value
+  // formats as multi-image: legacy plain string OR JSON of
+  // { thumb, key } entries. parseMultiImageValue normalises both.
+  const entries = useMemo(() => parseMultiImageValue(trimmed), [trimmed]);
+  const entry: CollectionImageEntry | null = entries.length > 0 ? entries[0] : null;
+  // For display in the row: prefer the small thumb. For higher-quality
+  // viewing on hover we COULD swap to full via key, but the cell is
+  // small enough that the thumb is already sharp.
+  const displaySrc = entry ? (entry.thumb || (entry.key ? `/portal/collection-image/${entry.key}` : "")) : "";
+  const hasImage = Boolean(displaySrc) || isFabricImageValue(trimmed);
 
   const handleFile = async (file: File | null | undefined) => {
     if (!file || !file.type.startsWith("image/")) return;
     setBusy(true);
     try {
       const dataUrl = await compressImageToDataUrl(file);
-      onCommit(dataUrl);
+      onCommit(serializeMultiImageValue([{ thumb: dataUrl }]));
     } finally {
       setBusy(false);
     }
@@ -11189,7 +11383,7 @@ function CollectionImageCell({
         title="Paste, drop, or click to upload image"
       >
         {hasImage
-          ? <img src={trimmed} alt="" style={s.fabricSheetImage} />
+          ? <img src={displaySrc || trimmed} alt="" style={s.fabricSheetImage} />
           : <span>{busy ? "Uploading…" : "Paste, drop or upload"}</span>}
         {hasImage && (
           <button

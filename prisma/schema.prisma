@@ -226,6 +226,21 @@ model Collection {
   updatedAt DateTime @updatedAt
 }
 
+// Full-quality image bytes for collection rows. Row JSON stores a
+// compact { thumb, key } reference per image; this table holds the
+// original bytes that get lazy-loaded when the popup opens and
+// uploaded as-is to Shopify on push. Keeps the rows JSON small so
+// get_collection_full stays fast.
+model CollectionImage {
+  key          String   @id              // uuid
+  collectionId Int                       // for orphan cleanup later
+  mimeType     String
+  bytes        Bytes
+  createdAt    DateTime @default(now())
+
+  @@index([collectionId])
+}
+
 model SampleIteration {
   id          Int      @id @default(autoincrement())
   sampleId    Int
