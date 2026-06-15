@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
 import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRevalidator, useRouteError, useSearchParams, useSubmit } from "react-router";
@@ -9951,7 +9951,10 @@ function CollectionSpreadsheetPage({
     );
   };
 
-  const updateCell = (rowIdx: number, colId: string, value: string) => {
+  // Stable updateCell so per-row CollectionCells can be React.memo'd
+  // — without useCallback, the parent re-creates the function every
+  // render, defeating memo.
+  const updateCell = useCallback((rowIdx: number, colId: string, value: string) => {
     setRows((prev) => {
       const next = prev.map((r, i) => {
         if (i !== rowIdx) return r;
@@ -9966,7 +9969,8 @@ function CollectionSpreadsheetPage({
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
       return next;
     });
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collectionSettings.sampleReceivedChipValue, listItem.id]);
 
   const addRow = () => {
     setRows((prev) => {
@@ -10182,7 +10186,10 @@ function CollectionSpreadsheetPage({
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
         ) : (
-          <table style={{ ...s.table, width: 48 + 140 + columns.reduce((sum, c) => sum + (c.width ?? 110), 0), minWidth: 900 }}>
+          <table
+            style={{ ...s.table, width: 48 + 140 + columns.reduce((sum, c) => sum + (c.width ?? 110), 0), minWidth: 900 }}
+            onKeyDown={handleTableGridKeyDown}
+          >
             <colgroup>
               <col style={{ width: 48 }} />
               <col style={{ width: 140 }} />
@@ -10342,7 +10349,8 @@ function CollectionSpreadsheetPage({
                               value={value}
                               type={col.type ?? "text"}
                               columnId={col.id}
-                              onCommit={(v) => updateCell(rIdx, col.id, v)}
+                              rowIndex={rIdx}
+                              updateCell={updateCell}
                             />
                           )}
                         </Td>
@@ -10555,17 +10563,25 @@ function CollectionShopifyLinkedCell({ productId, status, shopDomain, linkOverri
   );
 }
 
-function CollectionCell({
+// React.memo'd so a single cell edit doesn't re-render every other
+// cell in the spreadsheet. Props are kept primitive (rowIndex/colId
+// + a stable updateCell callback from the parent) so the shallow
+// compare actually hits.
+const CollectionCell = memo(CollectionCellInner);
+function CollectionCellInner({
   value,
   type,
   columnId,
-  onCommit,
+  rowIndex,
+  updateCell,
 }: {
   value: string;
   type: CollectionColumnDef["type"];
   columnId: string;
-  onCommit: (next: string) => void;
+  rowIndex: number;
+  updateCell: (rowIdx: number, colId: string, value: string) => void;
 }) {
+  const onCommit = useCallback((next: string) => updateCell(rowIndex, columnId, next), [updateCell, rowIndex, columnId]);
   // modelPicture is the multi-image product gallery (numbered, sortable,
   // uploaded to Shopify). Fabric + mani-pic columns are single images.
   if (columnId === "modelPicture") {
@@ -10782,7 +10798,7 @@ function CollectionMultiImageCell({ value, onCommit }: { value: string; onCommit
       >
         {images.length > 0 ? (
           <>
-            <img src={images[0]} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            <img src={images[0]} alt="" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
             {images.length > 1 && (
               <span style={{
                 position: "absolute", bottom: 6, right: 6,
@@ -10913,7 +10929,7 @@ function CollectionImageManagerModal({
                 }}
                 title={`Position ${idx + 1} — drag to reorder`}
               >
-                <img src={src} alt={`pos ${idx + 1}`} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                <img src={src} alt={`pos ${idx + 1}`} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />
                 <span style={{
                   position: "absolute", top: 6, left: 6,
                   background: "rgba(17,24,39,0.9)", color: "#fff",
