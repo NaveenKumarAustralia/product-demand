@@ -6190,6 +6190,7 @@ async function createShopifyProductFromRow(
   }
 
   const baseSku = (row.sku ?? "").trim();
+  const baseBarcode = (row.barcode ?? "").trim();
   const priceRaw = (row.price ?? "").trim();
   const price = priceRaw ? String(Number(priceRaw) || 0) : "0";
   const compareAtRaw = (row.compareAtPrice ?? "").trim();
@@ -6199,11 +6200,25 @@ async function createShopifyProductFromRow(
   const hsCode = (row.hsCode ?? "").trim();
   const countryCode = (row.countryOfOrigin ?? "").trim().toUpperCase().slice(0, 2);
 
+  // Size suffix for variant SKU/barcode. User's convention is:
+  //   XS / S / M / L / XL → as-is
+  //   2XL → XXL, 3XL → XXXL
+  //   S/M or S-M → SM, M/L or M-L → ML, L/XL or L-XL → LXL
+  // and no separator between base + suffix (so K2596 + XS = K2596XS).
+  const sizeSfx = (size: string): string => {
+    switch (size) {
+      case "2XL": return "XXL";
+      case "3XL": return "XXXL";
+      default: return size.replace(/[/-]/g, "");
+    }
+  };
+
   type Variant = {
     optionValues?: Array<{ optionName: string; name: string }>;
     price: string;
     compareAtPrice?: string;
     sku?: string;
+    barcode?: string;
     inventoryItem?: {
       cost?: string;
       tracked?: boolean;
@@ -6223,20 +6238,26 @@ async function createShopifyProductFromRow(
         price,
         ...(compareAt ? { compareAtPrice: compareAt } : {}),
         ...(baseSku ? { sku: baseSku } : {}),
+        ...(baseBarcode ? { barcode: baseBarcode } : {}),
         inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
       }]
     : variantRows.length
-    ? variantRows.map((v) => ({
-        optionValues: [{ optionName: "Size", name: v.size }],
-        price,
-        ...(compareAt ? { compareAtPrice: compareAt } : {}),
-        ...(baseSku ? { sku: `${baseSku}-${v.size.replace("/", "-")}` } : {}),
-        inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
-      }))
+    ? variantRows.map((v) => {
+        const sfx = sizeSfx(v.size);
+        return {
+          optionValues: [{ optionName: "Size", name: v.size }],
+          price,
+          ...(compareAt ? { compareAtPrice: compareAt } : {}),
+          ...(baseSku ? { sku: `${baseSku}${sfx}` } : {}),
+          ...(baseBarcode ? { barcode: `${baseBarcode}${sfx}` } : {}),
+          inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
+        };
+      })
     : [{
         price,
         ...(compareAt ? { compareAtPrice: compareAt } : {}),
         ...(baseSku ? { sku: baseSku } : {}),
+        ...(baseBarcode ? { barcode: baseBarcode } : {}),
         inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
       }];
 
@@ -6597,6 +6618,8 @@ const SHEET_HEADER_MAP: Record<string, string> = {
   "fabric": "fabric",
   "name": "name",
   "sku": "sku",
+  "barcode": "barcode",
+  "barcodes": "barcode",
   "xs": "xs",
   "s": "s",
   "m": "m",
@@ -9430,6 +9453,7 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "name", label: "Name", width: 160 },
   { id: "notes", label: "Notes", width: 140 },
   { id: "sku", label: "SKU", width: 90 },
+  { id: "barcode", label: "Barcode", width: 100 },
   { id: "freeSize", label: "Free Size", type: "number", width: 60 },
   { id: "xs", label: "XS", type: "number", width: 50 },
   { id: "s", label: "S", type: "number", width: 50 },
@@ -10143,6 +10167,13 @@ function CollectionSpreadsheetPage({
         // the configured "received" value AND the date column is empty.
         if (colId === "sample" && value === collectionSettings.sampleReceivedChipValue && !(patched.sampleReceived ?? "").trim()) {
           patched.sampleReceived = new Date().toISOString().slice(0, 10);
+        }
+        // Auto-fill barcode from SKU by stripping any leading letters
+        // (matches the user's convention: SKU "K2596" → barcode "2596").
+        // Only fills when barcode is empty so manual overrides stick.
+        if (colId === "sku" && !(patched.barcode ?? "").trim()) {
+          const stripped = value.replace(/^[A-Za-z]+/, "");
+          if (stripped) patched.barcode = stripped;
         }
         return patched;
       });
@@ -10892,8 +10923,62 @@ function CollectionCellInner({
       />
     );
   }
+  // SKU column gets a small "+K" Generate button when the value is
+  // digits-only (e.g., "2596"). Click it and the SKU becomes "K2596"
+  // and the barcode auto-fills to "2596" (via the auto-derive in
+  // updateCell). Saves staff one keystroke per row and removes the
+  // chance of a typo'd K-prefix.
+  if (columnId === "sku") {
+    return (
+      <CollectionSkuCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+    );
+  }
   return (
     <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+  );
+}
+
+function CollectionSkuCell({
+  value, draft, setDraft, onCommit,
+}: {
+  value: string;
+  draft: string;
+  setDraft: (next: string) => void;
+  onCommit: (next: string) => void;
+}) {
+  const showButton = /^\d+$/.test(draft.trim());
+  const apply = () => {
+    const next = `K${draft.trim()}`;
+    setDraft(next);
+    onCommit(next);
+  };
+  return (
+    <div style={{ position: "relative", width: "100%" }}>
+      <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+      {showButton && (
+        <button
+          type="button"
+          onMouseDown={(e) => { e.preventDefault(); apply(); }}
+          title={`Generate SKU "K${draft.trim()}" and barcode "${draft.trim()}"`}
+          style={{
+            position: "absolute",
+            top: 2,
+            right: 2,
+            padding: "1px 5px",
+            fontSize: 10,
+            fontWeight: 700,
+            color: "#fff",
+            background: "#7a1f2b",
+            border: "none",
+            borderRadius: 3,
+            cursor: "pointer",
+            lineHeight: 1.2,
+          }}
+        >
+          +K
+        </button>
+      )}
+    </div>
   );
 }
 
