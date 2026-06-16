@@ -11984,14 +11984,34 @@ function ProductInformationPanel({
   const [detailDraft, setDetailDraft] = useState<Record<string, string>>({});
   const [dragStyleId, setDragStyleId] = useState<string | null>(null);
   const [dragOverStyleId, setDragOverStyleId] = useState<string | null>(null);
-  const selectedCategory = productInfo.categories.find((category) => category.id === selectedCategoryId)
-    ?? productInfo.categories[0]
-    ?? null;
+  // "all" is the sentinel for the cross-category view. Default on
+  // first open is "all" so staff see every style without having to
+  // pick a category first — they're usually looking for a name across
+  // all categories anyway.
+  const ALL_CATEGORIES_ID = "all";
+  const effectiveCategoryId = selectedCategoryId || ALL_CATEGORIES_ID;
+  const isAllMode = effectiveCategoryId === ALL_CATEGORIES_ID;
+  const selectedCategory = isAllMode
+    ? null
+    : productInfo.categories.find((category) => category.id === effectiveCategoryId)
+      ?? productInfo.categories[0]
+      ?? null;
+  // Map every style.id → its parent category.id so per-style
+  // operations (delete / hide / image / save details) work in "all"
+  // mode where there's no single selected category.
+  const styleToCategoryId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of productInfo.categories) for (const st of c.styles) m.set(st.id, c.id);
+    return m;
+  }, [productInfo.categories]);
+  const categoryIdForStyle = (style: ProductInfoStyle): string =>
+    styleToCategoryId.get(style.id) ?? selectedCategory?.id ?? "";
   const normalizedSearch = search.trim().toLowerCase();
-  const visibleStyles = selectedCategory
-    ? selectedCategory.styles.filter((style) => (showHidden || !style.hidden) && (!normalizedSearch || style.name.toLowerCase().includes(normalizedSearch)))
-    : [];
-  const hiddenStyleCount = selectedCategory?.styles.filter((style) => style.hidden).length ?? 0;
+  const baseStyles: ProductInfoStyle[] = isAllMode
+    ? productInfo.categories.flatMap((c) => c.styles)
+    : (selectedCategory?.styles ?? []);
+  const visibleStyles = baseStyles.filter((style) => (showHidden || !style.hidden) && (!normalizedSearch || style.name.toLowerCase().includes(normalizedSearch)));
+  const hiddenStyleCount = baseStyles.filter((style) => style.hidden).length;
   const isSubmitting = fetcher.state !== "idle";
   const gridColumns: 3 | 4 | 5 | 6 = productInfo.gridColumns === 3 ? 3
     : productInfo.gridColumns === 5 ? 5
@@ -12010,25 +12030,29 @@ function ProductInformationPanel({
   };
 
   const deleteStyle = (style: ProductInfoStyle) => {
-    if (!selectedCategory) return;
-    submitProductInfo({ intent: "delete_product_style", categoryId: selectedCategory.id, styleId: style.id });
+    const categoryId = categoryIdForStyle(style);
+    if (!categoryId) return;
+    submitProductInfo({ intent: "delete_product_style", categoryId, styleId: style.id });
   };
 
   const hideStyle = (style: ProductInfoStyle) => {
-    if (!selectedCategory) return;
-    submitProductInfo({ intent: "hide_product_style", categoryId: selectedCategory.id, styleId: style.id });
+    const categoryId = categoryIdForStyle(style);
+    if (!categoryId) return;
+    submitProductInfo({ intent: "hide_product_style", categoryId, styleId: style.id });
   };
 
   const unhideStyle = (style: ProductInfoStyle) => {
-    if (!selectedCategory) return;
-    submitProductInfo({ intent: "unhide_product_style", categoryId: selectedCategory.id, styleId: style.id });
+    const categoryId = categoryIdForStyle(style);
+    if (!categoryId) return;
+    submitProductInfo({ intent: "unhide_product_style", categoryId, styleId: style.id });
   };
 
   const updateStyleImage = (style: ProductInfoStyle, imageUrl: string) => {
-    if (!selectedCategory) return;
+    const categoryId = categoryIdForStyle(style);
+    if (!categoryId) return;
     submitProductInfo({
       intent: "update_product_style_image",
-      categoryId: selectedCategory.id,
+      categoryId,
       styleId: style.id,
       imageUrl,
     });
@@ -12070,10 +12094,12 @@ function ProductInformationPanel({
   };
 
   const saveStyleDetails = () => {
-    if (!selectedCategory || !detailStyle) return;
+    if (!detailStyle) return;
+    const categoryId = categoryIdForStyle(detailStyle);
+    if (!categoryId) return;
     submitProductInfo({
       intent: "update_product_style_details",
-      categoryId: selectedCategory.id,
+      categoryId,
       styleId: detailStyle.id,
       ...detailDraft,
     });
@@ -12103,19 +12129,20 @@ function ProductInformationPanel({
           <label style={s.productInfoSelectLabel}>
             Category
             <select
-              value={selectedCategory?.id ?? ""}
+              value={effectiveCategoryId}
               onChange={(event) => updateParams({ category: event.currentTarget.value })}
               style={s.productInfoSelect}
             >
+              <option value={ALL_CATEGORIES_ID}>All products</option>
               {productInfo.categories.map((category) => (
                 <option key={category.id} value={category.id}>{category.name}</option>
               ))}
             </select>
           </label>
           <div>
-            <h2 style={s.productInfoHeading}>{selectedCategory?.name ?? "Product Styles"}</h2>
+            <h2 style={s.productInfoHeading}>{isAllMode ? "All products" : (selectedCategory?.name ?? "Product Styles")}</h2>
             <div style={s.productInfoMeta}>
-              {visibleStyles.length} of {selectedCategory?.styles.length ?? 0} styles
+              {visibleStyles.length} of {baseStyles.length} styles
             </div>
           </div>
         </div>
@@ -12143,15 +12170,15 @@ function ProductInformationPanel({
         {visibleStyles.map((style) => (
           <div
             key={style.id}
-            draggable={!normalizedSearch}
+            draggable={!normalizedSearch && !isAllMode}
             style={{
               ...s.productStyleCard,
               ...(dragStyleId === style.id ? s.productStyleCardDragging : {}),
               ...(dragOverStyleId === style.id && dragStyleId !== style.id ? s.productStyleCardDropTarget : {}),
-              cursor: normalizedSearch ? "default" : "grab",
+              cursor: (normalizedSearch || isAllMode) ? "default" : "grab",
             }}
             onDragStart={(event) => {
-              if (normalizedSearch) {
+              if (normalizedSearch || isAllMode) {
                 event.preventDefault();
                 return;
               }
@@ -12160,7 +12187,7 @@ function ProductInformationPanel({
               event.dataTransfer.setData("text/plain", style.id);
             }}
             onDragOver={(event) => {
-              if (!dragStyleId || normalizedSearch) return;
+              if (!dragStyleId || normalizedSearch || isAllMode) return;
               event.preventDefault();
               setDragOverStyleId(style.id);
             }}
@@ -12228,13 +12255,14 @@ function ProductInformationPanel({
             </div>
           </div>
         ))}
-        {selectedCategory && !visibleStyles.length && (
+        {!visibleStyles.length && (
           <div style={s.productInfoEmpty}>
-            {normalizedSearch ? "No styles match this search." : "No styles in this category yet."}
+            {normalizedSearch
+              ? "No styles match this search."
+              : isAllMode
+              ? (productInfo.categories.length ? "No styles yet." : "Add a category to start building product styles.")
+              : "No styles in this category yet."}
           </div>
-        )}
-        {!selectedCategory && (
-          <div style={s.productInfoEmpty}>Add a category to start building product styles.</div>
         )}
       </div>
       <div style={s.productInfoFooterActions}>
