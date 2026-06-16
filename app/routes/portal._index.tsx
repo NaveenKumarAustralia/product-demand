@@ -8188,11 +8188,22 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
   // A delete (we tracked it via pendingDelete) closes the drawer
   // entirely since there's nothing left to show; an edit just
   // refreshes the messages.
+  //
+  // Either way we broadcast a "portal-thread-content-changed" event
+  // so the spreadsheet page can reload the underlying cell text —
+  // the drawer mutates the cell behind the scenes but
+  // CollectionSpreadsheetPage owns the row state via its own
+  // fetcher, so we have to nudge it.
   useEffect(() => {
     if (!threadKey) return;
     if (originalFetcher.state === "idle" && originalFetcher.data?.ok) {
+      if (typeof document !== "undefined") {
+        document.dispatchEvent(new CustomEvent("portal-thread-content-changed", { detail: { threadKey } }));
+      }
       if (pendingDelete) {
         setPendingDelete(false);
+        // Drawer was already closed when the user clicked Delete;
+        // belt-and-braces in case it wasn't.
         close();
       } else {
         threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
@@ -8380,11 +8391,18 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
                       type="button"
                       onClick={() => {
                         if (!window.confirm("Delete this note? This will clear the cell text and remove all replies.")) return;
-                        setPendingDelete(true);
-                        originalFetcher.submit(
-                          { intent: "update_thread_original", threadKey, body: "" },
-                          { method: "post", action: "/portal" },
-                        );
+                        // Close instantly — the user perceives delete
+                        // as immediate. The action runs in the
+                        // background and the loader revalidation
+                        // updates the cell text shortly after.
+                        const t = threadKey;
+                        close();
+                        if (t) {
+                          originalFetcher.submit(
+                            { intent: "update_thread_original", threadKey: t, body: "" },
+                            { method: "post", action: "/portal" },
+                          );
+                        }
                       }}
                       style={{ background: "transparent", border: "none", color: "#dc2626", cursor: "pointer", padding: 0, fontSize: 11 }}
                       title="Clear the note and close this thread"
@@ -11072,6 +11090,27 @@ function CollectionSpreadsheetPage({
       { intent: "get_collection_full", collectionId: String(listItem.id) },
       { method: "post" },
     );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id]);
+
+  // The thread drawer mutates the cell text on the server when the
+  // user edits / deletes the original note. The Collection's local
+  // row state doesn't know about that, so we listen for a broadcast
+  // and reload the full row data when our collection is touched.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ threadKey?: string }>).detail;
+      const key = detail?.threadKey ?? "";
+      if (!key.startsWith(`collection_row:${listItem.id}:`)) return;
+      loadFetcher.submit(
+        { intent: "get_collection_full", collectionId: String(listItem.id) },
+        { method: "post" },
+      );
+      // Also refresh the thread counts so the 💬 badges drop.
+      threadCountsFetcher.load(`/api/portal-thread-counts?entityType=collection_row&entityId=${listItem.id}`);
+    };
+    document.addEventListener("portal-thread-content-changed", handler);
+    return () => document.removeEventListener("portal-thread-content-changed", handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listItem.id]);
 
