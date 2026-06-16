@@ -3738,6 +3738,17 @@ const FX_RUPEE_BUFFER = 2;
 // cutting. Applied inside buildStyleCostLookup; surfaced as its own
 // line in the cost-breakdown popup.
 const FABRIC_WASTAGE_PCT = 0.05;
+// Factory cost is the same flat ₹100 for every style — the per-style
+// factoryCost on ProductInfo is no longer used (the formula overrides
+// it). Factory profit is tier-based on the pre-profit subtotal so the
+// margin shrinks as styles get more expensive.
+const FACTORY_COST_FIXED = 100;
+function factoryProfitPct(subtotal: number): number {
+  if (subtotal <= 250) return 0.225;
+  if (subtotal <= 500) return 0.20;
+  if (subtotal <= 750) return 0.175;
+  return 0.15;
+}
 // How long the cached live rate is reused before re-fetching from the
 // free FX API. 12 hours is plenty for restock-page display where the
 // rate is informational; the packing list flow snapshots it explicitly
@@ -4479,6 +4490,7 @@ type CostBreakdown = {
   stitching: number;
   factoryCost: number;
   factoryProfit: number;
+  factoryProfitPct: number;        // tier-derived margin applied to subtotal
   zipButtons: number;
   liningTrim: number;
   rawTotal: number;                // sum of all components before rounding
@@ -4610,18 +4622,13 @@ function buildStyleCostLookup(
     costForTitle: (title) => {
       const r = resolve(title);
       if (!r) return 0;
-      const hasAllRequired =
-        r.fabricCost > 0
-        && isFilled(r.style.stitchingCost)
-        && isFilled(r.style.factoryCost)
-        && isFilled(r.style.factoryProfit);
-      if (!hasAllRequired) return 0;
-      const raw = r.fabricCost
-        + (r.style.stitchingCost ?? 0)
-        + (r.style.factoryCost ?? 0)
-        + (r.style.factoryProfit ?? 0)
-        + (r.style.zipButtonsCost ?? 0)
-        + (r.style.liningTrimCost ?? 0);
+      if (r.fabricCost <= 0 || !isFilled(r.style.stitchingCost)) return 0;
+      const stitching = r.style.stitchingCost ?? 0;
+      const zipButtons = r.style.zipButtonsCost ?? 0;
+      const liningTrim = r.style.liningTrimCost ?? 0;
+      const subtotal = r.fabricCost + stitching + FACTORY_COST_FIXED + zipButtons + liningTrim;
+      const factoryProfit = subtotal * factoryProfitPct(subtotal);
+      const raw = subtotal + factoryProfit;
       // Round to nearest ₹10 so the displayed cost is "tidy".
       return Math.round(raw / 10) * 10;
     },
@@ -4629,11 +4636,13 @@ function buildStyleCostLookup(
       const r = resolve(title);
       if (!r) return null;
       const stitching = r.style.stitchingCost ?? 0;
-      const factoryCost = r.style.factoryCost ?? 0;
-      const factoryProfit = r.style.factoryProfit ?? 0;
+      const factoryCost = FACTORY_COST_FIXED;
       const zipButtons = r.style.zipButtonsCost ?? 0;
       const liningTrim = r.style.liningTrimCost ?? 0;
-      const rawTotal = r.fabricCost + stitching + factoryCost + factoryProfit + zipButtons + liningTrim;
+      const subtotal = r.fabricCost + stitching + factoryCost + zipButtons + liningTrim;
+      const profitPct = factoryProfitPct(subtotal);
+      const factoryProfit = subtotal * profitPct;
+      const rawTotal = subtotal + factoryProfit;
       const total = Math.round(rawTotal / 10) * 10;
       return {
         styleName: r.style.name ?? "",
@@ -4647,6 +4656,7 @@ function buildStyleCostLookup(
         stitching,
         factoryCost,
         factoryProfit,
+        factoryProfitPct: profitPct,
         zipButtons,
         liningTrim,
         rawTotal,
@@ -8061,7 +8071,7 @@ function CostBreakdownMenu({
     { label: "Fabric cost", value: fmt(breakdown.fabricCost) },
     { label: "Stitching", value: fmt(breakdown.stitching) },
     { label: "Factory cost", value: fmt(breakdown.factoryCost) },
-    { label: "Factory profit", value: fmt(breakdown.factoryProfit) },
+    { label: `Factory profit (${Math.round(breakdown.factoryProfitPct * 1000) / 10}%)`, value: fmt(breakdown.factoryProfit) },
   ];
   if (breakdown.zipButtons > 0) lines.push({ label: "Zip / buttons", value: fmt(breakdown.zipButtons) });
   if (breakdown.liningTrim > 0) lines.push({ label: "Lining / trim", value: fmt(breakdown.liningTrim) });
@@ -12314,19 +12324,20 @@ function ProductInformationPanel({
                 <input
                   type="text"
                   inputMode="decimal"
-                  value={detailDraft.factoryCost ?? ""}
-                  onChange={(event) => updateDetailDraft("factoryCost", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
+                  value={String(FACTORY_COST_FIXED)}
+                  readOnly
+                  title="Fixed at ₹100 for every style."
+                  style={{ ...s.productInfoDetailsInput, background: "#f3f4f6", color: "#6b7280", cursor: "not-allowed" }}
                 />
               </label>
               <label style={s.productInfoDetailsField}>
-                Factory profit (₹/piece)
+                Factory profit (auto)
                 <input
                   type="text"
-                  inputMode="decimal"
-                  value={detailDraft.factoryProfit ?? ""}
-                  onChange={(event) => updateDetailDraft("factoryProfit", event.currentTarget.value)}
-                  style={s.productInfoDetailsInput}
+                  value="22.5% / 20% / 17.5% / 15%"
+                  readOnly
+                  title="Auto-calculated from the pre-profit subtotal: 0–250 → 22.5%, 251–500 → 20%, 501–750 → 17.5%, 750+ → 15%."
+                  style={{ ...s.productInfoDetailsInput, background: "#f3f4f6", color: "#6b7280", cursor: "not-allowed" }}
                 />
               </label>
               <label style={{ ...s.productInfoDetailsField, gridColumn: "1 / -1" }}>
