@@ -11415,8 +11415,21 @@ function CollectionSpreadsheetPage({
                         // s.td's default middle-align centers the
                         // textarea inside tall rows so half the cell
                         // stays empty.
+                        // position:relative is only set for NON-frozen
+                        // notes cells. Frozen cells already get
+                        // position:sticky from Td's frozenStyle; if we
+                        // override it here, the freeze breaks and the
+                        // column scrolls with the rest of the table.
+                        // sticky elements form a containing block for
+                        // absolute children, so the wrap inside still
+                        // anchors correctly.
                         const noteTdStyle: React.CSSProperties = isNoteCol
-                          ? { height: 1, padding: 0, position: "relative", verticalAlign: "top" }
+                          ? {
+                              height: 1,
+                              padding: 0,
+                              verticalAlign: "top",
+                              ...(stickyLeft === undefined ? { position: "relative" } : {}),
+                            }
                           : {};
                         return (
                           <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky} style={noteTdStyle}>
@@ -18235,7 +18248,7 @@ function OrderRow({
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
         {/* Factory notes */}
-        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={{ ...destinationRowBg, height: 1, padding: 0, position: "relative", verticalAlign: "top" }}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={{ ...destinationRowBg, height: 1, padding: 0, verticalAlign: "top" }}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
         {/* Order date */}
         <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={destinationRowBg}><span style={s.dateText}>{orderDate}</span></Td>
