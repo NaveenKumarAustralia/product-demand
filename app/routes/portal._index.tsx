@@ -11411,8 +11411,12 @@ function CollectionSpreadsheetPage({
                         // fill the cell exactly (height:100% works
                         // because the row has a definite tallest cell).
                         const isNoteCol = col.id === "factoryNotes" || col.id === "notes" || col.id === "loadingNotes";
+                        // verticalAlign:top is critical — without it,
+                        // s.td's default middle-align centers the
+                        // textarea inside tall rows so half the cell
+                        // stays empty.
                         const noteTdStyle: React.CSSProperties = isNoteCol
-                          ? { height: 1, padding: 0, position: "relative" }
+                          ? { height: 1, padding: 0, position: "relative", verticalAlign: "top" }
                           : {};
                         return (
                           <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky} style={noteTdStyle}>
@@ -18231,7 +18235,7 @@ function OrderRow({
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
         {/* Factory notes */}
-        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={{ ...destinationRowBg, height: 1, padding: 0, position: "relative" }}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={{ ...destinationRowBg, height: 1, padding: 0, position: "relative", verticalAlign: "top" }}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
         {/* Order date */}
         <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={destinationRowBg}><span style={s.dateText}>{orderDate}</span></Td>
@@ -18331,7 +18335,7 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} linkedPackingListId={order.packingListId ?? null} openPackingLists={openPackingLists} /></Td>
 
         {/* Notes (from order) */}
-        <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle} style={{ height: 1, padding: 0, position: "relative" }}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle} style={{ height: 1, padding: 0, position: "relative", verticalAlign: "top" }}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
 
         {/* Priority */}
         <Td rowIndex={rowIndex} colIndex={priorityCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Priority" historyEntityName={order.productTitle}><PriorityCell orderId={order.id} value={order.priority ?? ""} restockSettings={restockSettings} /></Td>
@@ -19051,6 +19055,25 @@ function MentionableTextarea({
     setText(next);
     onChange?.(next);
   };
+  // Suggestions list is portalled (and so is the popover) so the
+  // parent <td>'s overflow:hidden + sticky positioning don't clip
+  // them. Position recomputed against the textarea's bounding box.
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [suggestionsRect, setSuggestionsRect] = useState<DOMRect | null>(null);
+  useEffect(() => {
+    if (!focused || suggestions.length === 0) return;
+    const update = () => {
+      const r = textareaRef.current?.getBoundingClientRect();
+      if (r) setSuggestionsRect(r);
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [focused, suggestions.length, text]);
   // Inline thread state: clicking 💬 expands the cell to show every
   // reply stacked under the note + a small "Replying to @name" reply
   // popover anchored to the button.
@@ -19181,6 +19204,7 @@ function MentionableTextarea({
   return (
     <div style={cellWrapStyle}>
       <textarea
+        ref={textareaRef}
         value={text}
         onChange={(e) => setBoth(e.currentTarget.value)}
         onFocus={() => setFocused(true)}
@@ -19192,8 +19216,23 @@ function MentionableTextarea({
         style={{ ...textareaBase, ...(textareaStyle ?? {}) }}
         placeholder={placeholder}
       />
-      {focused && suggestions.length > 0 && (
-        <div style={s.tagSuggestions}>
+      {focused && suggestions.length > 0 && suggestionsRect && typeof document !== "undefined" && createPortal(
+        <div
+          style={{
+            position: "fixed",
+            top: Math.min(window.innerHeight - 40, suggestionsRect.bottom + 4),
+            left: Math.min(window.innerWidth - 200, suggestionsRect.left),
+            minWidth: 180,
+            background: "#fff",
+            border: "1px solid #cbd5e1",
+            borderRadius: 6,
+            boxShadow: "0 6px 18px rgba(0,0,0,0.12)",
+            padding: 6,
+            display: "grid",
+            gap: 4,
+            zIndex: 1200,
+          }}
+        >
           {suggestions.map((user) => (
             <button
               key={user.id}
@@ -19207,7 +19246,8 @@ function MentionableTextarea({
               @{user.name}
             </button>
           ))}
-        </div>
+        </div>,
+        document.body,
       )}
       {/* Inline replies — only render after the cell has loaded the
           thread (via clicking 💬). Each reply is its own small card
@@ -19268,29 +19308,59 @@ function MentionableTextarea({
             position: "absolute",
             bottom: 4,
             right: 4,
-            background: threadUnread > 0 ? "#dc2626" : "#fff",
-            color: threadUnread > 0 ? "#fff" : "#374151",
-            border: "1px solid #d1d5db",
-            borderRadius: 14,
-            padding: threadCount > 0 ? "1px 7px 1px 4px" : "2px 5px",
-            fontSize: 11,
+            width: 30,
+            height: 30,
+            background: "#fff",
+            color: "#7a1f2b",
+            border: "1px solid #e5e7eb",
+            borderRadius: 8,
+            padding: 0,
             cursor: "pointer",
             display: "inline-flex",
             alignItems: "center",
-            gap: 3,
-            lineHeight: 1.2,
-            boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
+            justifyContent: "center",
+            lineHeight: 1,
+            boxShadow: "0 2px 5px rgba(0,0,0,0.08)",
           }}
         >
-          <span aria-hidden style={{ fontSize: 11 }}>💬</span>
-          {threadCount > 0 && <span style={{ fontWeight: 700 }}>{threadCount}</span>}
+          <span aria-hidden style={{ fontSize: 14 }}>💬</span>
+          {threadCount > 0 && (
+            <span style={{
+              position: "absolute",
+              top: -5,
+              right: -5,
+              background: threadUnread > 0 ? "#dc2626" : "#9ca3af",
+              color: "#fff",
+              fontSize: 10,
+              fontWeight: 700,
+              borderRadius: 10,
+              minWidth: 16,
+              height: 16,
+              padding: "0 4px",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              lineHeight: 1,
+              boxShadow: "0 1px 2px rgba(0,0,0,0.12)",
+            }}>{threadCount}</span>
+          )}
         </button>
       )}
-      {/* Popover is portalled to document.body so the parent <td>'s
-          overflow:hidden doesn't clip it. Position is anchored to
-          the button via getBoundingClientRect; recomputed on resize
-          and scroll. */}
-      {threadKey && popoverOpen && popoverRect && typeof document !== "undefined" && createPortal(
+      {/* Popover is portalled to document.body. Auto-flips above /
+          below the button based on available room so it's never
+          drawn off-screen. */}
+      {threadKey && popoverOpen && popoverRect && typeof document !== "undefined" && (() => {
+        const popoverHeight = 150;
+        const popoverWidth = 270;
+        const fitsAbove = popoverRect.top >= popoverHeight + 16;
+        const top = fitsAbove
+          ? popoverRect.top - 8 - popoverHeight
+          : Math.min(window.innerHeight - popoverHeight - 8, popoverRect.bottom + 8);
+        const left = Math.min(
+          window.innerWidth - popoverWidth - 8,
+          Math.max(8, popoverRect.right - popoverWidth),
+        );
+        return createPortal(
         <>
           <div
             style={{ position: "fixed", inset: 0, zIndex: 999 }}
@@ -19299,9 +19369,9 @@ function MentionableTextarea({
           <div
             style={{
               position: "fixed",
-              top: popoverRect.top - 8 - 130,
-              left: Math.min(window.innerWidth - 280, Math.max(8, popoverRect.right - 280)),
-              width: 270,
+              top,
+              left,
+              width: popoverWidth,
               background: "#fff",
               border: "1px solid #d1d5db",
               borderRadius: 8,
@@ -19347,7 +19417,8 @@ function MentionableTextarea({
           </div>
         </>,
         document.body,
-      )}
+      );
+      })()}
     </div>
   );
 }
