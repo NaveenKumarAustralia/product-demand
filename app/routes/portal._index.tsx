@@ -2014,6 +2014,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const value = Number(raw);
       return Number.isFinite(value) ? value : undefined;
     };
+    // Name is optional — only overwrite if the form sent a non-empty
+    // value so absent / blank inputs don't wipe the existing name.
+    const nextName = String(form.get("name") ?? "").trim();
+    if (nextName) style.name = nextName;
     style.averageMeters = readNumber("averageMeters");
     style.averageTrimMeters = readNumber("averageTrimMeters");
     style.stitchingCost = readNumber("stitchingCost");
@@ -12076,6 +12080,7 @@ function ProductInformationPanel({
   const openStyleDetails = (style: ProductInfoStyle) => {
     setDetailStyle(style);
     setDetailDraft({
+      name: style.name ?? "",
       averageMeters: numberToDraft(style.averageMeters),
       averageTrimMeters: numberToDraft(style.averageTrimMeters),
       zipButtonType: style.zipButtonType ?? "",
@@ -12275,19 +12280,28 @@ function ProductInformationPanel({
           {showHidden ? "Hide hidden styles" : `Show hidden styles${hiddenStyleCount ? ` (${hiddenStyleCount})` : ""}`}
         </button>
       </div>
-      {detailStyle && selectedCategory && (
+      {detailStyle && categoryIdForStyle(detailStyle) && (
         <div style={s.productInfoModalBackdrop}>
           <div style={s.productInfoDetailsModal}>
             <div style={s.productInfoDetailsHeader}>
               <div>
-                <h3 style={s.productInfoModalTitle}>{detailStyle.name}</h3>
+                <h3 style={s.productInfoModalTitle}>{detailDraft.name?.trim() || detailStyle.name}</h3>
                 <p style={s.productInfoModalText}>
-                  Edit the averaged production details for this style.
+                  Edit the style name and averaged production details.
                 </p>
               </div>
               {detailStyle.imageUrl && <img src={detailStyle.imageUrl} alt="" style={s.productInfoDetailsThumb} />}
             </div>
             <div style={s.productInfoDetailsGrid}>
+              <label style={{ ...s.productInfoDetailsField, gridColumn: "1 / -1" }}>
+                Style name
+                <input
+                  type="text"
+                  value={detailDraft.name ?? ""}
+                  onChange={(event) => updateDetailDraft("name", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
               <label style={s.productInfoDetailsField}>
                 Fabric meters average
                 <input
