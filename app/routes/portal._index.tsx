@@ -2043,6 +2043,35 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "set_title_fabric_override") {
+    // Link a product title to a specific fabric stock entry
+    // ("<sheetName>::<fabricName>") so the "ambiguous fabric" warning
+    // resolves. Empty fabricKey clears the override.
+    const title = String(form.get("title") ?? "").trim().toLowerCase();
+    const fabricKey = String(form.get("fabricKey") ?? "").trim().toLowerCase();
+    if (!title) return null;
+    const productInfo = await loadProductInfoForAction();
+    if (!productInfo.titleFabricOverrides) productInfo.titleFabricOverrides = {};
+    if (fabricKey) productInfo.titleFabricOverrides[title] = fabricKey;
+    else delete productInfo.titleFabricOverrides[title];
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
+  if (intent === "set_title_price_override") {
+    // Manual rupees override for a title. Used as the per-piece cost
+    // directly; skips fabric/style resolution. Empty / 0 clears.
+    const title = String(form.get("title") ?? "").trim().toLowerCase();
+    const rupees = Number(form.get("rupees") ?? 0);
+    if (!title) return null;
+    const productInfo = await loadProductInfoForAction();
+    if (!productInfo.titlePriceOverrides) productInfo.titlePriceOverrides = {};
+    if (Number.isFinite(rupees) && rupees > 0) productInfo.titlePriceOverrides[title] = rupees;
+    else delete productInfo.titlePriceOverrides[title];
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
   if (intent === "set_title_style_override") {
     // Link a product title (case-insensitive) to an explicit style id
     // so future cost lookups skip the prefix matcher. Empty styleId
@@ -4192,6 +4221,15 @@ type ProductInfo = {
   // Shopify titles don't matter. findStyle checks this map before
   // falling back to prefix matching.
   titleStyleOverrides?: Record<string, string>;
+  // Title → fabric key map. Picked from the fabric picker when the
+  // title's fabric word matches multiple stock entries ("ambiguous
+  // fabric") so the lookup knows which one to use. Fabric key is
+  // "<sheetName>::<fabricName>", both lowercased.
+  titleFabricOverrides?: Record<string, string>;
+  // Title → manual rupees price. The "type my own" escape hatch when
+  // neither style nor fabric resolution works. Used directly as the
+  // per-piece cost (no fabric/style breakdown).
+  titlePriceOverrides?: Record<string, number>;
 };
 type ProductStyleCosting = Pick<
   ProductInfoStyle,
@@ -4540,6 +4578,14 @@ type StyleCostLookup = {
   // fabrics), this returns a short warning to surface on the price
   // cell so the user knows to fix the link.
   warningForTitle: (title: string | null | undefined) => string | null;
+  // Flat list of every fabric stock entry — surfaced by the fabric
+  // picker on the cost cells so staff can resolve "ambiguous fabric"
+  // by picking which one to use.
+  allFabrics: () => Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  // Returns the manual rupees override for a title, or 0 when none.
+  // Cells use this to render the value in bold and skip the right-
+  // click breakdown popover (there's no fabric breakdown to show).
+  manualPriceForTitle: (title: string | null | undefined) => number;
 };
 function buildStyleCostLookup(
   productInfo: ProductInfo,
@@ -4560,15 +4606,25 @@ function buildStyleCostLookup(
   // Group every fabric stock entry by lowercase name so we can
   // disambiguate same-named fabrics (e.g. multiple "Black"s) using
   // each entry's per-style meters override from the Products popup.
-  type FabricCandidate = { costPerMeter: number; styleMeters?: Record<string, number>; sheetName: string };
+  type FabricCandidate = { costPerMeter: number; styleMeters?: Record<string, number>; sheetName: string; name: string };
   const candidatesByName = new Map<string, FabricCandidate[]>();
+  // Flat list of every fabric stock entry — used by the fabric
+  // picker on the cost cells AND by titleFabricOverrides lookup.
+  const allFabrics: Array<FabricCandidate & { key: string }> = [];
+  const fabricByKey = new Map<string, FabricCandidate & { key: string }>();
+  const fabricKeyFor = (sheetName: string, name: string) => `${sheetName.trim().toLowerCase()}::${name.trim().toLowerCase()}`;
   for (const entry of fabricStockIndex) {
     if (entry.kind !== "stock") continue;
     if (!isFilled(entry.costPerMeter)) continue;
-    const key = entry.name.trim().toLowerCase();
-    const bucket = candidatesByName.get(key) ?? [];
-    bucket.push({ costPerMeter: entry.costPerMeter!, styleMeters: entry.styleMeters, sheetName: entry.sheetName });
-    candidatesByName.set(key, bucket);
+    const nameLower = entry.name.trim().toLowerCase();
+    const cand: FabricCandidate = { costPerMeter: entry.costPerMeter!, styleMeters: entry.styleMeters, sheetName: entry.sheetName, name: nameLower };
+    const bucket = candidatesByName.get(nameLower) ?? [];
+    bucket.push(cand);
+    candidatesByName.set(nameLower, bucket);
+    const key = fabricKeyFor(entry.sheetName, entry.name);
+    const withKey = { ...cand, key };
+    allFabrics.push(withKey);
+    fabricByKey.set(key, withKey);
   }
   // Pre-sort fabric names by length desc for whole-word matching.
   const fabricNamesByLength = Array.from(candidatesByName.keys()).sort((a, b) => b.length - a.length);
@@ -4608,13 +4664,15 @@ function buildStyleCostLookup(
     }
     return { kind: "no-match" };
   };
-  // Shared style resolver — first checks the global titleStyleOverrides
-  // map (set via the "Pick style" picker on any page) so print-first
-  // titles like "Leaf Tiered Maxi Dress" resolve as soon as staff
-  // have linked them once. Falls back to longest-prefix match.
-  const overrides = productInfo.titleStyleOverrides ?? {};
+  // Global per-title overrides. Style override skips findStyle's
+  // prefix matcher; fabric override skips findFabricForStyle's name
+  // search; price override short-circuits the whole formula and
+  // returns the manual rupees value directly.
+  const styleOverridesByTitle = productInfo.titleStyleOverrides ?? {};
+  const fabricOverridesByTitle = productInfo.titleFabricOverrides ?? {};
+  const priceOverridesByTitle = productInfo.titlePriceOverrides ?? {};
   const findStyle = (haystack: string): ProductInfoStyle | null => {
-    const overrideId = overrides[haystack];
+    const overrideId = styleOverridesByTitle[haystack];
     if (overrideId) {
       for (const entry of styles) if (entry.style.id === overrideId) return entry.style;
     }
@@ -4642,7 +4700,16 @@ function buildStyleCostLookup(
   // Core resolver — given an already-picked style, find the fabric
   // (still searched in the title) and compute the meters/fabric cost.
   const resolveWithStyle = (haystack: string, style: ProductInfoStyle): Resolved | null => {
-    const match = findFabricForStyle(style, haystack);
+    // Title → fabric override wins over the title-word search so
+    // staff can resolve "ambiguous fabric" cases by picking once.
+    const fabricKeyOverride = fabricOverridesByTitle[haystack];
+    let match: FabricMatch;
+    if (fabricKeyOverride && fabricByKey.has(fabricKeyOverride)) {
+      const f = fabricByKey.get(fabricKeyOverride)!;
+      match = { kind: "ok", fabric: f, fabricName: f.name };
+    } else {
+      match = findFabricForStyle(style, haystack);
+    }
     if (match.kind !== "ok") return null;
     const fabricOverrideMeters = match.fabric.styleMeters?.[style.id];
     const usingOverride = isFilled(fabricOverrideMeters);
@@ -4716,26 +4783,46 @@ function buildStyleCostLookup(
       total,
     };
   };
+  const manualPriceFor = (title: string | null | undefined): number => {
+    const haystack = (title ?? "").trim().toLowerCase();
+    if (!haystack) return 0;
+    const v = priceOverridesByTitle[haystack];
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  };
   return {
     costForTitle: (title) => {
+      const manual = manualPriceFor(title);
+      if (manual > 0) return manual;
       const r = resolve(title);
       return r ? costFromResolved(r) : 0;
     },
     costForOverride: (title, styleId) => {
+      const manual = manualPriceFor(title);
+      if (manual > 0) return manual;
       const r = resolveOverride(title, styleId);
       return r ? costFromResolved(r) : 0;
     },
     breakdownForTitle: (title) => {
+      // Manual price overrides skip the fabric/style breakdown —
+      // there's nothing structural to show, just the typed value.
+      if (manualPriceFor(title) > 0) return null;
       const r = resolve(title);
       return r ? breakdownFromResolved(r) : null;
     },
     breakdownForOverride: (title, styleId) => {
+      if (manualPriceFor(title) > 0) return null;
       const r = resolveOverride(title, styleId);
       return r ? breakdownFromResolved(r) : null;
     },
+    allFabrics: () => allFabrics.map((f) => ({ key: f.key, sheetName: f.sheetName, fabricName: f.name, costPerMeter: f.costPerMeter })),
+    manualPriceForTitle: manualPriceFor,
     warningForTitle: (title) => {
       const haystack = (title ?? "").trim().toLowerCase();
       if (!haystack) return null;
+      // Manual price + explicit fabric overrides resolve the situation —
+      // suppress the warning so the cell shows the value, not the alert.
+      if (manualPriceFor(title) > 0) return null;
+      if (fabricOverridesByTitle[haystack] && fabricByKey.has(fabricOverridesByTitle[haystack])) return null;
       const style = findStyle(haystack);
       if (!style) return null;
       const match = findFabricForStyle(style, haystack);
@@ -4791,20 +4878,39 @@ function normalizeProductInfo(value: unknown): ProductInfo {
 
   const rawGrid = Number((value as Record<string, unknown>).gridColumns);
   const gridColumns: 3 | 4 | 5 | 6 = rawGrid === 3 ? 3 : rawGrid === 5 ? 5 : rawGrid === 6 ? 6 : 4;
-  // titleStyleOverrides — keys lowercased so client/server matches
-  // are consistent. Drop empties so the map stays compact.
-  const rawOverrides = (value as Record<string, unknown>).titleStyleOverrides;
-  const titleStyleOverrides: Record<string, string> = {};
-  if (rawOverrides && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)) {
-    for (const [k, v] of Object.entries(rawOverrides as Record<string, unknown>)) {
-      const key = String(k ?? "").trim().toLowerCase();
-      const styleId = String(v ?? "").trim();
-      if (key && styleId) titleStyleOverrides[key] = styleId;
+  // titleStyleOverrides / titleFabricOverrides / titlePriceOverrides
+  // — all keyed by lowercased title so client/server matches are
+  // consistent. Drop empties so the maps stay compact.
+  const readStringMap = (key: string): Record<string, string> => {
+    const out: Record<string, string> = {};
+    const raw = (value as Record<string, unknown>)[key];
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        const kk = String(k ?? "").trim().toLowerCase();
+        const vv = String(v ?? "").trim();
+        if (kk && vv) out[kk] = vv;
+      }
     }
-  }
+    return out;
+  };
+  const readNumberMap = (key: string): Record<string, number> => {
+    const out: Record<string, number> = {};
+    const raw = (value as Record<string, unknown>)[key];
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        const kk = String(k ?? "").trim().toLowerCase();
+        const vv = Number(v);
+        if (kk && Number.isFinite(vv) && vv > 0) out[kk] = vv;
+      }
+    }
+    return out;
+  };
+  const titleStyleOverrides = readStringMap("titleStyleOverrides");
+  const titleFabricOverrides = readStringMap("titleFabricOverrides");
+  const titlePriceOverrides = readNumberMap("titlePriceOverrides");
   return categories.length
-    ? { gridColumns, categories, titleStyleOverrides }
-    : { ...structuredClone(DEFAULT_PRODUCT_INFO), titleStyleOverrides };
+    ? { gridColumns, categories, titleStyleOverrides, titleFabricOverrides, titlePriceOverrides }
+    : { ...structuredClone(DEFAULT_PRODUCT_INFO), titleStyleOverrides, titleFabricOverrides, titlePriceOverrides };
 }
 
 async function loadProductInfoForAction() {
@@ -7075,6 +7181,9 @@ export default function PortalDashboard() {
     () => buildStyleCostLookup(productInfo, fabricStockIndex),
     [productInfo, fabricStockIndex],
   );
+  // Flat fabric list for the per-cell fabric picker — memoised so the
+  // pickers don't re-render their lists on every parent update.
+  const allFabrics = useMemo(() => styleCostLookup.allFabrics(), [styleCostLookup]);
   const activePageTitle = page === "dashboard" ? "Dashboard"
     : page === "fabric" ? "Fabric in stock"
     : page === "settings" ? "Settings"
@@ -7474,6 +7583,7 @@ export default function PortalDashboard() {
                     inrPerAudCachedRate={inrPerAudCachedRate}
                     fxRupeeBuffer={fxRupeeBuffer}
                     productInfo={productInfo}
+                    allFabrics={allFabrics}
                   />
                   );
                 })}
@@ -10254,6 +10364,7 @@ function CollectionSpreadsheetPage({
     () => buildStyleCostLookup(productInfo, fabricStockIndex),
     [productInfo, fabricStockIndex],
   );
+  const allFabrics = useMemo(() => styleCostLookup.allFabrics(), [styleCostLookup]);
   // Per-row style override (set via the picker when the row's Name
   // doesn't auto-resolve). When present, costForOverride wins over
   // costForTitle. Empty / unset styleOverrideId falls back to the
@@ -10879,6 +10990,8 @@ function CollectionSpreadsheetPage({
                               rowName={rowName}
                               styleOverrideId={overrideId}
                               productInfo={productInfo}
+                              allFabrics={allFabrics}
+                              costWarning={styleCostLookup.warningForTitle(rowName)}
                               onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
                               onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
                             />
@@ -11358,6 +11471,8 @@ function CollectionPriceRupeesCell({
   rowName,
   styleOverrideId,
   productInfo,
+  allFabrics,
+  costWarning,
   onPickStyleOverride,
   onClearStyleOverride,
 }: {
@@ -11368,6 +11483,8 @@ function CollectionPriceRupeesCell({
   rowName: string;
   styleOverrideId: string;
   productInfo: ProductInfo;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  costWarning: string | null;
   onPickStyleOverride: (styleId: string) => void;
   onClearStyleOverride: () => void;
 }) {
@@ -11408,10 +11525,11 @@ function CollectionPriceRupeesCell({
         }}
       />
       {showPicker && (
-        <CollectionStylePicker
+        <CostFallbacks
           productInfo={productInfo}
-          currentName={rowName}
-          onPick={onPickStyleOverride}
+          productTitle={rowName}
+          fabrics={allFabrics}
+          warning={costWarning}
         />
       )}
       {overrideStyleName && (
@@ -16051,8 +16169,10 @@ function PackingListDetail({
                 sizes={packingSizes}
                 autoPriceRupees={styleCostLookup.costForTitle(line.productTitle)}
                 costBreakdown={styleCostLookup.breakdownForTitle(line.productTitle)}
+                costWarning={styleCostLookup.warningForTitle(line.productTitle)}
                 inrPerAudRate={(packingList as { lockedFxRate?: number | null }).lockedFxRate ?? inrPerAudCachedRate}
                 productInfo={productInfo}
+                allFabrics={allFabrics}
               />
               );
             }) : (
@@ -16176,8 +16296,10 @@ function PackingListLineRow({
   sizes,
   autoPriceRupees,
   costBreakdown,
+  costWarning,
   inrPerAudRate,
   productInfo,
+  allFabrics,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -16193,8 +16315,10 @@ function PackingListLineRow({
   sizes: string[];
   autoPriceRupees: number;
   costBreakdown: CostBreakdown | null;
+  costWarning: string | null;
   inrPerAudRate: number | null;
   productInfo: ProductInfo;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -16302,9 +16426,11 @@ function PackingListLineRow({
           manualPrice={line.priceRupees ?? 0}
           autoPrice={autoPriceRupees}
           costBreakdown={costBreakdown}
+          costWarning={costWarning}
           productTitle={line.productTitle}
           totalQty={total}
           productInfo={productInfo}
+          allFabrics={allFabrics}
           onCommit={(v) => setManualPriceLocal(v)}
         />
       </PackingTd>
@@ -16880,18 +17006,22 @@ function PackingPriceCell({
   manualPrice,
   autoPrice,
   costBreakdown,
+  costWarning,
   productTitle,
   totalQty,
   productInfo,
+  allFabrics,
   onCommit,
 }: {
   lineId: number;
   manualPrice: number;
   autoPrice: number;
   costBreakdown: CostBreakdown | null;
+  costWarning: string | null;
   productTitle: string;
   totalQty: number;
   productInfo: ProductInfo;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
   onCommit?: (value: number) => void;
 }) {
   const fetcher = useFetcher();
@@ -16952,11 +17082,17 @@ function PackingPriceCell({
           {Math.round(effective).toLocaleString()}
         </span>
       ) : productTitle ? (
-        // No manual override + no auto-resolve → offer the picker so
-        // staff can link the title to a style without having to type
-        // the rupee value by hand.
+        // No manual override + no auto-resolve → offer the same
+        // pick-style / pick-fabric / type-price affordances as the
+        // restock page so staff can fix the row without leaving the
+        // packing list.
         <div onClick={(e) => e.stopPropagation()} style={{ width: "100%" }}>
-          <RestockCostPicker productInfo={productInfo} productTitle={productTitle} />
+          <CostFallbacks
+            productInfo={productInfo}
+            productTitle={productTitle}
+            fabrics={allFabrics}
+            warning={costWarning}
+          />
         </div>
       ) : (
         <span style={{ color: "#9ca3af" }}>—</span>
@@ -17493,6 +17629,7 @@ function OrderRow({
   inrPerAudCachedRate,
   fxRupeeBuffer,
   productInfo,
+  allFabrics,
 }: {
   order: Order;
   rowIndex: number;
@@ -17512,6 +17649,7 @@ function OrderRow({
   inrPerAudCachedRate: number | null;
   fxRupeeBuffer: number;
   productInfo: ProductInfo;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
 }) {
   const fetcher = useFetcher();
   // On-demand Shopify inventory fetch — populated the first time staff
@@ -17734,18 +17872,13 @@ function OrderRow({
                 </span>
               )}
             </div>
-          ) : costWarning ? (
-            <span
-              title={costWarning}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 4,
-                color: "#b45309", fontSize: 12, fontWeight: 600, cursor: "help",
-              }}
-            >
-              ⚠ Ambiguous fabric
-            </span>
           ) : order.productTitle ? (
-            <RestockCostPicker productInfo={productInfo} productTitle={order.productTitle} />
+            <CostFallbacks
+              productInfo={productInfo}
+              productTitle={order.productTitle}
+              fabrics={allFabrics}
+              warning={costWarning}
+            />
           ) : (
             <span style={{ color: "#9ca3af" }}>—</span>
           )}
@@ -18472,6 +18605,201 @@ function RestockCostPicker({ productInfo, productTitle }: { productInfo: Product
     );
   };
   return <CollectionStylePicker productInfo={productInfo} currentName={productTitle} onPick={onPick} />;
+}
+
+// Combined "cost can't be auto-computed" fallback. Shows three small
+// affordances: pick a style, pick a specific fabric, or type a manual
+// price. Same component on restock / packing / Collections so the UX
+// feels identical. Picks are saved globally per product title so
+// staff only fix each product once.
+function CostFallbacks({
+  productInfo,
+  productTitle,
+  fabrics,
+  warning,
+  layout = "stacked",
+}: {
+  productInfo: ProductInfo;
+  productTitle: string;
+  fabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  warning: string | null;
+  layout?: "stacked" | "inline";
+}) {
+  const fetcher = useFetcher();
+  const submit = (fields: Record<string, string>) => {
+    fetcher.submit(fields, { method: "post" });
+  };
+  const onPickStyle = (styleId: string) => submit({ intent: "set_title_style_override", title: productTitle, styleId });
+  const onPickFabric = (fabricKey: string) => submit({ intent: "set_title_fabric_override", title: productTitle, fabricKey });
+  const onSetPrice = (rupees: number) => submit({ intent: "set_title_price_override", title: productTitle, rupees: String(rupees) });
+  return (
+    <div style={{
+      display: "flex",
+      flexDirection: layout === "inline" ? "row" : "column",
+      alignItems: "center",
+      gap: 3,
+      width: "100%",
+    }}>
+      {warning && (
+        <span
+          title={warning}
+          style={{ color: "#b45309", fontSize: 11, fontWeight: 600, cursor: "help" }}
+        >
+          ⚠ Ambiguous fabric
+        </span>
+      )}
+      <CollectionStylePicker productInfo={productInfo} currentName={productTitle} onPick={onPickStyle} />
+      <TitleFabricPicker fabrics={fabrics} currentTitle={productTitle} onPick={onPickFabric} />
+      <TitleManualPriceInput onSave={onSetPrice} />
+    </div>
+  );
+}
+
+// Searchable modal picker for fabric stock entries. Each entry is
+// shown as "<fabricName> · <sheetName>  ₹X.XX/m". Filters as the
+// user types. On pick, hands the fabric key (sheetName::name) up.
+function TitleFabricPicker({
+  fabrics,
+  currentTitle,
+  onPick,
+}: {
+  fabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  currentTitle: string;
+  onPick: (fabricKey: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  useEffect(() => { if (open) setQuery(""); }, [open]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return fabrics;
+    return fabrics.filter((f) => f.fabricName.includes(q) || f.sheetName.toLowerCase().includes(q));
+  }, [fabrics, query]);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        style={{
+          width: "100%", textAlign: "center",
+          background: "transparent", border: "1px dashed #d1d5db",
+          borderRadius: 5, padding: "3px 6px", fontSize: 10,
+          color: "#6b7280", cursor: "pointer", whiteSpace: "nowrap",
+        }}
+        title="Pick an exact fabric stock entry for this product title"
+      >
+        + Pick fabric ▾
+      </button>
+      {open && typeof document !== "undefined" && createPortal(
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }}
+          onClick={() => setOpen(false)}
+        >
+          <div style={{ background: "#fff", borderRadius: 10, width: 520, maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb" }}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Pick a fabric for this product</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>
+                Product: <strong>{currentTitle || "(no title)"}</strong>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search by fabric or sheet…"
+                style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 10px", fontSize: 13, boxSizing: "border-box" }}
+              />
+            </div>
+            <div style={{ overflowY: "auto", flex: 1 }}>
+              {filtered.length === 0 ? (
+                <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>No fabrics match.</div>
+              ) : filtered.map((f) => (
+                <button
+                  key={f.key}
+                  type="button"
+                  onClick={() => { onPick(f.key); setOpen(false); }}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    width: "100%", border: "none", borderBottom: "1px solid #f3f4f6",
+                    background: "transparent", padding: "10px 16px", fontSize: 13,
+                    cursor: "pointer", textAlign: "left",
+                  }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f9fafb"; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+                >
+                  <span>
+                    <span style={{ fontWeight: 600, color: "#111827", textTransform: "capitalize" }}>{f.fabricName}</span>
+                    <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 8 }}>{f.sheetName}</span>
+                  </span>
+                  <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
+                    ₹{f.costPerMeter.toLocaleString(undefined, { maximumFractionDigits: 2 })}/m
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div style={{ padding: "10px 16px", borderTop: "1px solid #e5e7eb", textAlign: "right" }}>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                style={{ background: "#f3f4f6", border: "none", borderRadius: 5, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+// Manual rupee price input — small inline form. Click to expand
+// into an input; commit on Enter / blur. The escape hatch when
+// neither style nor fabric picking works.
+function TitleManualPriceInput({ onSave }: { onSave: (rupees: number) => void }) {
+  const [open, setOpen] = useState(false);
+  const [value, setValue] = useState("");
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        style={{
+          width: "100%", textAlign: "center",
+          background: "transparent", border: "1px dashed #d1d5db",
+          borderRadius: 5, padding: "3px 6px", fontSize: 10,
+          color: "#6b7280", cursor: "pointer", whiteSpace: "nowrap",
+        }}
+        title="Type a manual rupees price for this product title"
+      >
+        + Type price
+      </button>
+    );
+  }
+  const commit = () => {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) onSave(n);
+    setOpen(false);
+    setValue("");
+  };
+  return (
+    <input
+      type="number"
+      autoFocus
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        if (e.key === "Escape") { setOpen(false); setValue(""); }
+      }}
+      placeholder="₹"
+      style={{
+        width: "100%", border: "1px solid #d1d5db", borderRadius: 5,
+        padding: "2px 6px", fontSize: 12, textAlign: "center",
+      }}
+    />
+  );
 }
 
 function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; size: string; value: number; restockSettings: RestockSettings }) {
