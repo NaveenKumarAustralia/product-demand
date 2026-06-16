@@ -1798,6 +1798,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return jsonResponse({ ok: false, error: "not_author" });
     }
 
+    // When body is empty we're DELETING the note: clear the cell
+    // text AND hard-delete every PortalMessage row for this thread
+    // (parent + replies + read + unread). The default
+    // syncEntityNoteMessages path only purges UNREAD top-level
+    // mentions, so a read parent or any replies would otherwise
+    // linger and the drawer would still show the "deleted" content.
+    const isDelete = body.trim() === "";
+
     if (entityType === "collection_row") {
       const collection = await prisma.collection.findUnique({
         where: { id: entityId },
@@ -1812,15 +1820,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         where: { id: entityId },
         data: { rows: rowsRaw, updatedAt: new Date() },
       });
-      await syncEntityNoteMessages({
-        entityType: "collection_row",
-        orderId: entityId,
-        entityKey,
-        field,
-        text: body,
-        fromName: currentUser.name,
-        productTitle: rowsRaw[idx].name || rowsRaw[idx].title || null,
-      });
+      if (isDelete) {
+        await prisma.portalMessage.deleteMany({
+          where: { entityType: "collection_row", orderId: entityId, entityKey, field },
+        });
+      } else {
+        await syncEntityNoteMessages({
+          entityType: "collection_row",
+          orderId: entityId,
+          entityKey,
+          field,
+          text: body,
+          fromName: currentUser.name,
+          productTitle: rowsRaw[idx].name || rowsRaw[idx].title || null,
+        });
+      }
       return jsonResponse({ ok: true });
     }
     if (entityType === "supplier_order") {
@@ -1831,12 +1845,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         where: { id: entityId },
         data: { [dbField]: body || null },
       });
-      await syncOrderNoteMessages({
-        orderId: entityId,
-        field: field as "factory_notes" | "notes",
-        text: body,
-        fromName: currentUser.name,
-      });
+      if (isDelete) {
+        await prisma.portalMessage.deleteMany({
+          where: { entityType: "supplier_order", orderId: entityId, entityKey: null, field },
+        });
+      } else {
+        await syncOrderNoteMessages({
+          orderId: entityId,
+          field: field as "factory_notes" | "notes",
+          text: body,
+          fromName: currentUser.name,
+        });
+      }
       return jsonResponse({ ok: true });
     }
     return jsonResponse({ ok: false, error: "unsupported_entity" });
@@ -8151,6 +8171,7 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
   const [optimisticReplies, setOptimisticReplies] = useState<ThreadMessage[]>([]);
   const [editingOriginal, setEditingOriginal] = useState(false);
   const [originalDraft, setOriginalDraft] = useState("");
+  const [pendingDelete, setPendingDelete] = useState(false);
   const originalFetcher = useFetcher<{ ok?: boolean }>();
 
   useEffect(() => {
@@ -8164,11 +8185,19 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadKey]);
   // Refetch / close drawer after the original-note action completes.
+  // A delete (we tracked it via pendingDelete) closes the drawer
+  // entirely since there's nothing left to show; an edit just
+  // refreshes the messages.
   useEffect(() => {
     if (!threadKey) return;
     if (originalFetcher.state === "idle" && originalFetcher.data?.ok) {
-      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
-      setEditingOriginal(false);
+      if (pendingDelete) {
+        setPendingDelete(false);
+        close();
+      } else {
+        threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
+        setEditingOriginal(false);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originalFetcher.state, originalFetcher.data]);
@@ -8351,6 +8380,7 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
                       type="button"
                       onClick={() => {
                         if (!window.confirm("Delete this note? This will clear the cell text and remove all replies.")) return;
+                        setPendingDelete(true);
                         originalFetcher.submit(
                           { intent: "update_thread_original", threadKey, body: "" },
                           { method: "post", action: "/portal" },
