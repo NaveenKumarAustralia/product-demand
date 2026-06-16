@@ -7464,6 +7464,8 @@ export default function PortalDashboard() {
             shopDomain={shopDomain}
             styleCostLookup={styleCostLookup}
             inrPerAudCachedRate={inrPerAudCachedRate}
+            productInfo={productInfo}
+            allFabrics={allFabrics}
           />
         ) : page === "fabric" ? (
           <CombinedFabricStockPanel
@@ -15427,6 +15429,8 @@ function PackingListsPanel({
   shopDomain,
   styleCostLookup,
   inrPerAudCachedRate,
+  productInfo,
+  allFabrics,
 }: {
   packingLists: PackingListWithLines[];
   selectedPackingList: PackingListWithLines | null;
@@ -15446,6 +15450,8 @@ function PackingListsPanel({
   shopDomain: string | null;
   styleCostLookup: StyleCostLookup;
   inrPerAudCachedRate: number | null;
+  productInfo: ProductInfo;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
 }) {
   const fetcher = useFetcher();
 
@@ -15473,6 +15479,8 @@ function PackingListsPanel({
             shopDomain={shopDomain}
             styleCostLookup={styleCostLookup}
             inrPerAudCachedRate={inrPerAudCachedRate}
+            productInfo={productInfo}
+            allFabrics={allFabrics}
           />
         </section>
       )}
@@ -15653,6 +15661,8 @@ function PackingListDetail({
   shopDomain,
   styleCostLookup,
   inrPerAudCachedRate,
+  productInfo,
+  allFabrics,
 }: {
   packingList: PackingListWithLines;
   savedPackingColumnWidths: Record<string, number>;
@@ -15671,6 +15681,8 @@ function PackingListDetail({
   shopDomain: string | null;
   styleCostLookup: StyleCostLookup;
   inrPerAudCachedRate: number | null;
+  productInfo: ProductInfo;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
 }) {
   const fetcher = useFetcher();
   const loadInventoryFetcher = useFetcher();
