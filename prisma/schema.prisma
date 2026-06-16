@@ -85,19 +85,33 @@ model PortalSetting {
 }
 
 model PortalMessage {
-  id           Int       @id @default(autoincrement())
-  userId       String
-  userName     String
-  orderId      Int
-  field        String
-  fromName     String?
-  productTitle String?
-  body         String
-  readAt       DateTime?
-  createdAt    DateTime  @default(now())
+  id              Int       @id @default(autoincrement())
+  userId          String
+  userName        String
+  // entityType + orderId + entityKey + field identify the cell this
+  // message is attached to. entityType is "supplier_order" /
+  // "collection_row" / "fabric_row" / "sample_iteration". orderId is
+  // the parent record's integer id (SupplierOrder.id / Collection.id
+  // etc.); entityKey is the sub-row id (Collection row uuid, fabric
+  // row id) when the parent has multiple rows.
+  orderId         Int
+  field           String
+  entityType      String    @default("supplier_order")
+  entityKey       String?
+  // Reply chain. Top-level message has parentMessageId = null.
+  // Replies set parentMessageId to the message they're replying to.
+  parentMessageId Int?
+  editedAt        DateTime?
+  fromName        String?
+  productTitle    String?
+  body            String
+  readAt          DateTime?
+  createdAt       DateTime  @default(now())
 
   @@index([userId, readAt, createdAt])
   @@index([orderId, field])
+  @@index([entityType, orderId, entityKey, field])
+  @@index([parentMessageId])
 }
 
 model PackingList {

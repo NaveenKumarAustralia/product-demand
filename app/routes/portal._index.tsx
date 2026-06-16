@@ -5,7 +5,8 @@ import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction }
 import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRevalidator, useRouteError, useSearchParams, useSubmit } from "react-router";
 import prisma from "../db.server";
 import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
-import { syncOrderNoteMessages, syncSampleIterationMessages } from "../portal-messages.server";
+import { syncOrderNoteMessages, syncEntityNoteMessages, syncSampleIterationMessages, createReplyMessage, editPortalMessage, deletePortalMessage } from "../portal-messages.server";
+import { randomUUID } from "node:crypto";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { unauthenticated } from "../shopify.server";
 
@@ -1726,6 +1727,60 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "mark_thread_read") {
+    // Mark every unread message in a thread as read for the current
+    // user. Called when they open the thread side panel — saves them
+    // having to dismiss each message individually.
+    const entityType = String(form.get("entityType") ?? "").trim();
+    const entityId = Number(form.get("entityId"));
+    const entityKey = String(form.get("entityKey") ?? "").trim() || null;
+    const field = String(form.get("field") ?? "").trim();
+    if (!currentUser || !entityType || !field || !Number.isFinite(entityId)) return null;
+    await prisma.portalMessage.updateMany({
+      where: {
+        userId: currentUser.id,
+        entityType,
+        orderId: entityId,
+        entityKey,
+        field,
+        readAt: null,
+      },
+      data: { readAt: new Date() },
+    });
+    return jsonResponse({ ok: true });
+  }
+
+  if (intent === "create_thread_reply") {
+    // Reply to a message — pings the parent's author + every other
+    // participant in the thread + anyone explicitly @-tagged.
+    const parentMessageId = Number(form.get("parentMessageId"));
+    const body = String(form.get("body") ?? "").trim();
+    if (!parentMessageId || !body || !currentUser) return null;
+    const { replyIds } = await createReplyMessage({
+      parentMessageId,
+      fromUserId: currentUser.id,
+      fromName: currentUser.name,
+      body,
+    });
+    return jsonResponse({ ok: true, replyIds });
+  }
+
+  if (intent === "edit_thread_message") {
+    // Anyone can edit any message (per the user's spec).
+    const messageId = Number(form.get("messageId"));
+    const body = String(form.get("body") ?? "").trim();
+    if (!messageId || !body) return null;
+    await editPortalMessage({ messageId, body });
+    return jsonResponse({ ok: true });
+  }
+
+  if (intent === "delete_thread_message") {
+    const messageId = Number(form.get("messageId"));
+    if (!messageId) return null;
+    await deletePortalMessage({ messageId });
+    return jsonResponse({ ok: true });
+  }
+
   if (intent === "update_column_widths") {
     let columnWidths: Record<string, number>;
     try {
@@ -2454,10 +2509,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const id = Number(form.get("collectionId"));
     if (!id) return null;
     const data: Record<string, unknown> = { updatedAt: new Date() };
+    let incomingRows: Array<Record<string, string>> | null = null;
     if (form.has("rows")) {
       try {
         const rows = JSON.parse(String(form.get("rows")));
-        if (Array.isArray(rows)) data.rows = rows;
+        if (Array.isArray(rows)) {
+          // Ensure every row has a stable __rowKey so mention links
+          // survive reorders. UUIDs are generated server-side here so
+          // older clients without crypto.randomUUID still get keyed.
+          incomingRows = rows.map((r) => {
+            const row = (r && typeof r === "object" ? r : {}) as Record<string, string>;
+            if (!row.__rowKey) row.__rowKey = randomUUID();
+            return row;
+          });
+          data.rows = incomingRows;
+        }
       } catch { /* keep existing */ }
     }
     if (form.has("columns")) {
@@ -2473,6 +2539,44 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (form.has("name")) {
       const name = String(form.get("name") ?? "").trim();
       if (name) data.name = name;
+    }
+    // Mention sync: fetch existing rows, diff each row's notes
+    // fields, and trigger syncEntityNoteMessages only when the text
+    // genuinely changed. Avoids re-notifying users on unrelated
+    // column edits.
+    if (incomingRows) {
+      try {
+        const existing = await prisma.collection.findUnique({ where: { id }, select: { rows: true } });
+        const previousByKey = new Map<string, Record<string, string>>();
+        if (Array.isArray(existing?.rows)) {
+          for (const r of existing.rows as Array<Record<string, string>>) {
+            const k = r?.__rowKey;
+            if (k) previousByKey.set(String(k), r);
+          }
+        }
+        const noteFields: Array<"factoryNotes" | "notes" | "loadingNotes"> = ["factoryNotes", "notes", "loadingNotes"];
+        for (const row of incomingRows) {
+          const key = String(row.__rowKey ?? "");
+          if (!key) continue;
+          const prev = previousByKey.get(key) ?? {};
+          for (const field of noteFields) {
+            const before = (prev[field] ?? "").trim();
+            const after = (row[field] ?? "").trim();
+            if (before === after) continue;
+            await syncEntityNoteMessages({
+              entityType: "collection_row",
+              orderId: id,
+              entityKey: key,
+              field,
+              text: after,
+              fromName: currentUser?.name ?? null,
+              productTitle: row.name || row.title || null,
+            });
+          }
+        }
+      } catch (e) {
+        console.warn("[collection mention sync] failed:", e);
+      }
     }
     await prisma.collection.update({ where: { id }, data });
     return null;
@@ -7279,6 +7383,22 @@ export default function PortalDashboard() {
             appearance: textfield;
             -moz-appearance: textfield;
           }
+          /* Message bell shake — runs every 4s so it's noticeable
+             but not seizure-inducing. Stops when the user opens the
+             menu (class is removed) or the unread count hits zero. */
+          @keyframes portal-msg-bell-shake {
+            0%, 70%, 100% { transform: rotate(0); }
+            72% { transform: rotate(-12deg); }
+            74% { transform: rotate(10deg); }
+            76% { transform: rotate(-8deg); }
+            78% { transform: rotate(6deg); }
+            80% { transform: rotate(-4deg); }
+            82% { transform: rotate(0); }
+          }
+          .portal-msg-bell-shake {
+            animation: portal-msg-bell-shake 4s ease-in-out infinite;
+            transform-origin: top center;
+          }
           /* Excel-style cell focus: a teal outline around the focused
              grid cell so the user knows exactly where they're typing.
              Both :focus (Td itself focused via tabIndex) and
@@ -7365,6 +7485,7 @@ export default function PortalDashboard() {
                 </label>
               )}
               <MessagesMenu messages={messages} />
+              <ThreadPanel users={users} />
               <div style={s.activeUsers} title="Currently active">
                 <span style={s.activeUsersLabel}>Active</span>
                 {activeUsers.length ? activeUsers.map((user) => (
@@ -7506,6 +7627,7 @@ export default function PortalDashboard() {
             inrPerAudCachedRate={inrPerAudCachedRate}
             isAdmin={Boolean(currentUser?.admin)}
             shopDomain={shopDomain}
+            users={users}
           />
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -7853,15 +7975,254 @@ function PortalLogin() {
   );
 }
 
+// Right-side thread panel — opens when the URL has ?thread=<key>.
+// The key is "<entityType>:<entityId>:<entityKey>:<field>".
+// Reads the messages via /api/portal-thread, renders the chain, lets
+// the user reply / edit / delete (anyone can edit anyone's message
+// per the user's spec — keeps the team's collective memory tidy).
+type ThreadMessage = {
+  id: number;
+  userId: string;
+  userName: string;
+  body: string;
+  fromName: string | null;
+  parentMessageId: number | null;
+  editedAt: string | null;
+  readAt: string | null;
+  createdAt: string;
+};
+function ThreadPanel({ users }: { users: PortalUser[] }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const threadKey = searchParams.get("thread");
+  const threadFetcher = useFetcher<{ messages: ThreadMessage[] }>();
+  const replyFetcher = useFetcher();
+  const editFetcher = useFetcher();
+  const deleteFetcher = useFetcher();
+  const [replyDraft, setReplyDraft] = useState("");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+
+  useEffect(() => {
+    if (!threadKey) return;
+    setReplyDraft("");
+    setEditingId(null);
+    threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}&markRead=1`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadKey]);
+  // Refetch after reply / edit / delete so the panel updates without
+  // a full revalidation.
+  useEffect(() => {
+    if (!threadKey) return;
+    if (replyFetcher.state === "idle" && replyFetcher.data) {
+      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
+      setReplyDraft("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replyFetcher.state, replyFetcher.data]);
+  useEffect(() => {
+    if (!threadKey) return;
+    if (editFetcher.state === "idle" && editFetcher.data) {
+      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
+      setEditingId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editFetcher.state, editFetcher.data]);
+  useEffect(() => {
+    if (!threadKey) return;
+    if (deleteFetcher.state === "idle" && deleteFetcher.data) {
+      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deleteFetcher.state, deleteFetcher.data]);
+
+  if (!threadKey) return null;
+  const messages = threadFetcher.data?.messages ?? [];
+  const close = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("thread");
+    setSearchParams(next, { replace: true });
+  };
+
+  // The first message is the top-level mention; everything else is a
+  // reply. We display them flat (oldest first) so the conversation
+  // reads naturally.
+  const topLevel = messages.find((m) => m.parentMessageId === null) ?? messages[0];
+  const submitReply = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const body = replyDraft.trim();
+    if (!body || !topLevel) return;
+    replyFetcher.submit(
+      { intent: "create_thread_reply", parentMessageId: String(topLevel.id), body },
+      { method: "post", action: "/portal" },
+    );
+  };
+  const startEdit = (m: ThreadMessage) => {
+    setEditingId(m.id);
+    setEditDraft(m.body);
+  };
+  const submitEdit = () => {
+    if (editingId == null) return;
+    const body = editDraft.trim();
+    if (!body) return;
+    editFetcher.submit(
+      { intent: "edit_thread_message", messageId: String(editingId), body },
+      { method: "post", action: "/portal" },
+    );
+  };
+  const deleteMessage = (id: number) => {
+    if (!window.confirm("Delete this message?")) return;
+    deleteFetcher.submit(
+      { intent: "delete_thread_message", messageId: String(id) },
+      { method: "post", action: "/portal" },
+    );
+  };
+
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div style={{
+      position: "fixed",
+      top: 0,
+      right: 0,
+      bottom: 0,
+      width: 380,
+      maxWidth: "100vw",
+      background: "#fff",
+      boxShadow: "-10px 0 30px rgba(0,0,0,0.12)",
+      zIndex: 1400,
+      display: "flex",
+      flexDirection: "column",
+    }}>
+      <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>{topLevel?.productTitle ?? "Thread"}</div>
+          <div style={{ fontSize: 11, color: "#6b7280" }}>
+            {topLevel ? formatFieldLabel(topLevel.field as string) : ""}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={close}
+          style={{ background: "transparent", border: "none", fontSize: 20, color: "#6b7280", cursor: "pointer", lineHeight: 1 }}
+          title="Close (Esc)"
+          aria-label="Close thread panel"
+        >×</button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+        {threadFetcher.state !== "idle" && messages.length === 0 && (
+          <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: 20 }}>Loading…</div>
+        )}
+        {messages.map((m) => (
+          <div key={m.id} style={{
+            background: m.parentMessageId == null ? "#fff7ed" : "#f9fafb",
+            border: "1px solid #e5e7eb",
+            borderRadius: 8,
+            padding: "8px 10px",
+            fontSize: 13,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+              <span style={{ fontWeight: 600, fontSize: 12 }}>{m.fromName || `For ${m.userName}`}</span>
+              <span style={{ fontSize: 10, color: "#9ca3af" }}>
+                {new Date(m.createdAt).toLocaleString()}
+                {m.editedAt && <span title={`Edited ${new Date(m.editedAt).toLocaleString()}`}> · edited</span>}
+              </span>
+            </div>
+            {editingId === m.id ? (
+              <div>
+                <textarea
+                  value={editDraft}
+                  onChange={(e) => setEditDraft(e.target.value)}
+                  rows={2}
+                  style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 4, padding: 6, fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }}
+                />
+                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                  <button type="button" onClick={submitEdit} style={{ background: "#2563eb", color: "#fff", border: "none", borderRadius: 4, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>Save</button>
+                  <button type="button" onClick={() => setEditingId(null)} style={{ background: "transparent", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 4, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{ whiteSpace: "pre-wrap", color: "#111827" }}>{m.body}</div>
+                <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                  <button type="button" onClick={() => startEdit(m)} style={{ background: "transparent", color: "#6b7280", border: "none", padding: 0, fontSize: 11, cursor: "pointer" }}>Edit</button>
+                  <button type="button" onClick={() => deleteMessage(m.id)} style={{ background: "transparent", color: "#dc2626", border: "none", padding: 0, fontSize: 11, cursor: "pointer" }}>Delete</button>
+                </div>
+              </>
+            )}
+          </div>
+        ))}
+        {messages.length === 0 && threadFetcher.state === "idle" && (
+          <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: 20 }}>No messages in this thread.</div>
+        )}
+      </div>
+      <form onSubmit={submitReply} style={{ borderTop: "1px solid #e5e7eb", padding: 10 }}>
+        <MentionableTextarea
+          value={replyDraft}
+          users={users}
+          onCommit={() => { /* commit on send button, not blur */ }}
+          onChange={setReplyDraft}
+          placeholder="Reply… use @name to ping more people"
+          rows={2}
+          textareaStyle={{ minHeight: 50, fontSize: 13 }}
+        />
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6 }}>
+          <button
+            type="submit"
+            disabled={!replyDraft.trim() || replyFetcher.state !== "idle"}
+            style={{
+              background: replyDraft.trim() ? "#2563eb" : "#9ca3af",
+              color: "#fff",
+              border: "none",
+              borderRadius: 5,
+              padding: "6px 14px",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: replyDraft.trim() ? "pointer" : "not-allowed",
+            }}
+          >
+            {replyFetcher.state !== "idle" ? "Sending…" : "Send reply"}
+          </button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  );
+}
+function formatFieldLabel(field: string): string {
+  switch (field) {
+    case "factory_notes": case "factoryNotes": return "Factory notes";
+    case "notes": return "Notes";
+    case "loadingNotes": return "Loading notes";
+    case "sample_notes": return "Sample notes";
+    default: return field;
+  }
+}
+
 function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
   const [open, setOpen] = useState(false);
   const fetcher = useFetcher();
+  // Build the thread URL for each message so clicking opens the
+  // side panel on the right page with the right thread loaded.
+  const threadHrefFor = (m: PortalMessageItem) => {
+    const entityType = (m as PortalMessageItem & { entityType?: string }).entityType || "supplier_order";
+    const entityKey = (m as PortalMessageItem & { entityKey?: string | null }).entityKey ?? "";
+    const threadKey = `${entityType}:${m.orderId}:${entityKey}:${m.field}`;
+    const page = entityType === "collection_row" ? "collections"
+      : entityType === "sample_iteration" ? "samples"
+      : "restock";
+    const params = new URLSearchParams({ page, thread: threadKey });
+    if (entityType === "collection_row") params.set("collectionId", String(m.orderId));
+    return `/portal?${params.toString()}`;
+  };
 
   return (
     <div style={s.messagesWrap}>
       <button
         type="button"
         onClick={() => setOpen((current) => !current)}
+        // The shake animation pulls the user's eye when there are
+        // unread messages. Subtle but persistent so they notice
+        // without being annoyed; pauses while the dropdown is open.
+        className={messages.length && !open ? "portal-msg-bell-shake" : undefined}
         style={messages.length ? s.messagesButtonActive : s.messagesButton}
         title="Messages"
         aria-label={messages.length ? `${messages.length} unread messages` : "Messages"}
@@ -7878,11 +8239,17 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
           {messages.length ? messages.map((message) => (
             <div key={message.id} style={s.messageItem}>
               <a
-                href={message.field === "sample_notes" ? `/portal?page=samples` : `/portal?messageOrderId=${message.orderId}#order-${message.orderId}`}
+                href={threadHrefFor(message)}
                 style={s.messageLink}
               >
                 <strong>{message.productTitle || `Order #${message.orderId}`}</strong>
-                <span>{message.field === "factory_notes" ? "Factory notes" : message.field === "sample_notes" ? "Sample notes" : "Notes"}</span>
+                <span>
+                  {message.field === "factory_notes" ? "Factory notes"
+                    : message.field === "sample_notes" ? "Sample notes"
+                    : message.field === "factoryNotes" ? "Factory notes"
+                    : message.field === "loadingNotes" ? "Loading notes"
+                    : "Notes"}
+                </span>
                 <span style={s.messageBody}>{message.body}</span>
               </a>
               <fetcher.Form method="post">
@@ -9797,7 +10164,7 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
   });
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[] }) {
   const fetcher = useFetcher();
   const importFetcher = useFetcher<{ ok?: boolean; totalCollections?: number; summary?: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }>; error?: string }>();
   const backfillFetcher = useFetcher<{ ok?: boolean; scanned?: number; updated?: number; error?: string }>();
@@ -9893,6 +10260,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         fabricStockIndex={fabricStockIndex}
         inrPerAudCachedRate={inrPerAudCachedRate}
         shopDomain={shopDomain}
+        users={users}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
       />
@@ -10306,6 +10674,7 @@ function CollectionSpreadsheetPage({
   fabricStockIndex,
   inrPerAudCachedRate,
   shopDomain,
+  users,
   onBack,
   onLocalNameChange,
 }: {
@@ -10315,9 +10684,23 @@ function CollectionSpreadsheetPage({
   fabricStockIndex: FabricStockEntry[];
   inrPerAudCachedRate: number | null;
   shopDomain: string | null;
+  users: PortalUser[];
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
 }) {
+  // Thread message counts keyed by "<entityType>:<entityId>:<entityKey>:<field>".
+  // Populated by a fetcher on mount + after row saves so the 💬 badges
+  // stay live without forcing a full page reload.
+  const threadCountsFetcher = useFetcher<{ counts: Array<{ key: string; total: number; unread: number }> }>();
+  const threadCounts = useMemo(() => {
+    const m = new Map<string, { total: number; unread: number }>();
+    for (const c of threadCountsFetcher.data?.counts ?? []) m.set(c.key, { total: c.total, unread: c.unread });
+    return m;
+  }, [threadCountsFetcher.data]);
+  useEffect(() => {
+    threadCountsFetcher.load(`/api/portal-thread-counts?entityType=collection_row&entityId=${listItem.id}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id]);
   const fetcher = useFetcher();
   const loadFetcher = useFetcher<{ collection: CollectionFullType | null }>();
   const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
@@ -11038,6 +11421,10 @@ function CollectionSpreadsheetPage({
                               productInfo={productInfo}
                               generateSkuAndBarcode={generateSkuAndBarcode}
                               placeholder={placeholderText}
+                              users={users}
+                              rowKey={row.__rowKey ?? ""}
+                              collectionId={listItem.id}
+                              threadCounts={threadCounts}
                             />
                           )}
                         </Td>
@@ -11284,6 +11671,10 @@ function CollectionCellInner({
   productInfo,
   generateSkuAndBarcode,
   placeholder,
+  users,
+  rowKey,
+  collectionId,
+  threadCounts,
 }: {
   value: string;
   type: CollectionColumnDef["type"];
@@ -11293,8 +11684,33 @@ function CollectionCellInner({
   productInfo?: ProductInfo;
   generateSkuAndBarcode?: (rowIdx: number, baseNumber: string) => void;
   placeholder?: string;
+  users?: PortalUser[];
+  rowKey?: string;
+  collectionId?: number;
+  threadCounts?: Map<string, { total: number; unread: number }>;
 }) {
   const onCommit = useCallback((next: string) => updateCell(rowIndex, columnId, next), [updateCell, rowIndex, columnId]);
+  // Notes columns get the shared @-mention textarea (same UX as the
+  // restock page). On commit the row save will pick up the new text
+  // and the server's update_collection action runs syncEntityNote-
+  // Messages to fan out fresh mentions.
+  const NOTE_COLUMN_IDS = new Set(["factoryNotes", "notes", "loadingNotes"]);
+  if (NOTE_COLUMN_IDS.has(columnId) && users) {
+    const threadKey = collectionId && rowKey ? `collection_row:${collectionId}:${rowKey}:${columnId}` : null;
+    const counts = threadKey ? threadCounts?.get(threadKey) : undefined;
+    return (
+      <MentionableTextarea
+        value={value}
+        users={users}
+        onCommit={onCommit}
+        rows={2}
+        textareaStyle={{ minHeight: 40 }}
+        threadHref={threadKey && counts && counts.total > 0 ? `?thread=${encodeURIComponent(threadKey)}` : null}
+        unreadCount={counts?.unread ?? 0}
+        totalCount={counts?.total ?? 0}
+      />
+    );
+  }
   // modelPicture is the multi-image product gallery (numbered, sortable,
   // uploaded to Shopify). Fabric + mani-pic columns are single images.
   if (columnId === "modelPicture") {
@@ -18524,49 +18940,63 @@ function insertStaffTag(value: string, name: string) {
   return `${value}${value.endsWith(" ") || !value ? "" : " "}${tag} `;
 }
 
-function NotesCell({
-  orderId,
-  field,
+// Shared @-mention textarea used by every notes-style cell across
+// the portal (restock Notes / Factory Notes, Collections factory /
+// loading / row notes, fabric sheet notes). Manages the picker
+// suggestions internally; the parent stays responsible for commit
+// (called with the new value on blur). Render a small "💬 N" thread
+// button next to the textarea when unreadCount > 0 — clicking it
+// opens the global thread panel via setThreadFromURL().
+function MentionableTextarea({
   value,
   users,
+  onCommit,
+  onChange,
+  placeholder = "Add note... use @name",
+  rows = 3,
+  threadHref,
+  unreadCount = 0,
+  totalCount = 0,
+  textareaStyle,
 }: {
-  orderId: number;
-  field: string;
   value: string;
   users: PortalUser[];
+  onCommit: (next: string) => void;
+  onChange?: (next: string) => void;
+  placeholder?: string;
+  rows?: number;
+  threadHref?: string | null;
+  unreadCount?: number;
+  totalCount?: number;
+  textareaStyle?: React.CSSProperties;
 }) {
-  const fetcher = useFetcher();
   const [text, setText] = useState(value);
+  useEffect(() => { setText(value); }, [value]);
   const [focused, setFocused] = useState(false);
   const tagQuery = currentTagQuery(text);
   const suggestions = tagQuery == null
     ? []
     : users
-        .filter((user) => user.active)
-        .filter((user) => user.name.toLowerCase().includes(tagQuery))
+        .filter((u) => u.active)
+        .filter((u) => u.name.toLowerCase().includes(tagQuery))
         .slice(0, 5);
-
+  const setBoth = (next: string) => {
+    setText(next);
+    onChange?.(next);
+  };
   return (
     <div style={s.noteTagWrap}>
       <textarea
         value={text}
-        onChange={(e) => setText(e.currentTarget.value)}
+        onChange={(e) => setBoth(e.currentTarget.value)}
         onFocus={() => setFocused(true)}
         onBlur={(e) => {
           window.setTimeout(() => setFocused(false), 120);
-          submitPortalCell(
-            fetcher,
-            {
-              intent: `update_${field}`,
-              orderId,
-              value: e.currentTarget.value,
-            },
-            { label: "Undo note", fields: { intent: `update_${field}`, orderId, value } },
-          );
+          if (e.currentTarget.value !== value) onCommit(e.currentTarget.value);
         }}
-        rows={3}
-        style={s.restockNoteTextarea}
-        placeholder="Add note... use @name"
+        rows={rows}
+        style={{ ...s.restockNoteTextarea, ...(textareaStyle ?? {}) }}
+        placeholder={placeholder}
       />
       {focused && suggestions.length > 0 && (
         <div style={s.tagSuggestions}>
@@ -18577,7 +19007,7 @@ function NotesCell({
               style={s.tagSuggestionButton}
               onMouseDown={(event) => {
                 event.preventDefault();
-                setText((current) => insertStaffTag(current, user.name));
+                setBoth(insertStaffTag(text, user.name));
               }}
             >
               @{user.name}
@@ -18585,7 +19015,71 @@ function NotesCell({
           ))}
         </div>
       )}
+      {threadHref && totalCount > 0 && (
+        <a
+          href={threadHref}
+          title={unreadCount > 0 ? `${unreadCount} unread / ${totalCount} total replies` : `${totalCount} replies`}
+          style={{
+            position: "absolute",
+            top: 2,
+            right: 2,
+            background: unreadCount > 0 ? "#dc2626" : "#e5e7eb",
+            color: unreadCount > 0 ? "#fff" : "#374151",
+            fontSize: 10,
+            fontWeight: 700,
+            borderRadius: 10,
+            padding: "1px 6px",
+            textDecoration: "none",
+            lineHeight: 1.4,
+          }}
+        >
+          💬 {totalCount}
+        </a>
+      )}
     </div>
+  );
+}
+
+function NotesCell({
+  orderId,
+  field,
+  value,
+  users,
+  threadCounts,
+}: {
+  orderId: number;
+  field: string;
+  value: string;
+  users: PortalUser[];
+  threadCounts?: Map<string, { total: number; unread: number }>;
+}) {
+  const fetcher = useFetcher();
+  // Thread badge counts. Key matches the bell + panel routing format
+  // "<entityType>:<entityId>:<entityKey>:<field>". For restock notes
+  // entityKey is the empty string.
+  const noteFieldMap: Record<string, string> = { factory_notes: "factory_notes", notes: "notes" };
+  const messageField = noteFieldMap[field] ?? field;
+  const threadKey = `supplier_order:${orderId}::${messageField}`;
+  const counts = threadCounts?.get(threadKey);
+  const threadHref = counts && counts.total > 0
+    ? `?thread=${encodeURIComponent(threadKey)}`
+    : null;
+  const commit = (next: string) => {
+    submitPortalCell(
+      fetcher,
+      { intent: `update_${field}`, orderId, value: next },
+      { label: "Undo note", fields: { intent: `update_${field}`, orderId, value } },
+    );
+  };
+  return (
+    <MentionableTextarea
+      value={value}
+      users={users}
+      onCommit={commit}
+      threadHref={threadHref}
+      unreadCount={counts?.unread ?? 0}
+      totalCount={counts?.total ?? 0}
+    />
   );
 }
 
