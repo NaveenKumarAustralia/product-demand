@@ -2043,6 +2043,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "set_title_style_override") {
+    // Link a product title (case-insensitive) to an explicit style id
+    // so future cost lookups skip the prefix matcher. Empty styleId
+    // clears the override. Used by the Pick-style picker on the
+    // restock / packing / collections pages.
+    const title = String(form.get("title") ?? "").trim().toLowerCase();
+    const styleId = String(form.get("styleId") ?? "").trim();
+    if (!title) return null;
+    const productInfo = await loadProductInfoForAction();
+    if (!productInfo.titleStyleOverrides) productInfo.titleStyleOverrides = {};
+    if (styleId) productInfo.titleStyleOverrides[title] = styleId;
+    else delete productInfo.titleStyleOverrides[title];
+    await saveProductInfo(productInfo);
+    return null;
+  }
+
   if (intent === "update_product_info_grid") {
     const gridColumns = Number(form.get("gridColumns"));
     if (gridColumns !== 3 && gridColumns !== 4 && gridColumns !== 5 && gridColumns !== 6) return null;
@@ -4169,6 +4185,13 @@ type ProductInfoCategory = {
 type ProductInfo = {
   gridColumns?: 3 | 4 | 5 | 6;
   categories: ProductInfoCategory[];
+  // Title → styleId map. Set via the "Pick style" picker on any page
+  // when a product title (e.g. "Leaf Tiered Maxi Dress") doesn't
+  // resolve via the longest-prefix matcher. Keys are normalised
+  // (trimmed + lowercased) so casing/whitespace differences across
+  // Shopify titles don't matter. findStyle checks this map before
+  // falling back to prefix matching.
+  titleStyleOverrides?: Record<string, string>;
 };
 type ProductStyleCosting = Pick<
   ProductInfoStyle,
@@ -4585,12 +4608,16 @@ function buildStyleCostLookup(
     }
     return { kind: "no-match" };
   };
-  // Shared style resolver — find the style entry for a title via
-  // longest-prefix match. Returns null when no style matches.
-  // For print-first titles ("Leaf Tiered Maxi Dress") staff use the
-  // per-row style picker on the Collections page — see styleOverrideId
-  // in the row → costForOverride below.
+  // Shared style resolver — first checks the global titleStyleOverrides
+  // map (set via the "Pick style" picker on any page) so print-first
+  // titles like "Leaf Tiered Maxi Dress" resolve as soon as staff
+  // have linked them once. Falls back to longest-prefix match.
+  const overrides = productInfo.titleStyleOverrides ?? {};
   const findStyle = (haystack: string): ProductInfoStyle | null => {
+    const overrideId = overrides[haystack];
+    if (overrideId) {
+      for (const entry of styles) if (entry.style.id === overrideId) return entry.style;
+    }
     for (const entry of styles) {
       if (haystack === entry.name || haystack.startsWith(entry.name + " ")) return entry.style;
     }
@@ -4764,7 +4791,20 @@ function normalizeProductInfo(value: unknown): ProductInfo {
 
   const rawGrid = Number((value as Record<string, unknown>).gridColumns);
   const gridColumns: 3 | 4 | 5 | 6 = rawGrid === 3 ? 3 : rawGrid === 5 ? 5 : rawGrid === 6 ? 6 : 4;
-  return categories.length ? { gridColumns, categories } : structuredClone(DEFAULT_PRODUCT_INFO);
+  // titleStyleOverrides — keys lowercased so client/server matches
+  // are consistent. Drop empties so the map stays compact.
+  const rawOverrides = (value as Record<string, unknown>).titleStyleOverrides;
+  const titleStyleOverrides: Record<string, string> = {};
+  if (rawOverrides && typeof rawOverrides === "object" && !Array.isArray(rawOverrides)) {
+    for (const [k, v] of Object.entries(rawOverrides as Record<string, unknown>)) {
+      const key = String(k ?? "").trim().toLowerCase();
+      const styleId = String(v ?? "").trim();
+      if (key && styleId) titleStyleOverrides[key] = styleId;
+    }
+  }
+  return categories.length
+    ? { gridColumns, categories, titleStyleOverrides }
+    : { ...structuredClone(DEFAULT_PRODUCT_INFO), titleStyleOverrides };
 }
 
 async function loadProductInfoForAction() {
@@ -7433,6 +7473,7 @@ export default function PortalDashboard() {
                     costWarning={styleCostLookup.warningForTitle(order.productTitle)}
                     inrPerAudCachedRate={inrPerAudCachedRate}
                     fxRupeeBuffer={fxRupeeBuffer}
+                    productInfo={productInfo}
                   />
                   );
                 })}
@@ -16011,6 +16052,7 @@ function PackingListDetail({
                 autoPriceRupees={styleCostLookup.costForTitle(line.productTitle)}
                 costBreakdown={styleCostLookup.breakdownForTitle(line.productTitle)}
                 inrPerAudRate={(packingList as { lockedFxRate?: number | null }).lockedFxRate ?? inrPerAudCachedRate}
+                productInfo={productInfo}
               />
               );
             }) : (
@@ -16135,6 +16177,7 @@ function PackingListLineRow({
   autoPriceRupees,
   costBreakdown,
   inrPerAudRate,
+  productInfo,
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
@@ -16151,6 +16194,7 @@ function PackingListLineRow({
   autoPriceRupees: number;
   costBreakdown: CostBreakdown | null;
   inrPerAudRate: number | null;
+  productInfo: ProductInfo;
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -16260,6 +16304,7 @@ function PackingListLineRow({
           costBreakdown={costBreakdown}
           productTitle={line.productTitle}
           totalQty={total}
+          productInfo={productInfo}
           onCommit={(v) => setManualPriceLocal(v)}
         />
       </PackingTd>
@@ -16837,6 +16882,7 @@ function PackingPriceCell({
   costBreakdown,
   productTitle,
   totalQty,
+  productInfo,
   onCommit,
 }: {
   lineId: number;
@@ -16845,6 +16891,7 @@ function PackingPriceCell({
   costBreakdown: CostBreakdown | null;
   productTitle: string;
   totalQty: number;
+  productInfo: ProductInfo;
   onCommit?: (value: number) => void;
 }) {
   const fetcher = useFetcher();
@@ -16904,6 +16951,13 @@ function PackingPriceCell({
         <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
           {Math.round(effective).toLocaleString()}
         </span>
+      ) : productTitle ? (
+        // No manual override + no auto-resolve → offer the picker so
+        // staff can link the title to a style without having to type
+        // the rupee value by hand.
+        <div onClick={(e) => e.stopPropagation()} style={{ width: "100%" }}>
+          <RestockCostPicker productInfo={productInfo} productTitle={productTitle} />
+        </div>
       ) : (
         <span style={{ color: "#9ca3af" }}>—</span>
       )}
@@ -17438,6 +17492,7 @@ function OrderRow({
   costWarning,
   inrPerAudCachedRate,
   fxRupeeBuffer,
+  productInfo,
 }: {
   order: Order;
   rowIndex: number;
@@ -17456,6 +17511,7 @@ function OrderRow({
   costWarning: string | null;
   inrPerAudCachedRate: number | null;
   fxRupeeBuffer: number;
+  productInfo: ProductInfo;
 }) {
   const fetcher = useFetcher();
   // On-demand Shopify inventory fetch — populated the first time staff
@@ -17688,6 +17744,8 @@ function OrderRow({
             >
               ⚠ Ambiguous fabric
             </span>
+          ) : order.productTitle ? (
+            <RestockCostPicker productInfo={productInfo} productTitle={order.productTitle} />
           ) : (
             <span style={{ color: "#9ca3af" }}>—</span>
           )}
@@ -18398,6 +18456,22 @@ function EtaCell({ orderId, value }: { orderId: number; value: string }) {
       placeholder="dd/mm/yy"
     />
   );
+}
+
+// Inline "Pick style" picker shown in the restock Cost ₹ cell when
+// the product title doesn't auto-resolve to a Product Information
+// style. Picking writes a global title → styleId override via the
+// set_title_style_override action; the page revalidates and the cost
+// renders normally on next render.
+function RestockCostPicker({ productInfo, productTitle }: { productInfo: ProductInfo; productTitle: string }) {
+  const fetcher = useFetcher();
+  const onPick = (styleId: string) => {
+    fetcher.submit(
+      { intent: "set_title_style_override", title: productTitle, styleId },
+      { method: "post" },
+    );
+  };
+  return <CollectionStylePicker productInfo={productInfo} currentName={productTitle} onPick={onPick} />;
 }
 
 function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; size: string; value: number; restockSettings: RestockSettings }) {
