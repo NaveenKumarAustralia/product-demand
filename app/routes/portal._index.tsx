@@ -12729,7 +12729,7 @@ function ProductInformationPanel({
           </div>
         </div>
       )}
-      {styleChoice && selectedCategory && (
+      {styleChoice && categoryIdForStyle(styleChoice) && (
         <div style={s.productInfoModalBackdrop}>
           <div style={s.productInfoModal}>
             <h3 style={s.productInfoModalTitle}>Remove this style?</h3>
