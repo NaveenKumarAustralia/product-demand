@@ -7485,7 +7485,6 @@ export default function PortalDashboard() {
                 </label>
               )}
               <MessagesMenu messages={messages} />
-              <ThreadPanel users={users} />
               <div style={s.activeUsers} title="Currently active">
                 <span style={s.activeUsersLabel}>Active</span>
                 {activeUsers.length ? activeUsers.map((user) => (
@@ -11169,26 +11168,61 @@ function CollectionSpreadsheetPage({
         }}>{pushStatus.msg}</div>
       )}
 
-      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, maxHeight: "none", minHeight: 0 }}>
+      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0 }}>
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
-        ) : (
+        ) : (() => {
+          // Freeze every column up to and including "name" so they
+          // stay visible while the user scrolls right — same pattern
+          // as the restock page. Shopify column moves to the right
+          // of name and scrolls with the rest.
+          const SHOPIFY_COL_WIDTH = 140;
+          const nameIdx = columns.findIndex((c) => c.id === "name");
+          const frozenCols = nameIdx >= 0 ? columns.slice(0, nameIdx + 1) : [];
+          const restCols = nameIdx >= 0 ? columns.slice(nameIdx + 1) : columns;
+          // stickyLeft offset per frozen index: 0 = row number,
+          // 1..N = each frozen column.
+          const frozenOffsets: number[] = [];
+          let cum = 0;
+          frozenOffsets.push(cum); // row number at left 0
+          cum += 48;
+          for (const c of frozenCols) {
+            frozenOffsets.push(cum);
+            cum += c.width ?? 110;
+          }
+          const tableWidth = 48 + frozenCols.reduce((s, c) => s + (c.width ?? 110), 0) + SHOPIFY_COL_WIDTH + restCols.reduce((s, c) => s + (c.width ?? 110), 0);
+          return (
           <table
-            style={{ ...s.table, width: 48 + 140 + columns.reduce((sum, c) => sum + (c.width ?? 110), 0), minWidth: 900 }}
+            style={{ ...s.table, width: tableWidth, minWidth: 900 }}
             onKeyDown={handleTableGridKeyDown}
           >
             <colgroup>
               <col style={{ width: 48 }} />
-              <col style={{ width: 140 }} />
-              {columns.map((col) => (
+              {frozenCols.map((col) => (
+                <col key={col.id} style={{ width: col.width ?? 110 }} />
+              ))}
+              <col style={{ width: SHOPIFY_COL_WIDTH }} />
+              {restCols.map((col) => (
                 <col key={col.id} style={{ width: col.width ?? 110 }} />
               ))}
             </colgroup>
             <thead>
               <tr style={s.headerRow}>
                 <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
+                {frozenCols.map((col, i) => (
+                  <Th
+                    key={col.id}
+                    headerKey={`collection:${col.id}`}
+                    columnId={col.id}
+                    onResizeStart={(e) => startResize(col.id, e)}
+                    stickyLeft={frozenOffsets[i + 1]}
+                    isLastFrozen={i === frozenCols.length - 1}
+                  >
+                    {col.label}
+                  </Th>
+                ))}
                 <th style={{ ...s.th, textAlign: "center" }}>Shopify</th>
-                {columns.map((col) => (
+                {restCols.map((col) => (
                   <Th
                     key={col.id}
                     headerKey={`collection:${col.id}`}
@@ -11263,173 +11297,161 @@ function CollectionSpreadsheetPage({
                         { label: "Delete row", danger: true, onClick: () => removeRow(rIdx) },
                       ]}
                     />
-                    <Td rowIndex={rIdx} colIndex={-1} center>
-                      {linked ? (
-                        <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => pushRow(rIdx)}
-                          disabled={isPushing}
-                          style={{
-                            background: "#0d9488", color: "#fff", border: "none",
-                            borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600,
-                            cursor: isPushing ? "wait" : "pointer", width: "100%",
-                          }}
-                          title="Create a Shopify draft product from this row"
-                        >Create in Shopify</button>
-                      )}
-                    </Td>
-                    {columns.map((col, colIdx) => {
-                      const computed = computedValueFor(col.id);
-                      // For the Link readonly cell, render as a clickable
-                      // anchor when a Shopify URL is present.
-                      if (col.id === "link" && computed) {
-                        return (
-                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
-                            <a href={computed} target="_blank" rel="noopener noreferrer"
-                              style={{ fontSize: 12, color: "#0d9488", fontWeight: 600, padding: "6px 8px", display: "inline-block" }}
-                              title="Open live storefront product page"
-                            >View live page</a>
-                          </Td>
-                        );
-                      }
-                      // Linked row but no handle yet (older import): show
-                      // a hint so the user knows it'll backfill once the
-                      // "Backfill storefront links" action runs.
-                      if (col.id === "link" && linked && !computed) {
-                        return (
-                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
-                            <span style={{ fontSize: 11, color: "#9ca3af", padding: "6px 8px", display: "inline-block" }}
-                              title="Run 'Backfill storefront links' on the Collections list page"
-                            >(no handle yet)</span>
-                          </Td>
-                        );
-                      }
-                      const value = computed !== null ? computed : (row[col.id] ?? "");
-                      // Chip columns get the inline chip dropdown.
-                      if (col.type === "chip" && (col.id === "status" || col.id === "sample")) {
-                        const opts = col.id === "status" ? localStatusOptions : localSampleOptions;
-                        return (
-                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center>
-                            <CollectionChipDropdown
-                              value={value}
-                              options={opts}
-                              emptyLabel="—"
-                              onChange={(v) => updateCell(rIdx, col.id, v)}
-                              onOptionsChange={(next) => saveChipOptions(col.id === "status" ? "statusOptions" : "sampleOptions", next)}
-                            />
-                          </Td>
-                        );
-                      }
-                      // Duplicate From picker: opens a Shopify product
-                      // search, then patches the row with the picked
-                      // product's fields (description, tags, type, HS,
-                      // COO, compare-at-price, SEO).
-                      if (col.id === "duplicateFrom" && !linked) {
-                        const style = extractStyleFromName(row.name ?? "", productInfo);
-                        return (
-                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
-                            <CollectionDuplicateFromCell
-                              value={value}
-                              currentName={row.name ?? ""}
-                              styleHint={style}
-                              onPick={(label, fields) => {
-                                setRows((prev) => {
-                                  const next = prev.map((r, i) => {
-                                    if (i !== rIdx) return r;
-                                    return { ...r, duplicateFrom: label, ...fields };
+                    {(() => {
+                      // Cell-renderer that wraps all the special-case
+                      // branches. Called once per column; sticky props
+                      // applied for frozen cols (factoryNotes through
+                      // name). The Shopify "Create" cell is rendered
+                      // between the frozen group and the rest.
+                      const renderCol = (col: typeof columns[number], colIdx: number, frozenIdx: number) => {
+                        const stickyLeft = frozenIdx >= 0 ? frozenOffsets[frozenIdx + 1] : undefined;
+                        const isLastFrozen = frozenIdx >= 0 && frozenIdx === frozenCols.length - 1;
+                        const tdSticky = { stickyLeft, isLastFrozen } as const;
+                        const computed = computedValueFor(col.id);
+                        if (col.id === "link" && computed) {
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <a href={computed} target="_blank" rel="noopener noreferrer"
+                                style={{ fontSize: 12, color: "#0d9488", fontWeight: 600, padding: "6px 8px", display: "inline-block" }}
+                                title="Open live storefront product page"
+                              >View live page</a>
+                            </Td>
+                          );
+                        }
+                        if (col.id === "link" && linked && !computed) {
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <span style={{ fontSize: 11, color: "#9ca3af", padding: "6px 8px", display: "inline-block" }}
+                                title="Run 'Backfill storefront links' on the Collections list page"
+                              >(no handle yet)</span>
+                            </Td>
+                          );
+                        }
+                        const value = computed !== null ? computed : (row[col.id] ?? "");
+                        if (col.type === "chip" && (col.id === "status" || col.id === "sample")) {
+                          const opts = col.id === "status" ? localStatusOptions : localSampleOptions;
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky}>
+                              <CollectionChipDropdown
+                                value={value}
+                                options={opts}
+                                emptyLabel="—"
+                                onChange={(v) => updateCell(rIdx, col.id, v)}
+                                onOptionsChange={(next) => saveChipOptions(col.id === "status" ? "statusOptions" : "sampleOptions", next)}
+                              />
+                            </Td>
+                          );
+                        }
+                        if (col.id === "duplicateFrom" && !linked) {
+                          const style = extractStyleFromName(row.name ?? "", productInfo);
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionDuplicateFromCell
+                                value={value}
+                                currentName={row.name ?? ""}
+                                styleHint={style}
+                                onPick={(label, fields) => {
+                                  setRows((prev) => {
+                                    const next = prev.map((r, i) => {
+                                      if (i !== rIdx) return r;
+                                      return { ...r, duplicateFrom: label, ...fields };
+                                    });
+                                    persistRows(next);
+                                    return next;
                                   });
-                                  persistRows(next);
-                                  return next;
-                                });
-                              }}
-                            />
-                          </Td>
-                        );
-                      }
-                      // Unit A$ (priceAud) is a live-computed readonly
-                      // cell: takes row.priceRupees + cached FX rate and
-                      // shows the per-piece AUD plus the rate subtext,
-                      // matching the packing list page.
-                      if (col.id === "priceAud") {
+                                }}
+                              />
+                            </Td>
+                          );
+                        }
+                        if (col.id === "priceAud") {
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionPriceAudCell
+                                rupees={Number(row.priceRupees ?? "0") || 0}
+                                inrPerAud={inrPerAudCachedRate}
+                              />
+                            </Td>
+                          );
+                        }
+                        if (col.id === "priceRupees" && !linked) {
+                          const rowName = (row.name ?? row.title ?? "").trim();
+                          const overrideId = (row.styleOverrideId ?? "").trim();
+                          const autoValue = autoPriceRupees(rowName, overrideId || undefined);
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionPriceRupeesCell
+                                value={value}
+                                rowIndex={rIdx}
+                                updateCell={updateCell}
+                                autoValue={autoValue}
+                                rowName={rowName}
+                                styleOverrideId={overrideId}
+                                productInfo={productInfo}
+                                allFabrics={allFabrics}
+                                costWarning={styleCostLookup.warningForTitle(rowName)}
+                                onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
+                                onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
+                              />
+                            </Td>
+                          );
+                        }
+                        const isSpecialRender =
+                          col.type === "readonly"
+                          || col.type === "tickbox"
+                          || col.type === "chip"
+                          || col.type === "release"
+                          || col.id === "totalOrdered"
+                          || col.id === "modelPicture"
+                          || col.id === "fabric"
+                          || col.id === "maniPicsTaken";
+                        const lockedDisplay = linked && !isSpecialRender;
                         return (
-                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
-                            <CollectionPriceAudCell
-                              rupees={Number(row.priceRupees ?? "0") || 0}
-                              inrPerAud={inrPerAudCachedRate}
-                            />
+                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                            {lockedDisplay ? (
+                              <span style={{ fontSize: 12, color: "#374151", padding: "2px 4px" }}>{value}</span>
+                            ) : (
+                              <CollectionCell
+                                value={value}
+                                type={col.type ?? "text"}
+                                columnId={col.id}
+                                rowIndex={rIdx}
+                                updateCell={updateCell}
+                                productInfo={productInfo}
+                                generateSkuAndBarcode={generateSkuAndBarcode}
+                                placeholder=""
+                                users={users}
+                                rowKey={row.__rowKey ?? ""}
+                                collectionId={listItem.id}
+                                threadCounts={threadCounts}
+                              />
+                            )}
                           </Td>
                         );
-                      }
-                      // Price ₹ (priceRupees) is its own dedicated cell:
-                      // wraps the number input, shows the auto value as
-                      // a bold placeholder when empty, and surfaces a
-                      // "+ Pick style" affordance when the row's Name
-                      // doesn't auto-resolve so staff can manually link
-                      // it to a Product Information style.
-                      if (col.id === "priceRupees" && !linked) {
-                        const rowName = (row.name ?? row.title ?? "").trim();
-                        const overrideId = (row.styleOverrideId ?? "").trim();
-                        const autoValue = autoPriceRupees(rowName, overrideId || undefined);
-                        return (
-                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
-                            <CollectionPriceRupeesCell
-                              value={value}
-                              rowIndex={rIdx}
-                              updateCell={updateCell}
-                              autoValue={autoValue}
-                              rowName={rowName}
-                              styleOverrideId={overrideId}
-                              productInfo={productInfo}
-                              allFabrics={allFabrics}
-                              costWarning={styleCostLookup.warningForTitle(rowName)}
-                              onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
-                              onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
-                            />
-                          </Td>
-                        );
-                      }
-                      const placeholderText = "";
-                      // Linked rows lock plain text/number/date inputs
-                      // so the source-of-truth is Shopify admin. But
-                      // cells with custom rendering (images, tickboxes,
-                      // chips, release styling, readonly auto-values)
-                      // must still go through CollectionCell or they'd
-                      // render as raw JSON / 1 / blank text.
-                      const isSpecialRender =
-                        col.type === "readonly"
-                        || col.type === "tickbox"
-                        || col.type === "chip"
-                        || col.type === "release"
-                        || col.id === "totalOrdered"
-                        || col.id === "modelPicture"
-                        || col.id === "fabric"
-                        || col.id === "maniPicsTaken";
-                      const lockedDisplay = linked && !isSpecialRender;
-                      return (
-                        <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
-                          {lockedDisplay ? (
-                            <span style={{ fontSize: 12, color: "#374151", padding: "2px 4px" }}>{value}</span>
+                      };
+                      const shopifyCell = (
+                        <Td key="__shopify" rowIndex={rIdx} colIndex={-1} center>
+                          {linked ? (
+                            <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
                           ) : (
-                            <CollectionCell
-                              value={value}
-                              type={col.type ?? "text"}
-                              columnId={col.id}
-                              rowIndex={rIdx}
-                              updateCell={updateCell}
-                              productInfo={productInfo}
-                              generateSkuAndBarcode={generateSkuAndBarcode}
-                              placeholder={placeholderText}
-                              users={users}
-                              rowKey={row.__rowKey ?? ""}
-                              collectionId={listItem.id}
-                              threadCounts={threadCounts}
-                            />
+                            <button
+                              type="button"
+                              onClick={() => pushRow(rIdx)}
+                              disabled={isPushing}
+                              style={{
+                                background: "#0d9488", color: "#fff", border: "none",
+                                borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600,
+                                cursor: isPushing ? "wait" : "pointer", width: "100%",
+                              }}
+                              title="Create a Shopify draft product from this row"
+                            >Create in Shopify</button>
                           )}
                         </Td>
                       );
-                    })}
+                      const frozenCells = frozenCols.map((col, i) => renderCol(col, i, i));
+                      const restCells = restCols.map((col, i) => renderCol(col, frozenCols.length + i, -1));
+                      return <>{frozenCells}{shopifyCell}{restCells}</>;
+                    })()}
                   </tr>
                 );
               })}
@@ -11462,7 +11484,8 @@ function CollectionSpreadsheetPage({
               )}
             </tbody>
           </table>
-        )}
+          );
+        })()}
       </div>
     </div>
   );
@@ -11699,15 +11722,13 @@ function CollectionCellInner({
     const threadKey = collectionId && rowKey ? `collection_row:${collectionId}:${rowKey}:${columnId}` : null;
     const counts = threadKey ? threadCounts?.get(threadKey) : undefined;
     return (
-      <MentionableTextarea
+      <CollectionNotesCellWrapper
+        threadKey={threadKey}
         value={value}
         users={users}
         onCommit={onCommit}
-        rows={2}
-        textareaStyle={{ minHeight: 40 }}
-        threadHref={threadKey && counts && counts.total > 0 ? `?thread=${encodeURIComponent(threadKey)}` : null}
-        unreadCount={counts?.unread ?? 0}
-        totalCount={counts?.total ?? 0}
+        total={counts?.total ?? 0}
+        unread={counts?.unread ?? 0}
       />
     );
   }
@@ -12069,6 +12090,40 @@ function CollectionStylePicker({
         document.body,
       )}
     </>
+  );
+}
+
+// Thin wrapper around MentionableTextarea for Collection notes cells.
+// Reads ?thread= from the URL so the cell can auto-open when the bell
+// navigates to it. Also tells the textarea to fill the entire cell.
+function CollectionNotesCellWrapper({
+  threadKey,
+  value,
+  users,
+  onCommit,
+  total,
+  unread,
+}: {
+  threadKey: string | null;
+  value: string;
+  users: PortalUser[];
+  onCommit: (next: string) => void;
+  total: number;
+  unread: number;
+}) {
+  const [searchParams] = useSearchParams();
+  const autoOpenThread = threadKey ? searchParams.get("thread") === threadKey : false;
+  return (
+    <MentionableTextarea
+      value={value}
+      users={users}
+      onCommit={onCommit}
+      threadKey={threadKey ?? undefined}
+      threadCount={total}
+      threadUnread={unread}
+      autoOpenThread={autoOpenThread}
+      fillCell
+    />
   );
 }
 
@@ -18943,10 +18998,10 @@ function insertStaffTag(value: string, name: string) {
 // Shared @-mention textarea used by every notes-style cell across
 // the portal (restock Notes / Factory Notes, Collections factory /
 // loading / row notes, fabric sheet notes). Manages the picker
-// suggestions internally; the parent stays responsible for commit
-// (called with the new value on blur). Render a small "💬 N" thread
-// button next to the textarea when unreadCount > 0 — clicking it
-// opens the global thread panel via setThreadFromURL().
+// suggestions internally and provides an inline thread mode: the 💬
+// button at the bottom-right of the cell opens a small reply
+// popover and stacks every reply directly under the textarea so the
+// conversation reads inside the same cell.
 function MentionableTextarea({
   value,
   users,
@@ -18954,10 +19009,12 @@ function MentionableTextarea({
   onChange,
   placeholder = "Add note... use @name",
   rows = 3,
-  threadHref,
-  unreadCount = 0,
-  totalCount = 0,
+  threadKey,
+  threadCount = 0,
+  threadUnread = 0,
+  autoOpenThread = false,
   textareaStyle,
+  fillCell = false,
 }: {
   value: string;
   users: PortalUser[];
@@ -18965,10 +19022,12 @@ function MentionableTextarea({
   onChange?: (next: string) => void;
   placeholder?: string;
   rows?: number;
-  threadHref?: string | null;
-  unreadCount?: number;
-  totalCount?: number;
+  threadKey?: string | null;
+  threadCount?: number;
+  threadUnread?: number;
+  autoOpenThread?: boolean;
   textareaStyle?: React.CSSProperties;
+  fillCell?: boolean;
 }) {
   const [text, setText] = useState(value);
   useEffect(() => { setText(value); }, [value]);
@@ -18984,8 +19043,94 @@ function MentionableTextarea({
     setText(next);
     onChange?.(next);
   };
+  // Inline thread state: clicking 💬 expands the cell to show every
+  // reply stacked under the note + a small "Replying to @name" reply
+  // popover anchored to the button.
+  const threadFetcher = useFetcher<{ messages: ThreadMessage[] }>();
+  const replyFetcher = useFetcher();
+  const editFetcher = useFetcher();
+  const deleteFetcher = useFetcher();
+  const [threadOpen, setThreadOpen] = useState(false);
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  const [replyDraft, setReplyDraft] = useState("");
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  useEffect(() => {
+    if (!threadKey || !threadOpen) return;
+    threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}&markRead=1`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadKey, threadOpen]);
+  // Auto-open the thread when the URL points at it (bell click flow).
+  useEffect(() => {
+    if (autoOpenThread && threadKey) setThreadOpen(true);
+  }, [autoOpenThread, threadKey]);
+  // Refresh after reply / edit / delete so the inline list updates.
+  useEffect(() => {
+    if (!threadKey || !threadOpen) return;
+    if (replyFetcher.state === "idle" && replyFetcher.data) {
+      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
+      setReplyDraft("");
+      setPopoverOpen(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replyFetcher.state, replyFetcher.data]);
+  useEffect(() => {
+    if (!threadKey || !threadOpen) return;
+    if (editFetcher.state === "idle" && editFetcher.data) {
+      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
+      setEditingId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editFetcher.state, editFetcher.data]);
+  useEffect(() => {
+    if (!threadKey || !threadOpen) return;
+    if (deleteFetcher.state === "idle" && deleteFetcher.data) {
+      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deleteFetcher.state, deleteFetcher.data]);
+
+  const messages = threadFetcher.data?.messages ?? [];
+  const topLevel = messages.find((m) => m.parentMessageId === null) ?? messages[0];
+  const replies = messages.filter((m) => m.parentMessageId !== null);
+  const submitReply = () => {
+    const body = replyDraft.trim();
+    if (!body || !topLevel) return;
+    replyFetcher.submit(
+      { intent: "create_thread_reply", parentMessageId: String(topLevel.id), body },
+      { method: "post", action: "/portal" },
+    );
+  };
+  const submitEdit = () => {
+    if (editingId == null) return;
+    const body = editDraft.trim();
+    if (!body) return;
+    editFetcher.submit(
+      { intent: "edit_thread_message", messageId: String(editingId), body },
+      { method: "post", action: "/portal" },
+    );
+  };
+  const deleteMessage = (id: number) => {
+    if (!window.confirm("Delete this message?")) return;
+    deleteFetcher.submit(
+      { intent: "delete_thread_message", messageId: String(id) },
+      { method: "post", action: "/portal" },
+    );
+  };
+  const replyTo = topLevel?.fromName ?? "this note";
+
+  // Cell-fill layout: the textarea expands to occupy 100% of the
+  // cell's height (above any inline replies). Without fillCell we
+  // keep the legacy auto-grow behavior so old callers don't shift.
+  const cellWrapStyle: React.CSSProperties = fillCell
+    ? { ...s.noteTagWrap, position: "relative", display: "flex", flexDirection: "column", width: "100%", height: "100%", minHeight: 80 }
+    : s.noteTagWrap;
+  const textareaBase: React.CSSProperties = fillCell
+    ? { ...s.restockNoteTextarea, flex: 1, width: "100%", minHeight: 60, resize: "none" }
+    : s.restockNoteTextarea;
+
   return (
-    <div style={s.noteTagWrap}>
+    <div style={cellWrapStyle}>
       <textarea
         value={text}
         onChange={(e) => setBoth(e.currentTarget.value)}
@@ -18995,7 +19140,7 @@ function MentionableTextarea({
           if (e.currentTarget.value !== value) onCommit(e.currentTarget.value);
         }}
         rows={rows}
-        style={{ ...s.restockNoteTextarea, ...(textareaStyle ?? {}) }}
+        style={{ ...textareaBase, ...(textareaStyle ?? {}) }}
         placeholder={placeholder}
       />
       {focused && suggestions.length > 0 && (
@@ -19015,26 +19160,128 @@ function MentionableTextarea({
           ))}
         </div>
       )}
-      {threadHref && totalCount > 0 && (
-        <a
-          href={threadHref}
-          title={unreadCount > 0 ? `${unreadCount} unread / ${totalCount} total replies` : `${totalCount} replies`}
-          style={{
-            position: "absolute",
-            top: 2,
-            right: 2,
-            background: unreadCount > 0 ? "#dc2626" : "#e5e7eb",
-            color: unreadCount > 0 ? "#fff" : "#374151",
-            fontSize: 10,
-            fontWeight: 700,
-            borderRadius: 10,
-            padding: "1px 6px",
-            textDecoration: "none",
-            lineHeight: 1.4,
-          }}
-        >
-          💬 {totalCount}
-        </a>
+      {/* Inline replies — only render after the cell has loaded the
+          thread (via clicking 💬). Each reply is its own small card
+          with inline edit/delete. */}
+      {threadKey && threadOpen && replies.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+          {replies.map((m) => (
+            <div key={m.id} style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 6, padding: "5px 7px", fontSize: 11 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                <span style={{ fontWeight: 600, color: "#374151" }}>{m.fromName || `For ${m.userName}`}</span>
+                <span style={{ color: "#9ca3af", fontSize: 9 }}>
+                  {new Date(m.createdAt).toLocaleString()}
+                  {m.editedAt && " · edited"}
+                </span>
+              </div>
+              {editingId === m.id ? (
+                <div>
+                  <textarea
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.target.value)}
+                    rows={2}
+                    style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 4, padding: 4, fontSize: 11, fontFamily: "inherit", boxSizing: "border-box" }}
+                  />
+                  <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                    <button type="button" onClick={submitEdit} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 4, padding: "2px 8px", fontSize: 10, cursor: "pointer" }}>Save</button>
+                    <button type="button" onClick={() => setEditingId(null)} style={{ background: "transparent", border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 8px", fontSize: 10, cursor: "pointer" }}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{ whiteSpace: "pre-wrap", color: "#111827" }}>{m.body}</div>
+                  <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+                    <button type="button" onClick={() => { setEditingId(m.id); setEditDraft(m.body); }} style={{ background: "transparent", color: "#6b7280", border: "none", padding: 0, fontSize: 9, cursor: "pointer" }}>Edit</button>
+                    <button type="button" onClick={() => deleteMessage(m.id)} style={{ background: "transparent", color: "#dc2626", border: "none", padding: 0, fontSize: 9, cursor: "pointer" }}>Delete</button>
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {/* 💬 button — bottom-right of the cell. Toggles the inline
+          thread expansion + the reply popover anchored to the
+          button. Always shown when a threadKey is set; badge count
+          is hidden when there are no replies yet. */}
+      {threadKey && (
+        <div style={{ position: "absolute", bottom: 4, right: 4 }}>
+          <button
+            type="button"
+            onClick={() => {
+              const next = !popoverOpen;
+              setPopoverOpen(next);
+              if (next) setThreadOpen(true);
+            }}
+            title={threadCount > 0 ? `${threadCount} replies${threadUnread > 0 ? ` (${threadUnread} unread)` : ""}` : "Add a reply"}
+            style={{
+              background: threadUnread > 0 ? "#dc2626" : "#f3f4f6",
+              color: threadUnread > 0 ? "#fff" : "#374151",
+              border: "1px solid #d1d5db",
+              borderRadius: 14,
+              padding: threadCount > 0 ? "1px 7px 1px 4px" : "2px 4px",
+              fontSize: 11,
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 3,
+              lineHeight: 1.2,
+            }}
+          >
+            <span aria-hidden style={{ fontSize: 11 }}>💬</span>
+            {threadCount > 0 && <span style={{ fontWeight: 700 }}>{threadCount}</span>}
+          </button>
+          {popoverOpen && (
+            <div
+              style={{
+                position: "absolute",
+                bottom: "calc(100% + 6px)",
+                right: 0,
+                width: 260,
+                background: "#fff",
+                border: "1px solid #d1d5db",
+                borderRadius: 8,
+                boxShadow: "0 6px 18px rgba(0,0,0,0.12)",
+                padding: 10,
+                zIndex: 100,
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, fontSize: 11, color: "#374151" }}>
+                <span>Replying to <strong style={{ color: "#0d9488" }}>@{replyTo}</strong></span>
+                <button type="button" onClick={() => setPopoverOpen(false)} style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1 }} aria-label="Close">×</button>
+              </div>
+              <textarea
+                value={replyDraft}
+                onChange={(e) => setReplyDraft(e.target.value)}
+                placeholder="Type your reply..."
+                rows={3}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitReply();
+                }}
+                style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 5, padding: 6, fontSize: 12, fontFamily: "inherit", boxSizing: "border-box", outline: "none" }}
+              />
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6 }}>
+                <button
+                  type="button"
+                  disabled={!replyDraft.trim() || replyFetcher.state !== "idle"}
+                  onClick={submitReply}
+                  style={{
+                    background: replyDraft.trim() ? "#0d9488" : "#9ca3af",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: 5,
+                    padding: "5px 12px",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: replyDraft.trim() ? "pointer" : "not-allowed",
+                  }}
+                >
+                  {replyFetcher.state !== "idle" ? "Sending…" : "Reply"}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -19054,16 +19301,10 @@ function NotesCell({
   threadCounts?: Map<string, { total: number; unread: number }>;
 }) {
   const fetcher = useFetcher();
-  // Thread badge counts. Key matches the bell + panel routing format
-  // "<entityType>:<entityId>:<entityKey>:<field>". For restock notes
-  // entityKey is the empty string.
-  const noteFieldMap: Record<string, string> = { factory_notes: "factory_notes", notes: "notes" };
-  const messageField = noteFieldMap[field] ?? field;
+  const [searchParams] = useSearchParams();
+  const messageField = field;
   const threadKey = `supplier_order:${orderId}::${messageField}`;
   const counts = threadCounts?.get(threadKey);
-  const threadHref = counts && counts.total > 0
-    ? `?thread=${encodeURIComponent(threadKey)}`
-    : null;
   const commit = (next: string) => {
     submitPortalCell(
       fetcher,
@@ -19071,14 +19312,16 @@ function NotesCell({
       { label: "Undo note", fields: { intent: `update_${field}`, orderId, value } },
     );
   };
+  const autoOpenThread = searchParams.get("thread") === threadKey;
   return (
     <MentionableTextarea
       value={value}
       users={users}
       onCommit={commit}
-      threadHref={threadHref}
-      unreadCount={counts?.unread ?? 0}
-      totalCount={counts?.total ?? 0}
+      threadKey={threadKey}
+      threadCount={counts?.total ?? 0}
+      threadUnread={counts?.unread ?? 0}
+      autoOpenThread={autoOpenThread}
     />
   );
 }
