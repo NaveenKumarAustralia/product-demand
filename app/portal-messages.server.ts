@@ -238,7 +238,29 @@ export async function createReplyMessage({
   }
   recipientsByUserId.delete(fromUserId);
 
-  if (!recipientsByUserId.size) return { replyIds: [] };
+  // No one else to notify? Still record the reply for thread history —
+  // create a single row addressed to the sender with readAt = now so
+  // it doesn't show in their own bell. This is what makes
+  // "replying to yourself" actually save the reply text.
+  if (!recipientsByUserId.size) {
+    const created = await prisma.portalMessage.create({
+      data: {
+        userId: fromUserId,
+        userName: fromName,
+        orderId: parent.orderId,
+        field: parent.field,
+        entityType: parent.entityType,
+        entityKey: parent.entityKey,
+        parentMessageId,
+        fromName,
+        productTitle: parent.productTitle,
+        body: body.trim(),
+        readAt: new Date(),
+      },
+      select: { id: true },
+    });
+    return { replyIds: [created.id] };
+  }
 
   const rows = Array.from(recipientsByUserId.values()).map((user) => ({
     userId: user.id,

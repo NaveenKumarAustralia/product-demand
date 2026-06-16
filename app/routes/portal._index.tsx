@@ -3474,7 +3474,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 // Reorder is handled optimistically in the UI — skip the expensive full loader reload
-export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultShouldRevalidate }) => {
+export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultShouldRevalidate, currentUrl, nextUrl }) => {
+  // Pure URL changes that only flip the thread drawer params should
+  // never re-run the (expensive) loader. The drawer reads the URL
+  // client-side; the page state is unchanged.
+  if (!formData && currentUrl && nextUrl) {
+    const cur = new URL(currentUrl);
+    const nxt = new URL(nextUrl);
+    cur.searchParams.delete("thread");
+    cur.searchParams.delete("row");
+    nxt.searchParams.delete("thread");
+    nxt.searchParams.delete("row");
+    if (cur.pathname === nxt.pathname && cur.search === nxt.search) return false;
+  }
   // Background callers (e.g. the silent image-compression hook) opt out of
   // loader revalidation by setting noRevalidate=1. This stops dozens of
   // sequential background POSTs from each triggering a full loader run.
@@ -8025,6 +8037,7 @@ function relativeTime(iso: string): string {
 }
 
 function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser: PortalUser | null }) {
+  void users;
   const [searchParams, setSearchParams] = useSearchParams();
   const threadKey = searchParams.get("thread");
   const rowParam = searchParams.get("row");
@@ -8036,12 +8049,17 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+  // Optimistic replies — appended locally on submit so the message
+  // appears instantly. Once the server confirms + the refetch
+  // returns the real row, the optimistic copy is dropped.
+  const [optimisticReplies, setOptimisticReplies] = useState<ThreadMessage[]>([]);
 
   useEffect(() => {
     if (!threadKey) return;
     setReplyDraft("");
     setEditingId(null);
     setOpenMenuId(null);
+    setOptimisticReplies([]);
     threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}&markRead=1`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadKey]);
@@ -8049,7 +8067,9 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
     if (!threadKey) return;
     if (replyFetcher.state === "idle" && replyFetcher.data) {
       threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
-      setReplyDraft("");
+      // The refetch returns the real row; drop any optimistic copies
+      // we appended so we don't end up with duplicates.
+      setOptimisticReplies([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [replyFetcher.state, replyFetcher.data]);
@@ -8081,9 +8101,31 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
   const topLevel = messages.find((m) => m.parentMessageId === null) ?? messages[0];
   const field = topLevel?.field ?? threadKey.split(":").pop() ?? "";
   const fieldLabel = formatFieldLabel(field).toUpperCase();
+  // Real replies first, then any optimistic-still-pending ones so they
+  // appear at the bottom of the conversation.
+  const displayedReplies: ThreadMessage[] = [
+    ...messages.filter((m) => m.parentMessageId !== null),
+    ...optimisticReplies,
+  ];
   const submitReply = () => {
     const body = replyDraft.trim();
     if (!body || !topLevel) return;
+    // Optimistic: drop the typed text into the thread immediately,
+    // clear the input, kick off the actual submit. The replyFetcher
+    // result handler above refetches and clears optimisticReplies.
+    const tempId = -Date.now();
+    setOptimisticReplies((prev) => [...prev, {
+      id: tempId,
+      userId: currentUser?.id ?? "self",
+      userName: currentUser?.name ?? "You",
+      body,
+      fromName: currentUser?.name ?? "You",
+      parentMessageId: topLevel.id,
+      editedAt: null,
+      readAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    }]);
+    setReplyDraft("");
     replyFetcher.submit(
       { intent: "create_thread_reply", parentMessageId: String(topLevel.id), body },
       { method: "post", action: "/portal" },
@@ -8155,7 +8197,7 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
             </div>
           )}
           <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
-            {messages.length === 0 ? "No comments yet" : `${messages.filter((m) => m.parentMessageId !== null).length} comment${messages.filter((m) => m.parentMessageId !== null).length === 1 ? "" : "s"}`}
+            {displayedReplies.length === 0 ? "No comments yet" : `${displayedReplies.length} comment${displayedReplies.length === 1 ? "" : "s"}`}
           </div>
         </div>
         {/* Comments list (replies only — original shown above) */}
@@ -8163,7 +8205,7 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
           {threadFetcher.state !== "idle" && messages.length === 0 && (
             <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: 20 }}>Loading…</div>
           )}
-          {messages.filter((m) => m.parentMessageId !== null).map((m) => {
+          {displayedReplies.map((m) => {
             const author = m.fromName || m.userName;
             return (
               <div key={m.id} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
@@ -8219,7 +8261,7 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
               </div>
             );
           })}
-          {messages.filter((m) => m.parentMessageId !== null).length === 0 && threadFetcher.state === "idle" && (
+          {displayedReplies.length === 0 && threadFetcher.state === "idle" && (
             <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: "10px 0" }}>No replies yet. Type below to start a conversation.</div>
           )}
         </div>
