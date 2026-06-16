@@ -4506,6 +4506,12 @@ type StyleCostLookup = {
   // anything required is missing.
   costForTitle: (title: string | null | undefined) => number;
   breakdownForTitle: (title: string | null | undefined) => CostBreakdown | null;
+  // Override path used by the Collections page picker — the row's
+  // Name didn't auto-match a style so the user picked one explicitly.
+  // Title still drives the fabric match (so print words like "Leaf"
+  // still resolve), but the style is taken as given.
+  costForOverride: (title: string | null | undefined, styleId: string) => number;
+  breakdownForOverride: (title: string | null | undefined, styleId: string) => CostBreakdown | null;
   // When the matcher saw a fabric name in the title but couldn't pick
   // a single fabric (e.g. style is linked to TWO different "Black"
   // fabrics), this returns a short warning to surface on the price
@@ -4581,10 +4587,17 @@ function buildStyleCostLookup(
   };
   // Shared style resolver — find the style entry for a title via
   // longest-prefix match. Returns null when no style matches.
+  // For print-first titles ("Leaf Tiered Maxi Dress") staff use the
+  // per-row style picker on the Collections page — see styleOverrideId
+  // in the row → costForOverride below.
   const findStyle = (haystack: string): ProductInfoStyle | null => {
     for (const entry of styles) {
       if (haystack === entry.name || haystack.startsWith(entry.name + " ")) return entry.style;
     }
+    return null;
+  };
+  const findStyleById = (styleId: string): ProductInfoStyle | null => {
+    for (const entry of styles) if (entry.style.id === styleId) return entry.style;
     return null;
   };
   // Full resolver — style + fabric + meters + cost. Returns null when
@@ -4599,11 +4612,9 @@ function buildStyleCostLookup(
     fabricWastage: number;
     fabricCost: number;
   };
-  const resolve = (title: string | null | undefined): Resolved | null => {
-    const haystack = (title ?? "").trim().toLowerCase();
-    if (!haystack) return null;
-    const style = findStyle(haystack);
-    if (!style) return null;
+  // Core resolver — given an already-picked style, find the fabric
+  // (still searched in the title) and compute the meters/fabric cost.
+  const resolveWithStyle = (haystack: string, style: ProductInfoStyle): Resolved | null => {
     const match = findFabricForStyle(style, haystack);
     if (match.kind !== "ok") return null;
     const fabricOverrideMeters = match.fabric.styleMeters?.[style.id];
@@ -4622,51 +4633,78 @@ function buildStyleCostLookup(
       fabricCost: baseCost + wastage,
     };
   };
+  const resolve = (title: string | null | undefined): Resolved | null => {
+    const haystack = (title ?? "").trim().toLowerCase();
+    if (!haystack) return null;
+    const style = findStyle(haystack);
+    if (!style) return null;
+    return resolveWithStyle(haystack, style);
+  };
+  const resolveOverride = (title: string | null | undefined, styleId: string): Resolved | null => {
+    const haystack = (title ?? "").trim().toLowerCase();
+    if (!haystack) return null;
+    const style = findStyleById(styleId);
+    if (!style) return null;
+    return resolveWithStyle(haystack, style);
+  };
+  // Cost / breakdown computation shared by the title-based and the
+  // override-based paths — same formula, only the style-resolution
+  // step differs.
+  const costFromResolved = (r: Resolved): number => {
+    if (r.fabricCost <= 0 || !isFilled(r.style.stitchingCost)) return 0;
+    const stitching = r.style.stitchingCost ?? 0;
+    const zipButtons = r.style.zipButtonsCost ?? 0;
+    const liningTrim = r.style.liningTrimCost ?? 0;
+    const subtotal = r.fabricCost + stitching + FACTORY_COST_FIXED + zipButtons + liningTrim;
+    const factoryProfit = subtotal * factoryProfitPct(subtotal);
+    return Math.round((subtotal + factoryProfit) / 10) * 10;
+  };
+  const breakdownFromResolved = (r: Resolved): CostBreakdown => {
+    const stitching = r.style.stitchingCost ?? 0;
+    const factoryCost = FACTORY_COST_FIXED;
+    const zipButtons = r.style.zipButtonsCost ?? 0;
+    const liningTrim = r.style.liningTrimCost ?? 0;
+    const subtotal = r.fabricCost + stitching + factoryCost + zipButtons + liningTrim;
+    const profitPct = factoryProfitPct(subtotal);
+    const factoryProfit = subtotal * profitPct;
+    const rawTotal = subtotal + factoryProfit;
+    const total = Math.round(rawTotal / 10) * 10;
+    return {
+      styleName: r.style.name ?? "",
+      fabricName: r.fabricName,
+      meters: r.meters,
+      metersSource: r.metersSource,
+      costPerMeter: r.costPerMeter,
+      fabricBaseCost: r.fabricBaseCost,
+      fabricWastage: r.fabricWastage,
+      fabricCost: r.fabricCost,
+      stitching,
+      factoryCost,
+      factoryProfit,
+      factoryProfitPct: profitPct,
+      zipButtons,
+      liningTrim,
+      rawTotal,
+      roundingAdjustment: total - rawTotal,
+      total,
+    };
+  };
   return {
     costForTitle: (title) => {
       const r = resolve(title);
-      if (!r) return 0;
-      if (r.fabricCost <= 0 || !isFilled(r.style.stitchingCost)) return 0;
-      const stitching = r.style.stitchingCost ?? 0;
-      const zipButtons = r.style.zipButtonsCost ?? 0;
-      const liningTrim = r.style.liningTrimCost ?? 0;
-      const subtotal = r.fabricCost + stitching + FACTORY_COST_FIXED + zipButtons + liningTrim;
-      const factoryProfit = subtotal * factoryProfitPct(subtotal);
-      const raw = subtotal + factoryProfit;
-      // Round to nearest ₹10 so the displayed cost is "tidy".
-      return Math.round(raw / 10) * 10;
+      return r ? costFromResolved(r) : 0;
+    },
+    costForOverride: (title, styleId) => {
+      const r = resolveOverride(title, styleId);
+      return r ? costFromResolved(r) : 0;
     },
     breakdownForTitle: (title) => {
       const r = resolve(title);
-      if (!r) return null;
-      const stitching = r.style.stitchingCost ?? 0;
-      const factoryCost = FACTORY_COST_FIXED;
-      const zipButtons = r.style.zipButtonsCost ?? 0;
-      const liningTrim = r.style.liningTrimCost ?? 0;
-      const subtotal = r.fabricCost + stitching + factoryCost + zipButtons + liningTrim;
-      const profitPct = factoryProfitPct(subtotal);
-      const factoryProfit = subtotal * profitPct;
-      const rawTotal = subtotal + factoryProfit;
-      const total = Math.round(rawTotal / 10) * 10;
-      return {
-        styleName: r.style.name ?? "",
-        fabricName: r.fabricName,
-        meters: r.meters,
-        metersSource: r.metersSource,
-        costPerMeter: r.costPerMeter,
-        fabricBaseCost: r.fabricBaseCost,
-        fabricWastage: r.fabricWastage,
-        fabricCost: r.fabricCost,
-        stitching,
-        factoryCost,
-        factoryProfit,
-        factoryProfitPct: profitPct,
-        zipButtons,
-        liningTrim,
-        rawTotal,
-        roundingAdjustment: total - rawTotal,
-        total,
-      };
+      return r ? breakdownFromResolved(r) : null;
+    },
+    breakdownForOverride: (title, styleId) => {
+      const r = resolveOverride(title, styleId);
+      return r ? breakdownFromResolved(r) : null;
     },
     warningForTitle: (title) => {
       const haystack = (title ?? "").trim().toLowerCase();
@@ -10175,8 +10213,14 @@ function CollectionSpreadsheetPage({
     () => buildStyleCostLookup(productInfo, fabricStockIndex),
     [productInfo, fabricStockIndex],
   );
-  const autoPriceRupees = useCallback((rowName: string): string => {
-    const rupees = styleCostLookup.costForTitle(rowName);
+  // Per-row style override (set via the picker when the row's Name
+  // doesn't auto-resolve). When present, costForOverride wins over
+  // costForTitle. Empty / unset styleOverrideId falls back to the
+  // title-based path.
+  const autoPriceRupees = useCallback((rowName: string, styleOverrideId?: string): string => {
+    const rupees = styleOverrideId
+      ? styleCostLookup.costForOverride(rowName, styleOverrideId)
+      : styleCostLookup.costForTitle(rowName);
     if (!rupees) return "";
     return String(Math.round(rupees));
   }, [styleCostLookup]);
@@ -10188,7 +10232,7 @@ function CollectionSpreadsheetPage({
         if ((r.priceRupees ?? "").trim()) return r;
         const name = (r.name ?? r.title ?? "").trim();
         if (!name) return r;
-        const rupees = autoPriceRupees(name);
+        const rupees = autoPriceRupees(name, (r.styleOverrideId ?? "").trim() || undefined);
         if (!rupees) return r;
         changed = true;
         return { ...r, priceRupees: rupees };
@@ -10334,6 +10378,38 @@ function CollectionSpreadsheetPage({
         return { ...r, sku: skus, barcode: barcodes };
       });
       persistRows(next, prev, `Undo SKU/barcode generate on row ${rowIdx + 1}`);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id]);
+
+  // Style override: when the row's Name doesn't match a Product Info
+  // style by prefix (e.g. print-first "Leaf Tiered Maxi Dress"),
+  // staff pick the style explicitly. We save the styleOverrideId on
+  // the row AND immediately fill priceRupees from costForOverride so
+  // the user sees the price land in one click.
+  const pickStyleOverrideForRow = useCallback((rowIdx: number, styleId: string) => {
+    setRows((prev) => {
+      const next = prev.map((r, i) => {
+        if (i !== rowIdx) return r;
+        const rowName = (r.name ?? r.title ?? "").trim();
+        const rupees = autoPriceRupees(rowName, styleId);
+        return { ...r, styleOverrideId: styleId, priceRupees: rupees };
+      });
+      persistRows(next, prev, `Undo style pick on row ${rowIdx + 1}`);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id, autoPriceRupees]);
+  const clearStyleOverrideForRow = useCallback((rowIdx: number) => {
+    setRows((prev) => {
+      const next = prev.map((r, i) => {
+        if (i !== rowIdx) return r;
+        const { styleOverrideId, ...rest } = r;
+        void styleOverrideId;
+        return { ...rest, priceRupees: "" };
+      });
+      persistRows(next, prev, `Undo clear style on row ${rowIdx + 1}`);
       return next;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -10742,12 +10818,33 @@ function CollectionSpreadsheetPage({
                           </Td>
                         );
                       }
-                      // Price ₹ (priceRupees) needs the auto-computed
-                      // value as the placeholder so empty cells hint at
-                      // what they'll become — same pattern as packing.
-                      const placeholderText = col.id === "priceRupees" && !value
-                        ? autoPriceRupees((row.name ?? row.title ?? "").trim())
-                        : "";
+                      // Price ₹ (priceRupees) is its own dedicated cell:
+                      // wraps the number input, shows the auto value as
+                      // a bold placeholder when empty, and surfaces a
+                      // "+ Pick style" affordance when the row's Name
+                      // doesn't auto-resolve so staff can manually link
+                      // it to a Product Information style.
+                      if (col.id === "priceRupees" && !linked) {
+                        const rowName = (row.name ?? row.title ?? "").trim();
+                        const overrideId = (row.styleOverrideId ?? "").trim();
+                        const autoValue = autoPriceRupees(rowName, overrideId || undefined);
+                        return (
+                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx}>
+                            <CollectionPriceRupeesCell
+                              value={value}
+                              rowIndex={rIdx}
+                              updateCell={updateCell}
+                              autoValue={autoValue}
+                              rowName={rowName}
+                              styleOverrideId={overrideId}
+                              productInfo={productInfo}
+                              onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
+                              onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
+                            />
+                          </Td>
+                        );
+                      }
+                      const placeholderText = "";
                       // Linked rows lock plain text/number/date inputs
                       // so the source-of-truth is Shopify admin. But
                       // cells with custom rendering (images, tickboxes,
@@ -11200,6 +11297,194 @@ function CollectionPriceAudCell({ rupees, inrPerAud }: { rupees: number; inrPerA
         </span>
       )}
     </div>
+  );
+}
+
+// Price ₹ cell for Collections — three states:
+//   • Manual value typed → editable number input, shown in bold.
+//   • Empty input + non-zero auto value → bold auto value as
+//     placeholder hint (user can click to type their own).
+//   • Empty input + zero auto value + a row Name → "+ Pick style…"
+//     affordance opens the searchable picker. Picking sets
+//     styleOverrideId on the row and fills priceRupees in one click.
+// A small "Style: <name>" subtext appears when the row uses a
+// style override so it's obvious which style is driving the cost.
+function CollectionPriceRupeesCell({
+  value,
+  rowIndex,
+  updateCell,
+  autoValue,
+  rowName,
+  styleOverrideId,
+  productInfo,
+  onPickStyleOverride,
+  onClearStyleOverride,
+}: {
+  value: string;
+  rowIndex: number;
+  updateCell: (rowIdx: number, colId: string, value: string) => void;
+  autoValue: string;
+  rowName: string;
+  styleOverrideId: string;
+  productInfo: ProductInfo;
+  onPickStyleOverride: (styleId: string) => void;
+  onClearStyleOverride: () => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  const onCommit = (next: string) => updateCell(rowIndex, "priceRupees", next);
+  // The picker shows only when there's a row name to pick FOR, the
+  // user hasn't typed a manual value, and the title-based lookup
+  // can't auto-resolve. Otherwise the cell is a plain number input.
+  const showPicker = !draft.trim() && !autoValue && rowName.length > 0 && !styleOverrideId;
+  // Resolve the override style's name from productInfo so the
+  // subtext can say "Style: Tiered Maxi Dress" instead of an id.
+  const overrideStyleName = useMemo(() => {
+    if (!styleOverrideId) return "";
+    for (const c of productInfo.categories) {
+      for (const s of c.styles) if (s.id === styleOverrideId) return s.name;
+    }
+    return "";
+  }, [productInfo.categories, styleOverrideId]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", width: "100%", gap: 2 }}>
+      <input
+        type="number"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => { if (draft !== value) onCommit(draft); }}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+        className="no-number-arrows"
+        placeholder={autoValue || undefined}
+        style={{
+          width: "100%", border: "none", outline: "none",
+          padding: "1px 2px",
+          fontSize: 16,
+          fontWeight: 600,
+          fontFamily: "inherit",
+          background: "transparent", boxSizing: "border-box",
+          textAlign: "center",
+        }}
+      />
+      {showPicker && (
+        <CollectionStylePicker
+          productInfo={productInfo}
+          currentName={rowName}
+          onPick={onPickStyleOverride}
+        />
+      )}
+      {overrideStyleName && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, fontSize: 10, color: "#6b7280", paddingBottom: 2 }}>
+          <span title="This row uses an explicit style override">Style: {overrideStyleName}</span>
+          <button
+            type="button"
+            onClick={onClearStyleOverride}
+            title="Clear style override"
+            style={{ background: "transparent", border: "none", color: "#9ca3af", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Searchable modal picker — flattens every style across categories,
+// excludes hidden styles, and filters as the user types. On pick,
+// closes the modal and hands the styleId up to the cell.
+function CollectionStylePicker({
+  productInfo,
+  currentName,
+  onPick,
+}: {
+  productInfo: ProductInfo;
+  currentName: string;
+  onPick: (styleId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  useEffect(() => { if (open) setQuery(""); }, [open]);
+  const allStyles = useMemo(() => productInfo.categories.flatMap((c) =>
+    c.styles
+      .filter((s) => !s.hidden)
+      .map((s) => ({ id: s.id, name: s.name, categoryName: c.name })),
+  ), [productInfo.categories]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return allStyles;
+    return allStyles.filter((s) => s.name.toLowerCase().includes(q) || s.categoryName.toLowerCase().includes(q));
+  }, [allStyles, query]);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        style={{
+          width: "100%", textAlign: "center",
+          background: "transparent", border: "1px dashed #d1d5db",
+          borderRadius: 5, padding: "3px 6px", fontSize: 10,
+          color: "#6b7280", cursor: "pointer", whiteSpace: "nowrap",
+        }}
+        title="No automatic style match — pick one to enable cost auto-fill"
+      >
+        + Pick style ▾
+      </button>
+      {open && typeof document !== "undefined" && createPortal(
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }}
+          onClick={() => setOpen(false)}
+        >
+          <div style={{ background: "#fff", borderRadius: 10, width: 480, maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb" }}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 4 }}>Pick a style for this row</div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 10 }}>
+                Row name: <strong>{currentName || "(no name yet)"}</strong>
+              </div>
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search style name or category…"
+                style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 10px", fontSize: 13, boxSizing: "border-box" }}
+              />
+            </div>
+            <div style={{ overflowY: "auto", flex: 1 }}>
+              {filtered.length === 0 ? (
+                <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>No styles match.</div>
+              ) : filtered.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => { onPick(s.id); setOpen(false); }}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    width: "100%", border: "none", borderBottom: "1px solid #f3f4f6",
+                    background: "transparent", padding: "10px 16px", fontSize: 13,
+                    cursor: "pointer", textAlign: "left",
+                  }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f9fafb"; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+                >
+                  <span style={{ fontWeight: 600, color: "#111827" }}>{s.name}</span>
+                  <span style={{ fontSize: 11, color: "#9ca3af" }}>{s.categoryName}</span>
+                </button>
+              ))}
+            </div>
+            <div style={{ padding: "10px 16px", borderTop: "1px solid #e5e7eb", textAlign: "right" }}>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                style={{ background: "#f3f4f6", border: "none", borderRadius: 5, padding: "6px 12px", fontSize: 12, cursor: "pointer" }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
