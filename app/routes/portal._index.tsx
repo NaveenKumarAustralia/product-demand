@@ -11406,8 +11406,16 @@ function CollectionSpreadsheetPage({
                           || col.id === "fabric"
                           || col.id === "maniPicsTaken";
                         const lockedDisplay = linked && !isSpecialRender;
+                        // Notes cells need the table-layout "height: 1"
+                        // trick + zero padding so the inner wrap can
+                        // fill the cell exactly (height:100% works
+                        // because the row has a definite tallest cell).
+                        const isNoteCol = col.id === "factoryNotes" || col.id === "notes" || col.id === "loadingNotes";
+                        const noteTdStyle: React.CSSProperties = isNoteCol
+                          ? { height: 1, padding: 0, position: "relative" }
+                          : {};
                         return (
-                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky} style={noteTdStyle}>
                             {lockedDisplay ? (
                               <span style={{ fontSize: 12, color: "#374151", padding: "2px 4px" }}>{value}</span>
                             ) : (
@@ -18223,7 +18231,7 @@ function OrderRow({
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
         {/* Factory notes */}
-        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={destinationRowBg}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={{ ...destinationRowBg, height: 1, padding: 0, position: "relative" }}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
         {/* Order date */}
         <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={destinationRowBg}><span style={s.dateText}>{orderDate}</span></Td>
@@ -18323,7 +18331,7 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} linkedPackingListId={order.packingListId ?? null} openPackingLists={openPackingLists} /></Td>
 
         {/* Notes (from order) */}
-        <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
+        <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle} style={{ height: 1, padding: 0, position: "relative" }}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
 
         {/* Priority */}
         <Td rowIndex={rowIndex} colIndex={priorityCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Priority" historyEntityName={order.productTitle}><PriorityCell orderId={order.id} value={order.priority ?? ""} restockSettings={restockSettings} /></Td>
@@ -19119,14 +19127,55 @@ function MentionableTextarea({
   };
   const replyTo = topLevel?.fromName ?? "this note";
 
-  // Cell-fill layout: the textarea expands to occupy 100% of the
-  // cell's height (above any inline replies). Without fillCell we
-  // keep the legacy auto-grow behavior so old callers don't shift.
+  // Cell-fill layout: the wrap absolutely fills its parent <td>
+  // (s.td has overflow:hidden but we use createPortal for the
+  // popover so clipping isn't a problem). The textarea grows with
+  // flex:1 inside the wrap, the 💬 button anchors absolute to the
+  // wrap's bottom-right, and replies stack between the textarea
+  // and the button.
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [popoverRect, setPopoverRect] = useState<DOMRect | null>(null);
+  useEffect(() => {
+    if (!popoverOpen) return;
+    const update = () => {
+      const r = buttonRef.current?.getBoundingClientRect();
+      if (r) setPopoverRect(r);
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [popoverOpen]);
+  // Wrap fills the entire cell. The "height: 100%" + a definite Td
+  // height (passed by the caller) lets the textarea actually grow.
+  // Without that table-layout trick the textarea would only ever be
+  // its own content height + minHeight, leaving empty space below.
   const cellWrapStyle: React.CSSProperties = fillCell
-    ? { ...s.noteTagWrap, position: "relative", display: "flex", flexDirection: "column", width: "100%", height: "100%", minHeight: 80 }
+    ? {
+        ...s.noteTagWrap,
+        position: "relative",
+        display: "flex",
+        flexDirection: "column",
+        width: "100%",
+        height: "100%",
+        minHeight: 100,
+      }
     : s.noteTagWrap;
   const textareaBase: React.CSSProperties = fillCell
-    ? { ...s.restockNoteTextarea, flex: 1, width: "100%", minHeight: 60, resize: "none" }
+    ? {
+        ...s.restockNoteTextarea,
+        flex: "1 1 auto",
+        width: "100%",
+        height: "100%",
+        minHeight: 0,
+        resize: "none",
+        // Leave room at the bottom-right so the last line of text
+        // isn't hidden behind the 💬 button.
+        paddingBottom: 28,
+      }
     : s.restockNoteTextarea;
 
   return (
@@ -19200,88 +19249,104 @@ function MentionableTextarea({
           ))}
         </div>
       )}
-      {/* 💬 button — bottom-right of the cell. Toggles the inline
-          thread expansion + the reply popover anchored to the
-          button. Always shown when a threadKey is set; badge count
-          is hidden when there are no replies yet. */}
+      {/* 💬 button — bottom-right of the cell. The wrap is
+          position:absolute fill so this lands at the cell's real
+          bottom-right, not the textarea's natural height. Badge
+          shows the reply count + flips red while there are unread
+          replies for the current user. */}
       {threadKey && (
-        <div style={{ position: "absolute", bottom: 4, right: 4 }}>
-          <button
-            type="button"
-            onClick={() => {
-              const next = !popoverOpen;
-              setPopoverOpen(next);
-              if (next) setThreadOpen(true);
-            }}
-            title={threadCount > 0 ? `${threadCount} replies${threadUnread > 0 ? ` (${threadUnread} unread)` : ""}` : "Add a reply"}
+        <button
+          ref={buttonRef}
+          type="button"
+          onClick={() => {
+            const next = !popoverOpen;
+            setPopoverOpen(next);
+            if (next) setThreadOpen(true);
+          }}
+          title={threadCount > 0 ? `${threadCount} replies${threadUnread > 0 ? ` (${threadUnread} unread)` : ""}` : "Add a reply"}
+          style={{
+            position: "absolute",
+            bottom: 4,
+            right: 4,
+            background: threadUnread > 0 ? "#dc2626" : "#fff",
+            color: threadUnread > 0 ? "#fff" : "#374151",
+            border: "1px solid #d1d5db",
+            borderRadius: 14,
+            padding: threadCount > 0 ? "1px 7px 1px 4px" : "2px 5px",
+            fontSize: 11,
+            cursor: "pointer",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 3,
+            lineHeight: 1.2,
+            boxShadow: "0 1px 2px rgba(0,0,0,0.08)",
+          }}
+        >
+          <span aria-hidden style={{ fontSize: 11 }}>💬</span>
+          {threadCount > 0 && <span style={{ fontWeight: 700 }}>{threadCount}</span>}
+        </button>
+      )}
+      {/* Popover is portalled to document.body so the parent <td>'s
+          overflow:hidden doesn't clip it. Position is anchored to
+          the button via getBoundingClientRect; recomputed on resize
+          and scroll. */}
+      {threadKey && popoverOpen && popoverRect && typeof document !== "undefined" && createPortal(
+        <>
+          <div
+            style={{ position: "fixed", inset: 0, zIndex: 999 }}
+            onClick={() => setPopoverOpen(false)}
+          />
+          <div
             style={{
-              background: threadUnread > 0 ? "#dc2626" : "#f3f4f6",
-              color: threadUnread > 0 ? "#fff" : "#374151",
+              position: "fixed",
+              top: popoverRect.top - 8 - 130,
+              left: Math.min(window.innerWidth - 280, Math.max(8, popoverRect.right - 280)),
+              width: 270,
+              background: "#fff",
               border: "1px solid #d1d5db",
-              borderRadius: 14,
-              padding: threadCount > 0 ? "1px 7px 1px 4px" : "2px 4px",
-              fontSize: 11,
-              cursor: "pointer",
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 3,
-              lineHeight: 1.2,
+              borderRadius: 8,
+              boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
+              padding: 10,
+              zIndex: 1000,
             }}
           >
-            <span aria-hidden style={{ fontSize: 11 }}>💬</span>
-            {threadCount > 0 && <span style={{ fontWeight: 700 }}>{threadCount}</span>}
-          </button>
-          {popoverOpen && (
-            <div
-              style={{
-                position: "absolute",
-                bottom: "calc(100% + 6px)",
-                right: 0,
-                width: 260,
-                background: "#fff",
-                border: "1px solid #d1d5db",
-                borderRadius: 8,
-                boxShadow: "0 6px 18px rgba(0,0,0,0.12)",
-                padding: 10,
-                zIndex: 100,
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, fontSize: 11, color: "#374151" }}>
-                <span>Replying to <strong style={{ color: "#0d9488" }}>@{replyTo}</strong></span>
-                <button type="button" onClick={() => setPopoverOpen(false)} style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1 }} aria-label="Close">×</button>
-              </div>
-              <textarea
-                value={replyDraft}
-                onChange={(e) => setReplyDraft(e.target.value)}
-                placeholder="Type your reply..."
-                rows={3}
-                onKeyDown={(e) => {
-                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitReply();
-                }}
-                style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 5, padding: 6, fontSize: 12, fontFamily: "inherit", boxSizing: "border-box", outline: "none" }}
-              />
-              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6 }}>
-                <button
-                  type="button"
-                  disabled={!replyDraft.trim() || replyFetcher.state !== "idle"}
-                  onClick={submitReply}
-                  style={{
-                    background: replyDraft.trim() ? "#0d9488" : "#9ca3af",
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: 5,
-                    padding: "5px 12px",
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: replyDraft.trim() ? "pointer" : "not-allowed",
-                  }}
-                >
-                  {replyFetcher.state !== "idle" ? "Sending…" : "Reply"}
-                </button>
-              </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, fontSize: 11, color: "#374151" }}>
+              <span>Replying to <strong style={{ color: "#0d9488" }}>@{replyTo}</strong></span>
+              <button type="button" onClick={() => setPopoverOpen(false)} style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1 }} aria-label="Close">×</button>
             </div>
-          )}
-        </div>
+            <textarea
+              value={replyDraft}
+              onChange={(e) => setReplyDraft(e.target.value)}
+              placeholder="Type your reply..."
+              rows={3}
+              autoFocus
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitReply();
+              }}
+              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 5, padding: 6, fontSize: 12, fontFamily: "inherit", boxSizing: "border-box", outline: "none" }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6 }}>
+              <button
+                type="button"
+                disabled={!replyDraft.trim() || replyFetcher.state !== "idle"}
+                onClick={submitReply}
+                style={{
+                  background: replyDraft.trim() ? "#0d9488" : "#9ca3af",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 5,
+                  padding: "5px 12px",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: replyDraft.trim() ? "pointer" : "not-allowed",
+                }}
+              >
+                {replyFetcher.state !== "idle" ? "Sending…" : "Reply"}
+              </button>
+            </div>
+          </div>
+        </>,
+        document.body,
       )}
     </div>
   );
@@ -19322,6 +19387,7 @@ function NotesCell({
       threadCount={counts?.total ?? 0}
       threadUnread={counts?.unread ?? 0}
       autoOpenThread={autoOpenThread}
+      fillCell
     />
   );
 }
