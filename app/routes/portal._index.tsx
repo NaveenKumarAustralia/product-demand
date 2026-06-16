@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
 import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRevalidator, useRouteError, useSearchParams, useSubmit } from "react-router";
@@ -7485,6 +7485,7 @@ export default function PortalDashboard() {
                 </label>
               )}
               <MessagesMenu messages={messages} />
+              <ThreadPanel users={users} currentUser={currentUser} />
               <div style={s.activeUsers} title="Currently active">
                 <span style={s.activeUsersLabel}>Active</span>
                 {activeUsers.length ? activeUsers.map((user) => (
@@ -7990,9 +7991,43 @@ type ThreadMessage = {
   readAt: string | null;
   createdAt: string;
 };
-function ThreadPanel({ users }: { users: PortalUser[] }) {
+// Avatar circle — first letter of the name in a colored chip. The
+// colour is derived deterministically from the name so the same user
+// always gets the same swatch across the app.
+function ThreadAvatar({ name, size = 28 }: { name: string; size?: number }) {
+  const palette = ["#0d9488", "#7c3aed", "#0284c7", "#db2777", "#f59e0b", "#16a34a", "#dc2626", "#4338ca"];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  const bg = palette[hash % palette.length];
+  const initial = (name.trim()[0] || "?").toUpperCase();
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: size,
+      background: bg, color: "#fff",
+      display: "inline-flex", alignItems: "center", justifyContent: "center",
+      fontWeight: 700, fontSize: Math.floor(size * 0.45),
+      flexShrink: 0,
+    }}>{initial}</div>
+  );
+}
+
+function relativeTime(iso: string): string {
+  const t = new Date(iso).getTime();
+  const diff = Date.now() - t;
+  if (diff < 60_000) return "just now";
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser: PortalUser | null }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const threadKey = searchParams.get("thread");
+  const rowParam = searchParams.get("row");
   const threadFetcher = useFetcher<{ messages: ThreadMessage[] }>();
   const replyFetcher = useFetcher();
   const editFetcher = useFetcher();
@@ -8000,16 +8035,16 @@ function ThreadPanel({ users }: { users: PortalUser[] }) {
   const [replyDraft, setReplyDraft] = useState("");
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  const [openMenuId, setOpenMenuId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!threadKey) return;
     setReplyDraft("");
     setEditingId(null);
+    setOpenMenuId(null);
     threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}&markRead=1`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadKey]);
-  // Refetch after reply / edit / delete so the panel updates without
-  // a full revalidation.
   useEffect(() => {
     if (!threadKey) return;
     if (replyFetcher.state === "idle" && replyFetcher.data) {
@@ -8039,15 +8074,14 @@ function ThreadPanel({ users }: { users: PortalUser[] }) {
   const close = () => {
     const next = new URLSearchParams(searchParams);
     next.delete("thread");
+    next.delete("row");
     setSearchParams(next, { replace: true });
   };
 
-  // The first message is the top-level mention; everything else is a
-  // reply. We display them flat (oldest first) so the conversation
-  // reads naturally.
   const topLevel = messages.find((m) => m.parentMessageId === null) ?? messages[0];
-  const submitReply = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const field = topLevel?.field ?? threadKey.split(":").pop() ?? "";
+  const fieldLabel = formatFieldLabel(field).toUpperCase();
+  const submitReply = () => {
     const body = replyDraft.trim();
     if (!body || !topLevel) return;
     replyFetcher.submit(
@@ -8058,6 +8092,7 @@ function ThreadPanel({ users }: { users: PortalUser[] }) {
   const startEdit = (m: ThreadMessage) => {
     setEditingId(m.id);
     setEditDraft(m.body);
+    setOpenMenuId(null);
   };
   const submitEdit = () => {
     if (editingId == null) return;
@@ -8070,6 +8105,7 @@ function ThreadPanel({ users }: { users: PortalUser[] }) {
   };
   const deleteMessage = (id: number) => {
     if (!window.confirm("Delete this message?")) return;
+    setOpenMenuId(null);
     deleteFetcher.submit(
       { intent: "delete_thread_message", messageId: String(id) },
       { method: "post", action: "/portal" },
@@ -8077,115 +8113,177 @@ function ThreadPanel({ users }: { users: PortalUser[] }) {
   };
 
   if (typeof document === "undefined") return null;
+  const currentName = currentUser?.name ?? "You";
   return createPortal(
-    <div style={{
-      position: "fixed",
-      top: 0,
-      right: 0,
-      bottom: 0,
-      width: 380,
-      maxWidth: "100vw",
-      background: "#fff",
-      boxShadow: "-10px 0 30px rgba(0,0,0,0.12)",
-      zIndex: 1400,
-      display: "flex",
-      flexDirection: "column",
-    }}>
-      <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div>
-          <div style={{ fontWeight: 700, fontSize: 14 }}>{topLevel?.productTitle ?? "Thread"}</div>
-          <div style={{ fontSize: 11, color: "#6b7280" }}>
-            {topLevel ? formatFieldLabel(topLevel.field as string) : ""}
+    <>
+      {/* Click-outside backdrop. Transparent — the user can still
+          see (but not interact with) the table behind. */}
+      <div
+        style={{ position: "fixed", inset: 0, background: "transparent", zIndex: 1390 }}
+        onClick={close}
+      />
+      <div style={{
+        position: "fixed",
+        top: 0,
+        right: 0,
+        bottom: 0,
+        width: 400,
+        maxWidth: "100vw",
+        background: "#fff",
+        boxShadow: "-10px 0 30px rgba(0,0,0,0.12)",
+        zIndex: 1400,
+        display: "flex",
+        flexDirection: "column",
+      }}>
+        {/* Field-name header */}
+        <div style={{ padding: "18px 20px 0", display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+          <div style={{ fontWeight: 800, fontSize: 14, letterSpacing: "0.06em", color: "#111827" }}>{fieldLabel}</div>
+          <button
+            type="button"
+            onClick={close}
+            style={{ background: "transparent", border: "none", fontSize: 22, color: "#9ca3af", cursor: "pointer", lineHeight: 1, padding: 0 }}
+            title="Close"
+            aria-label="Close thread panel"
+          >×</button>
+        </div>
+        {/* Row context + original note */}
+        <div style={{ padding: "10px 20px 14px", borderBottom: "1px solid #f3f4f6" }}>
+          {rowParam && <div style={{ color: "#0d9488", fontWeight: 700, fontSize: 13 }}>Row {rowParam}</div>}
+          {topLevel && (
+            <div style={{ fontSize: 18, fontWeight: 700, color: "#111827", marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+              {topLevel.body}
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
+            {messages.length === 0 ? "No comments yet" : `${messages.filter((m) => m.parentMessageId !== null).length} comment${messages.filter((m) => m.parentMessageId !== null).length === 1 ? "" : "s"}`}
           </div>
         </div>
-        <button
-          type="button"
-          onClick={close}
-          style={{ background: "transparent", border: "none", fontSize: 20, color: "#6b7280", cursor: "pointer", lineHeight: 1 }}
-          title="Close (Esc)"
-          aria-label="Close thread panel"
-        >×</button>
-      </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-        {threadFetcher.state !== "idle" && messages.length === 0 && (
-          <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: 20 }}>Loading…</div>
-        )}
-        {messages.map((m) => (
-          <div key={m.id} style={{
-            background: m.parentMessageId == null ? "#fff7ed" : "#f9fafb",
-            border: "1px solid #e5e7eb",
-            borderRadius: 8,
-            padding: "8px 10px",
-            fontSize: 13,
-          }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-              <span style={{ fontWeight: 600, fontSize: 12 }}>{m.fromName || `For ${m.userName}`}</span>
-              <span style={{ fontSize: 10, color: "#9ca3af" }}>
-                {new Date(m.createdAt).toLocaleString()}
-                {m.editedAt && <span title={`Edited ${new Date(m.editedAt).toLocaleString()}`}> · edited</span>}
-              </span>
-            </div>
-            {editingId === m.id ? (
-              <div>
-                <textarea
-                  value={editDraft}
-                  onChange={(e) => setEditDraft(e.target.value)}
-                  rows={2}
-                  style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 4, padding: 6, fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }}
-                />
-                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                  <button type="button" onClick={submitEdit} style={{ background: "#2563eb", color: "#fff", border: "none", borderRadius: 4, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>Save</button>
-                  <button type="button" onClick={() => setEditingId(null)} style={{ background: "transparent", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 4, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
+        {/* Comments list (replies only — original shown above) */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "12px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
+          {threadFetcher.state !== "idle" && messages.length === 0 && (
+            <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: 20 }}>Loading…</div>
+          )}
+          {messages.filter((m) => m.parentMessageId !== null).map((m) => {
+            const author = m.fromName || m.userName;
+            return (
+              <div key={m.id} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <ThreadAvatar name={author} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <div>
+                      <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>{author}</span>
+                      <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 6 }}>{relativeTime(m.createdAt)}{m.editedAt && " · edited"}</span>
+                    </div>
+                    <div style={{ position: "relative" }}>
+                      <button
+                        type="button"
+                        onClick={() => setOpenMenuId(openMenuId === m.id ? null : m.id)}
+                        style={{ background: "transparent", border: "none", color: "#9ca3af", cursor: "pointer", padding: "2px 6px", fontSize: 16, lineHeight: 1 }}
+                        title="Actions"
+                      >⋯</button>
+                      {openMenuId === m.id && (
+                        <div style={{ position: "absolute", top: "100%", right: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 6, boxShadow: "0 6px 18px rgba(0,0,0,0.12)", padding: 4, zIndex: 10 }}>
+                          <button
+                            type="button"
+                            onClick={() => startEdit(m)}
+                            style={{ display: "block", width: "100%", textAlign: "left", background: "transparent", border: "none", padding: "5px 12px", fontSize: 12, cursor: "pointer", color: "#374151" }}
+                          >Edit</button>
+                          <button
+                            type="button"
+                            onClick={() => deleteMessage(m.id)}
+                            style={{ display: "block", width: "100%", textAlign: "left", background: "transparent", border: "none", padding: "5px 12px", fontSize: 12, cursor: "pointer", color: "#dc2626" }}
+                          >Delete</button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {editingId === m.id ? (
+                    <div style={{ marginTop: 4 }}>
+                      <textarea
+                        value={editDraft}
+                        onChange={(e) => setEditDraft(e.target.value)}
+                        rows={2}
+                        style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: 8, fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }}
+                      />
+                      <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                        <button type="button" onClick={submitEdit} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 12px", fontSize: 12, cursor: "pointer" }}>Save</button>
+                        <button type="button" onClick={() => setEditingId(null)} style={{ background: "transparent", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 5, padding: "5px 12px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 13, color: "#111827", marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                      {renderBodyWithMentions(m.body)}
+                    </div>
+                  )}
                 </div>
               </div>
-            ) : (
-              <>
-                <div style={{ whiteSpace: "pre-wrap", color: "#111827" }}>{m.body}</div>
-                <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                  <button type="button" onClick={() => startEdit(m)} style={{ background: "transparent", color: "#6b7280", border: "none", padding: 0, fontSize: 11, cursor: "pointer" }}>Edit</button>
-                  <button type="button" onClick={() => deleteMessage(m.id)} style={{ background: "transparent", color: "#dc2626", border: "none", padding: 0, fontSize: 11, cursor: "pointer" }}>Delete</button>
-                </div>
-              </>
-            )}
-          </div>
-        ))}
-        {messages.length === 0 && threadFetcher.state === "idle" && (
-          <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: 20 }}>No messages in this thread.</div>
-        )}
-      </div>
-      <form onSubmit={submitReply} style={{ borderTop: "1px solid #e5e7eb", padding: 10 }}>
-        <MentionableTextarea
-          value={replyDraft}
-          users={users}
-          onCommit={() => { /* commit on send button, not blur */ }}
-          onChange={setReplyDraft}
-          placeholder="Reply… use @name to ping more people"
-          rows={2}
-          textareaStyle={{ minHeight: 50, fontSize: 13 }}
-        />
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6 }}>
-          <button
-            type="submit"
-            disabled={!replyDraft.trim() || replyFetcher.state !== "idle"}
-            style={{
-              background: replyDraft.trim() ? "#2563eb" : "#9ca3af",
-              color: "#fff",
-              border: "none",
-              borderRadius: 5,
-              padding: "6px 14px",
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: replyDraft.trim() ? "pointer" : "not-allowed",
-            }}
-          >
-            {replyFetcher.state !== "idle" ? "Sending…" : "Send reply"}
-          </button>
+            );
+          })}
+          {messages.filter((m) => m.parentMessageId !== null).length === 0 && threadFetcher.state === "idle" && (
+            <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: "10px 0" }}>No replies yet. Type below to start a conversation.</div>
+          )}
         </div>
-      </form>
-    </div>,
+        {/* Reply input */}
+        <div style={{ borderTop: "1px solid #e5e7eb", padding: "12px 20px" }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <ThreadAvatar name={currentName} size={32} />
+            <div style={{ flex: 1, border: "1px solid #d1d5db", borderRadius: 8, padding: 8 }}>
+              <textarea
+                value={replyDraft}
+                onChange={(e) => setReplyDraft(e.target.value)}
+                placeholder="Write a reply..."
+                rows={2}
+                onKeyDown={(e) => {
+                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitReply();
+                }}
+                style={{ width: "100%", border: "none", outline: "none", resize: "none", padding: 0, fontSize: 13, fontFamily: "inherit", background: "transparent" }}
+              />
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => setReplyDraft((d) => d + "@")}
+                  title="Mention someone"
+                  style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 16, padding: 4 }}
+                >@</button>
+                <button
+                  type="button"
+                  onClick={submitReply}
+                  disabled={!replyDraft.trim() || replyFetcher.state !== "idle"}
+                  style={{
+                    background: replyDraft.trim() ? "#0d9488" : "#9ca3af",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: 5,
+                    padding: "6px 16px",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: replyDraft.trim() ? "pointer" : "not-allowed",
+                  }}
+                >
+                  {replyFetcher.state !== "idle" ? "Sending…" : "Send"}
+                </button>
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, color: "#9ca3af", fontSize: 11 }}>
+            <span style={{ background: "#f3f4f6", borderRadius: 12, padding: "3px 8px" }}>@</span>
+            <span>Type @ to mention someone. They'll get notified.</span>
+          </div>
+        </div>
+      </div>
+    </>,
     document.body,
   );
 }
+
+// Render a message body with @-mentions highlighted in teal.
+function renderBodyWithMentions(body: string): React.ReactNode {
+  const parts = body.split(/(@[a-z0-9._-]+)/gi);
+  return parts.map((part, i) => /^@[a-z0-9._-]+$/i.test(part)
+    ? <strong key={i} style={{ color: "#0d9488" }}>{part}</strong>
+    : <Fragment key={i}>{part}</Fragment>);
+}
+
 function formatFieldLabel(field: string): string {
   switch (field) {
     case "factory_notes": case "factoryNotes": return "Factory notes";
@@ -11754,6 +11852,7 @@ function CollectionCellInner({
         onCommit={onCommit}
         total={counts?.total ?? 0}
         unread={counts?.unread ?? 0}
+        rowNumber={rowIndex + 1}
       />
     );
   }
@@ -12128,6 +12227,7 @@ function CollectionNotesCellWrapper({
   onCommit,
   total,
   unread,
+  rowNumber,
 }: {
   threadKey: string | null;
   value: string;
@@ -12135,6 +12235,7 @@ function CollectionNotesCellWrapper({
   onCommit: (next: string) => void;
   total: number;
   unread: number;
+  rowNumber?: number;
 }) {
   const [searchParams] = useSearchParams();
   const autoOpenThread = threadKey ? searchParams.get("thread") === threadKey : false;
@@ -12148,6 +12249,7 @@ function CollectionNotesCellWrapper({
       threadUnread={unread}
       autoOpenThread={autoOpenThread}
       fillCell
+      rowNumber={rowNumber}
     />
   );
 }
@@ -19032,7 +19134,7 @@ function MentionableTextarea({
   users,
   onCommit,
   onChange,
-  placeholder = "Add note... use @name",
+  placeholder = "Add note...",
   rows = 3,
   threadKey,
   threadCount = 0,
@@ -19040,6 +19142,7 @@ function MentionableTextarea({
   autoOpenThread = false,
   textareaStyle,
   fillCell = false,
+  rowNumber,
 }: {
   value: string;
   users: PortalUser[];
@@ -19053,6 +19156,7 @@ function MentionableTextarea({
   autoOpenThread?: boolean;
   textareaStyle?: React.CSSProperties;
   fillCell?: boolean;
+  rowNumber?: number;
 }) {
   const [text, setText] = useState(value);
   useEffect(() => { setText(value); }, [value]);
@@ -19087,104 +19191,22 @@ function MentionableTextarea({
       window.removeEventListener("scroll", update, true);
     };
   }, [focused, suggestions.length, text]);
-  // Inline thread state: clicking 💬 expands the cell to show every
-  // reply stacked under the note + a small "Replying to @name" reply
-  // popover anchored to the button.
-  const threadFetcher = useFetcher<{ messages: ThreadMessage[] }>();
-  const replyFetcher = useFetcher();
-  const editFetcher = useFetcher();
-  const deleteFetcher = useFetcher();
-  const [threadOpen, setThreadOpen] = useState(false);
-  const [popoverOpen, setPopoverOpen] = useState(false);
-  const [replyDraft, setReplyDraft] = useState("");
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [editDraft, setEditDraft] = useState("");
-  useEffect(() => {
-    if (!threadKey || !threadOpen) return;
-    threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}&markRead=1`);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadKey, threadOpen]);
-  // Auto-open the thread when the URL points at it (bell click flow).
-  useEffect(() => {
-    if (autoOpenThread && threadKey) setThreadOpen(true);
-  }, [autoOpenThread, threadKey]);
-  // Refresh after reply / edit / delete so the inline list updates.
-  useEffect(() => {
-    if (!threadKey || !threadOpen) return;
-    if (replyFetcher.state === "idle" && replyFetcher.data) {
-      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
-      setReplyDraft("");
-      setPopoverOpen(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [replyFetcher.state, replyFetcher.data]);
-  useEffect(() => {
-    if (!threadKey || !threadOpen) return;
-    if (editFetcher.state === "idle" && editFetcher.data) {
-      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
-      setEditingId(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editFetcher.state, editFetcher.data]);
-  useEffect(() => {
-    if (!threadKey || !threadOpen) return;
-    if (deleteFetcher.state === "idle" && deleteFetcher.data) {
-      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deleteFetcher.state, deleteFetcher.data]);
-
-  const messages = threadFetcher.data?.messages ?? [];
-  const topLevel = messages.find((m) => m.parentMessageId === null) ?? messages[0];
-  const replies = messages.filter((m) => m.parentMessageId !== null);
-  const submitReply = () => {
-    const body = replyDraft.trim();
-    if (!body || !topLevel) return;
-    replyFetcher.submit(
-      { intent: "create_thread_reply", parentMessageId: String(topLevel.id), body },
-      { method: "post", action: "/portal" },
-    );
-  };
-  const submitEdit = () => {
-    if (editingId == null) return;
-    const body = editDraft.trim();
-    if (!body) return;
-    editFetcher.submit(
-      { intent: "edit_thread_message", messageId: String(editingId), body },
-      { method: "post", action: "/portal" },
-    );
-  };
-  const deleteMessage = (id: number) => {
-    if (!window.confirm("Delete this message?")) return;
-    deleteFetcher.submit(
-      { intent: "delete_thread_message", messageId: String(id) },
-      { method: "post", action: "/portal" },
-    );
-  };
-  const replyTo = topLevel?.fromName ?? "this note";
-
-  // Cell-fill layout: the wrap absolutely fills its parent <td>
-  // (s.td has overflow:hidden but we use createPortal for the
-  // popover so clipping isn't a problem). The textarea grows with
-  // flex:1 inside the wrap, the 💬 button anchors absolute to the
-  // wrap's bottom-right, and replies stack between the textarea
-  // and the button.
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const [popoverRect, setPopoverRect] = useState<DOMRect | null>(null);
-  useEffect(() => {
-    if (!popoverOpen) return;
-    const update = () => {
-      const r = buttonRef.current?.getBoundingClientRect();
-      if (r) setPopoverRect(r);
-    };
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
-    return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-    };
-  }, [popoverOpen]);
+  // 💬 button opens the side drawer via ?thread= URL. All reply /
+  // edit / delete UI lives in the drawer — kept out of the cell to
+  // keep the spreadsheet view clean.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const openThread = useCallback(() => {
+    if (!threadKey) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("thread", threadKey);
+    if (rowNumber != null) next.set("row", String(rowNumber)); else next.delete("row");
+    setSearchParams(next, { replace: false });
+  }, [threadKey, searchParams, setSearchParams, rowNumber]);
+  // The autoOpenThread prop is still supported for the bell click
+  // flow — when the URL already has ?thread=<this-key>, the drawer
+  // opens automatically at the top level (no per-cell action
+  // needed). Nothing else to do here.
+  void autoOpenThread;
   // Wrap fills the entire cell. The "height: 100%" + a definite Td
   // height (passed by the caller) lets the textarea actually grow.
   // Without that table-layout trick the textarea would only ever be
@@ -19262,60 +19284,14 @@ function MentionableTextarea({
         </div>,
         document.body,
       )}
-      {/* Inline replies — only render after the cell has loaded the
-          thread (via clicking 💬). Each reply is its own small card
-          with inline edit/delete. */}
-      {threadKey && threadOpen && replies.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
-          {replies.map((m) => (
-            <div key={m.id} style={{ background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 6, padding: "5px 7px", fontSize: 11 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
-                <span style={{ fontWeight: 600, color: "#374151" }}>{m.fromName || `For ${m.userName}`}</span>
-                <span style={{ color: "#9ca3af", fontSize: 9 }}>
-                  {new Date(m.createdAt).toLocaleString()}
-                  {m.editedAt && " · edited"}
-                </span>
-              </div>
-              {editingId === m.id ? (
-                <div>
-                  <textarea
-                    value={editDraft}
-                    onChange={(e) => setEditDraft(e.target.value)}
-                    rows={2}
-                    style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 4, padding: 4, fontSize: 11, fontFamily: "inherit", boxSizing: "border-box" }}
-                  />
-                  <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
-                    <button type="button" onClick={submitEdit} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 4, padding: "2px 8px", fontSize: 10, cursor: "pointer" }}>Save</button>
-                    <button type="button" onClick={() => setEditingId(null)} style={{ background: "transparent", border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 8px", fontSize: 10, cursor: "pointer" }}>Cancel</button>
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <div style={{ whiteSpace: "pre-wrap", color: "#111827" }}>{m.body}</div>
-                  <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
-                    <button type="button" onClick={() => { setEditingId(m.id); setEditDraft(m.body); }} style={{ background: "transparent", color: "#6b7280", border: "none", padding: 0, fontSize: 9, cursor: "pointer" }}>Edit</button>
-                    <button type="button" onClick={() => deleteMessage(m.id)} style={{ background: "transparent", color: "#dc2626", border: "none", padding: 0, fontSize: 9, cursor: "pointer" }}>Delete</button>
-                  </div>
-                </>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-      {/* 💬 button — bottom-right of the cell. The wrap is
-          position:absolute fill so this lands at the cell's real
-          bottom-right, not the textarea's natural height. Badge
-          shows the reply count + flips red while there are unread
-          replies for the current user. */}
+      {/* 💬 button — bottom-right of the cell. Click opens the
+          side drawer (ThreadPanel) via a ?thread= URL change.
+          Badge shows the reply count and flips red while there
+          are unread replies for the current user. */}
       {threadKey && (
         <button
-          ref={buttonRef}
           type="button"
-          onClick={() => {
-            const next = !popoverOpen;
-            setPopoverOpen(next);
-            if (next) setThreadOpen(true);
-          }}
+          onClick={openThread}
           title={threadCount > 0 ? `${threadCount} replies${threadUnread > 0 ? ` (${threadUnread} unread)` : ""}` : "Add a reply"}
           style={{
             position: "absolute",
@@ -19359,79 +19335,6 @@ function MentionableTextarea({
           )}
         </button>
       )}
-      {/* Popover is portalled to document.body. Auto-flips above /
-          below the button based on available room so it's never
-          drawn off-screen. */}
-      {threadKey && popoverOpen && popoverRect && typeof document !== "undefined" && (() => {
-        const popoverHeight = 150;
-        const popoverWidth = 270;
-        const fitsAbove = popoverRect.top >= popoverHeight + 16;
-        const top = fitsAbove
-          ? popoverRect.top - 8 - popoverHeight
-          : Math.min(window.innerHeight - popoverHeight - 8, popoverRect.bottom + 8);
-        const left = Math.min(
-          window.innerWidth - popoverWidth - 8,
-          Math.max(8, popoverRect.right - popoverWidth),
-        );
-        return createPortal(
-        <>
-          <div
-            style={{ position: "fixed", inset: 0, zIndex: 999 }}
-            onClick={() => setPopoverOpen(false)}
-          />
-          <div
-            style={{
-              position: "fixed",
-              top,
-              left,
-              width: popoverWidth,
-              background: "#fff",
-              border: "1px solid #d1d5db",
-              borderRadius: 8,
-              boxShadow: "0 10px 30px rgba(0,0,0,0.15)",
-              padding: 10,
-              zIndex: 1000,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, fontSize: 11, color: "#374151" }}>
-              <span>Replying to <strong style={{ color: "#0d9488" }}>@{replyTo}</strong></span>
-              <button type="button" onClick={() => setPopoverOpen(false)} style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1 }} aria-label="Close">×</button>
-            </div>
-            <textarea
-              value={replyDraft}
-              onChange={(e) => setReplyDraft(e.target.value)}
-              placeholder="Type your reply..."
-              rows={3}
-              autoFocus
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitReply();
-              }}
-              style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 5, padding: 6, fontSize: 12, fontFamily: "inherit", boxSizing: "border-box", outline: "none" }}
-            />
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 6 }}>
-              <button
-                type="button"
-                disabled={!replyDraft.trim() || replyFetcher.state !== "idle"}
-                onClick={submitReply}
-                style={{
-                  background: replyDraft.trim() ? "#0d9488" : "#9ca3af",
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 5,
-                  padding: "5px 12px",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  cursor: replyDraft.trim() ? "pointer" : "not-allowed",
-                }}
-              >
-                {replyFetcher.state !== "idle" ? "Sending…" : "Reply"}
-              </button>
-            </div>
-          </div>
-        </>,
-        document.body,
-      );
-      })()}
     </div>
   );
 }
