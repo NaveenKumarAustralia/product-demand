@@ -1765,6 +1765,83 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, replyIds });
   }
 
+  if (intent === "update_thread_original") {
+    // The "original message" shown at the top of the drawer is just
+    // the cell's text. To edit / delete it we need to update the
+    // underlying entity (collection row OR supplier order field),
+    // then re-run the mention sync so the bell + cell badges line up
+    // with the new text. Body = "" deletes the note.
+    const threadKey = String(form.get("threadKey") ?? "");
+    const body = String(form.get("body") ?? "");
+    if (!threadKey || !currentUser) return null;
+    const parts = threadKey.split(":");
+    if (parts.length < 4) return null;
+    const [entityType, entityIdRaw, entityKey, ...fieldParts] = parts;
+    const entityId = Number(entityIdRaw);
+    const field = fieldParts.join(":");
+    if (!entityType || !field || !Number.isFinite(entityId)) return null;
+
+    // Author check: only the user whose name matches the top-level
+    // PortalMessage's fromName can change the cell from here.
+    const existing = await prisma.portalMessage.findFirst({
+      where: {
+        entityType,
+        orderId: entityId,
+        entityKey: entityKey ? entityKey : null,
+        field,
+        parentMessageId: null,
+      },
+      select: { fromName: true },
+      orderBy: { createdAt: "desc" },
+    });
+    if (existing && (existing.fromName ?? "").trim().toLowerCase() !== currentUser.name.trim().toLowerCase()) {
+      return jsonResponse({ ok: false, error: "not_author" });
+    }
+
+    if (entityType === "collection_row") {
+      const collection = await prisma.collection.findUnique({
+        where: { id: entityId },
+        select: { rows: true },
+      });
+      if (!collection) return jsonResponse({ ok: false, error: "not_found" });
+      const rowsRaw = normalizeCollectionRows(collection.rows);
+      const idx = rowsRaw.findIndex((r) => (r.__rowKey ?? "") === entityKey);
+      if (idx < 0) return jsonResponse({ ok: false, error: "row_not_found" });
+      rowsRaw[idx] = { ...rowsRaw[idx], [field]: body };
+      await prisma.collection.update({
+        where: { id: entityId },
+        data: { rows: rowsRaw, updatedAt: new Date() },
+      });
+      await syncEntityNoteMessages({
+        entityType: "collection_row",
+        orderId: entityId,
+        entityKey,
+        field,
+        text: body,
+        fromName: currentUser.name,
+        productTitle: rowsRaw[idx].name || rowsRaw[idx].title || null,
+      });
+      return jsonResponse({ ok: true });
+    }
+    if (entityType === "supplier_order") {
+      const fieldMap: Record<string, string> = { factory_notes: "factoryNotes", notes: "notes" };
+      const dbField = fieldMap[field];
+      if (!dbField) return jsonResponse({ ok: false, error: "bad_field" });
+      await prisma.supplierOrder.update({
+        where: { id: entityId },
+        data: { [dbField]: body || null },
+      });
+      await syncOrderNoteMessages({
+        orderId: entityId,
+        field: field as "factory_notes" | "notes",
+        text: body,
+        fromName: currentUser.name,
+      });
+      return jsonResponse({ ok: true });
+    }
+    return jsonResponse({ ok: false, error: "unsupported_entity" });
+  }
+
   if (intent === "edit_thread_message") {
     // Author-only: only the user who wrote the message can edit it.
     // We compare against the stored fromName since that's the
@@ -8072,6 +8149,9 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
   // appears instantly. Once the server confirms + the refetch
   // returns the real row, the optimistic copy is dropped.
   const [optimisticReplies, setOptimisticReplies] = useState<ThreadMessage[]>([]);
+  const [editingOriginal, setEditingOriginal] = useState(false);
+  const [originalDraft, setOriginalDraft] = useState("");
+  const originalFetcher = useFetcher<{ ok?: boolean }>();
 
   useEffect(() => {
     if (!threadKey) return;
@@ -8079,9 +8159,19 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
     setEditingId(null);
     setOpenMenuId(null);
     setOptimisticReplies([]);
+    setEditingOriginal(false);
     threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}&markRead=1`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadKey]);
+  // Refetch / close drawer after the original-note action completes.
+  useEffect(() => {
+    if (!threadKey) return;
+    if (originalFetcher.state === "idle" && originalFetcher.data?.ok) {
+      threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}`);
+      setEditingOriginal(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [originalFetcher.state, originalFetcher.data]);
   useEffect(() => {
     if (!threadKey) return;
     if (replyFetcher.state === "idle" && replyFetcher.data) {
@@ -8210,11 +8300,70 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
         {/* Row context + original note */}
         <div style={{ padding: "10px 20px 14px", borderBottom: "1px solid #f3f4f6" }}>
           {rowParam && <div style={{ color: "#0d9488", fontWeight: 700, fontSize: 13 }}>Row {rowParam}</div>}
-          {topLevel && (
-            <div style={{ fontSize: 18, fontWeight: 700, color: "#111827", marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-              {topLevel.body}
-            </div>
-          )}
+          {topLevel && (() => {
+            const author = topLevel.fromName || topLevel.userName;
+            const canEdit = !!currentUser && author.trim().toLowerCase() === currentUser.name.trim().toLowerCase();
+            if (editingOriginal) {
+              return (
+                <div style={{ marginTop: 4 }}>
+                  <textarea
+                    value={originalDraft}
+                    onChange={(e) => setOriginalDraft(e.target.value)}
+                    rows={3}
+                    autoFocus
+                    style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: 8, fontSize: 15, fontWeight: 600, fontFamily: "inherit", boxSizing: "border-box" }}
+                  />
+                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        originalFetcher.submit(
+                          { intent: "update_thread_original", threadKey, body: originalDraft },
+                          { method: "post", action: "/portal" },
+                        );
+                      }}
+                      disabled={originalFetcher.state !== "idle"}
+                      style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+                    >{originalFetcher.state !== "idle" ? "Saving…" : "Save"}</button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingOriginal(false)}
+                      style={{ background: "transparent", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 5, padding: "6px 14px", fontSize: 13, cursor: "pointer" }}
+                    >Cancel</button>
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "#111827", marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                  {topLevel.body}
+                </div>
+                {canEdit && (
+                  <div style={{ display: "flex", gap: 12, marginTop: 6 }}>
+                    <button
+                      type="button"
+                      onClick={() => { setOriginalDraft(topLevel.body); setEditingOriginal(true); }}
+                      style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, fontSize: 11 }}
+                      title="Edit the original note"
+                    >Edit</button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!window.confirm("Delete this note? This will clear the cell text and remove all replies.")) return;
+                        originalFetcher.submit(
+                          { intent: "update_thread_original", threadKey, body: "" },
+                          { method: "post", action: "/portal" },
+                        );
+                      }}
+                      style={{ background: "transparent", border: "none", color: "#dc2626", cursor: "pointer", padding: 0, fontSize: 11 }}
+                      title="Clear the note and close this thread"
+                    >Delete</button>
+                  </div>
+                )}
+              </>
+            );
+          })()}
           <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
             {displayedReplies.length === 0 ? "No comments yet" : `${displayedReplies.length} comment${displayedReplies.length === 1 ? "" : "s"}`}
           </div>
