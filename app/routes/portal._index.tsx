@@ -15682,6 +15682,7 @@ function PackingListDetail({
                 showShopifyColumn={combineView}
                 sizes={packingSizes}
                 autoPriceRupees={styleCostLookup.costForTitle(line.productTitle)}
+                costBreakdown={styleCostLookup.breakdownForTitle(line.productTitle)}
                 inrPerAudRate={(packingList as { lockedFxRate?: number | null }).lockedFxRate ?? inrPerAudCachedRate}
               />
               );
@@ -15805,6 +15806,7 @@ function PackingListLineRow({
   showShopifyColumn,
   sizes,
   autoPriceRupees,
+  costBreakdown,
   inrPerAudRate,
 }: {
   line: PackingListWithLines["lines"][number];
@@ -15820,6 +15822,7 @@ function PackingListLineRow({
   showShopifyColumn: boolean;
   sizes: string[];
   autoPriceRupees: number;
+  costBreakdown: CostBreakdown | null;
   inrPerAudRate: number | null;
 }) {
   const fetcher = useFetcher();
@@ -15922,7 +15925,17 @@ function PackingListLineRow({
         </PackingTd>
       ))}
       <PackingTd rowIndex={rowIndex} colIndex={5 + sizes.length} center><span style={s.total}>{total}</span></PackingTd>
-      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center><PackingTextInput lineId={line.id} field="priceRupees" value={line.priceRupees?.toString() ?? ""} center placeholder={autoPriceRupees > 0 ? String(Math.round(autoPriceRupees)) : undefined} onCommit={(v) => setManualPriceLocal(Number(v) || 0)} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={6 + sizes.length} center>
+        <PackingPriceCell
+          lineId={line.id}
+          manualPrice={line.priceRupees ?? 0}
+          autoPrice={autoPriceRupees}
+          costBreakdown={costBreakdown}
+          productTitle={line.productTitle}
+          totalQty={total}
+          onCommit={(v) => setManualPriceLocal(v)}
+        />
+      </PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={7 + sizes.length} center>
         {(() => {
           const unitAud = convertRupeesToAud(effectivePrice, inrPerAudRate);
@@ -16476,6 +16489,96 @@ function PackingProductNameCell({
           )}
         </div>,
         document.body,
+      )}
+    </div>
+  );
+}
+
+// Price ₹ cell — matches the restock page cost cell UX:
+//   • Read-only display in bold dark text (per-piece + total below).
+//   • Right-click pops the cost breakdown (same `show-cost-breakdown`
+//     event the restock page dispatches).
+//   • Click to override: switches to an input, commits on blur/Enter,
+//     saves to PackingListLine.priceRupees via update_packing_line.
+// The displayed value is the manual override when set, otherwise the
+// auto-computed style cost so empty rows show the formula's number
+// instead of placeholder gray.
+function PackingPriceCell({
+  lineId,
+  manualPrice,
+  autoPrice,
+  costBreakdown,
+  productTitle,
+  totalQty,
+  onCommit,
+}: {
+  lineId: number;
+  manualPrice: number;
+  autoPrice: number;
+  costBreakdown: CostBreakdown | null;
+  productTitle: string;
+  totalQty: number;
+  onCommit?: (value: number) => void;
+}) {
+  const fetcher = useFetcher();
+  const [editing, setEditing] = useState(false);
+  const effective = manualPrice > 0 ? manualPrice : autoPrice;
+
+  if (editing) {
+    return (
+      <input
+        type="text"
+        autoFocus
+        defaultValue={manualPrice > 0 ? String(manualPrice) : ""}
+        placeholder={autoPrice > 0 ? String(Math.round(autoPrice)) : undefined}
+        onBlur={(event) => {
+          const nextValue = event.currentTarget.value;
+          submitPortalCell(
+            fetcher,
+            { intent: "update_packing_line", lineId, field: "priceRupees", value: nextValue },
+            { label: "Undo packing price", fields: { intent: "update_packing_line", lineId, field: "priceRupees", value: String(manualPrice) } },
+          );
+          onCommit?.(Number(nextValue) || 0);
+          setEditing(false);
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") setEditing(false);
+        }}
+        style={{ ...s.packingCellInput, textAlign: "center" }}
+      />
+    );
+  }
+
+  return (
+    <div
+      onClick={() => setEditing(true)}
+      onContextMenu={(event) => {
+        if (!costBreakdown) return;
+        event.preventDefault();
+        event.stopPropagation();
+        document.dispatchEvent(new CustomEvent("show-cost-breakdown", {
+          detail: { x: event.clientX, y: event.clientY, breakdown: costBreakdown, productTitle, totalQty },
+        }));
+      }}
+      title={costBreakdown ? "Click to override • Right-click for breakdown" : "Click to override"}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 2,
+        padding: "4px 6px",
+        cursor: "context-menu",
+        minHeight: 28,
+      }}
+    >
+      {effective > 0 ? (
+        <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
+          {Math.round(effective).toLocaleString()}
+        </span>
+      ) : (
+        <span style={{ color: "#9ca3af" }}>—</span>
       )}
     </div>
   );
