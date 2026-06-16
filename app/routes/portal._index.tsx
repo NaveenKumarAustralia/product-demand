@@ -1766,17 +1766,36 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "edit_thread_message") {
-    // Anyone can edit any message (per the user's spec).
+    // Author-only: only the user who wrote the message can edit it.
+    // We compare against the stored fromName since that's the
+    // display name persisted at write time.
     const messageId = Number(form.get("messageId"));
     const body = String(form.get("body") ?? "").trim();
-    if (!messageId || !body) return null;
+    if (!messageId || !body || !currentUser) return null;
+    const existing = await prisma.portalMessage.findUnique({
+      where: { id: messageId },
+      select: { fromName: true },
+    });
+    if (!existing) return jsonResponse({ ok: false, error: "not_found" });
+    if ((existing.fromName ?? "").trim().toLowerCase() !== currentUser.name.trim().toLowerCase()) {
+      return jsonResponse({ ok: false, error: "not_author" });
+    }
     await editPortalMessage({ messageId, body });
     return jsonResponse({ ok: true });
   }
 
   if (intent === "delete_thread_message") {
+    // Author-only delete — same check as edit above.
     const messageId = Number(form.get("messageId"));
-    if (!messageId) return null;
+    if (!messageId || !currentUser) return null;
+    const existing = await prisma.portalMessage.findUnique({
+      where: { id: messageId },
+      select: { fromName: true },
+    });
+    if (!existing) return jsonResponse({ ok: false, error: "not_found" });
+    if ((existing.fromName ?? "").trim().toLowerCase() !== currentUser.name.trim().toLowerCase()) {
+      return jsonResponse({ ok: false, error: "not_author" });
+    }
     await deletePortalMessage({ messageId });
     return jsonResponse({ ok: true });
   }
@@ -8207,6 +8226,12 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
           )}
           {displayedReplies.map((m) => {
             const author = m.fromName || m.userName;
+            // Author-only edit/delete — match by name (the fromName
+            // we store at write time is the user's display name).
+            // Optimistic local rows have id < 0 so we hide actions
+            // until the server-side row arrives.
+            const isAuthor = !!currentUser && author.trim().toLowerCase() === currentUser.name.trim().toLowerCase();
+            const isPending = m.id < 0;
             return (
               <div key={m.id} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                 <ThreadAvatar name={author} />
@@ -8216,28 +8241,22 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
                       <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>{author}</span>
                       <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 6 }}>{relativeTime(m.createdAt)}{m.editedAt && " · edited"}</span>
                     </div>
-                    <div style={{ position: "relative" }}>
-                      <button
-                        type="button"
-                        onClick={() => setOpenMenuId(openMenuId === m.id ? null : m.id)}
-                        style={{ background: "transparent", border: "none", color: "#9ca3af", cursor: "pointer", padding: "2px 6px", fontSize: 16, lineHeight: 1 }}
-                        title="Actions"
-                      >⋯</button>
-                      {openMenuId === m.id && (
-                        <div style={{ position: "absolute", top: "100%", right: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 6, boxShadow: "0 6px 18px rgba(0,0,0,0.12)", padding: 4, zIndex: 10 }}>
-                          <button
-                            type="button"
-                            onClick={() => startEdit(m)}
-                            style={{ display: "block", width: "100%", textAlign: "left", background: "transparent", border: "none", padding: "5px 12px", fontSize: 12, cursor: "pointer", color: "#374151" }}
-                          >Edit</button>
-                          <button
-                            type="button"
-                            onClick={() => deleteMessage(m.id)}
-                            style={{ display: "block", width: "100%", textAlign: "left", background: "transparent", border: "none", padding: "5px 12px", fontSize: 12, cursor: "pointer", color: "#dc2626" }}
-                          >Delete</button>
-                        </div>
-                      )}
-                    </div>
+                    {isAuthor && !isPending && editingId !== m.id && (
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                          type="button"
+                          onClick={() => startEdit(m)}
+                          style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, fontSize: 11 }}
+                          title="Edit this message"
+                        >Edit</button>
+                        <button
+                          type="button"
+                          onClick={() => deleteMessage(m.id)}
+                          style={{ background: "transparent", border: "none", color: "#dc2626", cursor: "pointer", padding: 0, fontSize: 11 }}
+                          title="Delete this message"
+                        >Delete</button>
+                      </div>
+                    )}
                   </div>
                   {editingId === m.id ? (
                     <div style={{ marginTop: 4 }}>
