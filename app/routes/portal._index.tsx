@@ -9704,6 +9704,7 @@ type CollectionFullType = {
 // variant, Colour column (for the colour metafield), split SEO into title +
 // description. Some cells changed to tickbox / readonly / release / chip.
 const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
+  { id: "factoryNotes", label: "Factory Notes", width: 160 },
   { id: "release", label: "Release", type: "release", width: 90 },
   { id: "modelPicture", label: "Picture", width: 120 },
   { id: "fabric", label: "FABRIC", width: 120 },
@@ -9775,6 +9776,12 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   insertAfter("sku", { id: "barcode", label: "Barcode", width: 100 });
   insertAfter("price", { id: "priceRupees", label: "Price ₹", type: "number", width: 90 });
   insertAfter("priceRupees", { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 });
+  // Factory Notes was added later as the leftmost column. Drop it in
+  // at index 0 for existing collections so staff don't have to drag
+  // it to the front manually.
+  if (!cols.some((c) => c.id === "factoryNotes")) {
+    cols.unshift({ id: "factoryNotes", label: "Factory Notes", width: 160 });
+  }
   // Legacy "cost" column was AUD-only and is superseded by the
   // priceRupees + priceAud pair (matches packing list / restock).
   // Drop it from the visible columns; any data on rows stays in row
