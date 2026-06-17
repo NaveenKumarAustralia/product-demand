@@ -21651,7 +21651,12 @@ const s: Record<string, React.CSSProperties> = {
     // before the bottom of the main column and the body's pageBg
     // strip is visible underneath.
     maxHeight: "calc(100vh - 170px - var(--portal-bottom-gap))",
-    overflow: "auto",
+    // overflowX: "scroll" pins the horizontal scrollbar to the
+    // bottom of the wrap so it's ALWAYS visible above the body
+    // background strip — matches the restock page.
+    overflowX: "scroll" as const,
+    overflowY: "auto" as const,
+    scrollbarGutter: "stable" as const,
     background: "#fff",
     border: "1px solid #cbd5e1",
     boxShadow: "0 1px 2px rgba(15,23,42,0.08)",
