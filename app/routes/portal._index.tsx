@@ -7487,7 +7487,12 @@ export default function PortalDashboard() {
         // Reserve a strip of body background at the bottom of every
         // page. Tables and panels factor this into their maxHeight
         // so nothing pokes into the strip.
-        "--portal-bottom-gap": "20px",
+        "--portal-bottom-gap": "28px",
+        // Extra room for pages whose tables sit ABOVE a small "Add
+        // row" / action button (Packing list, Collections). The
+        // table shrinks by this much so the footer button stays
+        // inside the viewport instead of being clipped.
+        "--portal-footer-actions": "44px",
       } as React.CSSProperties}
     >
       <style>
@@ -11550,7 +11555,7 @@ function CollectionSpreadsheetPage({
         }}>{pushStatus.msg}</div>
       )}
 
-      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0 }}>
+      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 118px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
         ) : (() => {
@@ -20886,7 +20891,11 @@ const s: Record<string, React.CSSProperties> = {
   productResultImage: { width: 42, height: 56, objectFit: "cover", borderRadius: 4 },
   productResultText: { display: "grid", gap: 3, flex: 1, fontSize: 13, color: "#374151" },
   packingTableWrap: {
-    maxHeight: "calc(100vh - 185px - var(--portal-bottom-gap))",
+    // Subtracts an extra var(--portal-footer-actions) so the
+    // "Add row" button sitting just below the table stays inside
+    // the visible viewport — without this the footer was clipped
+    // and the user had to scroll to reach it.
+    maxHeight: "calc(100vh - 185px - var(--portal-bottom-gap) - var(--portal-footer-actions))",
     overflowX: "scroll",
     overflowY: "visible",
     scrollbarGutter: "stable",
