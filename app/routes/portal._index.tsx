@@ -7485,11 +7485,11 @@ export default function PortalDashboard() {
         "--portal-panel-font-size": `${universalSettings.panelTextSize}px`,
         "--portal-inventory-font-size": `${universalSettings.inventoryFontSize}px`,
         // Reserve a strip of body background at the bottom of every
-        // page. Tables and panels factor this into their maxHeight
-        // so nothing pokes into the strip. The strip also gives
-        // long-content pages (Settings, etc.) a visible breathing
-        // space at the bottom.
-        "--portal-bottom-gap": "28px",
+        // page. Combined with main's 6px bottom padding (see
+        // s.main) the visible bottom strip is ~20px — same on
+        // long-content pages (Settings) and below the Add row
+        // footer on Collections / Packing list.
+        "--portal-bottom-gap": "14px",
         // Extra room for pages whose tables sit ABOVE a small "Add
         // row" / action button (Packing list, Collections). The
         // table shrinks by this much so the footer button stays
@@ -11557,7 +11557,7 @@ function CollectionSpreadsheetPage({
         }}>{pushStatus.msg}</div>
       )}
 
-      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 175px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
+      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 140px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
         ) : (() => {
@@ -20276,10 +20276,13 @@ const s: Record<string, React.CSSProperties> = {
   main: {
     flex: 1,
     minWidth: 0,
-    // 24px bottom padding gives long-content pages (Settings, etc.)
-    // a visible breathing space inside the main column before the
-    // body-background strip starts.
-    padding: "24px 16px",
+    // 6px bottom padding + ~14px outer bottom-gap = ~20px of
+    // visible breathing space at the bottom of every page (same
+    // amount whether the page is a long-content scroller like
+    // Settings or a table page with an Add row footer). Trimmed
+    // from the previous 24px so Collections doesn't leave a giant
+    // pink gap below the Add row button.
+    padding: "24px 16px 6px",
     height: "calc(100vh - var(--portal-bottom-gap))",
     alignSelf: "flex-start",
     overflowY: "auto",
