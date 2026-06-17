@@ -7484,6 +7484,10 @@ export default function PortalDashboard() {
         "--portal-heading-text-color": universalSettings.headingTextColor,
         "--portal-panel-font-size": `${universalSettings.panelTextSize}px`,
         "--portal-inventory-font-size": `${universalSettings.inventoryFontSize}px`,
+        // Reserve a strip of body background at the bottom of every
+        // page. Tables and panels factor this into their maxHeight
+        // so nothing pokes into the strip.
+        "--portal-bottom-gap": "20px",
       } as React.CSSProperties}
     >
       <style>
@@ -20173,11 +20177,18 @@ const s: Record<string, React.CSSProperties> = {
     // Settings link is always visible AND so wide tables get a
     // horizontal scrollbar at the bottom of the main column
     // (instead of pushed below the page fold).
+    // paddingBottom reserves a strip of the body's pageBg at the
+    // bottom of every page — same gap the Fabric in stock page
+    // shows naturally because its content is short. Tables and
+    // panels inside subtract var(--portal-bottom-gap) from their
+    // maxHeight calcs so they don't poke into that strip.
     height: "100vh",
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     display: "flex",
     alignItems: "stretch",
     overflow: "hidden",
+    paddingBottom: "var(--portal-bottom-gap)",
+    boxSizing: "border-box",
   },
   sidebar: {
     width: 230,
@@ -20190,7 +20201,10 @@ const s: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     position: "sticky",
     top: 0,
-    height: "100vh",
+    // height: 100% picks up the appShell's content area (which
+    // already subtracts the bottom-gap padding) so we don't have to
+    // manage two viewport calcs.
+    height: "100%",
     // overflowY: hidden so only the inner <nav> scrolls when the
     // list is too long — the Settings link below it stays pinned
     // at the bottom of the sidebar regardless.
@@ -20264,9 +20278,10 @@ const s: Record<string, React.CSSProperties> = {
   count: { fontSize: 13, color: "#6b7280" },
   // The main column owns its own vertical scroll within the locked
   // shell — pages with tall content scroll here, the document body
-  // does not. Combined with the table wrappers' maxHeight that
-  // keeps the horizontal scrollbar inside the visible area.
-  main: { flex: 1, minWidth: 0, padding: "24px 16px", height: "100vh", overflowY: "auto", overflowX: "hidden" },
+  // does not. height: 100% picks up the appShell's content area
+  // (which already subtracts var(--portal-bottom-gap)), so the
+  // bottom strip of pageBg is always visible.
+  main: { flex: 1, minWidth: 0, padding: "24px 16px", height: "100%", overflowY: "auto", overflowX: "hidden" },
   pageHeader: {
     display: "flex",
     alignItems: "flex-start",
@@ -20883,7 +20898,7 @@ const s: Record<string, React.CSSProperties> = {
   productResultImage: { width: 42, height: 56, objectFit: "cover", borderRadius: 4 },
   productResultText: { display: "grid", gap: 3, flex: 1, fontSize: 13, color: "#374151" },
   packingTableWrap: {
-    maxHeight: "calc(100vh - 185px)",
+    maxHeight: "calc(100vh - 185px - var(--portal-bottom-gap))",
     overflowX: "scroll",
     overflowY: "visible",
     scrollbarGutter: "stable",
@@ -21305,7 +21320,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   productInfoDetailsModal: {
     width: "min(760px, 100%)",
-    maxHeight: "calc(100vh - 40px)",
+    maxHeight: "calc(100vh - 40px - var(--portal-bottom-gap))",
     overflow: "auto",
     display: "grid",
     gap: 14,
@@ -21614,7 +21629,7 @@ const s: Record<string, React.CSSProperties> = {
     gap: 10,
   },
   fabricTableWrap: {
-    maxHeight: "calc(100vh - 170px)",
+    maxHeight: "calc(100vh - 170px - var(--portal-bottom-gap))",
     overflow: "auto",
     background: "#fff",
     border: "1px solid #cbd5e1",
@@ -21959,7 +21974,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   fabricStyleUsageModal: {
     width: "min(860px, 100%)",
-    maxHeight: "calc(100vh - 40px)",
+    maxHeight: "calc(100vh - 40px - var(--portal-bottom-gap))",
     overflow: "auto",
     border: "1px solid #cbd5e1",
     borderRadius: 12,
@@ -22157,7 +22172,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   fabricLink: { color: "#2563eb", fontWeight: 800, textDecoration: "none" },
   tableWrap: {
-    maxHeight: "calc(100vh - 118px)",
+    maxHeight: "calc(100vh - 118px - var(--portal-bottom-gap))",
     overflowX: "scroll" as const,
     overflowY: "auto" as const,
     scrollbarGutter: "stable" as const,
