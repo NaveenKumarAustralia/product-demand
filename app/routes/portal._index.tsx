@@ -20908,12 +20908,12 @@ const s: Record<string, React.CSSProperties> = {
   productResultImage: { width: 42, height: 56, objectFit: "cover", borderRadius: 4 },
   productResultText: { display: "grid", gap: 3, flex: 1, fontSize: 13, color: "#374151" },
   packingTableWrap: {
-    // Densest top chrome of any page (Back + Export + Download
-    // buttons + Status + Shipping + Skip words + Load inventory +
-    // Search bar). Subtract 260 = ~190 chrome + 24+24 main paddings
-    // + slack so the table ends with breathing room and the Add
-    // row footer below it stays inside the viewport.
-    maxHeight: "calc(100vh - 260px - var(--portal-bottom-gap) - var(--portal-footer-actions))",
+    // Densest top chrome of any page (page title + Back + Export +
+    // Download buttons + Status + Shipping + Skip words + Load
+    // inventory + Search bar). Bumped to 290 so the Add row footer
+    // stays visible on smaller laptop viewports too — at 260 the
+    // chrome+table+footer overflowed main on ~800px tall screens.
+    maxHeight: "calc(100vh - 290px - var(--portal-bottom-gap) - var(--portal-footer-actions))",
     // overflowY: auto matches Collections — the table scrolls
     // internally instead of overflowing visibly past the footer.
     overflowX: "scroll",
