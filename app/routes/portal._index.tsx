@@ -4348,20 +4348,20 @@ const PORTAL_ACTIVE_USERS_KEY = "supplier-portal-active-users-v1";
 const PORTAL_USER_COOKIE = "supplier_portal_user";
 const ACTIVE_USER_WINDOW_MS = 5 * 60 * 1000;
 
-// Brand watermark — three pointed leaves above a horizontal line
-// and three descending dots, the Karma East mark. The SVG is used
-// as a mask-image so the colour is driven by --portal-watermark-
-// color per surface (light over the dark sidebar, dark over the
-// light content background).
-const PORTAL_LOGO_WALLPAPER_SVG = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none" stroke="black" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M100 22 C 119 56, 121 90, 100 118 C 79 90, 81 56, 100 22 Z"/>
-  <path d="M106 78 C 140 74, 170 80, 188 96 C 168 110, 134 106, 106 96 Z"/>
-  <path d="M94 78 C 60 74, 30 80, 12 96 C 32 110, 66 106, 94 96 Z"/>
-  <line x1="100" y1="118" x2="100" y2="128"/>
-  <line x1="14" y1="128" x2="186" y2="128"/>
-  <circle cx="100" cy="148" r="9"/>
-  <circle cx="100" cy="168" r="5.5"/>
-  <circle cx="100" cy="184" r="3"/>
+// Brand watermark — three sharply pointed almond leaves fanning
+// out from a single bottom point, a thick horizontal rule, and
+// three descending ring-dots below. All three leaves are the same
+// shape; the side leaves are the centre rotated ±42° around the
+// shared bottom vertex (100, 113) so they share that vertex
+// exactly, the way the Karma East mark does.
+const PORTAL_LOGO_WALLPAPER_SVG = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none" stroke="black" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M100 22 C 118 55, 118 92, 100 113 C 82 92, 82 55, 100 22 Z"/>
+  <path d="M100 22 C 118 55, 118 92, 100 113 C 82 92, 82 55, 100 22 Z" transform="rotate(42 100 113)"/>
+  <path d="M100 22 C 118 55, 118 92, 100 113 C 82 92, 82 55, 100 22 Z" transform="rotate(-42 100 113)"/>
+  <line x1="16" y1="130" x2="184" y2="130" stroke-width="9"/>
+  <circle cx="100" cy="150" r="9"/>
+  <circle cx="100" cy="170" r="5.5"/>
+  <circle cx="100" cy="186" r="3"/>
 </svg>`);
 const PORTAL_LOGO_WALLPAPER_URL = `url("data:image/svg+xml;utf8,${PORTAL_LOGO_WALLPAPER_SVG}")`;
 const MIN_COLUMN_WIDTH = 52;
