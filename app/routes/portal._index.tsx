@@ -4348,20 +4348,24 @@ const PORTAL_ACTIVE_USERS_KEY = "supplier-portal-active-users-v1";
 const PORTAL_USER_COOKIE = "supplier_portal_user";
 const ACTIVE_USER_WINDOW_MS = 5 * 60 * 1000;
 
-// Brand watermark — three sharply pointed almond leaves fanning
-// out from a single bottom point, a thick horizontal rule, and
-// three descending ring-dots below. All three leaves are the same
-// shape; the side leaves are the centre rotated ±42° around the
-// shared bottom vertex (100, 113) so they share that vertex
-// exactly, the way the Karma East mark does.
-const PORTAL_LOGO_WALLPAPER_SVG = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none" stroke="black" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M100 22 C 118 55, 118 92, 100 113 C 82 92, 82 55, 100 22 Z"/>
-  <path d="M100 22 C 118 55, 118 92, 100 113 C 82 92, 82 55, 100 22 Z" transform="rotate(42 100 113)"/>
-  <path d="M100 22 C 118 55, 118 92, 100 113 C 82 92, 82 55, 100 22 Z" transform="rotate(-42 100 113)"/>
-  <line x1="16" y1="130" x2="184" y2="130" stroke-width="9"/>
-  <circle cx="100" cy="150" r="9"/>
-  <circle cx="100" cy="170" r="5.5"/>
-  <circle cx="100" cy="186" r="3"/>
+// Brand watermark — Karma East mark.
+// Centre leaf is narrower and has an inner outline (the hollow-V
+// at the bottom in the source logo); the side leaves are wider
+// solid-outlined almonds rotated ±48° around the shared vertex.
+// The whole drawing is centred in a 300x300 viewBox so the tile
+// has built-in padding around the mark — gives each logo room to
+// breathe when the mask repeats.
+const PORTAL_LOGO_WALLPAPER_SVG = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 300" fill="none" stroke="black" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+  <g transform="translate(50 50)">
+    <path d="M100 18 C 112 55, 112 95, 100 116 C 88 95, 88 55, 100 18 Z"/>
+    <path d="M100 38 C 106 62, 106 90, 100 108 C 94 90, 94 62, 100 38 Z"/>
+    <path d="M100 18 C 122 55, 122 95, 100 116 C 78 95, 78 55, 100 18 Z" transform="rotate(48 100 116)"/>
+    <path d="M100 18 C 122 55, 122 95, 100 116 C 78 95, 78 55, 100 18 Z" transform="rotate(-48 100 116)"/>
+    <line x1="14" y1="130" x2="186" y2="130" stroke-width="8"/>
+    <circle cx="100" cy="150" r="9"/>
+    <circle cx="100" cy="168" r="5.5"/>
+    <circle cx="100" cy="183" r="2.8"/>
+  </g>
 </svg>`);
 const PORTAL_LOGO_WALLPAPER_URL = `url("data:image/svg+xml;utf8,${PORTAL_LOGO_WALLPAPER_SVG}")`;
 const MIN_COLUMN_WIDTH = 52;
@@ -7596,10 +7600,10 @@ export default function PortalDashboard() {
             mask-image: var(--portal-watermark-mask), var(--portal-watermark-mask);
             -webkit-mask-repeat: repeat, repeat;
             mask-repeat: repeat, repeat;
-            -webkit-mask-size: 170px 170px, 170px 170px;
-            mask-size: 170px 170px, 170px 170px;
-            -webkit-mask-position: 0 0, 85px 85px;
-            mask-position: 0 0, 85px 85px;
+            -webkit-mask-size: 260px 260px, 260px 260px;
+            mask-size: 260px 260px, 260px 260px;
+            -webkit-mask-position: 0 0, 130px 130px;
+            mask-position: 0 0, 130px 130px;
             pointer-events: none;
             z-index: 0;
           }
