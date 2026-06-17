@@ -7549,14 +7549,16 @@ export default function PortalDashboard() {
       </style>
       <aside style={{ ...s.sidebar, background: universalSettings.menuBg, color: universalSettings.menuTextColor }}>
         {universalSettings.logoUrl && (
-          <div style={{ padding: "2px 14px 0" }}>
+          <div style={{ padding: "2px 14px 0", flexShrink: 0 }}>
             <img src={universalSettings.logoUrl} alt="Logo" style={{ maxWidth: "100%", display: "block", borderRadius: 6 }} />
           </div>
         )}
-        <div style={{ ...s.sidebarTop, ...(universalSettings.logoUrl ? { marginTop: 14 } : {}) }}>
+        <div style={{ ...s.sidebarTop, ...(universalSettings.logoUrl ? { marginTop: 14 } : {}), flexShrink: 0 }}>
           <div style={s.sidebarTitle}>Production Portal</div>
         </div>
-        <nav style={s.nav}>
+        {/* Nav links scroll internally if they don't fit — Settings
+            stays pinned at the bottom so it's always one click away. */}
+        <nav style={{ ...s.nav, flex: 1, overflowY: "auto", minHeight: 0 }}>
           {orderedNavItems.map((item) => {
             const isActive = item.id === "restock" ? (page === "restock" && !selectedProductGroup) : page === item.id;
             return (
@@ -7564,7 +7566,7 @@ export default function PortalDashboard() {
             );
           })}
         </nav>
-        <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), ...s.settingsLink }}>Settings</a>
+        <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), flexShrink: 0, marginTop: 8 }}>Settings</a>
       </aside>
 
       <main style={s.main}>
@@ -20167,10 +20169,15 @@ function PackingTd({
 
 const s: Record<string, React.CSSProperties> = {
   appShell: {
-    minHeight: "100vh",
+    // Lock the whole portal to viewport height so the sidebar
+    // Settings link is always visible AND so wide tables get a
+    // horizontal scrollbar at the bottom of the main column
+    // (instead of pushed below the page fold).
+    height: "100vh",
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     display: "flex",
-    alignItems: "flex-start",
+    alignItems: "stretch",
+    overflow: "hidden",
   },
   sidebar: {
     width: 230,
@@ -20251,7 +20258,11 @@ const s: Record<string, React.CSSProperties> = {
   iconNavItemActive: { background: "rgba(255,255,255,0.2)", color: "#fff", borderColor: "rgba(255,255,255,0.4)" },
   settingsLink: { marginTop: "auto" },
   count: { fontSize: 13, color: "#6b7280" },
-  main: { flex: 1, minWidth: 0, padding: "24px 16px", minHeight: "100vh" },
+  // The main column owns its own vertical scroll within the locked
+  // shell — pages with tall content scroll here, the document body
+  // does not. Combined with the table wrappers' maxHeight that
+  // keeps the horizontal scrollbar inside the visible area.
+  main: { flex: 1, minWidth: 0, padding: "24px 16px", height: "100vh", overflowY: "auto", overflowX: "hidden" },
   pageHeader: {
     display: "flex",
     alignItems: "flex-start",
