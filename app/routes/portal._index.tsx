@@ -16921,8 +16921,12 @@ function PackingListDetail({
 
       {/* Table + Add row footer share a tight flex column so the
           packingDetailInner grid gap (10px) doesn't sit between
-          them — the button hugs the table like on Collections. */}
-      <div style={{ display: "flex", flexDirection: "column" }}>
+          them — the button hugs the table like on Collections.
+          min-width: 0 is critical: without it the wide table
+          inside forces the flex column to grow horizontally past
+          main's width, and main's overflowX: hidden then clips the
+          tableWrap's horizontal scrollbar. */}
+      <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
       <div className="portal-table-scroll" style={s.packingTableWrap}>
         <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
           <colgroup>
