@@ -7484,11 +7484,12 @@ export default function PortalDashboard() {
         "--portal-heading-text-color": universalSettings.headingTextColor,
         "--portal-panel-font-size": `${universalSettings.panelTextSize}px`,
         "--portal-inventory-font-size": `${universalSettings.inventoryFontSize}px`,
-        // Reserve a small strip of body background at the bottom of
-        // every page — same look the Fabric in stock and restock
-        // pages naturally have. Tables and panels subtract this
-        // from their maxHeight so nothing pokes into the strip.
-        "--portal-bottom-gap": "12px",
+        // Reserve a strip of body background at the bottom of every
+        // page. Tables and panels factor this into their maxHeight
+        // so nothing pokes into the strip. The strip also gives
+        // long-content pages (Settings, etc.) a visible breathing
+        // space at the bottom.
+        "--portal-bottom-gap": "28px",
         // Extra room for pages whose tables sit ABOVE a small "Add
         // row" / action button (Packing list, Collections). The
         // table shrinks by this much so the footer button stays
@@ -11556,7 +11557,7 @@ function CollectionSpreadsheetPage({
         }}>{pushStatus.msg}</div>
       )}
 
-      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 160px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
+      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 175px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
         ) : (() => {
@@ -16918,6 +16919,10 @@ function PackingListDetail({
         </span>
       </div>
 
+      {/* Table + Add row footer share a tight flex column so the
+          packingDetailInner grid gap (10px) doesn't sit between
+          them — the button hugs the table like on Collections. */}
+      <div style={{ display: "flex", flexDirection: "column" }}>
       <div className="portal-table-scroll" style={s.packingTableWrap}>
         <table style={{ ...s.table, width: packingTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
           <colgroup>
@@ -17118,7 +17123,7 @@ function PackingListDetail({
         </table>
       </div>
 
-      <div style={s.packingFooterActions}>
+      <div style={{ ...s.packingFooterActions, padding: "6px 0 0" }}>
         <button
           type="button"
           style={s.smallButton}
@@ -17127,8 +17132,9 @@ function PackingListDetail({
             packingId: packingList.id,
           })}
         >
-          Add row
+          + Add row
         </button>
+      </div>
       </div>
       {combinedCellMenu && typeof document !== "undefined" && createPortal(
         <div
@@ -20270,11 +20276,10 @@ const s: Record<string, React.CSSProperties> = {
   main: {
     flex: 1,
     minWidth: 0,
-    // padding-bottom: 0 lets the table extend all the way to main's
-    // bottom edge (the bottom strip lives outside main as the
-    // appShell's pageBg). Removing the 24px padding reclaims that
-    // space for content + footer buttons.
-    padding: "24px 16px 0",
+    // 24px bottom padding gives long-content pages (Settings, etc.)
+    // a visible breathing space inside the main column before the
+    // body-background strip starts.
+    padding: "24px 16px",
     height: "calc(100vh - var(--portal-bottom-gap))",
     alignSelf: "flex-start",
     overflowY: "auto",
@@ -20896,13 +20901,16 @@ const s: Record<string, React.CSSProperties> = {
   productResultImage: { width: 42, height: 56, objectFit: "cover", borderRadius: 4 },
   productResultText: { display: "grid", gap: 3, flex: 1, fontSize: 13, color: "#374151" },
   packingTableWrap: {
-    // Packing list has the densest top chrome of any page (Back +
-    // Export + Download buttons + Status + Shipping + Skip words +
-    // Load inventory + Search bar). 220 covers the actual chrome
-    // height so the table ends right above the Add row footer.
-    maxHeight: "calc(100vh - 220px - var(--portal-bottom-gap) - var(--portal-footer-actions))",
+    // Densest top chrome of any page (Back + Export + Download
+    // buttons + Status + Shipping + Skip words + Load inventory +
+    // Search bar). Subtract 260 = ~190 chrome + 24+24 main paddings
+    // + slack so the table ends with breathing room and the Add
+    // row footer below it stays inside the viewport.
+    maxHeight: "calc(100vh - 260px - var(--portal-bottom-gap) - var(--portal-footer-actions))",
+    // overflowY: auto matches Collections — the table scrolls
+    // internally instead of overflowing visibly past the footer.
     overflowX: "scroll",
-    overflowY: "visible",
+    overflowY: "auto",
     scrollbarGutter: "stable",
     background: "#fff",
     border: "1px solid #cbd5e1",
@@ -21631,11 +21639,11 @@ const s: Record<string, React.CSSProperties> = {
     gap: 10,
   },
   fabricTableWrap: {
-    // Match the restock chrome subtract — the Fabric in stock page
-    // has a slim toolbar + summary, so the table can extend down
-    // to the same point as restock instead of leaving a giant pink
-    // strip below it.
-    maxHeight: "calc(100vh - 118px - var(--portal-bottom-gap))",
+    // 170 = top page chrome (filter + summary row) + main's top
+    // 24px padding + main's 24px bottom padding so the table ends
+    // before the bottom of the main column and the body's pageBg
+    // strip is visible underneath.
+    maxHeight: "calc(100vh - 170px - var(--portal-bottom-gap))",
     overflow: "auto",
     background: "#fff",
     border: "1px solid #cbd5e1",
