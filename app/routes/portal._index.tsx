@@ -4348,20 +4348,20 @@ const PORTAL_ACTIVE_USERS_KEY = "supplier-portal-active-users-v1";
 const PORTAL_USER_COOKIE = "supplier_portal_user";
 const ACTIVE_USER_WINDOW_MS = 5 * 60 * 1000;
 
-// Brand watermark — three pointed leaves above a stem, then a
-// horizontal line and three descending dots. Used as a mask-image
-// so the watermark colour is driven by --portal-watermark-color
-// per surface (light over the dark sidebar, dark over the light
-// content background).
-const PORTAL_LOGO_WALLPAPER_SVG = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none" stroke="black" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M100 28 C 118 60, 118 84, 100 108 C 82 84, 82 60, 100 28 Z"/>
-  <path d="M105 60 C 138 60, 165 70, 178 90 C 158 102, 130 100, 110 92 Z"/>
-  <path d="M95 60 C 62 60, 35 70, 22 90 C 42 102, 70 100, 90 92 Z"/>
-  <line x1="100" y1="108" x2="100" y2="118"/>
-  <line x1="20" y1="118" x2="180" y2="118"/>
-  <circle cx="100" cy="140" r="11"/>
-  <circle cx="100" cy="162" r="6"/>
-  <circle cx="100" cy="180" r="3"/>
+// Brand watermark — three pointed leaves above a horizontal line
+// and three descending dots, the Karma East mark. The SVG is used
+// as a mask-image so the colour is driven by --portal-watermark-
+// color per surface (light over the dark sidebar, dark over the
+// light content background).
+const PORTAL_LOGO_WALLPAPER_SVG = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none" stroke="black" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M100 22 C 119 56, 121 90, 100 118 C 79 90, 81 56, 100 22 Z"/>
+  <path d="M106 78 C 140 74, 170 80, 188 96 C 168 110, 134 106, 106 96 Z"/>
+  <path d="M94 78 C 60 74, 30 80, 12 96 C 32 110, 66 106, 94 96 Z"/>
+  <line x1="100" y1="118" x2="100" y2="128"/>
+  <line x1="14" y1="128" x2="186" y2="128"/>
+  <circle cx="100" cy="148" r="9"/>
+  <circle cx="100" cy="168" r="5.5"/>
+  <circle cx="100" cy="184" r="3"/>
 </svg>`);
 const PORTAL_LOGO_WALLPAPER_URL = `url("data:image/svg+xml;utf8,${PORTAL_LOGO_WALLPAPER_SVG}")`;
 const MIN_COLUMN_WIDTH = 52;
@@ -7587,14 +7587,19 @@ export default function PortalDashboard() {
             position: absolute;
             inset: 0;
             background-color: var(--portal-watermark-color, rgba(17, 24, 39, 0.06));
-            -webkit-mask-image: var(--portal-watermark-mask);
-            mask-image: var(--portal-watermark-mask);
-            -webkit-mask-repeat: repeat;
-            mask-repeat: repeat;
-            -webkit-mask-size: 160px 160px;
-            mask-size: 160px 160px;
-            -webkit-mask-position: center;
-            mask-position: center;
+            /* Two overlapping mask layers offset diagonally so the
+               logo tiles read as a scattered / brick pattern
+               instead of a flat grid. Layer 1: 0,0. Layer 2 shifted
+               by half a tile so every other row sits between the
+               row above. */
+            -webkit-mask-image: var(--portal-watermark-mask), var(--portal-watermark-mask);
+            mask-image: var(--portal-watermark-mask), var(--portal-watermark-mask);
+            -webkit-mask-repeat: repeat, repeat;
+            mask-repeat: repeat, repeat;
+            -webkit-mask-size: 170px 170px, 170px 170px;
+            mask-size: 170px 170px, 170px 170px;
+            -webkit-mask-position: 0 0, 85px 85px;
+            mask-position: 0 0, 85px 85px;
             pointer-events: none;
             z-index: 0;
           }
