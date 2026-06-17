@@ -11522,7 +11522,6 @@ function CollectionSpreadsheetPage({
               e.target.value = "";
             }}
           />
-          <button type="button" onClick={addRow} style={s.primaryActionButton}>+ Add row</button>
           <button
             type="button"
             onClick={pushAllUnsynced}
@@ -11866,27 +11865,7 @@ function CollectionSpreadsheetPage({
               {rows.length === 0 && (
                 <tr style={s.row}>
                   <td colSpan={columns.length + 2} style={{ ...s.td, padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
-                    No rows yet. Click + Add row above to add one.
-                  </td>
-                </tr>
-              )}
-              {rows.length > 0 && (
-                <tr>
-                  <td colSpan={columns.length + 2} style={{ ...s.td, padding: 0, background: "#fafafa" }}>
-                    <button
-                      type="button"
-                      onClick={addRow}
-                      style={{
-                        width: "100%", padding: "10px 16px",
-                        background: "transparent", border: "none",
-                        borderTop: "1px dashed #d1d5db",
-                        color: "#0d9488", fontSize: 13, fontWeight: 700,
-                        cursor: "pointer", textAlign: "center",
-                      }}
-                      title="Append a blank row at the end"
-                    >
-                      + Add row
-                    </button>
+                    No rows yet. Click + Add row below to add one.
                   </td>
                 </tr>
               )}
@@ -11895,6 +11874,15 @@ function CollectionSpreadsheetPage({
           );
         })()}
       </div>
+      {/* Footer Add-row button — matches the packing list pattern
+          for consistency: small button sitting just below the table
+          (instead of an inline row inside the table or a button up
+          in the toolbar). */}
+      {loaded && (
+        <div style={{ ...s.packingFooterActions, padding: "6px 0 0" }}>
+          <button type="button" style={s.smallButton} onClick={addRow}>+ Add row</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -20173,22 +20161,15 @@ function PackingTd({
 
 const s: Record<string, React.CSSProperties> = {
   appShell: {
-    // Lock the whole portal to viewport height so the sidebar
-    // Settings link is always visible AND so wide tables get a
-    // horizontal scrollbar at the bottom of the main column
-    // (instead of pushed below the page fold).
-    // paddingBottom reserves a strip of the body's pageBg at the
-    // bottom of every page — same gap the Fabric in stock page
-    // shows naturally because its content is short. Tables and
-    // panels inside subtract var(--portal-bottom-gap) from their
-    // maxHeight calcs so they don't poke into that strip.
+    // Lock the whole portal to viewport height. Sidebar fills the
+    // full viewport height; main column is slightly shorter so the
+    // body's pageBg shows as a strip at the bottom (same look the
+    // Fabric in stock page has naturally).
     height: "100vh",
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     display: "flex",
     alignItems: "stretch",
     overflow: "hidden",
-    paddingBottom: "var(--portal-bottom-gap)",
-    boxSizing: "border-box",
   },
   sidebar: {
     width: 230,
@@ -20201,10 +20182,7 @@ const s: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     position: "sticky",
     top: 0,
-    // height: 100% picks up the appShell's content area (which
-    // already subtracts the bottom-gap padding) so we don't have to
-    // manage two viewport calcs.
-    height: "100%",
+    height: "100vh",
     // overflowY: hidden so only the inner <nav> scrolls when the
     // list is too long — the Settings link below it stays pinned
     // at the bottom of the sidebar regardless.
@@ -20278,10 +20256,20 @@ const s: Record<string, React.CSSProperties> = {
   count: { fontSize: 13, color: "#6b7280" },
   // The main column owns its own vertical scroll within the locked
   // shell — pages with tall content scroll here, the document body
-  // does not. height: 100% picks up the appShell's content area
-  // (which already subtracts var(--portal-bottom-gap)), so the
-  // bottom strip of pageBg is always visible.
-  main: { flex: 1, minWidth: 0, padding: "24px 16px", height: "100%", overflowY: "auto", overflowX: "hidden" },
+  // does not. Height is shy of the viewport by var(--portal-bottom-
+  // gap) and align-self: flex-start stops the flex layout from
+  // re-stretching it, so the bottom strip of pageBg always shows
+  // (matching the Fabric in stock look). The sidebar still goes
+  // full 100vh — only the main column has the gap.
+  main: {
+    flex: 1,
+    minWidth: 0,
+    padding: "24px 16px",
+    height: "calc(100vh - var(--portal-bottom-gap))",
+    alignSelf: "flex-start",
+    overflowY: "auto",
+    overflowX: "hidden",
+  },
   pageHeader: {
     display: "flex",
     alignItems: "flex-start",
