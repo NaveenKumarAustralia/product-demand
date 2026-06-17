@@ -12173,7 +12173,7 @@ function CollectionCellInner({
     // running sum cell so user wanted the bigger 16pt qty/totals
     // sizing here too. Link's text content is small anyway.
     return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "1px 2px", fontSize: 16, color: "#374151", fontWeight: 700, textAlign: "center", width: "100%", minHeight: 24, wordBreak: "break-word" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "1px 2px", fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)", color: "var(--portal-table-text-color, #374151)", fontWeight: 700, textAlign: "center", width: "100%", minHeight: 24, wordBreak: "break-word" }}>
         {value || ""}
       </div>
     );
@@ -12206,7 +12206,11 @@ function CollectionCellInner({
         style={{
           width: "100%", border: "none", outline: "none",
           padding: "1px 2px",
-          fontSize: 16,
+          // Number / qty cells stay slightly larger than text cells
+          // (the +2px was a deliberate "qty stands out" bump).
+          // Bound to --portal-table-font-size so Settings controls it.
+          fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)",
+          color: "var(--portal-table-text-color, #1f2937)",
           fontWeight: 600,
           fontFamily: "inherit",
           background: "transparent", boxSizing: "border-box",
@@ -12288,12 +12292,12 @@ function CollectionSkuCell({
 function CollectionPriceAudCell({ rupees, inrPerAud }: { rupees: number; inrPerAud: number | null }) {
   const aud = convertRupeesToAud(rupees, inrPerAud);
   if (aud == null) {
-    return <div style={{ textAlign: "center", color: "#9ca3af", fontSize: 14, padding: "1px 2px" }}>—</div>;
+    return <div style={{ textAlign: "center", color: "#9ca3af", fontSize: "var(--portal-table-font-size, 14px)", padding: "1px 2px" }}>—</div>;
   }
   const effectiveRate = inrPerAud != null ? inrPerAud - FX_RUPEE_BUFFER : null;
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, padding: "1px 2px" }}>
-      <span style={{ fontSize: 14, fontWeight: 700, color: "#111827" }}>
+      <span style={{ fontSize: "var(--portal-table-font-size, 14px)", fontWeight: 700, color: "var(--portal-table-text-color, #111827)" }}>
         {aud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
       </span>
       {effectiveRate != null && effectiveRate > 0 && (
@@ -12368,7 +12372,8 @@ function CollectionPriceRupeesCell({
         style={{
           width: "100%", border: "none", outline: "none",
           padding: "1px 2px",
-          fontSize: 16,
+          fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)",
+          color: "var(--portal-table-text-color, #1f2937)",
           fontWeight: 600,
           fontFamily: "inherit",
           background: "transparent", boxSizing: "border-box",
@@ -12606,7 +12611,12 @@ function CollectionTextCell({
       style={{
         width: "100%", border: "none", outline: "none",
         padding: "1px 2px",
-        fontSize: 14, fontFamily: "inherit",
+        // Tied to universalSettings.tableTextSize / tableTextColor
+        // via the existing --portal-table-* CSS variables so editing
+        // them in Settings updates Collections too.
+        fontSize: "var(--portal-table-font-size, 14px)",
+        color: "var(--portal-table-text-color, #1f2937)",
+        fontFamily: "inherit",
         background: "transparent", boxSizing: "border-box",
         textAlign: "center",
         resize: "none", overflow: "hidden",
