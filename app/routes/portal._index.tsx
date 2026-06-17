@@ -4330,19 +4330,16 @@ const FABRIC_TOTAL_EXCLUDED_NAMES = new Set([
   "fabric on order",
 ]);
 const ALL_NAV_ITEMS = [
-  { id: "dashboard", label: "Dashboard", href: "/portal?page=dashboard" },
   { id: "restock", label: "Existing Products Restock", href: "/portal" },
   { id: "fabric", label: "Fabric in stock", href: "/portal?page=fabric" },
   { id: "packing", label: "Packing Lists", href: "/portal?page=packing" },
-  { id: "pricelist", label: "Price List", href: "/portal?page=pricelist" },
   { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
   { id: "samples", label: "Samples", href: "/portal?page=samples" },
-  { id: "newproduct", label: "New Product Orders", href: "/portal?page=newproduct" },
   { id: "visionboard", label: "Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
   { id: "collections", label: "Collections", href: "/portal?page=collections" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["dashboard", "restock", "fabric", "packing", "pricelist", "productinfo", "samples", "newproduct", "visionboard", "collections"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "fabric", "packing", "productinfo", "samples", "visionboard", "collections"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
