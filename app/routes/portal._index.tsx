@@ -4347,6 +4347,23 @@ const PORTAL_USERS_KEY = "supplier-portal-users-v1";
 const PORTAL_ACTIVE_USERS_KEY = "supplier-portal-active-users-v1";
 const PORTAL_USER_COOKIE = "supplier_portal_user";
 const ACTIVE_USER_WINDOW_MS = 5 * 60 * 1000;
+
+// Brand watermark — three pointed leaves above a stem, then a
+// horizontal line and three descending dots. Used as a mask-image
+// so the watermark colour is driven by --portal-watermark-color
+// per surface (light over the dark sidebar, dark over the light
+// content background).
+const PORTAL_LOGO_WALLPAPER_SVG = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none" stroke="black" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M100 28 C 118 60, 118 84, 100 108 C 82 84, 82 60, 100 28 Z"/>
+  <path d="M105 60 C 138 60, 165 70, 178 90 C 158 102, 130 100, 110 92 Z"/>
+  <path d="M95 60 C 62 60, 35 70, 22 90 C 42 102, 70 100, 90 92 Z"/>
+  <line x1="100" y1="108" x2="100" y2="118"/>
+  <line x1="20" y1="118" x2="180" y2="118"/>
+  <circle cx="100" cy="140" r="11"/>
+  <circle cx="100" cy="162" r="6"/>
+  <circle cx="100" cy="180" r="3"/>
+</svg>`);
+const PORTAL_LOGO_WALLPAPER_URL = `url("data:image/svg+xml;utf8,${PORTAL_LOGO_WALLPAPER_SVG}")`;
 const MIN_COLUMN_WIDTH = 52;
 const FOCUSABLE_CELL_SELECTOR = [
   "input:not([type='hidden'])",
@@ -7557,9 +7574,41 @@ export default function PortalDashboard() {
           /* Give the scroll container its own stacking context so the sticky frozen columns
              cannot paint on top of the scrollbar gutter at the bottom. */
           .portal-table-scroll { isolation: isolate; }
+          /* Brand watermark — a faint repeating logo tile in the
+             background of both the sidebar and the main content
+             area. Implemented via mask-image on an absolutely
+             positioned ::before so the colour adapts (light tint
+             over the dark sidebar, dark tint over the light page
+             background). The mask path is the lotus + stem + three
+             descending dots from the Karma East logo. */
+          .portal-logo-wallpaper { position: relative; }
+          .portal-logo-wallpaper::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background-color: var(--portal-watermark-color, rgba(17, 24, 39, 0.06));
+            -webkit-mask-image: var(--portal-watermark-mask);
+            mask-image: var(--portal-watermark-mask);
+            -webkit-mask-repeat: repeat;
+            mask-repeat: repeat;
+            -webkit-mask-size: 160px 160px;
+            mask-size: 160px 160px;
+            -webkit-mask-position: center;
+            mask-position: center;
+            pointer-events: none;
+            z-index: 0;
+          }
+          .portal-logo-wallpaper > * { position: relative; z-index: 1; }
         `}
       </style>
-      <aside style={{ ...s.sidebar, background: universalSettings.menuBg, color: universalSettings.menuTextColor }}>
+      <aside className="portal-logo-wallpaper" style={{
+        ...s.sidebar,
+        background: universalSettings.menuBg,
+        color: universalSettings.menuTextColor,
+        // Light-tinted watermark over the dark menu background.
+        ["--portal-watermark-mask" as never]: PORTAL_LOGO_WALLPAPER_URL,
+        ["--portal-watermark-color" as never]: "rgba(255, 255, 255, 0.07)",
+      } as React.CSSProperties}>
         {universalSettings.logoUrl && (
           <div style={{ padding: "2px 14px 0", flexShrink: 0 }}>
             <img src={universalSettings.logoUrl} alt="Logo" style={{ maxWidth: "100%", display: "block", borderRadius: 6 }} />
@@ -7581,7 +7630,12 @@ export default function PortalDashboard() {
         <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), flexShrink: 0, marginTop: 8 }}>Settings</a>
       </aside>
 
-      <main style={s.main}>
+      <main className="portal-logo-wallpaper" style={{
+        ...s.main,
+        // Dark-tinted watermark over the light page background.
+        ["--portal-watermark-mask" as never]: PORTAL_LOGO_WALLPAPER_URL,
+        ["--portal-watermark-color" as never]: "rgba(17, 24, 39, 0.05)",
+      } as React.CSSProperties}>
         <header style={s.pageHeader}>
           <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
             <h1 style={s.pageTitle}>{activePageTitle}</h1>
