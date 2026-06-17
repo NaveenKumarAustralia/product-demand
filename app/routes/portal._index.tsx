@@ -14089,7 +14089,7 @@ function CombinedFabricStockPanel({
         </div>
       </div>
       <div style={s.fabricTableShell}>
-        <div style={s.fabricTableWrap}>
+        <div className="portal-table-scroll" style={s.fabricTableWrap}>
           <table style={{ ...s.fabricTable, width: fabricTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
             <colgroup>
               <col style={{ width: 48 }} />
