@@ -7550,12 +7550,19 @@ export default function PortalDashboard() {
             background: #f0fdfa;
           }
 
-          /* Always-visible horizontal scrollbar on table wrappers (macOS overlay scrollbars auto-hide otherwise) */
-          .portal-table-scroll::-webkit-scrollbar { height: 12px; width: 12px; }
+          /* Always-visible horizontal scrollbar on table wrappers (macOS overlay scrollbars auto-hide otherwise).
+             Bumped to 14px on macOS laptops the thinner 12px bar was rendering behind the sticky frozen columns. */
+          .portal-table-scroll::-webkit-scrollbar { height: 14px; width: 14px; }
           .portal-table-scroll::-webkit-scrollbar-track { background: #f1f5f9; }
-          .portal-table-scroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 6px; border: 2px solid #f1f5f9; }
+          .portal-table-scroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 7px; border: 2px solid #f1f5f9; }
           .portal-table-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
           .portal-table-scroll { scrollbar-color: #94a3b8 #f1f5f9; }
+          /* Force the scrollbar to its own layer so the sticky frozen columns don't paint over it.
+             webkit's `::-webkit-scrollbar` is normally above content, but on smaller viewports
+             where the sticky column edge meets the scrollbar gutter, Chromium/Safari sometimes
+             rasterise the sticky background on top of the gutter. Giving the scroll container its
+             own stacking context with `isolation: isolate` clamps the sticky cells inside it. */
+          .portal-table-scroll { isolation: isolate; }
         `}
       </style>
       <aside style={{ ...s.sidebar, background: universalSettings.menuBg, color: universalSettings.menuTextColor }}>
