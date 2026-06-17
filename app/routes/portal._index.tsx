@@ -7600,10 +7600,10 @@ export default function PortalDashboard() {
             mask-image: var(--portal-watermark-mask), var(--portal-watermark-mask);
             -webkit-mask-repeat: repeat, repeat;
             mask-repeat: repeat, repeat;
-            -webkit-mask-size: 260px 260px, 260px 260px;
-            mask-size: 260px 260px, 260px 260px;
-            -webkit-mask-position: 0 0, 130px 130px;
-            mask-position: 0 0, 130px 130px;
+            -webkit-mask-size: 130px 130px, 130px 130px;
+            mask-size: 130px 130px, 130px 130px;
+            -webkit-mask-position: 0 0, 65px 65px;
+            mask-position: 0 0, 65px 65px;
             pointer-events: none;
             z-index: 0;
           }
@@ -7614,16 +7614,18 @@ export default function PortalDashboard() {
         ...s.sidebar,
         background: universalSettings.menuBg,
         color: universalSettings.menuTextColor,
-        // Light-tinted watermark over the dark menu background.
-        ["--portal-watermark-mask" as never]: PORTAL_LOGO_WALLPAPER_URL,
-        ["--portal-watermark-color" as never]: "rgba(255, 255, 255, 0.07)",
+        // The uploaded logo (universalSettings.logoUrl) is used as
+        // the watermark mask when present; if the user hasn't
+        // uploaded a logo we fall back to the inline SVG approx.
+        ["--portal-watermark-mask" as never]: universalSettings.logoUrl
+          ? `url("${universalSettings.logoUrl}")`
+          : PORTAL_LOGO_WALLPAPER_URL,
+        ["--portal-watermark-color" as never]: "rgba(255, 255, 255, 0.08)",
       } as React.CSSProperties}>
-        {universalSettings.logoUrl && (
-          <div style={{ padding: "2px 14px 0", flexShrink: 0 }}>
-            <img src={universalSettings.logoUrl} alt="Logo" style={{ maxWidth: "100%", display: "block", borderRadius: 6 }} />
-          </div>
-        )}
-        <div style={{ ...s.sidebarTop, ...(universalSettings.logoUrl ? { marginTop: 14 } : {}), flexShrink: 0 }}>
+        {/* The visible logo at the top of the sidebar was removed —
+            the user wanted only the wallpaper treatment, not a
+            second copy of the logo above the nav items. */}
+        <div style={{ ...s.sidebarTop, flexShrink: 0 }}>
           <div style={s.sidebarTitle}>Production Portal</div>
         </div>
         {/* Nav links scroll internally if they don't fit — Settings
@@ -7642,8 +7644,10 @@ export default function PortalDashboard() {
       <main className="portal-logo-wallpaper" style={{
         ...s.main,
         // Dark-tinted watermark over the light page background.
-        ["--portal-watermark-mask" as never]: PORTAL_LOGO_WALLPAPER_URL,
-        ["--portal-watermark-color" as never]: "rgba(17, 24, 39, 0.05)",
+        ["--portal-watermark-mask" as never]: universalSettings.logoUrl
+          ? `url("${universalSettings.logoUrl}")`
+          : PORTAL_LOGO_WALLPAPER_URL,
+        ["--portal-watermark-color" as never]: "rgba(17, 24, 39, 0.06)",
       } as React.CSSProperties}>
         <header style={s.pageHeader}>
           <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
