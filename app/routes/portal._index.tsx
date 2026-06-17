@@ -11557,7 +11557,7 @@ function CollectionSpreadsheetPage({
         }}>{pushStatus.msg}</div>
       )}
 
-      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 140px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
+      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 175px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
         ) : (() => {
