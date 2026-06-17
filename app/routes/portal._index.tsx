@@ -7557,11 +7557,8 @@ export default function PortalDashboard() {
           .portal-table-scroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 7px; border: 2px solid #f1f5f9; }
           .portal-table-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
           .portal-table-scroll { scrollbar-color: #94a3b8 #f1f5f9; }
-          /* Force the scrollbar to its own layer so the sticky frozen columns don't paint over it.
-             webkit's `::-webkit-scrollbar` is normally above content, but on smaller viewports
-             where the sticky column edge meets the scrollbar gutter, Chromium/Safari sometimes
-             rasterise the sticky background on top of the gutter. Giving the scroll container its
-             own stacking context with `isolation: isolate` clamps the sticky cells inside it. */
+          /* Give the scroll container its own stacking context so the sticky frozen columns
+             cannot paint on top of the scrollbar gutter at the bottom. */
           .portal-table-scroll { isolation: isolate; }
         `}
       </style>
