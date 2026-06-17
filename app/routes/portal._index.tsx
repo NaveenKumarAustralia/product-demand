@@ -20191,7 +20191,11 @@ const s: Record<string, React.CSSProperties> = {
     position: "sticky",
     top: 0,
     height: "100vh",
-    overflowY: "auto",
+    // overflowY: hidden so only the inner <nav> scrolls when the
+    // list is too long — the Settings link below it stays pinned
+    // at the bottom of the sidebar regardless.
+    overflowY: "hidden",
+    boxSizing: "border-box",
     transition: "width 160ms ease, padding 160ms ease",
   },
   sidebarCollapsed: { width: 68, padding: "18px 10px", alignItems: "center" },
