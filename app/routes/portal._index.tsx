@@ -252,16 +252,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           : boards[0]?.id ?? null;
 
         let items: Array<{
-          id: number; name: string; sortOrder: number;
+          id: number; name: string; sortOrder: number; status: string;
           imageCount: number; hasThumbnail: boolean; updatedAt: Date;
         }> = [];
         if (activeBoardId) {
           const raw = await prisma.$queryRaw<Array<{
-            id: number; name: string; sortOrder: number;
+            id: number; name: string; sortOrder: number; status: string;
             imageCount: number; hasThumbnail: boolean; updatedAt: Date;
           }>>`
             SELECT
-              id, name, "sortOrder",
+              id, name, "sortOrder", status,
               CASE WHEN jsonb_typeof(images) = 'array'
                 THEN jsonb_array_length(images)
                 ELSE 0
@@ -280,7 +280,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         }
         return { boards, activeBoardId, items };
       })()
-    : { boards: [] as Array<{ id: number; name: string; sortOrder: number }>, activeBoardId: null as number | null, items: [] as Array<{ id: number; name: string; sortOrder: number; imageCount: number; hasThumbnail: boolean; updatedAt: Date }> };
+    : { boards: [] as Array<{ id: number; name: string; sortOrder: number }>, activeBoardId: null as number | null, items: [] as Array<{ id: number; name: string; sortOrder: number; status: string; imageCount: number; hasThumbnail: boolean; updatedAt: Date }> };
   // Collections listing — slim projection (no rows JSON, no thumbnail bytes).
   // The drawer fetches the full collection (rows + columns) on open.
   const collections = page === "collections"
@@ -2506,6 +2506,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!id) return null;
     const data: Record<string, unknown> = {};
     if (form.has("name")) data.name = String(form.get("name") ?? "");
+    if (form.has("status")) data.status = String(form.get("status") ?? "") || "under_consideration";
     if (form.has("notes")) data.notes = String(form.get("notes") ?? "") || null;
     if (form.has("fields")) {
       try { data.fields = JSON.parse(String(form.get("fields") ?? "[]")); } catch { /* ignore */ }

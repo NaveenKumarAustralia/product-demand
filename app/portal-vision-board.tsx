@@ -13,11 +13,42 @@ export type VisionItemListItem = {
   id: number;
   name: string;
   sortOrder: number;
+  status: string;
   imageCount: number;
   hasThumbnail: boolean;
   updatedAt: string | Date;
 };
 type VisionField = { id: string; text: string };
+
+// Item workflow status — mirrors the Samples page pill treatment.
+// Order here is the order shown in the drawer dropdown.
+const VB_STATUSES: Array<{ value: string; label: string }> = [
+  { value: "under_consideration", label: "Under Consideration" },
+  { value: "sample_requested", label: "Sample Requested" },
+  { value: "sample_arrived", label: "Sample Arrived" },
+  { value: "changes_requested", label: "Changes Requested" },
+  { value: "approved", label: "Approved" },
+  { value: "on_order", label: "On Order" },
+  { value: "fabric_arrived", label: "Fabric Arrived" },
+];
+
+function vbStatusLabel(status: string): string {
+  return VB_STATUSES.find((s) => s.value === status)?.label ?? "Under Consideration";
+}
+
+function vbStatusPillStyle(status: string, large?: boolean): React.CSSProperties {
+  const base: React.CSSProperties = { borderRadius: 99, fontWeight: 700, whiteSpace: "nowrap", padding: large ? "4px 12px" : "2px 9px", fontSize: large ? 12 : 11, display: "inline-block" };
+  switch (status) {
+    case "under_consideration": return { ...base, background: "#ede9fe", color: "#5b21b6" };
+    case "sample_requested": return { ...base, background: "#cffafe", color: "#155e75" };
+    case "sample_arrived": return { ...base, background: "#dbeafe", color: "#1e40af" };
+    case "changes_requested": return { ...base, background: "#fef3c7", color: "#92400e" };
+    case "approved": return { ...base, background: "#dcfce7", color: "#166534" };
+    case "on_order": return { ...base, background: "#ffedd5", color: "#9a3412" };
+    case "fabric_arrived": return { ...base, background: "#bbf7d0", color: "#14532d" };
+    default: return { ...base, background: "#f1f5f9", color: "#64748b" };
+  }
+}
 
 const CARD_THUMB_BASE = "/portal/thumbnail/visionV2";
 const ITEM_IMAGE_BASE = "/portal/image/visionV2";
@@ -409,6 +440,7 @@ const VisionCard = memo(function VisionCard({
 
       <div style={S.cardBody}>
         <span style={S.cardTitle}>{item.name || "Untitled"}</span>
+        <span style={vbStatusPillStyle(item.status || "under_consideration")}>{vbStatusLabel(item.status || "under_consideration")}</span>
       </div>
     </div>
   );
@@ -463,6 +495,7 @@ function ItemDrawer({
   const revalidator = useRevalidator();
   const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState(itemList.name);
+  const [status, setStatus] = useState(itemList.status || "under_consideration");
   const [notes, setNotes] = useState("");
   const [fields, setFields] = useState<VisionField[]>([]);
   const [savedCount, setSavedCount] = useState(itemList.imageCount);
@@ -483,9 +516,10 @@ function ItemDrawer({
   }, [itemList.id]);
 
   useEffect(() => {
-    const item = (fetcher.data as { item?: { name?: string; notes?: string | null; fields?: unknown; images?: unknown[]; updatedAt?: string | Date } | null } | undefined)?.item;
+    const item = (fetcher.data as { item?: { name?: string; status?: string | null; notes?: string | null; fields?: unknown; images?: unknown[]; updatedAt?: string | Date } | null } | undefined)?.item;
     if (item && !loaded) {
       setName(item.name ?? itemList.name);
+      setStatus(item.status || "under_consideration");
       setNotes(item.notes ?? "");
       setFields(fieldsFromUnknown(item.fields));
       const len = Array.isArray(item.images) ? item.images.length : 0;
@@ -517,6 +551,21 @@ function ItemDrawer({
     fd.set("intent", "vb_update_item");
     fd.set("itemId", String(itemList.id));
     fd.set("name", next);
+    await fetch(window.location.pathname + window.location.search, {
+      method: "POST",
+      body: fd,
+    });
+    revalidator.revalidate();
+  };
+  // Status shows as a pill on the grid card, so (like renames) we use a raw
+  // fetch + explicit revalidate to force the grid to refresh — vb_update_item
+  // submissions without name/thumbnail are otherwise skipped by shouldRevalidate.
+  const saveStatus = async (next: string) => {
+    setStatus(next);
+    const fd = new FormData();
+    fd.set("intent", "vb_update_item");
+    fd.set("itemId", String(itemList.id));
+    fd.set("status", next);
     await fetch(window.location.pathname + window.location.search, {
       method: "POST",
       body: fd,
@@ -597,6 +646,22 @@ function ItemDrawer({
         </div>
 
         <div style={S.drawerBody}>
+          <section style={S.drawerSection}>
+            <h3 style={S.drawerSectionTitle}>Status</h3>
+            <div style={S.statusRow}>
+              <span style={vbStatusPillStyle(status, true)}>{vbStatusLabel(status)}</span>
+              <select
+                value={status}
+                onChange={(e) => void saveStatus(e.target.value)}
+                style={S.statusSelect}
+              >
+                {VB_STATUSES.map((s) => (
+                  <option key={s.value} value={s.value}>{s.label}</option>
+                ))}
+              </select>
+            </div>
+          </section>
+
           <section style={S.drawerSection}>
             <h3 style={S.drawerSectionTitle}>Images</h3>
             <div
@@ -765,8 +830,8 @@ const S: Record<string, React.CSSProperties> = {
   cardImageWrap: { width: "100%", aspectRatio: "1.3 / 1.8", background: "#f8fafc", overflow: "hidden", position: "relative" },
   cardImage: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
   cardImageEmpty: { width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#9ca3af", fontSize: 12 },
-  cardBody: { padding: "8px 10px 12px" },
-  cardTitle: { fontSize: 13, fontWeight: 600, color: "#111827", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  cardBody: { padding: "8px 10px 12px", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 6 },
+  cardTitle: { fontSize: 13, fontWeight: 600, color: "#111827", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "100%" },
   cardDelete: { position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: "50%", border: "none", background: "#ef4444", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, lineHeight: 1, padding: 0, zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" },
   dragHandle: { position: "absolute", top: 4, left: 6, fontSize: 16, color: "#374151", cursor: "grab", transition: "opacity 0.15s", zIndex: 2, userSelect: "none" },
   confirmOverlay: { position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 8 },
@@ -802,6 +867,8 @@ const S: Record<string, React.CSSProperties> = {
   fieldRemove: { background: "transparent", border: "1px solid #fecaca", color: "#ef4444", borderRadius: 6, width: 26, height: 26, cursor: "pointer", lineHeight: 1, padding: 0, fontSize: 16 },
 
   notesInput: { width: "100%", fontSize: 13, padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontFamily: "inherit", resize: "vertical", outline: "none", boxSizing: "border-box" },
+  statusRow: { display: "flex", alignItems: "center", gap: 10 },
+  statusSelect: { fontSize: 13, padding: "6px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: "#fff", color: "#111827", cursor: "pointer", outline: "none" },
 
   lightboxScrim: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", cursor: "zoom-out" },
   lightboxImg: { maxWidth: "92vw", maxHeight: "92vh", objectFit: "contain", borderRadius: 6 },

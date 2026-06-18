@@ -223,6 +223,7 @@ model VisionBoardV2Item {
   thumbnail String?
   fields    Json          @default("[]")
   notes     String?
+  status    String        @default("under_consideration")
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
 
