@@ -8636,6 +8636,10 @@ function formatFieldLabel(field: string): string {
 function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
   const [open, setOpen] = useState(false);
   const fetcher = useFetcher();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [popoverPos, setPopoverPos] = useState<{ top: number; right: number } | null>(null);
+
   // Build the thread URL for each message so clicking opens the
   // side panel on the right page with the right thread loaded.
   const threadHrefFor = (m: PortalMessageItem) => {
@@ -8650,9 +8654,46 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
     return `/portal?${params.toString()}`;
   };
 
+  // Position the popover from the button's bounding rect. We render it
+  // via a portal to document.body so it escapes the header's stacking
+  // context. The bell lives inside <main>, whose direct children all get
+  // `z-index: 1` from the .portal-logo-wallpaper rule; a popover nested in
+  // the header would be trapped at that level and painted over by the
+  // later page-content cards. Portaling to <body> + a top-layer z-index
+  // lifts it above everything.
+  useEffect(() => {
+    if (!open) return;
+    const updatePosition = () => {
+      if (!buttonRef.current) return;
+      const rect = buttonRef.current.getBoundingClientRect();
+      setPopoverPos({ top: rect.bottom + 6, right: Math.max(8, window.innerWidth - rect.right) });
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open]);
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (buttonRef.current?.contains(target)) return;
+      if (popoverRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
   return (
     <div style={s.messagesWrap}>
       <button
+        ref={buttonRef}
         type="button"
         onClick={() => setOpen((current) => !current)}
         // The shake animation pulls the user's eye when there are
@@ -8669,8 +8710,8 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
         </svg>
         {messages.length > 0 && <span style={s.messageCount}>{messages.length}</span>}
       </button>
-      {open && (
-        <div style={s.messagesPopover}>
+      {open && popoverPos && typeof document !== "undefined" && createPortal(
+        <div ref={popoverRef} style={{ ...s.messagesPopover, top: popoverPos.top, right: popoverPos.right }}>
           <div style={s.messagesHeader}>Messages</div>
           {messages.length ? messages.map((message) => (
             <div key={message.id} style={s.messageItem}>
@@ -8697,7 +8738,8 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
           )) : (
             <div style={s.messageEmpty}>No messages for you.</div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -20537,9 +20579,7 @@ const s: Record<string, React.CSSProperties> = {
     boxShadow: "0 0 0 2px #fff",
   },
   messagesPopover: {
-    position: "absolute",
-    top: 38,
-    right: 0,
+    position: "fixed",
     width: 360,
     maxHeight: 420,
     overflow: "auto",
@@ -20547,7 +20587,10 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #cbd5e1",
     borderRadius: 12,
     boxShadow: "0 18px 40px rgba(15,23,42,0.24)",
-    zIndex: 200,
+    // Top-layer z-index (same value the other body-portaled popovers
+    // use) so the dropdown sits above the header bar and every page
+    // content card — not behind them.
+    zIndex: 2147483647,
     padding: 8,
   },
   messagesHeader: { padding: "8px 10px", fontSize: 13, fontWeight: 900, color: "#111827" },
