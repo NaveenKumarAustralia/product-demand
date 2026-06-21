@@ -16736,6 +16736,14 @@ function PackingListDetail({
   const visiblePackingLines = normalizedPackingListSearch
     ? packingList.lines.filter((line) => packingLineMatchesSearch(line, normalizedPackingListSearch))
     : packingList.lines;
+  // Effective rupee price for a line — the manual priceRupees if the user
+  // typed one, otherwise the auto-derived style cost (same value the row
+  // shows on screen). Lists priced via the style-cost lookup rather than
+  // manual entry would otherwise read 0 in the totals and CSV export.
+  const effectivePackingRupees = (line: (typeof packingList.lines)[number]) => {
+    const manual = line.priceRupees ?? 0;
+    return manual > 0 ? manual : (styleCostLookup.costForTitle(line.productTitle) || 0);
+  };
   const exportPackingList = () => {
     const headers = [
       "Box",
@@ -16750,14 +16758,14 @@ function PackingListDetail({
     const rows = packingList.lines.map((line) => {
       const qtys = normalizeQtys(line.qtys);
       const total = packingTotal(qtys);
-      const price = line.priceRupees ?? 0;
+      const price = effectivePackingRupees(line);
       return [
         line.boxNumber ?? "",
         line.productTitle,
         line.sku ?? "",
         ...packingSizes.map((size) => qtys[size] || ""),
         total || "",
-        line.priceRupees ?? "",
+        price || "",
         total && price ? Math.round(total * price) : "",
         line.weight ?? "",
       ];
@@ -16765,7 +16773,7 @@ function PackingListDetail({
     const totalQty = packingList.lines.reduce((acc, line) => acc + packingTotal(normalizeQtys(line.qtys)), 0);
     const totalValue = packingList.lines.reduce((acc, line) => {
       const qty = packingTotal(normalizeQtys(line.qtys));
-      const price = line.priceRupees ?? 0;
+      const price = effectivePackingRupees(line);
       return acc + (qty && price ? Math.round(qty * price) : 0);
     }, 0);
     const totalWeight = packingList.lines.reduce((acc, line) => acc + (line.weight ?? 0), 0);
@@ -17214,7 +17222,7 @@ function PackingListDetail({
               const totalQty = visiblePackingLines.reduce((sum, line) => sum + packingTotal(normalizeQtys(line.qtys)), 0);
               const totalValue = visiblePackingLines.reduce((sum, line) => {
                 const qty = packingTotal(normalizeQtys(line.qtys));
-                return sum + qty * (line.priceRupees ?? 0);
+                return sum + qty * effectivePackingRupees(line);
               }, 0);
               const packingFrozenOffsets = [
                 48,
