@@ -31,6 +31,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const SETTING_KEYS = [
     COLUMN_WIDTHS_KEY,
     PACKING_COLUMN_WIDTHS_KEY,
+    PHOTOSHOOT_COLUMN_WIDTHS_KEY,
     TABLE_HEADER_LABELS_KEY,
     TABLE_CUSTOM_COLUMNS_KEY,
     TABLE_CUSTOM_CELLS_KEY,
@@ -104,6 +105,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   };
   const columnWidthsSetting = wrap(COLUMN_WIDTHS_KEY);
   const packingColumnWidthsSetting = wrap(PACKING_COLUMN_WIDTHS_KEY);
+  const photoShootColumnWidthsSetting = wrap(PHOTOSHOOT_COLUMN_WIDTHS_KEY);
   const headerLabelsSetting = wrap(TABLE_HEADER_LABELS_KEY);
   const customColumnsSetting = wrap(TABLE_CUSTOM_COLUMNS_KEY);
   const customCellsSetting = wrap(TABLE_CUSTOM_CELLS_KEY);
@@ -732,6 +734,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     visionBoardData,
     collections,
     photoShoots,
+    photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
     fabricStockIndex,
   };
   } catch (error) {
@@ -1937,6 +1940,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await prisma.portalSetting.upsert({
       where: { key: PACKING_COLUMN_WIDTHS_KEY },
       create: { key: PACKING_COLUMN_WIDTHS_KEY, value: columnWidths },
+      update: { value: columnWidths },
+    });
+    return null;
+  }
+
+  if (intent === "update_photoshoot_column_widths") {
+    let columnWidths: Record<string, number>;
+    try {
+      columnWidths = normalizeColumnWidths(JSON.parse(String(form.get("value") ?? "{}")));
+    } catch {
+      return null;
+    }
+    await prisma.portalSetting.upsert({
+      where: { key: PHOTOSHOOT_COLUMN_WIDTHS_KEY },
+      create: { key: PHOTOSHOOT_COLUMN_WIDTHS_KEY, value: columnWidths },
       update: { value: columnWidths },
     });
     return null;
@@ -3820,7 +3838,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // sees the new items prop.
   if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
-  if (intent === "update_column_widths" || intent === "update_packing_column_widths") return false;
+  if (intent === "update_column_widths" || intent === "update_packing_column_widths" || intent === "update_photoshoot_column_widths") return false;
   // Photo shoot row edits keep their own local state; the slim shoot list
   // (loader) only needs refreshing on add/rename/delete, not row edits.
   if (intent === "ps_update_shoot") return false;
@@ -4129,6 +4147,7 @@ function normalizeFabricDeletedSheets(value: unknown): Record<string, boolean> {
 
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
+const PHOTOSHOOT_COLUMN_WIDTHS_KEY = "supplier-portal-photoshoot-column-widths-v1";
 const TABLE_HEADER_LABELS_KEY = "production-portal-table-header-labels-v1";
 const TABLE_CUSTOM_COLUMNS_KEY = "production-portal-table-custom-columns-v1";
 const TABLE_CUSTOM_CELLS_KEY = "production-portal-table-custom-cells-v1";
@@ -7503,6 +7522,7 @@ export default function PortalDashboard() {
     visionBoardData,
     collections,
     photoShoots,
+    photoShootColumnWidths,
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -8051,7 +8071,7 @@ export default function PortalDashboard() {
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
             <CollectionsPhotoShootToggle active="photoshoot" />
             <div style={{ flex: 1, minHeight: 0 }}>
-              <PhotoShootPanel photoShoots={photoShoots} productInfo={productInfo} />
+              <PhotoShootPanel photoShoots={photoShoots} productInfo={productInfo} savedColumnWidths={photoShootColumnWidths} />
             </div>
           </div>
         ) : page !== "restock" ? (
@@ -10926,13 +10946,44 @@ function CollectionsPhotoShootToggle({ active }: { active: "collections" | "phot
   );
 }
 
-function PhotoShootPanel({ photoShoots, productInfo }: { photoShoots: PhotoShootListItem[]; productInfo: ProductInfo }) {
+function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { photoShoots: PhotoShootListItem[]; productInfo: ProductInfo; savedColumnWidths: Record<string, number> }) {
   const [params, setParams] = useSearchParams();
   const fetcher = useFetcher();
   const loadFetcher = useFetcher<{ shoot: PhotoShootFullType | null }>();
   const addFetcher = useFetcher<{ ok?: boolean; shoot?: { id: number; name: string } }>();
+  const widthsFetcher = useFetcher();
   const [shoots, setShoots] = useState(photoShoots);
   useEffect(() => { setShoots(photoShoots); }, [photoShoots]);
+
+  // Resizable columns (global across shoots), persisted to a PortalSetting.
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
+  useEffect(() => { setColumnWidths(savedColumnWidths); }, [savedColumnWidths]);
+  const widthFor = (colId: string) => columnWidths[colId] ?? PHOTOSHOOT_COLUMNS.find((c) => c.id === colId)?.width ?? 120;
+  const startResize = (colId: string, event: React.MouseEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = widthFor(colId);
+    let nextWidths = columnWidths;
+    const prevCursor = document.body.style.cursor;
+    const prevSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (e: MouseEvent) => {
+      const w = Math.max(MIN_COLUMN_WIDTH, startWidth + e.clientX - startX);
+      nextWidths = { ...nextWidths, [colId]: w };
+      setColumnWidths(nextWidths);
+    };
+    const onUp = () => {
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevSelect;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      widthsFetcher.submit({ intent: "update_photoshoot_column_widths", value: JSON.stringify(nextWidths) }, { method: "post" });
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
 
   const shootIdParam = Number(params.get("shootId")) || null;
   const activeShootId = shootIdParam && shoots.some((s) => s.id === shootIdParam) ? shootIdParam : shoots[0]?.id ?? null;
@@ -11049,15 +11100,17 @@ function PhotoShootPanel({ photoShoots, productInfo }: { photoShoots: PhotoShoot
         <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
       ) : (
         <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0 }}>
-          <table style={{ ...s.table, minWidth: 1100 }}>
+          <table style={{ ...s.table, width: 48 + PHOTOSHOOT_COLUMNS.reduce((sum, c) => sum + widthFor(c.id), 0), minWidth: 1100 }}>
             <colgroup>
               <col style={{ width: 48 }} />
-              {PHOTOSHOOT_COLUMNS.map((c) => <col key={c.id} style={{ width: c.width }} />)}
+              {PHOTOSHOOT_COLUMNS.map((c) => <col key={c.id} style={{ width: widthFor(c.id) }} />)}
             </colgroup>
             <thead>
               <tr style={s.headerRow}>
                 <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
-                {PHOTOSHOOT_COLUMNS.map((c) => <th key={c.id} style={s.th}>{c.label}</th>)}
+                {PHOTOSHOOT_COLUMNS.map((c) => (
+                  <Th key={c.id} columnId={c.id} onResizeStart={(e) => startResize(c.id, e)}>{c.label}</Th>
+                ))}
               </tr>
             </thead>
             <tbody>
