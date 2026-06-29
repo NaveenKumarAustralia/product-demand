@@ -3959,17 +3959,25 @@ const DEFAULT_COLLECTION_STATUS_OPTIONS: CollectionChipOption[] = [
   { value: "in_shipment", label: "In Shipment", bg: "#fde68a", color: "#78350f" },
   { value: "arrived", label: "Arrived", bg: "#bbf7d0", color: "#065f46" },
 ];
+// Sample chip catalog. Labels match the Google Sheet "Sample" column
+// text exactly so the importer's mapToChipValue() auto-selects the
+// right chip on import.
 const DEFAULT_COLLECTION_SAMPLE_OPTIONS: CollectionChipOption[] = [
-  { value: "sample_needed", label: "Sample Needed", bg: "#fee2e2", color: "#991b1b" },
-  { value: "photos_done", label: "Photos Done", bg: "#fde68a", color: "#78350f" },
-  { value: "sample_sent", label: "Sample Sent", bg: "#dbeafe", color: "#1e3a8a" },
-  { value: "sent_bijour", label: "Sent Bijour", bg: "#e9d5ff", color: "#5b21b6" },
-  { value: "sample_received", label: "Sample Received", bg: "#bbf7d0", color: "#065f46" },
+  { value: "sample_needed", label: "Sample Needed", bg: "#b91c1c", color: "#ffffff" },
+  { value: "photos_done", label: "Photos Done", bg: "#15803d", color: "#ffffff" },
+  { value: "sample_send", label: "Sample Send", bg: "#bbf7d0", color: "#166534" },
+  { value: "sent_bali", label: "Sent Bali", bg: "#e9d5ff", color: "#6b21a8" },
+  { value: "sent_bijour", label: "Sent Bijour", bg: "#2563eb", color: "#ffffff" },
+  { value: "stock_arrived", label: "stock arrived", bg: "#fed7aa", color: "#9a3412" },
+  { value: "sample_arrived", label: "Sample arrived", bg: "#115e59", color: "#ffffff" },
+  { value: "sample_hq", label: "Sample HQ", bg: "#7c3aed", color: "#ffffff" },
+  { value: "jackie_shoot", label: "Jackie Shoot", bg: "#78350f", color: "#ffffff" },
 ];
 const DEFAULT_COLLECTION_SETTINGS: CollectionSettings = {
   statusOptions: DEFAULT_COLLECTION_STATUS_OPTIONS,
   sampleOptions: DEFAULT_COLLECTION_SAMPLE_OPTIONS,
-  sampleReceivedChipValue: "sample_received",
+  // "Sample arrived" fills the Sample RECEIVED date column with today.
+  sampleReceivedChipValue: "sample_arrived",
 };
 function normalizeCollectionChipOptions(value: unknown, fallback: CollectionChipOption[]): CollectionChipOption[] {
   if (!Array.isArray(value)) return fallback;
@@ -10960,7 +10968,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
       )}
 
-      <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(5, minmax(0, 1fr))" }}>
+      <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
         {collections.map((c) => (
           <CollectionCard
             key={c.id}
@@ -11185,6 +11193,10 @@ function CollectionSpreadsheetPage({
   const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
   const [columns, setColumns] = useState<CollectionColumnDef[]>(DEFAULT_COLLECTION_COLUMNS);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
+  // Filter the table by STATUS and/or SAMPLE chip value (e.g. "Photo
+  // shoot"). Empty string = no filter on that column; both apply together.
+  const [statusFilter, setStatusFilter] = useState("");
+  const [sampleFilter, setSampleFilter] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [nameDraft, setNameDraft] = useState(listItem.name);
   const [editingName, setEditingName] = useState(false);
@@ -11620,10 +11632,42 @@ function CollectionSpreadsheetPage({
                 {listItem.name || "Untitled"}
               </h2>
             )}
-            <div style={s.productInfoMeta}>{rows.length} row{rows.length !== 1 ? "s" : ""}</div>
+            <div style={s.productInfoMeta}>
+              {statusFilter || sampleFilter
+                ? `${rows.filter((r) => (!statusFilter || (r.status ?? "") === statusFilter) && (!sampleFilter || (r.sample ?? "") === sampleFilter)).length} of ${rows.length} row${rows.length !== 1 ? "s" : ""}`
+                : `${rows.length} row${rows.length !== 1 ? "s" : ""}`}
+            </div>
           </div>
         </div>
         <div style={s.productInfoActions}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
+            Status
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: statusFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
+              title="Filter rows by status"
+            >
+              <option value="">All statuses</option>
+              {localStatusOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
+            Sample
+            <select
+              value={sampleFilter}
+              onChange={(e) => setSampleFilter(e.target.value)}
+              style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: sampleFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
+              title="Filter rows by sample"
+            >
+              <option value="">All samples</option>
+              {localSampleOptions.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
@@ -11735,7 +11779,13 @@ function CollectionSpreadsheetPage({
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, rIdx) => {
+              {rows
+                // Keep each row's true index so edit/drag handlers still
+                // target the right entry in the unfiltered rows array.
+                .map((row, rIdx) => ({ row, rIdx }))
+                .filter(({ row }) => (!statusFilter || (row.status ?? "") === statusFilter)
+                  && (!sampleFilter || (row.sample ?? "") === sampleFilter))
+                .map(({ row, rIdx }) => {
                 const linkedProductId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
                 const linked = Boolean(linkedProductId);
                 const totalOrdered = sumCollectionRowQuantity(row);
