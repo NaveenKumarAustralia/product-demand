@@ -1,0 +1,9 @@
+CREATE TABLE "PhotoShoot" (
+  "id" SERIAL NOT NULL,
+  "name" TEXT NOT NULL DEFAULT 'Untitled shoot',
+  "sortOrder" INTEGER NOT NULL DEFAULT 0,
+  "rows" JSONB NOT NULL DEFAULT '[]',
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL,
+  CONSTRAINT "PhotoShoot_pkey" PRIMARY KEY ("id")
+);

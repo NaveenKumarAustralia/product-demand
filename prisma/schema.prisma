@@ -241,6 +241,18 @@ model Collection {
   updatedAt DateTime @updatedAt
 }
 
+// Photo shoot briefs. Products are copied here from collections (the
+// originals stay in the collection). Rows hold the styling/pairing
+// fields and image cells, same JSON shape as Collection.rows.
+model PhotoShoot {
+  id        Int      @id @default(autoincrement())
+  name      String   @default("Untitled shoot")
+  sortOrder Int      @default(0)
+  rows      Json     @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 // Full-quality image bytes for collection rows. Row JSON stores a
 // compact { thumb, key } reference per image; this table holds the
 // original bytes that get lazy-loaded when the popup opens and

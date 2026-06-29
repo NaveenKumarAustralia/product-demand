@@ -302,6 +302,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         createdAt: r.createdAt, updatedAt: r.updatedAt,
       }))).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date }>)
     : [];
+  // Photo shoots: slim tab list (id/name/sortOrder/rowCount). The active
+  // shoot's full rows are fetched on demand via ps_get_shoot. Loaded for
+  // both pages so the collection "Send to photo shoot" picker has the list.
+  const photoShoots = (page === "photoshoot" || page === "collections")
+    ? await prisma.$queryRawUnsafe<Array<{ id: number; name: string; sortOrder: number; rowCount: number }>>(`
+        SELECT id, name, "sortOrder",
+          CASE WHEN jsonb_typeof(rows) = 'array' THEN jsonb_array_length(rows) ELSE 0 END AS "rowCount"
+        FROM "PhotoShoot"
+        ORDER BY "sortOrder" ASC, "createdAt" ASC
+      `).then((rows) => rows.map((r) => ({ id: r.id, name: r.name, sortOrder: r.sortOrder, rowCount: Number(r.rowCount) })))
+        .catch(() => [] as Array<{ id: number; name: string; sortOrder: number; rowCount: number }>)
+    : [];
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = needsActivityLogs
     ? await prisma.activityLog.findMany({
@@ -719,6 +731,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     samples,
     visionBoardData,
     collections,
+    photoShoots,
     fabricStockIndex,
   };
   } catch (error) {
@@ -2772,6 +2785,109 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, moved: moving.length, targetId, deletedSource: intent === "combine_collections" });
   }
 
+  // ─── Photo shoots ────────────────────────────────────────────────────────
+  if (intent === "ps_add_shoot") {
+    const name = String(form.get("name") ?? "").trim() || "Untitled shoot";
+    const count = await prisma.photoShoot.count();
+    const shoot = await prisma.photoShoot.create({ data: { name, sortOrder: count } });
+    return jsonResponse({ ok: true, shoot: { id: shoot.id, name: shoot.name } });
+  }
+  if (intent === "ps_rename_shoot") {
+    const id = Number(form.get("shootId"));
+    const name = String(form.get("name") ?? "").trim();
+    if (!id || !name) return null;
+    await prisma.photoShoot.update({ where: { id }, data: { name } });
+    return null;
+  }
+  if (intent === "ps_delete_shoot") {
+    const id = Number(form.get("shootId"));
+    if (!id) return null;
+    await prisma.photoShoot.delete({ where: { id } });
+    return null;
+  }
+  if (intent === "ps_reorder_shoots") {
+    try {
+      const ids = JSON.parse(String(form.get("shootIds") ?? "[]")) as number[];
+      await Promise.all(ids.map((id, i) => prisma.photoShoot.update({ where: { id }, data: { sortOrder: i } })));
+    } catch { /* ignore */ }
+    return null;
+  }
+  if (intent === "ps_get_shoot") {
+    const id = Number(form.get("shootId"));
+    if (!id) return jsonResponse({ shoot: null });
+    const shoot = await prisma.photoShoot.findUnique({ where: { id } }).catch(() => null);
+    return jsonResponse({ shoot });
+  }
+  if (intent === "ps_update_shoot") {
+    const id = Number(form.get("shootId"));
+    if (!id) return null;
+    const data: Record<string, unknown> = { updatedAt: new Date() };
+    if (form.has("rows")) {
+      try {
+        const rows = JSON.parse(String(form.get("rows")));
+        if (Array.isArray(rows)) {
+          data.rows = rows.map((r) => {
+            const row = (r && typeof r === "object" ? r : {}) as Record<string, string>;
+            if (!row.__rowKey) row.__rowKey = randomUUID();
+            return row;
+          });
+        }
+      } catch { /* keep existing */ }
+    }
+    if (form.has("name")) {
+      const name = String(form.get("name") ?? "").trim();
+      if (name) data.name = name;
+    }
+    await prisma.photoShoot.update({ where: { id }, data });
+    return null;
+  }
+  if (intent === "ps_send_from_collection") {
+    // Copy the selected collection rows into a photo shoot (existing or
+    // new). Originals stay in the collection. Only the photo-shoot fields
+    // we know how to map are carried over; the rest are filled on the
+    // shoot page.
+    const collectionId = Number(form.get("collectionId"));
+    if (!collectionId) return jsonResponse({ ok: false, error: "bad_collection" });
+    const col = await prisma.collection.findUnique({ where: { id: collectionId }, select: { rows: true } });
+    if (!col) return jsonResponse({ ok: false, error: "not_found" });
+    const sourceRows = normalizeCollectionRows(col.rows);
+    let indices: number[] = [];
+    try { indices = JSON.parse(String(form.get("rowIndices") ?? "[]")) as number[]; } catch { /* ignore */ }
+    const picked = indices.filter((n) => Number.isInteger(n) && n >= 0 && n < sourceRows.length).map((i) => sourceRows[i]);
+    if (picked.length === 0) return jsonResponse({ ok: false, error: "no_rows" });
+
+    // Resolve target shoot: existing id, or create from newShootName.
+    let shootId = Number(form.get("targetShootId")) || 0;
+    if (!shootId) {
+      const newName = String(form.get("newShootName") ?? "").trim() || "Untitled shoot";
+      const count = await prisma.photoShoot.count();
+      const created = await prisma.photoShoot.create({ data: { name: newName, sortOrder: count } });
+      shootId = created.id;
+    }
+    const shoot = await prisma.photoShoot.findUnique({ where: { id: shootId }, select: { rows: true } });
+    if (!shoot) return jsonResponse({ ok: false, error: "shoot_not_found" });
+    const existingRows = normalizeCollectionRows(shoot.rows);
+    const newRows = picked.map((row) => ({
+      __rowKey: randomUUID(),
+      productImage: row.modelPicture ?? "",
+      featuredName: row.name ?? "",
+      sku: row.sku ?? "",
+      pairWith: "",
+      pairWithName: "",
+      pairAlsoWith: "",
+      earrings: "",
+      styling: "",
+      shoesImage: "",
+      shoesText: "",
+      done: "",
+    } as Record<string, string>));
+    await prisma.photoShoot.update({
+      where: { id: shootId },
+      data: { rows: [...existingRows, ...newRows] as unknown as object, updatedAt: new Date() },
+    });
+    return jsonResponse({ ok: true, shootId, added: newRows.length });
+  }
+
   if (intent === "import_collections_from_google_sheet") {
     // One-shot importer: fetch each tab from the user's Google Sheet,
     // parse the CSV, build collection rows, link rows whose Link cell
@@ -3705,11 +3821,14 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths") return false;
+  // Photo shoot row edits keep their own local state; the slim shoot list
+  // (loader) only needs refreshing on add/rename/delete, not row edits.
+  if (intent === "ps_update_shoot") return false;
   // Read-only fetchers used by drawers and background hooks don't change
   // any data the page renders, so the loader doesn't need to re-run.
   if (intent === "vb_get_item" || intent === "get_sample_full"
     || intent === "get_sample_iteration_thumbnails"
-    || intent === "get_collection_full") return false;
+    || intent === "get_collection_full" || intent === "ps_get_shoot") return false;
   return defaultShouldRevalidate;
 };
 
@@ -7383,6 +7502,7 @@ export default function PortalDashboard() {
     samples,
     visionBoardData,
     collections,
+    photoShoots,
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -7525,6 +7645,7 @@ export default function PortalDashboard() {
     : page === "samples" ? "Samples"
     : page === "visionboard" ? "Vision Board"
     : page === "collections" ? "Collections"
+    : page === "photoshoot" ? "Photo Shoots"
     : page === "newproduct" ? "New Product Orders"
     : selectedProductGroup || "Existing Products Restock";
   const orderedNavItems = navOrder
@@ -7910,16 +8031,29 @@ export default function PortalDashboard() {
             items={visionBoardData.items}
           />
         ) : page === "collections" ? (
-          <CollectionsPanel
-            collections={collections}
-            collectionSettings={collectionSettings}
-            productInfo={productInfo}
-            fabricStockIndex={fabricStockIndex}
-            inrPerAudCachedRate={inrPerAudCachedRate}
-            isAdmin={Boolean(currentUser?.admin)}
-            shopDomain={shopDomain}
-            users={users}
-          />
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
+            <CollectionsPhotoShootToggle active="collections" />
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <CollectionsPanel
+                collections={collections}
+                collectionSettings={collectionSettings}
+                productInfo={productInfo}
+                fabricStockIndex={fabricStockIndex}
+                inrPerAudCachedRate={inrPerAudCachedRate}
+                isAdmin={Boolean(currentUser?.admin)}
+                shopDomain={shopDomain}
+                users={users}
+                photoShoots={photoShoots}
+              />
+            </div>
+          </div>
+        ) : page === "photoshoot" ? (
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
+            <CollectionsPhotoShootToggle active="photoshoot" />
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <PhotoShootPanel photoShoots={photoShoots} productInfo={productInfo} />
+            </div>
+          </div>
         ) : page !== "restock" ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : (
@@ -10698,6 +10832,23 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "swatches", label: "Swatches", type: "tickbox", width: 90 },
 ];
 
+// Photo shoot table columns. Mirror the photographer's styling sheet:
+// product image + name/SKU, pairing notes, and accessory images.
+type PhotoShootColumnDef = { id: string; label: string; type?: "image-multi" | "image" | "tickbox" | "text"; width: number };
+const PHOTOSHOOT_COLUMNS: PhotoShootColumnDef[] = [
+  { id: "productImage", label: "Product", type: "image-multi", width: 130 },
+  { id: "featuredName", label: "Featured Garment Name", type: "text", width: 170 },
+  { id: "sku", label: "SKU", type: "text", width: 90 },
+  { id: "pairWith", label: "Pair With", type: "text", width: 130 },
+  { id: "pairWithName", label: "Pair With Garment Name", type: "text", width: 170 },
+  { id: "pairAlsoWith", label: "Pair Also With", type: "text", width: 130 },
+  { id: "earrings", label: "Earrings", type: "image", width: 110 },
+  { id: "styling", label: "Styling", type: "text", width: 150 },
+  { id: "shoesImage", label: "Shoes", type: "image", width: 110 },
+  { id: "shoesText", label: "Shoes (notes)", type: "text", width: 130 },
+  { id: "done", label: "Done", type: "tickbox", width: 60 },
+];
+
 function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   if (!Array.isArray(value) || value.length === 0) return DEFAULT_COLLECTION_COLUMNS;
   const VALID_TYPES = new Set(["text", "number", "date", "tickbox", "readonly", "release", "chip"]);
@@ -10741,7 +10892,214 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
   });
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[] }) {
+type PhotoShootListItem = { id: number; name: string; sortOrder: number; rowCount: number };
+type PhotoShootFullType = { id: number; name: string; rows: unknown };
+
+// Segmented toggle at the top of the Collections / Photo Shoot section.
+// Switches the page param (and clears any open collection/shoot).
+function CollectionsPhotoShootToggle({ active }: { active: "collections" | "photoshoot" }) {
+  const [params, setParams] = useSearchParams();
+  const go = (target: "collections" | "photoshoot") => {
+    if (target === active) return;
+    const next = new URLSearchParams(params);
+    next.set("page", target);
+    next.delete("collectionId");
+    next.delete("shootId");
+    setParams(next);
+  };
+  const tab = (key: "collections" | "photoshoot", label: string) => (
+    <button
+      type="button"
+      onClick={() => go(key)}
+      style={{
+        padding: "7px 18px", fontSize: 13, fontWeight: 700, border: "none", cursor: "pointer",
+        background: active === key ? "#0d9488" : "transparent",
+        color: active === key ? "#fff" : "#475569",
+      }}
+    >{label}</button>
+  );
+  return (
+    <div style={{ display: "inline-flex", border: "1px solid #cbd5e1", borderRadius: 8, overflow: "hidden", background: "#fff", flexShrink: 0 }}>
+      {tab("collections", "Collections")}
+      {tab("photoshoot", "Photo Shoot")}
+    </div>
+  );
+}
+
+function PhotoShootPanel({ photoShoots, productInfo }: { photoShoots: PhotoShootListItem[]; productInfo: ProductInfo }) {
+  const [params, setParams] = useSearchParams();
+  const fetcher = useFetcher();
+  const loadFetcher = useFetcher<{ shoot: PhotoShootFullType | null }>();
+  const addFetcher = useFetcher<{ ok?: boolean; shoot?: { id: number; name: string } }>();
+  const [shoots, setShoots] = useState(photoShoots);
+  useEffect(() => { setShoots(photoShoots); }, [photoShoots]);
+
+  const shootIdParam = Number(params.get("shootId")) || null;
+  const activeShootId = shootIdParam && shoots.some((s) => s.id === shootIdParam) ? shootIdParam : shoots[0]?.id ?? null;
+  const activeShoot = shoots.find((s) => s.id === activeShootId) ?? null;
+
+  const [rows, setRows] = useState<Record<string, string>[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    if (!activeShootId) { setRows([]); setLoaded(true); return; }
+    setLoaded(false);
+    loadFetcher.submit({ intent: "ps_get_shoot", shootId: String(activeShootId) }, { method: "post" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeShootId]);
+  useEffect(() => {
+    const shoot = loadFetcher.data?.shoot;
+    if (shoot && shoot.id === activeShootId) {
+      setRows(normalizeCollectionRows(shoot.rows));
+      setLoaded(true);
+    }
+  }, [loadFetcher.data, activeShootId]);
+
+  const selectShoot = (id: number) => {
+    const next = new URLSearchParams(params);
+    next.set("shootId", String(id));
+    setParams(next);
+  };
+  const saveRows = (next: Record<string, string>[]) => {
+    if (!activeShootId) return;
+    setRows(next);
+    fetcher.submit({ intent: "ps_update_shoot", shootId: String(activeShootId), rows: JSON.stringify(next) }, { method: "post" });
+  };
+  const updateCell = (rIdx: number, colId: string, value: string) => {
+    saveRows(rows.map((r, i) => i === rIdx ? { ...r, [colId]: value } : r));
+  };
+  const addRow = () => saveRows([...rows, { __rowKey: `r_${Math.random().toString(36).slice(2, 9)}` }]);
+  const removeRow = (rIdx: number) => saveRows(rows.filter((_, i) => i !== rIdx));
+
+  const addShoot = () => {
+    const name = window.prompt("Name this photo shoot:", "")?.trim();
+    if (!name) return;
+    addFetcher.submit({ intent: "ps_add_shoot", name }, { method: "post" });
+  };
+  // Jump to a freshly created shoot once the server returns its id.
+  useEffect(() => {
+    const created = addFetcher.data?.shoot;
+    if (created) {
+      setShoots((cur) => cur.some((s) => s.id === created.id) ? cur : [...cur, { id: created.id, name: created.name, sortOrder: cur.length, rowCount: 0 }]);
+      const next = new URLSearchParams(params);
+      next.set("shootId", String(created.id));
+      setParams(next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addFetcher.data]);
+  const renameShoot = (id: number) => {
+    const current = shoots.find((s) => s.id === id);
+    const name = window.prompt("Rename photo shoot:", current?.name ?? "")?.trim();
+    if (!name) return;
+    setShoots((cur) => cur.map((s) => s.id === id ? { ...s, name } : s));
+    fetcher.submit({ intent: "ps_rename_shoot", shootId: String(id), name }, { method: "post" });
+  };
+  const deleteShoot = (id: number) => {
+    const current = shoots.find((s) => s.id === id);
+    if (!window.confirm(`Delete photo shoot "${current?.name ?? ""}"? This can't be undone.`)) return;
+    setShoots((cur) => cur.filter((s) => s.id !== id));
+    if (activeShootId === id) {
+      const next = new URLSearchParams(params);
+      next.delete("shootId");
+      setParams(next);
+    }
+    fetcher.submit({ intent: "ps_delete_shoot", shootId: String(id) }, { method: "post" });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
+      {/* Tab strip */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", flexShrink: 0 }}>
+        {shoots.map((s) => (
+          <div
+            key={s.id}
+            onClick={() => selectShoot(s.id)}
+            onDoubleClick={() => renameShoot(s.id)}
+            title="Click to open · double-click to rename"
+            style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, cursor: "pointer",
+              fontSize: 13, fontWeight: 700,
+              background: s.id === activeShootId ? "#0f766e" : "#e2e8f0",
+              color: s.id === activeShootId ? "#fff" : "#334155",
+            }}
+          >
+            <span>{s.name}</span>
+            {s.id === activeShootId && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); deleteShoot(s.id); }}
+                title="Delete shoot"
+                style={{ border: "none", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: 0 }}
+              >×</button>
+            )}
+          </div>
+        ))}
+        <button
+          type="button"
+          onClick={addShoot}
+          style={{ padding: "6px 12px", borderRadius: 8, border: "1px dashed #94a3b8", background: "#fff", color: "#475569", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+        >+ New shoot</button>
+      </div>
+
+      {/* Active shoot table */}
+      {!activeShootId ? (
+        <div style={{ padding: 48, textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+          No photo shoots yet. Click “+ New shoot”, or send products from a collection.
+        </div>
+      ) : !loaded ? (
+        <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
+      ) : (
+        <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0 }}>
+          <table style={{ ...s.table, minWidth: 1100 }}>
+            <colgroup>
+              <col style={{ width: 48 }} />
+              {PHOTOSHOOT_COLUMNS.map((c) => <col key={c.id} style={{ width: c.width }} />)}
+            </colgroup>
+            <thead>
+              <tr style={s.headerRow}>
+                <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
+                {PHOTOSHOOT_COLUMNS.map((c) => <th key={c.id} style={s.th}>{c.label}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rIdx) => (
+                <tr key={row.__rowKey ?? rIdx} style={s.row}>
+                  <RowNumberCell rowNumber={rIdx + 1} actions={[{ label: "Delete row", danger: true, onClick: () => removeRow(rIdx) }]} />
+                  {PHOTOSHOOT_COLUMNS.map((c) => (
+                    <td key={c.id} style={s.td}>
+                      {c.type === "image-multi" ? (
+                        <CollectionMultiImageCell value={row[c.id] ?? ""} onCommit={(v) => updateCell(rIdx, c.id, v)} productInfo={productInfo} />
+                      ) : c.type === "image" ? (
+                        <CollectionImageCell value={row[c.id] ?? ""} onCommit={(v) => updateCell(rIdx, c.id, v)} />
+                      ) : c.type === "tickbox" ? (
+                        <label style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 8, cursor: "pointer", width: "100%" }}>
+                          <input type="checkbox" checked={row[c.id] === "1"} onChange={(e) => updateCell(rIdx, c.id, e.target.checked ? "1" : "")} style={{ width: 18, height: 18, cursor: "pointer" }} />
+                        </label>
+                      ) : (
+                        <input
+                          value={row[c.id] ?? ""}
+                          onChange={(e) => setRows((cur) => cur.map((r, i) => i === rIdx ? { ...r, [c.id]: e.target.value } : r))}
+                          onBlur={(e) => updateCell(rIdx, c.id, e.target.value)}
+                          style={{ width: "100%", border: "none", background: "transparent", fontSize: 13, padding: "6px 8px", outline: "none", boxSizing: "border-box" }}
+                        />
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <button
+            type="button"
+            onClick={addRow}
+            style={{ margin: "10px 0 0 4px", background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+          >+ Add row</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[] }) {
   const fetcher = useFetcher();
   const importFetcher = useFetcher<{ ok?: boolean; totalCollections?: number; summary?: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }>; error?: string }>();
   const backfillFetcher = useFetcher<{ ok?: boolean; scanned?: number; updated?: number; error?: string }>();
@@ -10839,6 +11197,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         shopDomain={shopDomain}
         users={users}
         allCollections={collections}
+        photoShoots={photoShoots}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
       />
@@ -11254,6 +11613,7 @@ function CollectionSpreadsheetPage({
   shopDomain,
   users,
   allCollections,
+  photoShoots,
   onBack,
   onLocalNameChange,
 }: {
@@ -11265,6 +11625,7 @@ function CollectionSpreadsheetPage({
   shopDomain: string | null;
   users: PortalUser[];
   allCollections: CollectionListItem[];
+  photoShoots: PhotoShootListItem[];
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
 }) {
@@ -11286,6 +11647,7 @@ function CollectionSpreadsheetPage({
   const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
   // Move/combine: selected row indices + a fetcher for the move action.
   const moveFetcher = useFetcher<{ ok?: boolean; moved?: number; targetId?: number; deletedSource?: boolean; error?: string }>();
+  const sendShootFetcher = useFetcher<{ ok?: boolean; shootId?: number; added?: number; error?: string }>();
   const [selectedRowIdxs, setSelectedRowIdxs] = useState<Set<number>>(new Set());
   const otherCollections = allCollections.filter((c) => c.id !== listItem.id);
   const [columns, setColumns] = useState<CollectionColumnDef[]>(DEFAULT_COLLECTION_COLUMNS);
@@ -11478,6 +11840,26 @@ function CollectionSpreadsheetPage({
       { method: "post" },
     );
   };
+  // Send the selected products to a photo shoot (copy — they stay here).
+  const sendToShoot = (opts: { targetShootId?: number; newShootName?: string }) => {
+    if (!selectedRowIdxs.size || sendShootFetcher.state !== "idle") return;
+    sendShootFetcher.submit(
+      {
+        intent: "ps_send_from_collection",
+        collectionId: String(listItem.id),
+        rowIndices: JSON.stringify(Array.from(selectedRowIdxs)),
+        ...(opts.targetShootId ? { targetShootId: String(opts.targetShootId) } : {}),
+        ...(opts.newShootName ? { newShootName: opts.newShootName } : {}),
+      },
+      { method: "post" },
+    );
+  };
+  useEffect(() => {
+    if (sendShootFetcher.state === "idle" && sendShootFetcher.data?.ok) {
+      setSelectedRowIdxs(new Set());
+    }
+  }, [sendShootFetcher.state, sendShootFetcher.data]);
+
   // After a move/combine: combine deletes this collection (go back to the
   // grid); a plain move reloads this collection's rows and clears the
   // selection. Either way the tile grid counts need a revalidate.
@@ -11837,6 +12219,30 @@ function CollectionSpreadsheetPage({
               {otherCollections.map((c) => (
                 <option key={c.id} value={c.id}>{c.name}</option>
               ))}
+            </select>
+          )}
+          {selectedRowIdxs.size > 0 && (
+            <select
+              value=""
+              disabled={sendShootFetcher.state !== "idle"}
+              onChange={(e) => {
+                const v = e.target.value;
+                e.currentTarget.value = "";
+                if (v === "__new") {
+                  const name = window.prompt("Name the new photo shoot:", "")?.trim();
+                  if (name) sendToShoot({ newShootName: name });
+                } else if (v) {
+                  sendToShoot({ targetShootId: Number(v) });
+                }
+              }}
+              style={{ fontSize: 12, fontWeight: 600, padding: "6px 8px", border: "1px solid #9333ea", borderRadius: 6, background: "#9333ea", color: "#fff", cursor: "pointer", outline: "none" }}
+              title="Copy the selected products to a photo shoot (they stay in this collection)"
+            >
+              <option value="">{sendShootFetcher.state !== "idle" ? "Sending…" : `Send ${selectedRowIdxs.size} to photo shoot…`}</option>
+              {photoShoots.map((p) => (
+                <option key={p.id} value={p.id} style={{ color: "#111827", background: "#fff" }}>{p.name}</option>
+              ))}
+              <option value="__new" style={{ color: "#111827", background: "#fff" }}>+ New shoot…</option>
             </select>
           )}
           <button
