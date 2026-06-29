@@ -11109,7 +11109,7 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
               <tr style={s.headerRow}>
                 <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
                 {PHOTOSHOOT_COLUMNS.map((c) => (
-                  <Th key={c.id} columnId={c.id} onResizeStart={(e) => startResize(c.id, e)}>{c.label}</Th>
+                  <Th key={c.id} columnId={c.id} onResizeStart={(e) => startResize(c.id, e)} wrap>{c.label}</Th>
                 ))}
               </tr>
             </thead>
@@ -20851,6 +20851,7 @@ function Th({
   onResizeStart,
   stickyLeft,
   isLastFrozen,
+  wrap,
 }: {
   children: React.ReactNode;
   center?: boolean;
@@ -20859,19 +20860,28 @@ function Th({
   onResizeStart: (event: React.MouseEvent<HTMLSpanElement>) => void;
   stickyLeft?: number;
   isLastFrozen?: boolean;
+  // When true the header label wraps onto multiple lines instead of being
+  // truncated with an ellipsis — used where columns can be narrow.
+  wrap?: boolean;
 }) {
   const frozenStyle: React.CSSProperties = stickyLeft !== undefined ? {
     left: stickyLeft,
     zIndex: 55,
     ...(isLastFrozen ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
   } : {};
+  const wrapStyle: React.CSSProperties = wrap
+    ? { whiteSpace: "normal", overflow: "visible", textOverflow: "clip" }
+    : {};
+  const contentWrapStyle: React.CSSProperties = wrap
+    ? { whiteSpace: "normal", overflow: "visible", textOverflow: "clip", overflowWrap: "anywhere" }
+    : {};
   return (
     <th
-      style={{ ...s.th, textAlign: center ? "center" : "left", ...frozenStyle }}
+      style={{ ...s.th, textAlign: center ? "center" : "left", ...wrapStyle, ...frozenStyle }}
     >
       {headerKey && typeof children === "string"
         ? <EditableHeaderLabel headerKey={headerKey} value={children} />
-        : <span style={s.thContent}>{children}</span>}
+        : <span style={{ ...s.thContent, ...contentWrapStyle }}>{children}</span>}
       <span
         role="separator"
         aria-orientation="vertical"
