@@ -2699,6 +2699,79 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "move_collection_rows" || intent === "combine_collections") {
+    // move_collection_rows: move the selected rows (by index) from the
+    // source collection into a target collection, keeping the rest.
+    // combine_collections: move ALL rows from source into target, then
+    // delete the now-empty source. Both reassign the moved rows' image
+    // ownership (CollectionImage.collectionId) and re-home their note
+    // threads (PortalMessage) so nothing is orphaned.
+    const sourceId = Number(form.get("collectionId"));
+    const targetId = Number(form.get("targetCollectionId"));
+    if (!sourceId || !targetId || sourceId === targetId) return jsonResponse({ ok: false, error: "bad_ids" });
+    const [source, target] = await Promise.all([
+      prisma.collection.findUnique({ where: { id: sourceId }, select: { rows: true } }),
+      prisma.collection.findUnique({ where: { id: targetId }, select: { rows: true } }),
+    ]);
+    if (!source || !target) return jsonResponse({ ok: false, error: "not_found" });
+    const sourceRows = normalizeCollectionRows(source.rows);
+    const targetRows = normalizeCollectionRows(target.rows);
+
+    let movingIdx: Set<number>;
+    if (intent === "combine_collections") {
+      movingIdx = new Set(sourceRows.map((_, i) => i));
+    } else {
+      let requested: number[] = [];
+      try { requested = JSON.parse(String(form.get("rowIndices") ?? "[]")) as number[]; } catch { /* ignore */ }
+      movingIdx = new Set(requested.filter((n) => Number.isInteger(n) && n >= 0 && n < sourceRows.length));
+    }
+    if (movingIdx.size === 0) return jsonResponse({ ok: false, error: "no_rows" });
+
+    const moving = sourceRows.filter((_, i) => movingIdx.has(i));
+    const remaining = sourceRows.filter((_, i) => !movingIdx.has(i));
+    // Guarantee every moved row carries a stable key so its threads /
+    // future edits stay addressable in the target collection.
+    for (const row of moving) { if (!row.__rowKey) row.__rowKey = randomUUID(); }
+
+    // Reassign full-image ownership so a later source delete / cleanup
+    // can't strip images that now belong to the target.
+    const imageKeys: string[] = [];
+    for (const row of moving) {
+      for (const col of ["modelPicture", "fabric", "maniPicsTaken"]) {
+        const raw = row[col];
+        if (!raw) continue;
+        try {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr)) for (const e of arr) { if (e && typeof e === "object" && e.key) imageKeys.push(String(e.key)); }
+        } catch { /* not a JSON image cell */ }
+      }
+    }
+    if (imageKeys.length) {
+      await prisma.collectionImage.updateMany({ where: { key: { in: imageKeys } }, data: { collectionId: targetId } });
+    }
+    const movedKeys = moving.map((r) => r.__rowKey).filter(Boolean) as string[];
+    if (movedKeys.length) {
+      await prisma.portalMessage.updateMany({
+        where: { entityType: "collection_row", orderId: sourceId, entityKey: { in: movedKeys } },
+        data: { orderId: targetId },
+      });
+    }
+
+    await prisma.collection.update({
+      where: { id: targetId },
+      data: { rows: [...targetRows, ...moving] as unknown as object, updatedAt: new Date() },
+    });
+    if (intent === "combine_collections") {
+      await prisma.collection.delete({ where: { id: sourceId } });
+    } else {
+      await prisma.collection.update({
+        where: { id: sourceId },
+        data: { rows: remaining as unknown as object, updatedAt: new Date() },
+      });
+    }
+    return jsonResponse({ ok: true, moved: moving.length, targetId, deletedSource: intent === "combine_collections" });
+  }
+
   if (intent === "import_collections_from_google_sheet") {
     // One-shot importer: fetch each tab from the user's Google Sheet,
     // parse the CSV, build collection rows, link rows whose Link cell
@@ -8059,10 +8132,16 @@ function RowNumberCell({
   rowNumber,
   actions,
   heightKey,
+  selected,
+  onToggleSelect,
 }: {
   rowNumber: number | string;
   actions: RowMenuAction[];
   heightKey?: string;
+  // When onToggleSelect is provided the cell shows a selection checkbox
+  // before the row number (used by the Collections move/combine UI).
+  selected?: boolean;
+  onToggleSelect?: () => void;
 }) {
   const fetcher = useFetcher();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -8118,6 +8197,17 @@ function RowNumberCell({
         }}
         title="Right click for row actions"
       >
+        {onToggleSelect ? (
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={onToggleSelect}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{ width: 15, height: 15, marginRight: 5, cursor: "pointer", verticalAlign: "middle" }}
+            title="Select row"
+          />
+        ) : null}
         {rowNumber}
         {heightKey ? <span style={s.rowResizeHandle} onMouseDown={startRowResize} title="Drag to resize row" /> : null}
       </td>
@@ -10748,6 +10838,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         inrPerAudCachedRate={inrPerAudCachedRate}
         shopDomain={shopDomain}
         users={users}
+        allCollections={collections}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
       />
@@ -11162,6 +11253,7 @@ function CollectionSpreadsheetPage({
   inrPerAudCachedRate,
   shopDomain,
   users,
+  allCollections,
   onBack,
   onLocalNameChange,
 }: {
@@ -11172,6 +11264,7 @@ function CollectionSpreadsheetPage({
   inrPerAudCachedRate: number | null;
   shopDomain: string | null;
   users: PortalUser[];
+  allCollections: CollectionListItem[];
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
 }) {
@@ -11191,12 +11284,19 @@ function CollectionSpreadsheetPage({
   const fetcher = useFetcher();
   const loadFetcher = useFetcher<{ collection: CollectionFullType | null }>();
   const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
+  // Move/combine: selected row indices + a fetcher for the move action.
+  const moveFetcher = useFetcher<{ ok?: boolean; moved?: number; targetId?: number; deletedSource?: boolean; error?: string }>();
+  const [selectedRowIdxs, setSelectedRowIdxs] = useState<Set<number>>(new Set());
+  const otherCollections = allCollections.filter((c) => c.id !== listItem.id);
   const [columns, setColumns] = useState<CollectionColumnDef[]>(DEFAULT_COLLECTION_COLUMNS);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
   // Filter the table by STATUS and/or SAMPLE chip value (e.g. "Photo
   // shoot"). Empty string = no filter on that column; both apply together.
   const [statusFilter, setStatusFilter] = useState("");
   const [sampleFilter, setSampleFilter] = useState("");
+  const rowMatchesFilters = (row: Record<string, string>) =>
+    (!statusFilter || (row.status ?? "") === statusFilter)
+    && (!sampleFilter || (row.sample ?? "") === sampleFilter);
   const [loaded, setLoaded] = useState(false);
   const [nameDraft, setNameDraft] = useState(listItem.name);
   const [editingName, setEditingName] = useState(false);
@@ -11222,6 +11322,7 @@ function CollectionSpreadsheetPage({
   };
 
   useEffect(() => {
+    setSelectedRowIdxs(new Set());
     loadFetcher.submit(
       { intent: "get_collection_full", collectionId: String(listItem.id) },
       { method: "post" },
@@ -11352,6 +11453,47 @@ function CollectionSpreadsheetPage({
       { method: "post" },
     );
   };
+
+  // Move the selected rows into another collection (originals leave this
+  // one). Indices map into the unfiltered `rows` array.
+  const moveSelectedTo = (targetId: number) => {
+    if (!selectedRowIdxs.size || moveFetcher.state !== "idle") return;
+    moveFetcher.submit(
+      {
+        intent: "move_collection_rows",
+        collectionId: String(listItem.id),
+        targetCollectionId: String(targetId),
+        rowIndices: JSON.stringify(Array.from(selectedRowIdxs)),
+      },
+      { method: "post" },
+    );
+  };
+  // Merge this entire collection into another, then delete this one.
+  const combineInto = (targetId: number) => {
+    if (moveFetcher.state !== "idle") return;
+    const targetName = otherCollections.find((c) => c.id === targetId)?.name ?? "the target collection";
+    if (!window.confirm(`Combine "${listItem.name}" into "${targetName}"?\n\nAll ${rows.length} product(s) move into "${targetName}" and "${listItem.name}" is deleted. This can't be undone.`)) return;
+    moveFetcher.submit(
+      { intent: "combine_collections", collectionId: String(listItem.id), targetCollectionId: String(targetId) },
+      { method: "post" },
+    );
+  };
+  // After a move/combine: combine deletes this collection (go back to the
+  // grid); a plain move reloads this collection's rows and clears the
+  // selection. Either way the tile grid counts need a revalidate.
+  useEffect(() => {
+    if (moveFetcher.state !== "idle" || !moveFetcher.data?.ok) return;
+    if (moveFetcher.data.deletedSource) {
+      onBack();
+      return;
+    }
+    setSelectedRowIdxs(new Set());
+    loadFetcher.submit(
+      { intent: "get_collection_full", collectionId: String(listItem.id) },
+      { method: "post" },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moveFetcher.state, moveFetcher.data]);
 
   // Per-collection in-memory undo stack. localStorage CAN'T hold the
   // full rows JSON when rows contain base64 image data (a single edit
@@ -11634,8 +11776,9 @@ function CollectionSpreadsheetPage({
             )}
             <div style={s.productInfoMeta}>
               {statusFilter || sampleFilter
-                ? `${rows.filter((r) => (!statusFilter || (r.status ?? "") === statusFilter) && (!sampleFilter || (r.sample ?? "") === sampleFilter)).length} of ${rows.length} row${rows.length !== 1 ? "s" : ""}`
+                ? `${rows.filter(rowMatchesFilters).length} of ${rows.length} row${rows.length !== 1 ? "s" : ""}`
                 : `${rows.length} row${rows.length !== 1 ? "s" : ""}`}
+              {selectedRowIdxs.size > 0 ? ` · ${selectedRowIdxs.size} selected` : ""}
             </div>
           </div>
         </div>
@@ -11668,6 +11811,34 @@ function CollectionSpreadsheetPage({
               ))}
             </select>
           </label>
+          {otherCollections.length > 0 && selectedRowIdxs.size > 0 && (
+            <select
+              value=""
+              disabled={moveFetcher.state !== "idle"}
+              onChange={(e) => { const t = Number(e.target.value); if (t) moveSelectedTo(t); e.currentTarget.value = ""; }}
+              style={{ fontSize: 12, fontWeight: 600, padding: "6px 8px", border: "1px solid #0d9488", borderRadius: 6, background: "#0d9488", color: "#fff", cursor: "pointer", outline: "none" }}
+              title="Move the selected products into another collection"
+            >
+              <option value="">{moveFetcher.state !== "idle" ? "Moving…" : `Move ${selectedRowIdxs.size} to…`}</option>
+              {otherCollections.map((c) => (
+                <option key={c.id} value={c.id} style={{ color: "#111827", background: "#fff" }}>{c.name}</option>
+              ))}
+            </select>
+          )}
+          {otherCollections.length > 0 && (
+            <select
+              value=""
+              disabled={moveFetcher.state !== "idle"}
+              onChange={(e) => { const t = Number(e.target.value); if (t) combineInto(t); e.currentTarget.value = ""; }}
+              style={{ fontSize: 12, fontWeight: 600, padding: "6px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: "#fff", color: "#374151", cursor: "pointer", outline: "none" }}
+              title="Merge this whole collection into another, then delete this one"
+            >
+              <option value="">Combine into…</option>
+              {otherCollections.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          )}
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
@@ -11752,7 +11923,26 @@ function CollectionSpreadsheetPage({
             </colgroup>
             <thead>
               <tr style={s.headerRow}>
-                <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
+                <th style={{ ...s.th, ...s.rowNumberHeader }}>
+                  {(() => {
+                    const visibleIdxs = rows.map((_, i) => i).filter((i) => rowMatchesFilters(rows[i]));
+                    const allSelected = visibleIdxs.length > 0 && visibleIdxs.every((i) => selectedRowIdxs.has(i));
+                    return (
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        onChange={() => setSelectedRowIdxs((cur) => {
+                          const next = new Set(cur);
+                          if (allSelected) visibleIdxs.forEach((i) => next.delete(i));
+                          else visibleIdxs.forEach((i) => next.add(i));
+                          return next;
+                        })}
+                        style={{ width: 15, height: 15, cursor: "pointer", verticalAlign: "middle" }}
+                        title="Select all rows"
+                      />
+                    );
+                  })()}
+                </th>
                 {frozenCols.map((col, i) => (
                   <Th
                     key={col.id}
@@ -11783,8 +11973,7 @@ function CollectionSpreadsheetPage({
                 // Keep each row's true index so edit/drag handlers still
                 // target the right entry in the unfiltered rows array.
                 .map((row, rIdx) => ({ row, rIdx }))
-                .filter(({ row }) => (!statusFilter || (row.status ?? "") === statusFilter)
-                  && (!sampleFilter || (row.sample ?? "") === sampleFilter))
+                .filter(({ row }) => rowMatchesFilters(row))
                 .map(({ row, rIdx }) => {
                 const linkedProductId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
                 const linked = Boolean(linkedProductId);
@@ -11843,6 +12032,12 @@ function CollectionSpreadsheetPage({
                   >
                     <RowNumberCell
                       rowNumber={rIdx + 1}
+                      selected={selectedRowIdxs.has(rIdx)}
+                      onToggleSelect={() => setSelectedRowIdxs((cur) => {
+                        const next = new Set(cur);
+                        if (next.has(rIdx)) next.delete(rIdx); else next.add(rIdx);
+                        return next;
+                      })}
                       actions={[
                         { label: "Delete row", danger: true, onClick: () => removeRow(rIdx) },
                       ]}
