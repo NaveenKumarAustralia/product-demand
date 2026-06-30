@@ -10927,21 +10927,54 @@ function CollectionsPhotoShootToggle({ active }: { active: "collections" | "phot
     next.delete("shootId");
     setParams(next);
   };
-  const tab = (key: "collections" | "photoshoot", label: string) => (
+  const btn = (key: "collections" | "photoshoot", label: string) => (
     <button
       type="button"
       onClick={() => go(key)}
       style={{
-        padding: "7px 18px", fontSize: 13, fontWeight: 700, border: "none", cursor: "pointer",
-        background: active === key ? "#0d9488" : "transparent",
+        padding: "8px 20px", fontSize: 13, fontWeight: 700, borderRadius: 8, cursor: "pointer",
+        border: active === key ? "1px solid #0d9488" : "1px solid #cbd5e1",
+        background: active === key ? "#0d9488" : "#fff",
         color: active === key ? "#fff" : "#475569",
+        boxShadow: active === key ? "0 1px 3px rgba(13,148,136,0.3)" : "none",
       }}
     >{label}</button>
   );
   return (
-    <div style={{ display: "inline-flex", border: "1px solid #cbd5e1", borderRadius: 8, overflow: "hidden", background: "#fff", flexShrink: 0 }}>
-      {tab("collections", "Collections")}
-      {tab("photoshoot", "Photo Shoot")}
+    <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+      {btn("collections", "Collections")}
+      {btn("photoshoot", "Photo Shoot")}
+    </div>
+  );
+}
+
+// One tile in the Photo Shoots grid (mirrors the Collections tiles).
+function PhotoShootTile({ shoot, onOpen, onRename, onDelete }: { shoot: PhotoShootListItem; onOpen: () => void; onRename: () => void; onDelete: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      onClick={onOpen}
+      onDoubleClick={onRename}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title="Click to open · double-click to rename"
+      style={{
+        position: "relative", border: "1px solid #e2e8f0", borderRadius: 12, background: "#fff",
+        padding: 16, cursor: "pointer", minHeight: 110, display: "flex", flexDirection: "column",
+        justifyContent: "space-between", gap: 8,
+        boxShadow: hover ? "0 4px 12px rgba(15,23,42,0.12)" : "0 1px 3px rgba(15,23,42,0.06)",
+      }}
+    >
+      {hover && (
+        <button
+          type="button"
+          title="Delete shoot"
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          style={{ position: "absolute", top: 8, right: 8, width: 24, height: 24, borderRadius: "50%", border: "none", background: "#ef4444", color: "#fff", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: 0 }}
+        >×</button>
+      )}
+      <div style={{ fontSize: 15, fontWeight: 800, color: "#0f172a", wordBreak: "break-word" }}>{shoot.name}</div>
+      <div style={{ fontSize: 12, color: "#64748b" }}>{shoot.rowCount} product{shoot.rowCount !== 1 ? "s" : ""}</div>
     </div>
   );
 }
@@ -10986,34 +11019,39 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   };
 
   const shootIdParam = Number(params.get("shootId")) || null;
-  const activeShootId = shootIdParam && shoots.some((s) => s.id === shootIdParam) ? shootIdParam : shoots[0]?.id ?? null;
-  const activeShoot = shoots.find((s) => s.id === activeShootId) ?? null;
+  const selectedShootId = shootIdParam && shoots.some((sh) => sh.id === shootIdParam) ? shootIdParam : null;
+  const selectedShoot = shoots.find((sh) => sh.id === selectedShootId) ?? null;
 
   const [rows, setRows] = useState<Record<string, string>[]>([]);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
-    if (!activeShootId) { setRows([]); setLoaded(true); return; }
+    if (!selectedShootId) { setRows([]); setLoaded(true); return; }
     setLoaded(false);
-    loadFetcher.submit({ intent: "ps_get_shoot", shootId: String(activeShootId) }, { method: "post" });
+    loadFetcher.submit({ intent: "ps_get_shoot", shootId: String(selectedShootId) }, { method: "post" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeShootId]);
+  }, [selectedShootId]);
   useEffect(() => {
     const shoot = loadFetcher.data?.shoot;
-    if (shoot && shoot.id === activeShootId) {
+    if (shoot && shoot.id === selectedShootId) {
       setRows(normalizeCollectionRows(shoot.rows));
       setLoaded(true);
     }
-  }, [loadFetcher.data, activeShootId]);
+  }, [loadFetcher.data, selectedShootId]);
 
-  const selectShoot = (id: number) => {
+  const openShoot = (id: number) => {
     const next = new URLSearchParams(params);
     next.set("shootId", String(id));
     setParams(next);
   };
+  const closeShoot = () => {
+    const next = new URLSearchParams(params);
+    next.delete("shootId");
+    setParams(next);
+  };
   const saveRows = (next: Record<string, string>[]) => {
-    if (!activeShootId) return;
+    if (!selectedShootId) return;
     setRows(next);
-    fetcher.submit({ intent: "ps_update_shoot", shootId: String(activeShootId), rows: JSON.stringify(next) }, { method: "post" });
+    fetcher.submit({ intent: "ps_update_shoot", shootId: String(selectedShootId), rows: JSON.stringify(next) }, { method: "post" });
   };
   const updateCell = (rIdx: number, colId: string, value: string) => {
     saveRows(rows.map((r, i) => i === rIdx ? { ...r, [colId]: value } : r));
@@ -11026,126 +11064,117 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
     if (!name) return;
     addFetcher.submit({ intent: "ps_add_shoot", name }, { method: "post" });
   };
-  // Jump to a freshly created shoot once the server returns its id.
+  // Reflect a newly created shoot in the tile list (stay on the grid).
   useEffect(() => {
     const created = addFetcher.data?.shoot;
     if (created) {
-      setShoots((cur) => cur.some((s) => s.id === created.id) ? cur : [...cur, { id: created.id, name: created.name, sortOrder: cur.length, rowCount: 0 }]);
-      const next = new URLSearchParams(params);
-      next.set("shootId", String(created.id));
-      setParams(next);
+      setShoots((cur) => cur.some((sh) => sh.id === created.id) ? cur : [...cur, { id: created.id, name: created.name, sortOrder: cur.length, rowCount: 0 }]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addFetcher.data]);
   const renameShoot = (id: number) => {
-    const current = shoots.find((s) => s.id === id);
+    const current = shoots.find((sh) => sh.id === id);
     const name = window.prompt("Rename photo shoot:", current?.name ?? "")?.trim();
     if (!name) return;
-    setShoots((cur) => cur.map((s) => s.id === id ? { ...s, name } : s));
+    setShoots((cur) => cur.map((sh) => sh.id === id ? { ...sh, name } : sh));
     fetcher.submit({ intent: "ps_rename_shoot", shootId: String(id), name }, { method: "post" });
   };
   const deleteShoot = (id: number) => {
-    const current = shoots.find((s) => s.id === id);
+    const current = shoots.find((sh) => sh.id === id);
     if (!window.confirm(`Delete photo shoot "${current?.name ?? ""}"? This can't be undone.`)) return;
-    setShoots((cur) => cur.filter((s) => s.id !== id));
-    if (activeShootId === id) {
-      const next = new URLSearchParams(params);
-      next.delete("shootId");
-      setParams(next);
-    }
+    setShoots((cur) => cur.filter((sh) => sh.id !== id));
+    if (selectedShootId === id) closeShoot();
     fetcher.submit({ intent: "ps_delete_shoot", shootId: String(id) }, { method: "post" });
   };
 
-  return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
-      {/* Tab strip */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", flexShrink: 0 }}>
-        {shoots.map((s) => (
-          <div
-            key={s.id}
-            onClick={() => selectShoot(s.id)}
-            onDoubleClick={() => renameShoot(s.id)}
-            title="Click to open · double-click to rename"
-            style={{
-              display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 8, cursor: "pointer",
-              fontSize: 13, fontWeight: 700,
-              background: s.id === activeShootId ? "#0f766e" : "#e2e8f0",
-              color: s.id === activeShootId ? "#fff" : "#334155",
-            }}
-          >
-            <span>{s.name}</span>
-            {s.id === activeShootId && (
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); deleteShoot(s.id); }}
-                title="Delete shoot"
-                style={{ border: "none", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: 0 }}
-              >×</button>
-            )}
-          </div>
-        ))}
-        <button
-          type="button"
-          onClick={addShoot}
-          style={{ padding: "6px 12px", borderRadius: 8, border: "1px dashed #94a3b8", background: "#fff", color: "#475569", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
-        >+ New shoot</button>
-      </div>
-
-      {/* Active shoot table */}
-      {!activeShootId ? (
-        <div style={{ padding: 48, textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-          No photo shoots yet. Click “+ New shoot”, or send products from a collection.
-        </div>
-      ) : !loaded ? (
-        <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
-      ) : (
-        <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0 }}>
-          <table style={{ ...s.table, width: 48 + PHOTOSHOOT_COLUMNS.reduce((sum, c) => sum + widthFor(c.id), 0), minWidth: 1100 }}>
-            <colgroup>
-              <col style={{ width: 48 }} />
-              {PHOTOSHOOT_COLUMNS.map((c) => <col key={c.id} style={{ width: widthFor(c.id) }} />)}
-            </colgroup>
-            <thead>
-              <tr style={s.headerRow}>
-                <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
-                {PHOTOSHOOT_COLUMNS.map((c) => (
-                  <Th key={c.id} columnId={c.id} onResizeStart={(e) => startResize(c.id, e)} wrap>{c.label}</Th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, rIdx) => (
-                <tr key={row.__rowKey ?? rIdx} style={s.row}>
-                  <RowNumberCell rowNumber={rIdx + 1} actions={[{ label: "Delete row", danger: true, onClick: () => removeRow(rIdx) }]} />
-                  {PHOTOSHOOT_COLUMNS.map((c) => (
-                    <td key={c.id} style={s.td}>
-                      {c.type === "image-multi" ? (
-                        <CollectionMultiImageCell value={row[c.id] ?? ""} onCommit={(v) => updateCell(rIdx, c.id, v)} productInfo={productInfo} />
-                      ) : c.type === "image" ? (
-                        <CollectionImageCell value={row[c.id] ?? ""} onCommit={(v) => updateCell(rIdx, c.id, v)} />
-                      ) : c.type === "tickbox" ? (
-                        <label style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 8, cursor: "pointer", width: "100%" }}>
-                          <input type="checkbox" checked={row[c.id] === "1"} onChange={(e) => updateCell(rIdx, c.id, e.target.checked ? "1" : "")} style={{ width: 18, height: 18, cursor: "pointer" }} />
-                        </label>
-                      ) : (
-                        <input
-                          value={row[c.id] ?? ""}
-                          onChange={(e) => setRows((cur) => cur.map((r, i) => i === rIdx ? { ...r, [c.id]: e.target.value } : r))}
-                          onBlur={(e) => updateCell(rIdx, c.id, e.target.value)}
-                          style={{ width: "100%", border: "none", background: "transparent", fontSize: 13, padding: "6px 8px", outline: "none", boxSizing: "border-box" }}
-                        />
-                      )}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+  // ── A shoot is open → spreadsheet view ──
+  if (selectedShoot) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
           <button
             type="button"
-            onClick={addRow}
-            style={{ margin: "10px 0 0 4px", background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-          >+ Add row</button>
+            onClick={closeShoot}
+            style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+          >← Photo Shoots</button>
+          <h2 style={{ ...s.productInfoHeading, margin: 0, cursor: "pointer" }} onClick={() => renameShoot(selectedShoot.id)} title="Click to rename">{selectedShoot.name}</h2>
+        </div>
+        {!loaded ? (
+          <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
+        ) : (
+          <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0 }}>
+            <table style={{ ...s.table, width: 48 + PHOTOSHOOT_COLUMNS.reduce((sum, c) => sum + widthFor(c.id), 0), minWidth: 1100 }}>
+              <colgroup>
+                <col style={{ width: 48 }} />
+                {PHOTOSHOOT_COLUMNS.map((c) => <col key={c.id} style={{ width: widthFor(c.id) }} />)}
+              </colgroup>
+              <thead>
+                <tr style={s.headerRow}>
+                  <th style={{ ...s.th, ...s.rowNumberHeader }}>#</th>
+                  {PHOTOSHOOT_COLUMNS.map((c) => (
+                    <Th key={c.id} columnId={c.id} onResizeStart={(e) => startResize(c.id, e)} wrap>{c.label}</Th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, rIdx) => (
+                  <tr key={row.__rowKey ?? rIdx} style={s.row}>
+                    <RowNumberCell rowNumber={rIdx + 1} actions={[{ label: "Delete row", danger: true, onClick: () => removeRow(rIdx) }]} />
+                    {PHOTOSHOOT_COLUMNS.map((c) => (
+                      <td key={c.id} style={s.td}>
+                        {c.type === "image-multi" ? (
+                          <CollectionMultiImageCell value={row[c.id] ?? ""} onCommit={(v) => updateCell(rIdx, c.id, v)} productInfo={productInfo} />
+                        ) : c.type === "image" ? (
+                          <CollectionImageCell value={row[c.id] ?? ""} onCommit={(v) => updateCell(rIdx, c.id, v)} />
+                        ) : c.type === "tickbox" ? (
+                          <label style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: 8, cursor: "pointer", width: "100%" }}>
+                            <input type="checkbox" checked={row[c.id] === "1"} onChange={(e) => updateCell(rIdx, c.id, e.target.checked ? "1" : "")} style={{ width: 18, height: 18, cursor: "pointer" }} />
+                          </label>
+                        ) : (
+                          <input
+                            value={row[c.id] ?? ""}
+                            onChange={(e) => setRows((cur) => cur.map((r, i) => i === rIdx ? { ...r, [c.id]: e.target.value } : r))}
+                            onBlur={(e) => updateCell(rIdx, c.id, e.target.value)}
+                            style={{ width: "100%", border: "none", background: "transparent", fontSize: 13, padding: "6px 8px", outline: "none", boxSizing: "border-box" }}
+                          />
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <button
+              type="button"
+              onClick={addRow}
+              style={{ margin: "10px 0 0 4px", background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+            >+ Add row</button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── No shoot open → tiles grid (same layout as Collections) ──
+  return (
+    <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
+      {shoots.map((sh) => (
+        <PhotoShootTile
+          key={sh.id}
+          shoot={sh}
+          onOpen={() => openShoot(sh.id)}
+          onRename={() => renameShoot(sh.id)}
+          onDelete={() => deleteShoot(sh.id)}
+        />
+      ))}
+      <button
+        type="button"
+        onClick={addShoot}
+        style={{ border: "1px dashed #94a3b8", borderRadius: 12, background: "#fff", color: "#475569", fontSize: 14, fontWeight: 700, cursor: "pointer", minHeight: 110, display: "flex", alignItems: "center", justifyContent: "center" }}
+      >+ New shoot</button>
+      {shoots.length === 0 && (
+        <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+          No photo shoots yet. Click “+ New shoot”, or send products from a collection.
         </div>
       )}
     </div>
