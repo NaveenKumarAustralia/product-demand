@@ -308,13 +308,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // shoot's full rows are fetched on demand via ps_get_shoot. Loaded for
   // both pages so the collection "Send to photo shoot" picker has the list.
   const photoShoots = (page === "photoshoot" || page === "collections")
-    ? await prisma.$queryRawUnsafe<Array<{ id: number; name: string; sortOrder: number; rowCount: number }>>(`
+    ? await prisma.$queryRawUnsafe<Array<{ id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date; updatedAt: Date }>>(`
         SELECT id, name, "sortOrder",
-          CASE WHEN jsonb_typeof(rows) = 'array' THEN jsonb_array_length(rows) ELSE 0 END AS "rowCount"
+          CASE WHEN jsonb_typeof(rows) = 'array' THEN jsonb_array_length(rows) ELSE 0 END AS "rowCount",
+          (thumbnail IS NOT NULL) AS "hasThumbnail",
+          "createdAt", "updatedAt"
         FROM "PhotoShoot"
         ORDER BY "sortOrder" ASC, "createdAt" ASC
-      `).then((rows) => rows.map((r) => ({ id: r.id, name: r.name, sortOrder: r.sortOrder, rowCount: Number(r.rowCount) })))
-        .catch(() => [] as Array<{ id: number; name: string; sortOrder: number; rowCount: number }>)
+      `).then((rows) => rows.map((r) => ({ id: r.id, name: r.name, sortOrder: r.sortOrder, rowCount: Number(r.rowCount), hasThumbnail: Boolean(r.hasThumbnail), createdAt: r.createdAt, updatedAt: r.updatedAt })))
+        .catch(() => [] as Array<{ id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date; updatedAt: Date }>)
     : [];
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = needsActivityLogs
@@ -2855,6 +2857,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (form.has("name")) {
       const name = String(form.get("name") ?? "").trim();
       if (name) data.name = name;
+    }
+    if (form.has("thumbnail")) {
+      const thumb = String(form.get("thumbnail") ?? "");
+      data.thumbnail = thumb || null;
     }
     await prisma.photoShoot.update({ where: { id }, data });
     return null;
@@ -10912,7 +10918,7 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
   });
 }
 
-type PhotoShootListItem = { id: number; name: string; sortOrder: number; rowCount: number };
+type PhotoShootListItem = { id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date | string; updatedAt: Date | string };
 type PhotoShootFullType = { id: number; name: string; rows: unknown };
 
 // Segmented toggle at the top of the Collections / Photo Shoot section.
@@ -10944,37 +10950,6 @@ function CollectionsPhotoShootToggle({ active }: { active: "collections" | "phot
     <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
       {btn("collections", "Collections")}
       {btn("photoshoot", "Photo Shoot")}
-    </div>
-  );
-}
-
-// One tile in the Photo Shoots grid (mirrors the Collections tiles).
-function PhotoShootTile({ shoot, onOpen, onRename, onDelete }: { shoot: PhotoShootListItem; onOpen: () => void; onRename: () => void; onDelete: () => void }) {
-  const [hover, setHover] = useState(false);
-  return (
-    <div
-      onClick={onOpen}
-      onDoubleClick={onRename}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title="Click to open · double-click to rename"
-      style={{
-        position: "relative", border: "1px solid #e2e8f0", borderRadius: 12, background: "#fff",
-        padding: 16, cursor: "pointer", minHeight: 110, display: "flex", flexDirection: "column",
-        justifyContent: "space-between", gap: 8,
-        boxShadow: hover ? "0 4px 12px rgba(15,23,42,0.12)" : "0 1px 3px rgba(15,23,42,0.06)",
-      }}
-    >
-      {hover && (
-        <button
-          type="button"
-          title="Delete shoot"
-          onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          style={{ position: "absolute", top: 8, right: 8, width: 24, height: 24, borderRadius: "50%", border: "none", background: "#ef4444", color: "#fff", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: 0 }}
-        >×</button>
-      )}
-      <div style={{ fontSize: 15, fontWeight: 800, color: "#0f172a", wordBreak: "break-word" }}>{shoot.name}</div>
-      <div style={{ fontSize: 12, color: "#64748b" }}>{shoot.rowCount} product{shoot.rowCount !== 1 ? "s" : ""}</div>
     </div>
   );
 }
@@ -11068,16 +11043,20 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   useEffect(() => {
     const created = addFetcher.data?.shoot;
     if (created) {
-      setShoots((cur) => cur.some((sh) => sh.id === created.id) ? cur : [...cur, { id: created.id, name: created.name, sortOrder: cur.length, rowCount: 0 }]);
+      setShoots((cur) => cur.some((sh) => sh.id === created.id) ? cur : [...cur, { id: created.id, name: created.name, sortOrder: cur.length, rowCount: 0, hasThumbnail: false, createdAt: new Date(), updatedAt: new Date() }]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [addFetcher.data]);
+  const renameShootTo = (id: number, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setShoots((cur) => cur.map((sh) => sh.id === id ? { ...sh, name: trimmed } : sh));
+    fetcher.submit({ intent: "ps_rename_shoot", shootId: String(id), name: trimmed }, { method: "post" });
+  };
   const renameShoot = (id: number) => {
     const current = shoots.find((sh) => sh.id === id);
     const name = window.prompt("Rename photo shoot:", current?.name ?? "")?.trim();
-    if (!name) return;
-    setShoots((cur) => cur.map((sh) => sh.id === id ? { ...sh, name } : sh));
-    fetcher.submit({ intent: "ps_rename_shoot", shootId: String(id), name }, { method: "post" });
+    if (name) renameShootTo(id, name);
   };
   const deleteShoot = (id: number) => {
     const current = shoots.find((sh) => sh.id === id);
@@ -11085,6 +11064,31 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
     setShoots((cur) => cur.filter((sh) => sh.id !== id));
     if (selectedShootId === id) closeShoot();
     fetcher.submit({ intent: "ps_delete_shoot", shootId: String(id) }, { method: "post" });
+  };
+  const setCover = async (id: number, file: File) => {
+    try {
+      const dataUrl = await compressImageToDataUrl(file);
+      const thumb = await generateThumbnail(dataUrl);
+      setShoots((cur) => cur.map((sh) => sh.id === id ? { ...sh, hasThumbnail: true, updatedAt: new Date() } : sh));
+      fetcher.submit({ intent: "ps_update_shoot", shootId: String(id), thumbnail: thumb || dataUrl }, { method: "post" });
+    } catch (e) {
+      console.warn("[ps cover] upload failed:", e);
+      window.alert("Couldn't upload that image. Try a different file.");
+    }
+  };
+  // Drag-to-reorder tiles (same as Collections).
+  const [dragId, setDragId] = useState<number | null>(null);
+  const [dragOverId, setDragOverId] = useState<number | null>(null);
+  const reorder = (targetId: number) => {
+    if (!dragId || dragId === targetId) return;
+    const fromIdx = shoots.findIndex((sh) => sh.id === dragId);
+    const toIdx = shoots.findIndex((sh) => sh.id === targetId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const next = shoots.slice();
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    setShoots(next);
+    fetcher.submit({ intent: "ps_reorder_shoots", shootIds: JSON.stringify(next.map((sh) => sh.id)) }, { method: "post" });
   };
 
   // ── A shoot is open → spreadsheet view ──
@@ -11155,28 +11159,49 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
     );
   }
 
-  // ── No shoot open → tiles grid (same layout as Collections) ──
+  // ── No shoot open → tiles grid (same layout/cards as Collections) ──
   return (
-    <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
-      {shoots.map((sh) => (
-        <PhotoShootTile
-          key={sh.id}
-          shoot={sh}
-          onOpen={() => openShoot(sh.id)}
-          onRename={() => renameShoot(sh.id)}
-          onDelete={() => deleteShoot(sh.id)}
-        />
-      ))}
-      <button
-        type="button"
-        onClick={addShoot}
-        style={{ border: "1px dashed #94a3b8", borderRadius: 12, background: "#fff", color: "#475569", fontSize: 14, fontWeight: 700, cursor: "pointer", minHeight: 110, display: "flex", alignItems: "center", justifyContent: "center" }}
-      >+ New shoot</button>
-      {shoots.length === 0 && (
-        <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-          No photo shoots yet. Click “+ New shoot”, or send products from a collection.
+    <div style={s.productInfoPage}>
+      <div style={s.productInfoToolbar}>
+        <div style={s.productInfoToolbarLeft}>
+          <div>
+            <h2 style={s.productInfoHeading}>Photo Shoots</h2>
+            <div style={s.productInfoMeta}>{shoots.length} shoot{shoots.length !== 1 ? "s" : ""}</div>
+          </div>
         </div>
-      )}
+        <div style={s.productInfoActions}>
+          <button type="button" style={s.primaryActionButton} onClick={addShoot}>
+            Add Photo Shoot
+          </button>
+        </div>
+      </div>
+      <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
+        {shoots.map((sh) => (
+          <CollectionCard
+            key={sh.id}
+            collection={sh}
+            thumbnailEntity="photoshoot"
+            noun="photo shoot"
+            countNoun="product"
+            isDragging={dragId === sh.id}
+            isDragOver={dragOverId === sh.id && dragId !== sh.id}
+            onOpen={() => openShoot(sh.id)}
+            onRename={(name) => renameShootTo(sh.id, name)}
+            onDelete={() => deleteShoot(sh.id)}
+            onSetCover={(file) => setCover(sh.id, file)}
+            onDragStart={(e) => { setDragId(sh.id); e.dataTransfer.effectAllowed = "move"; }}
+            onDragOver={(e) => { if (!dragId) return; e.preventDefault(); setDragOverId(sh.id); }}
+            onDragLeave={() => setDragOverId((cur) => cur === sh.id ? null : cur)}
+            onDrop={(e) => { e.preventDefault(); reorder(sh.id); setDragId(null); setDragOverId(null); }}
+            onDragEnd={() => { setDragId(null); setDragOverId(null); }}
+          />
+        ))}
+        {shoots.length === 0 && (
+          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+            No photo shoots yet. Click “Add Photo Shoot”, or send products from a collection.
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -11562,6 +11587,9 @@ function CollectionCard({
   onDragLeave,
   onDrop,
   onDragEnd,
+  thumbnailEntity = "collection",
+  noun = "collection",
+  countNoun = "row",
 }: {
   collection: CollectionListItem;
   isDragging: boolean;
@@ -11575,6 +11603,11 @@ function CollectionCard({
   onDragLeave: () => void;
   onDrop: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
+  // Reused for both Collections and Photo Shoots — these tune the
+  // thumbnail route entity and the wording so both look identical.
+  thumbnailEntity?: string;
+  noun?: string;
+  countNoun?: string;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [hover, setHover] = useState(false);
@@ -11604,14 +11637,14 @@ function CollectionCard({
       {(hover || confirmDelete) && (
         <button
           type="button"
-          title="Delete collection"
+          title={`Delete ${noun}`}
           onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
           style={{ position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: "50%", border: "none", background: "#ef4444", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, lineHeight: 1, padding: 0, zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" }}
         >×</button>
       )}
       {confirmDelete && (
         <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 8 }} onClick={(e) => e.stopPropagation()}>
-          <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>Delete this collection?</div>
+          <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>Delete this {noun}?</div>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Delete</button>
             <button type="button" onClick={(e) => { e.stopPropagation(); setConfirmDelete(false); }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}>Cancel</button>
@@ -11621,7 +11654,7 @@ function CollectionCard({
       <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative" }}>
         {collection.hasThumbnail ? (
           <img
-            src={`/portal/thumbnail/collection/${collection.id}?v=${new Date(collection.updatedAt).getTime()}`}
+            src={`/portal/thumbnail/${thumbnailEntity}/${collection.id}?v=${new Date(collection.updatedAt).getTime()}`}
             alt={collection.name}
             style={s.productStyleImage}
             loading="lazy"
@@ -11642,7 +11675,7 @@ function CollectionCard({
               cursor: "pointer", zIndex: 3,
               boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
             }}
-            title="Pick a cover image for this collection"
+            title={`Pick a cover image for this ${noun}`}
           >
             {collection.hasThumbnail ? "Change cover" : "+ Cover image"}
           </button>
@@ -11679,7 +11712,7 @@ function CollectionCard({
           >{collection.name || "Untitled"}</span>
         )}
         <span style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
-          {collection.rowCount} row{collection.rowCount !== 1 ? "s" : ""}
+          {collection.rowCount} {countNoun}{collection.rowCount !== 1 ? "s" : ""}
         </span>
       </div>
     </div>

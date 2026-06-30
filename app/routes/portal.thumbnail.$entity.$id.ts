@@ -11,7 +11,7 @@ import prisma from "../db.server";
 export async function loader({ params }: LoaderFunctionArgs) {
   const entity = params.entity;
   const id = Number(params.id);
-  if (!id || (entity !== "vision" && entity !== "visionV2" && entity !== "sample" && entity !== "collection")) {
+  if (!id || (entity !== "vision" && entity !== "visionV2" && entity !== "sample" && entity !== "collection" && entity !== "photoshoot")) {
     return new Response("Not found", { status: 404 });
   }
 
@@ -53,6 +53,12 @@ export async function loader({ params }: LoaderFunctionArgs) {
           if (typeof first === "string") dataUrl = first;
         }
       }
+    } else if (entity === "photoshoot") {
+      const ps = await prisma.photoShoot.findUnique({
+        where: { id },
+        select: { thumbnail: true },
+      });
+      if (ps?.thumbnail) dataUrl = ps.thumbnail;
     } else {
       // collection
       const c = await prisma.collection.findUnique({
