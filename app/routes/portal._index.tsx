@@ -3628,6 +3628,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "set_fabric_type") {
+    // Assign a fabric type to a row whose source sheet has no Fabric Type
+    // column yet — creates the column (padding every row) then writes the
+    // value. Lets the combined view show a chip selector on rows that
+    // previously had none.
+    const gid = String(form.get("gid") ?? "");
+    const rowIndex = Number(form.get("rowIndex"));
+    const value = String(form.get("value") ?? "");
+    if (!gid || !Number.isInteger(rowIndex) || rowIndex < 0) return null;
+    const sheets = await loadManualFabricSheetsForAction();
+    const sheet = sheets.find((item) => item.gid === gid);
+    if (!sheet?.rows[rowIndex]) return null;
+    let idx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h.trim()) || /^type$/i.test(h.trim()));
+    if (idx < 0) {
+      if (!value) return null; // nothing to store, don't add an empty column
+      sheet.headers.push("Fabric Type");
+      idx = sheet.headers.length - 1;
+      for (const r of sheet.rows) { while (r.length <= idx) r.push(""); }
+    }
+    while (sheet.rows[rowIndex].length <= idx) sheet.rows[rowIndex].push("");
+    sheet.rows[rowIndex][idx] = value;
+    await saveManualFabricSheets(sheets);
+    return null;
+  }
+
   if (intent === "upload_fabric_image") {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
@@ -15184,6 +15209,16 @@ function CombinedFabricRow({
                 fabricSettings={fabricSettings}
                 productInfo={productInfo}
                 users={users}
+              />
+            ) : column.key === "fabricType" ? (
+              // Source sheet has no Fabric Type column — still offer the chip
+              // picker. Selecting one creates the column on that sheet.
+              <FabricChipDropdown
+                value=""
+                options={fabricSettings.fabricTypeOptions}
+                chipKind="fabricTypeOptions"
+                fabricSettings={fabricSettings}
+                onChange={(v) => submitPortalCell(fetcher, { intent: "set_fabric_type", gid: primaryGid, rowIndex: primaryRowIndex, value: v })}
               />
             ) : null}
           </FabricTd>
