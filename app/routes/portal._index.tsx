@@ -15993,6 +15993,25 @@ function FabricChipDropdown({
     stopEdit();
   };
 
+  // Remove a chip from the catalog only. Deletes from the stored settings
+  // list (not the draft-augmented `options`) so it persists. Row/cell
+  // values are left untouched — a cell still holding the old label just
+  // shows it as plain text.
+  const deleteChipOption = (item: RestockOption) => {
+    if (!window.confirm(`Delete the "${item.label}" chip?`)) return;
+    const baseOptions = chipKind === "supplierOptions" ? fabricSettings.supplierOptions : fabricSettings.fabricTypeOptions;
+    const nextOptions = baseOptions.filter((o) => o.value !== item.value && o.label !== item.label);
+    submitPortalCell(
+      settingsFetcher,
+      {
+        intent: "update_fabric_settings",
+        value: JSON.stringify({ ...fabricSettings, [chipKind]: nextOptions }),
+      },
+      { label: "Undo delete chip", fields: { intent: "update_fabric_settings", value: JSON.stringify(fabricSettings) } },
+    );
+    if (editingChip?.value === item.value) stopEdit();
+  };
+
   const dropdown = open && rect && typeof document !== "undefined" ? createPortal(
     <div
       data-fabric-chip-menu="true"
@@ -16034,6 +16053,14 @@ function FabricChipDropdown({
             >
               <span style={s.fabricChipCheck}>{selected ? "✓" : ""}</span>
               <span style={{ ...s.fabricChipMenuPill, background: item.bg, color: item.color }}>{item.label}</span>
+            </button>
+            <button
+              type="button"
+              title={`Delete "${item.label}" chip`}
+              style={{ ...s.fabricChipEditButton, color: "#dc2626", fontWeight: 700 }}
+              onClick={(e) => { e.stopPropagation(); deleteChipOption(item); }}
+            >
+              ✕
             </button>
           </div>
         );
