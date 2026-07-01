@@ -14868,6 +14868,7 @@ function CombinedFabricStockPanel({
 }) {
   const fetcher = useFetcher();
   const [fabricTypeFilter, setFabricTypeFilter] = useState("");
+  const [supplierFilter, setSupplierFilter] = useState("");
   const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
   useEffect(() => setPendingDeletes(new Set()), [sheets]);
 
@@ -14906,13 +14907,26 @@ function CombinedFabricStockPanel({
     return [...labels].sort((a, b) => a.localeCompare(b));
   }, [allRows, fabricSettings.fabricTypeOptions]);
 
+  const supplierChoices = useMemo(() => {
+    const labels = new Set<string>();
+    for (const entry of allRows) {
+      const raw = (entry.cells.supplier?.value ?? "").trim();
+      if (raw) labels.add(raw);
+    }
+    return [...labels].sort((a, b) => a.localeCompare(b));
+  }, [allRows]);
+
   const filteredRows = useMemo(() => {
     const search = nameSearch.trim().toLowerCase();
     const typeFilter = canonicalizeFabricType(fabricTypeFilter).toLowerCase();
+    const supplier = supplierFilter.trim().toLowerCase();
     return allRows.filter((entry) => {
       if (typeFilter) {
         const raw = entry.cells.fabricType ? entry.cells.fabricType.value.trim() : entry.primarySheet.name.trim();
         if (canonicalizeFabricType(raw).toLowerCase() !== typeFilter) return false;
+      }
+      if (supplier) {
+        if ((entry.cells.supplier?.value ?? "").trim().toLowerCase() !== supplier) return false;
       }
       if (search) {
         const name = (entry.cells.name?.value ?? "").toLowerCase();
@@ -14920,7 +14934,7 @@ function CombinedFabricStockPanel({
       }
       return true;
     });
-  }, [allRows, nameSearch, fabricTypeFilter]);
+  }, [allRows, nameSearch, fabricTypeFilter, supplierFilter]);
 
   const orderedColumns = useMemo(() => {
     const map = new Map(UNIFIED_FABRIC_COLUMNS.map((column) => [column.key, column]));
@@ -15025,8 +15039,21 @@ function CombinedFabricStockPanel({
               ))}
             </select>
           </label>
-          {fabricTypeFilter && (
-            <button type="button" style={s.secondaryButton} onClick={() => setFabricTypeFilter("")}>
+          <label style={s.filterLabel}>
+            Supplier
+            <select
+              value={supplierFilter}
+              onChange={(event) => setSupplierFilter(event.currentTarget.value)}
+              style={s.productTypeFilter}
+            >
+              <option value="">All suppliers</option>
+              {supplierChoices.map((supplier) => (
+                <option key={supplier} value={supplier}>{supplier}</option>
+              ))}
+            </select>
+          </label>
+          {(fabricTypeFilter || supplierFilter) && (
+            <button type="button" style={s.secondaryButton} onClick={() => { setFabricTypeFilter(""); setSupplierFilter(""); }}>
               Clear filter
             </button>
           )}
