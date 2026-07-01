@@ -2137,6 +2137,46 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "delete_fabric_chip") {
+    // Remove a chip from the catalog. For fabric-type chips we also blank
+    // that value from every row cell that used it — this keeps the rows
+    // (just without a chip, ready to re-assign) AND stops the chip from
+    // auto-regenerating from those row values on the next load.
+    const chipKind = String(form.get("chipKind") ?? "");
+    const label = String(form.get("label") ?? "").trim();
+    if ((chipKind !== "supplierOptions" && chipKind !== "fabricTypeOptions") || !label) return null;
+
+    const setting = await prisma.portalSetting.findUnique({ where: { key: FABRIC_SETTINGS_KEY }, select: { value: true } });
+    const settings = normalizeFabricSettings(setting?.value);
+    const targetCanonical = chipKind === "fabricTypeOptions" ? canonicalizeFabricType(label) : label;
+    const nextOptions = settings[chipKind].filter((o) =>
+      chipKind === "fabricTypeOptions"
+        ? canonicalizeFabricType(o.label) !== targetCanonical
+        : (o.label !== label && o.value !== slugForOption(label)),
+    );
+    const nextSettings = { ...settings, [chipKind]: nextOptions };
+    await prisma.portalSetting.upsert({
+      where: { key: FABRIC_SETTINGS_KEY },
+      create: { key: FABRIC_SETTINGS_KEY, value: nextSettings },
+      update: { value: nextSettings },
+    });
+
+    if (chipKind === "fabricTypeOptions") {
+      const sheets = await loadManualFabricSheetsForAction();
+      let touched = false;
+      for (const sheet of sheets) {
+        const idx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h.trim()) || /^type$/i.test(h.trim()));
+        if (idx < 0) continue;
+        for (const row of sheet.rows) {
+          const cell = String(row[idx] ?? "").trim();
+          if (cell && canonicalizeFabricType(cell) === targetCanonical) { row[idx] = ""; touched = true; }
+        }
+      }
+      if (touched) await saveManualFabricSheets(sheets);
+    }
+    return null;
+  }
+
   if (intent === "update_nav_order") {
     try {
       const order = JSON.parse(String(form.get("value") ?? "[]"));
@@ -4925,16 +4965,15 @@ function ensureFabricTypeChipsForRows(options: RestockOption[], sheets: FabricSt
 }
 
 function canonicalizeFabricTypeOptions(options: RestockOption[]): RestockOption[] {
+  // Collapse alias labels to their canonical form and de-dup. We do NOT
+  // force-add the standard alias chips here — that would make them
+  // un-deletable. Chips are otherwise generated from actual row values by
+  // ensureFabricTypeChipsForRows, so a type still in use will still appear.
   const byLabel = new Map<string, RestockOption>();
   for (const option of options) {
     const canonicalLabel = canonicalizeFabricType(option.label);
     if (byLabel.has(canonicalLabel)) continue;
     byLabel.set(canonicalLabel, { ...option, label: canonicalLabel, value: slugForOption(canonicalLabel) });
-  }
-  for (const [index, alias] of FABRIC_TYPE_ALIASES.entries()) {
-    if (byLabel.has(alias.canonical)) continue;
-    const colors = FABRIC_CHIP_COLORS[(byLabel.size + index) % FABRIC_CHIP_COLORS.length];
-    byLabel.set(alias.canonical, { value: slugForOption(alias.canonical), label: alias.canonical, ...colors });
   }
   return [...byLabel.values()];
 }
@@ -15993,23 +16032,19 @@ function FabricChipDropdown({
     stopEdit();
   };
 
-  // Remove a chip from the catalog only. Deletes from the stored settings
-  // list (not the draft-augmented `options`) so it persists. Row/cell
-  // values are left untouched — a cell still holding the old label just
-  // shows it as plain text.
+  // Remove a chip from the catalog. Handled server-side (delete_fabric_chip):
+  // it drops the chip and, for fabric-type chips, blanks that value from any
+  // row cell that used it so the chip stays gone (rows keep their now-empty
+  // cell, ready to re-assign). Undoable back to the previous settings.
   const deleteChipOption = (item: RestockOption) => {
-    if (!window.confirm(`Delete the "${item.label}" chip?`)) return;
-    const baseOptions = chipKind === "supplierOptions" ? fabricSettings.supplierOptions : fabricSettings.fabricTypeOptions;
-    const nextOptions = baseOptions.filter((o) => o.value !== item.value && o.label !== item.label);
+    if (!window.confirm(`Delete the "${item.label}" chip?\n\nRows using it keep their row — the cell just goes blank so you can re-assign a chip later.`)) return;
     submitPortalCell(
       settingsFetcher,
-      {
-        intent: "update_fabric_settings",
-        value: JSON.stringify({ ...fabricSettings, [chipKind]: nextOptions }),
-      },
+      { intent: "delete_fabric_chip", chipKind, label: item.label },
       { label: "Undo delete chip", fields: { intent: "update_fabric_settings", value: JSON.stringify(fabricSettings) } },
     );
-    if (editingChip?.value === item.value) stopEdit();
+    stopEdit();
+    setOpen(false);
   };
 
   const dropdown = open && rect && typeof document !== "undefined" ? createPortal(
@@ -16054,14 +16089,6 @@ function FabricChipDropdown({
               <span style={s.fabricChipCheck}>{selected ? "✓" : ""}</span>
               <span style={{ ...s.fabricChipMenuPill, background: item.bg, color: item.color }}>{item.label}</span>
             </button>
-            <button
-              type="button"
-              title={`Delete "${item.label}" chip`}
-              style={{ ...s.fabricChipEditButton, color: "#dc2626", fontWeight: 700 }}
-              onClick={(e) => { e.stopPropagation(); deleteChipOption(item); }}
-            >
-              ✕
-            </button>
           </div>
         );
       })}
@@ -16084,6 +16111,13 @@ function FabricChipDropdown({
           </label>
           <div style={s.fabricChipEditActions}>
             <button type="button" style={s.fabricMiniButton} onClick={stopEdit}>Cancel</button>
+            {editingChip && !addingChip && (
+              <button
+                type="button"
+                style={{ ...s.fabricMiniButton, background: "#fef2f2", borderColor: "#fecaca", color: "#dc2626" }}
+                onClick={() => deleteChipOption(editingChip)}
+              >Delete chip</button>
+            )}
             <button type="button" style={s.fabricMiniButton} onClick={saveEdit}>Save</button>
           </div>
         </div>
