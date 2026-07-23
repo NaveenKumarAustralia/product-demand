@@ -1494,6 +1494,62 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  // ─── JJ Restock — backfill barcodes (and any missing SKUs) from Shopify
+  // for every ordered line. Lines placed before the order block started
+  // sending barcodes have none; this fills them in. Only ever fills blanks —
+  // an existing barcode is never overwritten.
+  if (intent === "jj_backfill_barcodes") {
+    if (!currentUser) return { jjError: "Not signed in" };
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return { jjError: "No Shopify session available" };
+
+    const orders = await prisma.supplierOrder.findMany({
+      where: { supplier: "JJ" },
+      select: { id: true, productId: true, lines: { select: { id: true, variantTitle: true, sku: true, barcode: true, qtyOrdered: true } } },
+    }).catch(() => [] as Array<{ id: number; productId: string; lines: Array<{ id: number; variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }> }>);
+
+    // Only lines that were actually ordered and are missing a barcode.
+    const targets = orders
+      .map((o) => ({ productId: o.productId, lines: o.lines.filter((l) => (l.qtyOrdered || 0) > 0 && !(l.barcode ?? "").trim()) }))
+      .filter((o) => o.productId && o.lines.length > 0);
+    if (targets.length === 0) return { jjBackfill: { scanned: 0, updated: 0, noMatch: 0 } };
+
+    // One Shopify call per distinct product, reused across its lines.
+    const codesByProduct = new Map<string, ShopifyVariantCode[]>();
+    let scanned = 0;
+    let updated = 0;
+    let noMatch = 0;
+    for (const target of targets) {
+      let codes = codesByProduct.get(target.productId);
+      if (!codes) {
+        codes = await getShopifyVariantCodes(session.shop, session.accessToken, target.productId).catch(() => [] as ShopifyVariantCode[]);
+        codesByProduct.set(target.productId, codes);
+      }
+      for (const line of target.lines) {
+        scanned++;
+        const wanted = normalizeVariantSizeLabel(line.variantTitle ?? "");
+        const match = codes.find((c) => normalizeVariantSizeLabel(c.title) === wanted);
+        const barcode = (match?.barcode ?? "").trim();
+        const sku = (match?.sku ?? "").trim();
+        if (!barcode && !sku) { noMatch++; continue; }
+        const data: Record<string, unknown> = {};
+        if (barcode) data.barcode = barcode;
+        if (!(line.sku ?? "").trim() && sku) data.sku = sku;
+        if (Object.keys(data).length === 0) { noMatch++; continue; }
+        try {
+          await prisma.orderLine.update({ where: { id: line.id }, data });
+          if (barcode) updated++;
+        } catch (e) {
+          console.warn("[jj_backfill_barcodes] line update failed:", e);
+        }
+      }
+    }
+    return { jjBackfill: { scanned, updated, noMatch } };
+  }
+
   // ─── JJ Restock — load one or more orders' arrived quantities straight
   // into Shopify inventory (no packing list), push the baht→AUD unit cost,
   // then close each loaded order so it drops off the page.
@@ -6806,6 +6862,30 @@ function extractShopifySizeLabel(
 function matchingVariantForSize(variants: ShopifyVariantInfo[], size: string) {
   const normalizedSize = normalizeVariantSizeLabel(size);
   return variants.find((variant) => normalizeVariantSizeLabel(variant.title) === normalizedSize) ?? null;
+}
+
+// Variant id/title/sku/barcode for one product — used by the barcode
+// backfill. Kept separate from getShopifyProductVariants so that query
+// (and its inventory sub-selections) stays untouched.
+type ShopifyVariantCode = { id: string; title: string; sku: string | null; barcode: string | null };
+async function getShopifyVariantCodes(shop: string, accessToken: string, productId: string): Promise<ShopifyVariantCode[]> {
+  const json = await shopifyGraphql<{
+    data?: { product?: { variants?: { nodes?: Array<{ id?: string; title?: string; sku?: string | null; barcode?: string | null }> } } };
+  }>(shop, accessToken, `
+    query VariantCodes($id: ID!) {
+      product(id: $id) {
+        variants(first: 100) { nodes { id title sku barcode } }
+      }
+    }
+  `, { id: productId });
+  return (json?.data?.product?.variants?.nodes ?? [])
+    .map((v) => ({
+      id: String(v.id ?? ""),
+      title: String(v.title ?? ""),
+      sku: v.sku ? String(v.sku) : null,
+      barcode: v.barcode ? String(v.barcode) : null,
+    }))
+    .filter((v) => v.id && v.title);
 }
 
 async function shopifyGraphql<T>(
@@ -21297,6 +21377,7 @@ function JJRestockPanel({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
   const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
+  const backfillFetcher = useFetcher<{ jjError?: string; jjBackfill?: { scanned: number; updated: number; noMatch: number } }>();
   const widthsFetcher = useFetcher();
   const loading = loadFetcher.state !== "idle";
 
@@ -21405,7 +21486,32 @@ function JJRestockPanel({
             {loading ? "Loading…" : `Load ${selectedCount || ""} selected to Shopify`.replace("  ", " ")}
           </button>
         )}
+        <button
+          type="button"
+          disabled={backfillFetcher.state !== "idle"}
+          onClick={() => {
+            if (backfillFetcher.state !== "idle") return;
+            if (!window.confirm("Backfill barcodes from Shopify?\n\nFor every JJ order line with a quantity ordered but no barcode, this pulls the barcode (and SKU if missing) from the matching Shopify variant. Existing barcodes are never overwritten.")) return;
+            backfillFetcher.submit({ intent: "jj_backfill_barcodes" }, { method: "post" });
+          }}
+          style={{
+            padding: "7px 14px", background: "#0d9488", color: "#fff", border: "none",
+            borderRadius: 6, fontSize: 13, fontWeight: 600,
+            cursor: backfillFetcher.state !== "idle" ? "wait" : "pointer",
+            ...(backfillFetcher.state !== "idle" ? { opacity: 0.6 } : {}),
+          }}
+          title="Pull missing barcodes from Shopify for ordered lines"
+        >
+          {backfillFetcher.state !== "idle" ? "Backfilling…" : "Backfill barcodes"}
+        </button>
         {loadFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{loadFetcher.data.jjError}</span>}
+        {backfillFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{backfillFetcher.data.jjError}</span>}
+        {backfillFetcher.data?.jjBackfill && (
+          <span style={{ fontSize: 13, color: "#065f46" }}>
+            Filled {backfillFetcher.data.jjBackfill.updated} barcode(s) across {backfillFetcher.data.jjBackfill.scanned} ordered line(s)
+            {backfillFetcher.data.jjBackfill.noMatch > 0 ? ` · ${backfillFetcher.data.jjBackfill.noMatch} had no match in Shopify` : ""}
+          </span>
+        )}
       </div>
       <div className="portal-table-scroll" style={s.tableWrap}>
         {/* Widths come from the resizable column model; everything up to Name
