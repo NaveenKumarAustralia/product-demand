@@ -22,6 +22,7 @@ type Variant = {
   id: string;
   title: string;
   sku: string;
+  barcode: string;
   qtyOrdered: number;
   costPrice: string;
 };
@@ -29,7 +30,7 @@ type Variant = {
 type ShopProduct = {
   id: string;
   title: string;
-  variants: Array<{ id: string; title: string; sku: string }>;
+  variants: Array<{ id: string; title: string; sku: string; barcode: string | null }>;
 };
 
 function ProductOrderAction() {
@@ -60,14 +61,14 @@ function ProductOrderAction() {
       try {
         const result = await query<{
           shop: { myshopifyDomain: string };
-          product: { id: string; title: string; variants: { nodes: Array<{ id: string; title: string; sku: string }> } };
+          product: { id: string; title: string; variants: { nodes: Array<{ id: string; title: string; sku: string; barcode: string | null }> } };
         }>(`{
           shop { myshopifyDomain }
           product(id: "${productGid}") {
             id
             title
             variants(first: 50) {
-              nodes { id title sku }
+              nodes { id title sku barcode }
             }
           }
         }`);
@@ -86,6 +87,7 @@ function ProductOrderAction() {
             id: v.id,
             title: v.title,
             sku: v.sku ?? "",
+            barcode: v.barcode ?? "",
             qtyOrdered: 0,
             costPrice: "",
           })),
@@ -146,6 +148,7 @@ function ProductOrderAction() {
             variantId: v.id,
             variantTitle: v.title,
             sku: v.sku || undefined,
+            barcode: v.barcode || undefined,
             qtyOrdered: Number(v.qtyOrdered),
             costPrice: v.costPrice ? Number(v.costPrice) : undefined,
           })),

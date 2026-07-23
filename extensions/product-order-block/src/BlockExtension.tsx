@@ -34,7 +34,7 @@ type OrderStatusItem = {
   lines?: OrderLineStatus[];
 };
 type OrderStatus = OrderStatusItem | null;
-type Variant = { id: string; title: string; sku: string; stockQty: number; onOrderQty: number; qtyOrdered: string };
+type Variant = { id: string; title: string; sku: string; barcode: string; stockQty: number; onOrderQty: number; qtyOrdered: string };
 
 const ORDER_LIMIT = 2;
 const GAP = "small" as const;
@@ -230,14 +230,14 @@ function ProductOrderBlock() {
           product: {
             title: string; vendor: string;
             featuredImage: { url: string } | null;
-            variants: { nodes: Array<{ id: string; title: string; sku: string; inventoryQuantity: number }> };
+            variants: { nodes: Array<{ id: string; title: string; sku: string; barcode: string | null; inventoryQuantity: number }> };
           };
         }>(`{
           shop { myshopifyDomain }
           product(id: "${productGid}") {
             title vendor
             featuredImage { url }
-            variants(first: 100) { nodes { id title sku inventoryQuantity } }
+            variants(first: 100) { nodes { id title sku barcode inventoryQuantity } }
           }
         }`);
         const shopDomain = result.data?.shop?.myshopifyDomain;
@@ -249,7 +249,7 @@ function ProductOrderBlock() {
           setProductVendor(p.vendor ?? "");
           setProductImageUrl(p.featuredImage?.url ?? null);
           setVariants((p.variants?.nodes ?? []).map((v) => ({
-            id: v.id, title: v.title, sku: v.sku ?? "",
+            id: v.id, title: v.title, sku: v.sku ?? "", barcode: v.barcode ?? "",
             stockQty: v.inventoryQuantity ?? 0, onOrderQty: 0, qtyOrdered: "",
           })));
         }
@@ -372,7 +372,7 @@ function ProductOrderBlock() {
           existingOrderId: mode === "existing" ? order?.id : undefined,
           lines: orderedLines.map((v) => ({
             variantId: v.id, variantTitle: v.title,
-            sku: v.sku || undefined, qtyOrdered: Number(v.qtyOrdered),
+            sku: v.sku || undefined, barcode: v.barcode || undefined, qtyOrdered: Number(v.qtyOrdered),
           })),
         }),
       });

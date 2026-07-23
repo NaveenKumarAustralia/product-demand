@@ -77,6 +77,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       variantId: string;
       variantTitle: string;
       sku?: string;
+      barcode?: string;
       qtyOrdered: number;
       costPrice?: number;
     }>;
@@ -173,6 +174,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 variantId: line.variantId,
                 variantTitle: line.variantTitle || "",
                 sku: line.sku || null,
+                barcode: line.barcode || null,
                 qtyOrdered: line.qtyOrdered,
                 costPrice: line.costPrice ?? null,
               },
@@ -214,6 +216,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 variantId: l.variantId,
                 variantTitle: l.variantTitle || "",
                 sku: l.sku || null,
+                barcode: l.barcode || null,
                 qtyOrdered: l.qtyOrdered,
                 costPrice: l.costPrice ?? null,
               })),

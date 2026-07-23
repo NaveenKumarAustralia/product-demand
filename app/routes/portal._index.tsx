@@ -13,6 +13,12 @@ import { unauthenticated } from "../shopify.server";
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const page = url.searchParams.get("page") ?? "restock";
+  // The restock table is shared by two vendor-scoped pages: the default
+  // "restock" page (Karma East) and "jj-restock" (JJ). They behave
+  // identically except each only shows orders whose supplier matches its
+  // vendor. `restockVendor` is null for every non-restock page.
+  const isRestockPage = page === "restock" || page === "jj-restock";
+  const restockVendor = page === "jj-restock" ? "JJ" : page === "restock" ? "Karma East" : null;
   const selectedProductGroup = normalizeProductGroup(
     url.searchParams.get("productGroup") ?? url.searchParams.get("productType") ?? "",
   );
@@ -20,7 +26,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const selectedPriority = url.searchParams.get("priority") ?? "";
   const selectedDestination = url.searchParams.get("destination") ?? "";
   const searchTitle = url.searchParams.get("q") ?? "";
-  const serverSearchTitle = page === "restock" ? "" : searchTitle;
+  const serverSearchTitle = isRestockPage ? "" : searchTitle;
   const messageOrderId = Number(url.searchParams.get("messageOrderId") ?? 0) || null;
   const packingId = Number(url.searchParams.get("packingId") ?? 0) || null;
   const productSearch = url.searchParams.get("productSearch") ?? "";
@@ -47,7 +53,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     PORTAL_ACTIVE_USERS_KEY,
     PORTAL_NAV_ORDER_KEY,
   ];
-  const needsOrders = page === "restock" || page === "packing";
+  const needsOrders = isRestockPage || page === "packing";
   const needsPackingLists = page === "packing" || packingId !== null;
   const needsActivityLogs = page !== "visionboard" && page !== "samples";
 
@@ -66,6 +72,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "packingListId" INTEGER`);
     } catch (e) {
       console.warn("[packingListId] column ensure failed:", e);
+    }
+    try {
+      await prisma.$executeRawUnsafe(`ALTER TABLE "OrderLine" ADD COLUMN IF NOT EXISTS "barcode" TEXT`);
+    } catch (e) {
+      console.warn("[barcode] column ensure failed:", e);
     }
     // Backfill: fold the old packed / ready_to_send statuses into the new
     // unified `ready`. updateMany is a no-op when no rows match, so this
@@ -341,10 +352,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       console.error("Active user tracking failed", error);
       return [] as ActivePortalUser[];
     });
-  const normalizedOrders = allOrders.map((order) => ({
-    ...order,
-    productType: normalizeProductGroup(order.productType) || null,
-  }));
+  const normalizedOrders = allOrders
+    .map((order) => ({
+      ...order,
+      productType: normalizeProductGroup(order.productType) || null,
+    }))
+    // On a vendor-scoped restock page, only keep that vendor's orders. The
+    // packing page (restockVendor === null) keeps every order.
+    .filter((order) => !restockVendor || (order.supplier ?? "").trim() === restockVendor);
   // Open packing lists (id + invoiceNumber + title) for the In Shipment
   // picker. A packing list counts as "open" when:
   //   - the master Load Inventory button hasn't been pressed, AND
@@ -355,7 +370,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // case). Empty lists with no lines yet still appear so the user can
   // pre-link to a freshly-created list.
   let openPackingLists: PackingListBadge[] = [];
-  if (page === "restock") {
+  if (isRestockPage) {
     try {
       const lists = await prisma.packingList.findMany({
         where: { masterInventoryLoadedAt: null, hiddenAt: null },
@@ -397,7 +412,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // invoice number(s) of the relevant packing list(s) under the chip.
   // Skips lines that have already been fully loaded to Shopify.
   const packingListsByProductId = new Map<string, PackingListBadge[]>();
-  if (page === "restock" && normalizedOrders.length) {
+  if (isRestockPage && normalizedOrders.length) {
     const productIds = Array.from(new Set(
       normalizedOrders.map((order) => order.productId).filter(Boolean) as string[],
     ));
@@ -524,7 +539,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Defensive: hydrate shippingMethod from the DB in case the Prisma client
   // wasn't regenerated on this environment to know about the field. The
   // ADD COLUMN IF NOT EXISTS makes this safe on a stale schema too.
-  if ((page === "packing" || page === "restock") && packingLists.length) {
+  if ((page === "packing" || isRestockPage) && packingLists.length) {
     try {
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "shippingMethod" TEXT`);
       const shippingRows = await prisma.$queryRawUnsafe<Array<{ id: number; shippingMethod: string | null }>>(
@@ -583,7 +598,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productResults = page === "packing" && selectedPackingList && productSearch.trim().length >= 2
     ? await searchShopifyProducts(productSearch)
     : [];
-  const restockProductResults = page === "restock" && restockProductSearch.trim().length >= 2
+  const restockProductResults = isRestockPage && restockProductSearch.trim().length >= 2
     ? await searchShopifyProducts(restockProductSearch)
     : [];
   const messages = currentUser
@@ -596,7 +611,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         return [] as PortalMessageItem[];
       })
     : [];
-  const needsFabricSheets = page === "fabric" || page === "restock" || page === "packing";
+  const needsFabricSheets = page === "fabric" || isRestockPage || page === "packing";
   const fabricCellOverridesSetting = needsFabricSheets
     ? await prisma.portalSetting.findUnique({
         where: { key: FABRIC_CELL_OVERRIDES_KEY },
@@ -632,7 +647,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         deletedSheetsValue: fabricDeletedSheetsSetting?.value,
       })
     : [];
-  const fabricStockIndex: FabricStockEntry[] = (page === "restock" || page === "packing" || page === "collections")
+  const fabricStockIndex: FabricStockEntry[] = (isRestockPage || page === "packing" || page === "collections")
     ? buildFabricStockIndex(manualFabricSheets)
     : [];
   if (page === "fabric") {
@@ -699,7 +714,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     openPackingLists,
     restockTotalsAll,
     restockTotalsFiltered,
-    inrPerAudCachedRate: (page === "restock" || page === "packing" || page === "collections") ? await getCachedInrPerAud() : null,
+    inrPerAudCachedRate: (isRestockPage || page === "packing" || page === "collections") ? await getCachedInrPerAud() : null,
     fxRupeeBuffer: FX_RUPEE_BUFFER,
     collectionSettings,
     sortBy,
@@ -4622,6 +4637,7 @@ const FABRIC_TOTAL_EXCLUDED_NAMES = new Set([
 ]);
 const ALL_NAV_ITEMS = [
   { id: "restock", label: "Existing Products Restock", href: "/portal" },
+  { id: "jj-restock", label: "JJ Restock", href: "/portal?page=jj-restock" },
   { id: "fabric", label: "Fabric in stock", href: "/portal?page=fabric" },
   { id: "packing", label: "Packing Lists", href: "/portal?page=packing" },
   { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
@@ -4630,7 +4646,7 @@ const ALL_NAV_ITEMS = [
   { id: "collections", label: "Collections", href: "/portal?page=collections" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "fabric", "packing", "productinfo", "samples", "visionboard", "collections"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "fabric", "packing", "productinfo", "samples", "visionboard", "collections"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -7595,6 +7611,10 @@ export default function PortalDashboard() {
     photoShootColumnWidths,
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
+  // Both the Karma East ("restock") and JJ ("jj-restock") pages render the
+  // shared restock table; the loader has already scoped `orders` to the
+  // right vendor. Behaviour below keys off this instead of a single page id.
+  const isRestockPage = page === "restock" || page === "jj-restock";
   const [searchParams, setSearchParams] = useSearchParams();
   const submit = useSubmit();
   const columnWidthsFetcher = useFetcher();
@@ -7610,7 +7630,7 @@ export default function PortalDashboard() {
     if (node) node.scrollTop = 0;
   }, []);
   useLayoutEffect(() => {
-    if (page !== "restock") return;
+    if (!isRestockPage) return;
     const el = restockTableScrollRef.current;
     if (el) el.scrollTop = 0;
   }, [page]);
@@ -7704,14 +7724,14 @@ export default function PortalDashboard() {
   }, [searchTitle]);
   useEffect(() => {
     if (!isSearchFocused) return;
-    if (page === "restock") return;
+    if (isRestockPage) return;
     const timer = window.setTimeout(() => {
       if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
     }, 350);
     return () => window.clearTimeout(timer);
   }, [searchTitleInput, isSearchFocused, page]);
-  const restockSearch = page === "restock" ? searchTitleInput.trim().toLowerCase() : "";
-  const visibleOrders = page === "restock" && restockSearch
+  const restockSearch = isRestockPage ? searchTitleInput.trim().toLowerCase() : "";
+  const visibleOrders = isRestockPage && restockSearch
     ? orders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
     : orders;
   // Lookup: product title (e.g. "Vivien Dress Queen Protea") → per-piece
@@ -7737,6 +7757,7 @@ export default function PortalDashboard() {
     : page === "collections" ? "Collections"
     : page === "photoshoot" ? "Photo Shoots"
     : page === "newproduct" ? "New Product Orders"
+    : page === "jj-restock" ? (selectedProductGroup || "JJ Restock")
     : selectedProductGroup || "Existing Products Restock";
   const orderedNavItems = navOrder
     .map((id) => ALL_NAV_ITEMS.find((item) => item.id === id))
@@ -7945,7 +7966,7 @@ export default function PortalDashboard() {
         <header style={s.pageHeader}>
           <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
             <h1 style={s.pageTitle}>{activePageTitle}</h1>
-            {page === "restock" && (() => {
+            {isRestockPage && (() => {
               const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
               const showFiltered = filtersActive && (
                 restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
@@ -7969,7 +7990,7 @@ export default function PortalDashboard() {
           </div>
           <div style={s.headerControls}>
             <div style={s.utilityBar}>
-              {(page === "restock" || page === "packing" || page === "fabric" || page === "productinfo" || page === "samples") && (
+              {(isRestockPage || page === "packing" || page === "fabric" || page === "productinfo" || page === "samples") && (
                 <label style={s.filterLabel}>
                   Search
                   <input
@@ -7979,7 +8000,7 @@ export default function PortalDashboard() {
                     onFocus={() => setIsSearchFocused(true)}
                     onBlur={() => {
                       setIsSearchFocused(false);
-                      if (page !== "restock" && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
+                      if (!isRestockPage && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
                     }}
                     style={s.searchInput}
                     placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : page === "productinfo" ? "Style name" : page === "samples" ? "Sample name" : "Product title"}
@@ -8003,7 +8024,7 @@ export default function PortalDashboard() {
           </div>
         </header>
 
-        {page === "restock" && (
+        {isRestockPage && (
           <div style={s.restockFilterBar}>
             <label style={s.filterLabel}>
               Product group
@@ -8144,7 +8165,7 @@ export default function PortalDashboard() {
               <PhotoShootPanel photoShoots={photoShoots} productInfo={productInfo} savedColumnWidths={photoShootColumnWidths} />
             </div>
           </div>
-        ) : page !== "restock" ? (
+        ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : (
           <div className="portal-table-scroll" style={s.tableWrap} ref={setRestockTableScrollRef}>
@@ -19604,7 +19625,8 @@ function OrderRow({
     return Object.fromEntries(sizes.map((size) => [size, null]));
   })();
   const inventoryLoading = inventoryFetcher.state !== "idle";
-  const allSkus = order.lines.map((l) => l.sku).filter(Boolean).join("\n");
+  const allSkus = order.lines.map((l: { sku: string | null; barcode: string | null }) => l.sku).filter(Boolean).join("\n");
+  const allBarcodes = order.lines.map((l: { sku: string | null; barcode: string | null }) => l.barcode).filter(Boolean).join("\n");
   const etaValue = formatPortalDate(order.eta);
   const orderDate = formatPortalDate(order.createdAt);
   const inventoryTotal = fetchedInventory ? (inventoryFetcher.data?.total ?? 0) : 0;
@@ -19720,7 +19742,10 @@ function OrderRow({
         {/* SKU */}
         <Td rowIndex={rowIndex} colIndex={4} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="SKU" historyEntityName={order.productTitle}>
           <div style={s.skuCellWithToggle}>
-            <span style={s.sku}>{allSkus || "—"}</span>
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <span style={s.sku}>{allSkus || "—"}</span>
+              {allBarcodes && <span style={s.barcode} title="Barcode">{allBarcodes}</span>}
+            </div>
             <button
               type="button"
               onClick={() => {
@@ -23395,6 +23420,7 @@ const s: Record<string, React.CSSProperties> = {
   noImg: { color: "#d1d5db", textAlign: "center" },
   productName: { fontWeight: 600, color: "#111827", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 },
   sku: { fontFamily: "monospace", fontSize: 11, color: "#6b7280", whiteSpace: "pre-line" },
+  barcode: { fontFamily: "monospace", fontSize: 10, color: "#9ca3af", whiteSpace: "pre-line", marginTop: 2 },
   skuCellWithToggle: {
     position: "relative",
     minHeight: 72,

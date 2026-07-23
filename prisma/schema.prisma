@@ -58,6 +58,7 @@ model OrderLine {
   variantId    String
   variantTitle String
   sku          String?
+  barcode      String?
   qtyOrdered   Int
   qtyReceived  Int           @default(0)
   costPrice    Float?
