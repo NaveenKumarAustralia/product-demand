@@ -9443,6 +9443,14 @@ function formatFieldLabel(field: string): string {
 function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
   const [open, setOpen] = useState(false);
   const fetcher = useFetcher();
+  // Pressing Done hides the message straight away rather than waiting for the
+  // server round-trip + loader revalidation to drop it from `messages`.
+  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
+  const visibleMessages = messages.filter((m) => !dismissed.has(m.id));
+  const markRead = (messageId: number) => {
+    setDismissed((prev) => new Set(prev).add(messageId));
+    fetcher.submit({ intent: "mark_message_read", messageId: String(messageId) }, { method: "post" });
+  };
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const [popoverPos, setPopoverPos] = useState<{ top: number; right: number } | null>(null);
@@ -9507,21 +9515,21 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
         // The shake animation pulls the user's eye when there are
         // unread messages. Subtle but persistent so they notice
         // without being annoyed; pauses while the dropdown is open.
-        className={messages.length && !open ? "portal-msg-bell-shake" : undefined}
-        style={messages.length ? s.messagesButtonActive : s.messagesButton}
+        className={visibleMessages.length && !open ? "portal-msg-bell-shake" : undefined}
+        style={visibleMessages.length ? s.messagesButtonActive : s.messagesButton}
         title="Messages"
-        aria-label={messages.length ? `${messages.length} unread messages` : "Messages"}
+        aria-label={visibleMessages.length ? `${visibleMessages.length} unread messages` : "Messages"}
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="M4 5.75C4 4.78 4.78 4 5.75 4h12.5C19.22 4 20 4.78 20 5.75v8.5c0 .97-.78 1.75-1.75 1.75H9.4L5.2 19.15A.75.75 0 0 1 4 18.55V5.75Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
           <path d="M7.5 8.5h9M7.5 12h6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
         </svg>
-        {messages.length > 0 && <span style={s.messageCount}>{messages.length}</span>}
+        {visibleMessages.length > 0 && <span style={s.messageCount}>{visibleMessages.length}</span>}
       </button>
       {open && popoverPos && typeof document !== "undefined" && createPortal(
         <div ref={popoverRef} style={{ ...s.messagesPopover, top: popoverPos.top, right: popoverPos.right }}>
           <div style={s.messagesHeader}>Messages</div>
-          {messages.length ? messages.map((message) => (
+          {visibleMessages.length ? visibleMessages.map((message) => (
             <div key={message.id} style={s.messageItem}>
               <a
                 href={threadHrefFor(message)}
@@ -9537,11 +9545,7 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
                 </span>
                 <span style={s.messageBody}>{message.body}</span>
               </a>
-              <fetcher.Form method="post">
-                <input type="hidden" name="intent" value="mark_message_read" />
-                <input type="hidden" name="messageId" value={message.id} />
-                <button type="submit" style={s.messageReadButton}>Done</button>
-              </fetcher.Form>
+              <button type="button" style={s.messageReadButton} onClick={() => markRead(message.id)}>Done</button>
             </div>
           )) : (
             <div style={s.messageEmpty}>No messages for you.</div>
