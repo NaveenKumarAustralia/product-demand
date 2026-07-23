@@ -678,6 +678,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ...fabricSettings,
       fabricTypeOptions: ensureFabricTypeChipsForRows(fabricSettings.fabricTypeOptions, manualFabricSheets),
     };
+    // One-time (idempotent) backfill so every fabric row carries a stable key
+    // for its note thread. After the first load this is a no-op.
+    try {
+      if (ensureFabricRowKeys(manualFabricSheets)) {
+        await saveManualFabricSheets(manualFabricSheets);
+      }
+    } catch (e) {
+      console.warn("[fabric row keys] backfill failed:", e);
+    }
   }
   // Cache buster for the fabric image URLs we generate below. Using the
   // blob's updatedAt means every edit invalidates every image URL, which is
@@ -2022,6 +2031,38 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           fromName: currentUser.name,
           productTitle: rowsRaw[idx].name || rowsRaw[idx].title || null,
         });
+      }
+      return jsonResponse({ ok: true });
+    }
+    if (entityType === "fabric_row") {
+      // Locate the row across every sheet by its stable key, write the cell,
+      // then re-sync (or purge) the thread.
+      const sheets = await loadManualFabricSheetsForAction();
+      let found: { sheet: (typeof sheets)[number]; rowIndex: number } | null = null;
+      for (const sheet of sheets) {
+        const keyIdx = fabricRowKeyIndex(sheet);
+        if (keyIdx < 0) continue;
+        const rowIndex = sheet.rows.findIndex((r) => (r[keyIdx] ?? "").trim() === entityKey);
+        if (rowIndex >= 0) { found = { sheet, rowIndex }; break; }
+      }
+      if (!found) return jsonResponse({ ok: false, error: "row_not_found" });
+      let notesIdx = found.sheet.headers.findIndex((h) => /^notes?$/i.test(h.trim()));
+      if (notesIdx < 0) {
+        found.sheet.headers.push("Notes");
+        notesIdx = found.sheet.headers.length - 1;
+        for (const r of found.sheet.rows) { while (r.length <= notesIdx) r.push(""); }
+      }
+      const row = found.sheet.rows[found.rowIndex];
+      while (row.length <= notesIdx) row.push("");
+      row[notesIdx] = body;
+      const title = fabricNameForRow(found.sheet, found.rowIndex);
+      await saveManualFabricSheets(sheets);
+      if (isDelete) {
+        await prisma.portalMessage.deleteMany({
+          where: { entityType: "fabric_row", entityKey, field },
+        });
+      } else {
+        await syncFabricRowNote(entityKey, body, currentUser.name, title);
       }
       return jsonResponse({ ok: true });
     }
@@ -3809,7 +3850,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!sheet?.rows[rowIndex]) return null;
     while (sheet.rows[rowIndex].length <= colIndex) sheet.rows[rowIndex].push("");
     sheet.rows[rowIndex][colIndex] = value;
+    // Editing the Notes column fans @mentions out as portal messages, same as
+    // the restock/collection note cells.
+    const isNotesCol = /^notes?$/i.test((sheet.headers[colIndex] ?? "").trim());
+    const rowKey = isNotesCol ? ensureFabricRowKeyAt(sheet, rowIndex) : "";
+    const productTitle = isNotesCol ? fabricNameForRow(sheet, rowIndex) : null;
     await saveManualFabricSheets(sheets);
+    if (isNotesCol && rowKey) {
+      await syncFabricRowNote(rowKey, value, currentUser?.name ?? null, productTitle);
+    }
     return null;
   }
 
@@ -3857,7 +3906,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     while (sheet.rows[rowIndex].length <= idx) sheet.rows[rowIndex].push("");
     sheet.rows[rowIndex][idx] = value;
+    const notesRowKey = ensureFabricRowKeyAt(sheet, rowIndex);
+    const notesTitle = fabricNameForRow(sheet, rowIndex);
     await saveManualFabricSheets(sheets);
+    if (notesRowKey) await syncFabricRowNote(notesRowKey, value, currentUser?.name ?? null, notesTitle);
     return null;
   }
 
@@ -3901,10 +3953,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!sourceSheet || !Number.isInteger(rowIndex) || rowIndex < 0) return null;
     if (intent === "move_fabric_row" && (!targetSheet || targetSheet.gid === sourceSheet.gid || isHiddenFabricSheet(targetSheet.name))) return null;
 
+    // Thread identity: a duplicate must NOT inherit the original's key (it
+    // would share its note thread); a move keeps it so the thread follows.
+    const sourceKeyIdx = fabricRowKeyIndex(sourceSheet);
+    const movedRowKey = sourceKeyIdx >= 0 ? (sourceSheet.rows[rowIndex]?.[sourceKeyIdx] ?? "").trim() : "";
+
     if ((intent === "move_fabric_row" && targetSheet) || intent === "duplicate_fabric_row") {
       const row = sourceSheet.rows[rowIndex]?.map((value) => value);
       if (!row) return null;
       if (intent === "duplicate_fabric_row") {
+        if (sourceKeyIdx >= 0) {
+          while (row.length <= sourceKeyIdx) row.push("");
+          row[sourceKeyIdx] = randomUUID();
+        }
         sourceSheet.rows.push(row);
       } else if (targetSheet) {
         const sourceHeaderMap = new Map<string, number>();
@@ -3917,6 +3978,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const sourceIndex = sourceHeaderMap.get(normalizeFabricHeader(header)) ?? sourceHeaderMap.get(fabricHeaderRole(header));
           return sourceIndex == null ? "" : row[sourceIndex] ?? "";
         });
+        // Carry the stable key so the row's note thread follows it.
+        if (movedRowKey) {
+          let targetKeyIdx = fabricRowKeyIndex(targetSheet);
+          if (targetKeyIdx < 0) {
+            targetSheet.headers.push(FABRIC_ROW_KEY_HEADER);
+            targetKeyIdx = targetSheet.headers.length - 1;
+            for (const r of targetSheet.rows) { while (r.length <= targetKeyIdx) r.push(""); }
+          }
+          while (movedRow.length <= targetKeyIdx) movedRow.push("");
+          movedRow[targetKeyIdx] = movedRowKey;
+        }
         targetSheet.rows.push(movedRow);
       }
     }
@@ -3926,6 +3998,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     await saveManualFabricSheets(sheets);
+    // A deleted row's note thread has nothing left to point at.
+    if (intent === "delete_fabric_row" && movedRowKey) {
+      await prisma.portalMessage.deleteMany({
+        where: { entityType: "fabric_row", entityKey: movedRowKey },
+      }).catch(() => null);
+    }
     return null;
   }
 
@@ -5743,6 +5821,87 @@ const COMBINED_FABRIC_PAD_COLUMNS: Array<{ header: string; regex: RegExp }> = [
   { header: "Meters in Stock", regex: /meters?\s*in\s*stock|meters?\s*available|^meters?$/ },
   { header: "Quantity Ordered", regex: /quantity\s*ordered/ },
 ];
+
+// ─── Fabric row identity ────────────────────────────────────────────────────
+// Fabric rows are plain string[] with no id, but note threads need a stable
+// key (row indices shift when a row above is deleted/moved). We keep a hidden
+// "__rowKey" column on each sheet — it is never part of the combined view's
+// column list, so it stays invisible in the UI.
+const FABRIC_ROW_KEY_HEADER = "__rowKey";
+
+function fabricRowKeyIndex(sheet: { headers: string[] }): number {
+  return sheet.headers.findIndex((h) => h.trim() === FABRIC_ROW_KEY_HEADER);
+}
+
+// Adds the hidden column / fills any blank keys. Returns true when something
+// changed so the caller knows to persist.
+function ensureFabricRowKeys(sheets: Array<{ headers: string[]; rows: string[][] }>): boolean {
+  let changed = false;
+  for (const sheet of sheets) {
+    let idx = fabricRowKeyIndex(sheet);
+    if (idx < 0) {
+      if (sheet.rows.length === 0) continue;
+      sheet.headers.push(FABRIC_ROW_KEY_HEADER);
+      idx = sheet.headers.length - 1;
+      changed = true;
+    }
+    for (const row of sheet.rows) {
+      while (row.length <= idx) row.push("");
+      if (!row[idx]) {
+        row[idx] = randomUUID();
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+function fabricRowKeyAt(sheet: { headers: string[]; rows: string[][] }, rowIndex: number): string {
+  const idx = fabricRowKeyIndex(sheet);
+  if (idx < 0) return "";
+  return (sheet.rows[rowIndex]?.[idx] ?? "").trim();
+}
+
+// Find-or-create a key for one row (used when a note is saved before the
+// load-time backfill has run for that sheet).
+function ensureFabricRowKeyAt(sheet: { headers: string[]; rows: string[][] }, rowIndex: number): string {
+  let idx = fabricRowKeyIndex(sheet);
+  if (idx < 0) {
+    sheet.headers.push(FABRIC_ROW_KEY_HEADER);
+    idx = sheet.headers.length - 1;
+    for (const r of sheet.rows) { while (r.length <= idx) r.push(""); }
+  }
+  const row = sheet.rows[rowIndex];
+  if (!row) return "";
+  while (row.length <= idx) row.push("");
+  if (!row[idx]) row[idx] = randomUUID();
+  return row[idx];
+}
+
+// Fabric note threads hang off entityType "fabric_row" with orderId 0 (there
+// is no integer parent record) and the row's stable key as entityKey.
+const FABRIC_ROW_THREAD_ORDER_ID = 0;
+async function syncFabricRowNote(rowKey: string, text: string, fromName: string | null, productTitle: string | null) {
+  try {
+    await syncEntityNoteMessages({
+      entityType: "fabric_row",
+      orderId: FABRIC_ROW_THREAD_ORDER_ID,
+      entityKey: rowKey,
+      field: "notes",
+      text,
+      fromName,
+      productTitle,
+    });
+  } catch (e) {
+    console.warn("[fabric note sync] failed:", e);
+  }
+}
+
+function fabricNameForRow(sheet: { headers: string[]; rows: string[][] }, rowIndex: number): string | null {
+  const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h.trim()));
+  if (nameIdx < 0) return null;
+  return (sheet.rows[rowIndex]?.[nameIdx] ?? "").trim() || null;
+}
 
 function padCombinedFabricSheet(sheet: FabricSheetData): FabricSheetData {
   const existing = sheet.headers.map((h) => h.trim().toLowerCase());
@@ -9296,6 +9455,7 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
     const threadKey = `${entityType}:${m.orderId}:${entityKey}:${m.field}`;
     const page = entityType === "collection_row" ? "collections"
       : entityType === "sample_iteration" ? "samples"
+      : entityType === "fabric_row" ? "fabric"
       : "restock";
     const params = new URLSearchParams({ page, thread: threadKey });
     if (entityType === "collection_row") params.set("collectionId", String(m.orderId));
@@ -15073,6 +15233,7 @@ type UnifiedFabricCell = {
 type UnifiedFabricRowEntry = {
   primarySheet: FabricSheetData;
   primaryRowIndex: number;
+  rowKey: string;
   cells: Record<UnifiedFabricKey, UnifiedFabricCell | null>;
 };
 
@@ -15106,6 +15267,7 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
   return {
     primarySheet: sheet,
     primaryRowIndex: sourceRowIndex,
+    rowKey: fabricRowKeyAt(sheet, sourceRowIndex),
     cells: {
       supplier: make(supplierIdx, "Supplier"),
       fabricType: fabricTypeIdx < 0 ? null : {
@@ -15162,6 +15324,8 @@ function mergeFabricRowEntries(rows: UnifiedFabricRowEntry[]): UnifiedFabricRowE
     const mergedEntry: UnifiedFabricRowEntry = {
       primarySheet: stockEntry.primarySheet,
       primaryRowIndex: stockEntry.primaryRowIndex,
+      // Notes/threads follow the stock row, which is the row we keep editing.
+      rowKey: stockEntry.rowKey,
       cells: mergedCells,
     };
     byKey.set(key, mergedEntry);
@@ -15195,6 +15359,29 @@ function CombinedFabricStockPanel({
   nameSearch: string;
 }) {
   const fetcher = useFetcher();
+  // 💬 counts for the fabric note threads, keyed
+  // "fabric_row:0:<rowKey>:notes" — same shape as the other pages.
+  const threadCountsFetcher = useFetcher<{ counts: Array<{ key: string; total: number; unread: number }> }>();
+  const threadCounts = useMemo(() => {
+    const m = new Map<string, { total: number; unread: number }>();
+    for (const c of threadCountsFetcher.data?.counts ?? []) m.set(c.key, { total: c.total, unread: c.unread });
+    return m;
+  }, [threadCountsFetcher.data]);
+  useEffect(() => {
+    threadCountsFetcher.load("/api/portal-thread-counts?entityType=fabric_row");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // The drawer edits the note text server-side; reload counts when it does.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const key = (event as CustomEvent<{ threadKey?: string }>).detail?.threadKey ?? "";
+      if (!key.startsWith("fabric_row:")) return;
+      threadCountsFetcher.load("/api/portal-thread-counts?entityType=fabric_row");
+    };
+    document.addEventListener("portal-thread-content-changed", handler);
+    return () => document.removeEventListener("portal-thread-content-changed", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [fabricTypeFilter, setFabricTypeFilter] = useState("");
   const [supplierFilter, setSupplierFilter] = useState("");
   const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
@@ -15486,6 +15673,7 @@ function CombinedFabricStockPanel({
                   users={users}
                   rowHeights={rowHeights}
                   sheets={sheets}
+                  threadCounts={threadCounts}
                   onMarkDeleted={markRowDeleted}
                 />
               ))}
@@ -15504,17 +15692,35 @@ function CombinedFabricStockPanel({
   );
 }
 
-// Notes editor for a fabric row whose sheet has no Notes column yet. Same
-// mention textarea as the populated cells; the first save creates the column.
-function FabricRowNotesFallback({ users, onSave }: { users: PortalUser[]; onSave: (value: string) => void }) {
-  const [draft, setDraft] = useState("");
+// Fabric note cell — shared mention textarea plus the 💬 thread badge. The
+// thread key uses the row's stable key so it survives row reordering; rows
+// whose sheet has no Notes column yet still edit (the save creates it).
+function FabricNotesCell({
+  value,
+  rowKey,
+  users,
+  threadCounts,
+  onCommit,
+}: {
+  value: string;
+  rowKey: string;
+  users: PortalUser[];
+  threadCounts: Map<string, { total: number; unread: number }>;
+  onCommit: (next: string) => void;
+}) {
+  const [searchParams] = useSearchParams();
+  const threadKey = rowKey ? `fabric_row:0:${rowKey}:notes` : null;
+  const counts = threadKey ? threadCounts.get(threadKey) : undefined;
   return (
-    <FabricMentionCell
-      value={draft}
-      originalValue=""
+    <MentionableTextarea
+      value={value}
       users={users}
-      onDraftChange={setDraft}
-      onSave={onSave}
+      onCommit={onCommit}
+      threadKey={threadKey ?? undefined}
+      threadCount={counts?.total ?? 0}
+      threadUnread={counts?.unread ?? 0}
+      autoOpenThread={threadKey ? searchParams.get("thread") === threadKey : false}
+      fillCell
     />
   );
 }
@@ -15529,6 +15735,7 @@ function CombinedFabricRow({
   users,
   rowHeights,
   sheets,
+  threadCounts,
   onMarkDeleted,
 }: {
   entry: UnifiedFabricRowEntry;
@@ -15540,6 +15747,7 @@ function CombinedFabricRow({
   users: PortalUser[];
   rowHeights: Record<string, number>;
   sheets: FabricSheetData[];
+  threadCounts: Map<string, { total: number; unread: number }>;
   onMarkDeleted: (gid: string, rowIndex: number) => void;
 }) {
   const primaryGid = entry.primarySheet.gid;
@@ -15572,7 +15780,25 @@ function CombinedFabricRow({
         const cell = entry.cells[column.key];
         return (
           <FabricTd key={column.key} rowIndex={displayIndex} colIndex={colDisplayIdx}>
-            {cell ? (
+            {column.key === "notes" ? (
+              // Notes get the shared mention textarea + 💬 thread badge, the
+              // same treatment as the restock and collection note cells.
+              <FabricNotesCell
+                value={cell?.value ?? ""}
+                rowKey={entry.rowKey}
+                users={users}
+                threadCounts={threadCounts}
+                onCommit={(v) => submitPortalCell(
+                  fetcher,
+                  cell
+                    ? { intent: "update_fabric_cell", gid: cell.gid, rowIndex: cell.sourceRowIndex, colIndex: cell.colIndex, value: v }
+                    : { intent: "set_fabric_notes", gid: primaryGid, rowIndex: primaryRowIndex, value: v },
+                  cell
+                    ? { label: "Undo fabric note", fields: { intent: "update_fabric_cell", gid: cell.gid, rowIndex: cell.sourceRowIndex, colIndex: cell.colIndex, value: cell.value } }
+                    : undefined,
+                )}
+              />
+            ) : cell ? (
               <FabricCell
                 gid={cell.gid}
                 rowIndex={cell.sourceRowIndex}
@@ -15596,13 +15822,6 @@ function CombinedFabricRow({
                 chipKind="fabricTypeOptions"
                 fabricSettings={fabricSettings}
                 onChange={(v) => submitPortalCell(fetcher, { intent: "set_fabric_type", gid: primaryGid, rowIndex: primaryRowIndex, value: v })}
-              />
-            ) : column.key === "notes" ? (
-              // Source sheet has no Notes column — still allow a note; saving
-              // one creates the column on that sheet.
-              <FabricRowNotesFallback
-                users={users}
-                onSave={(v) => submitPortalCell(fetcher, { intent: "set_fabric_notes", gid: primaryGid, rowIndex: primaryRowIndex, value: v })}
               />
             ) : null}
           </FabricTd>
