@@ -38,6 +38,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     COLUMN_WIDTHS_KEY,
     PACKING_COLUMN_WIDTHS_KEY,
     PHOTOSHOOT_COLUMN_WIDTHS_KEY,
+    JJ_COLUMN_WIDTHS_KEY,
     TABLE_HEADER_LABELS_KEY,
     TABLE_CUSTOM_COLUMNS_KEY,
     TABLE_CUSTOM_CELLS_KEY,
@@ -126,6 +127,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const columnWidthsSetting = wrap(COLUMN_WIDTHS_KEY);
   const packingColumnWidthsSetting = wrap(PACKING_COLUMN_WIDTHS_KEY);
   const photoShootColumnWidthsSetting = wrap(PHOTOSHOOT_COLUMN_WIDTHS_KEY);
+  const jjColumnWidthsSetting = wrap(JJ_COLUMN_WIDTHS_KEY);
   const headerLabelsSetting = wrap(TABLE_HEADER_LABELS_KEY);
   const customColumnsSetting = wrap(TABLE_CUSTOM_COLUMNS_KEY);
   const customCellsSetting = wrap(TABLE_CUSTOM_CELLS_KEY);
@@ -775,6 +777,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     collections,
     photoShoots,
     photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
+    jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
     fabricStockIndex,
   };
   } catch (error) {
@@ -2068,6 +2071,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await prisma.portalSetting.upsert({
       where: { key: PHOTOSHOOT_COLUMN_WIDTHS_KEY },
       create: { key: PHOTOSHOOT_COLUMN_WIDTHS_KEY, value: columnWidths },
+      update: { value: columnWidths },
+    });
+    return null;
+  }
+
+  if (intent === "update_jj_column_widths") {
+    let columnWidths: Record<string, number>;
+    try {
+      columnWidths = normalizeColumnWidths(JSON.parse(String(form.get("value") ?? "{}")));
+    } catch {
+      return null;
+    }
+    await prisma.portalSetting.upsert({
+      where: { key: JJ_COLUMN_WIDTHS_KEY },
+      create: { key: JJ_COLUMN_WIDTHS_KEY, value: columnWidths },
       update: { value: columnWidths },
     });
     return null;
@@ -4020,7 +4038,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // sees the new items prop.
   if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
-  if (intent === "update_column_widths" || intent === "update_packing_column_widths" || intent === "update_photoshoot_column_widths") return false;
+  if (intent === "update_column_widths" || intent === "update_packing_column_widths" || intent === "update_photoshoot_column_widths" || intent === "update_jj_column_widths") return false;
   // Photo shoot row edits keep their own local state; the slim shoot list
   // (loader) only needs refreshing on add/rename/delete, not row edits.
   if (intent === "ps_update_shoot") return false;
@@ -4330,6 +4348,7 @@ function normalizeFabricDeletedSheets(value: unknown): Record<string, boolean> {
 const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
 const PHOTOSHOOT_COLUMN_WIDTHS_KEY = "supplier-portal-photoshoot-column-widths-v1";
+const JJ_COLUMN_WIDTHS_KEY = "supplier-portal-jj-column-widths-v1";
 const TABLE_HEADER_LABELS_KEY = "production-portal-table-header-labels-v1";
 const TABLE_CUSTOM_COLUMNS_KEY = "production-portal-table-custom-columns-v1";
 const TABLE_CUSTOM_CELLS_KEY = "production-portal-table-custom-cells-v1";
@@ -7772,6 +7791,7 @@ export default function PortalDashboard() {
     collections,
     photoShoots,
     photoShootColumnWidths,
+    jjColumnWidths,
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
   // Both the Karma East ("restock") and JJ ("jj-restock") pages render the
@@ -8344,6 +8364,7 @@ export default function PortalDashboard() {
             fxBahtBuffer={fxBahtBuffer}
             restockSettings={restockSettings}
             canLoadInventory={Boolean((currentUser?.canLoadInventory || currentUser?.admin) && !jjSupplierOnly)}
+            savedColumnWidths={jjColumnWidths}
           />
         ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -21182,19 +21203,29 @@ function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
   );
 }
 
-// JJ Restock table column widths. Size columns must fit a full SKU/barcode
-// (e.g. "JJB001-LFFFBL") on one line without wrapping.
+// JJ Restock default column widths (all resizable + persisted). Size columns
+// default wide enough for a full SKU/barcode on one line; narrowing one lets
+// the text wrap.
 const JJ_SIZE_COL_WIDTH = 132;
 const JJ_LOAD_COL_WIDTH = 84;
-// checkbox 44 + picture 90 + colour code 120 + name 160 + sku 120 + qty 90 + baht 90 + aud 90
-const JJ_FIXED_COL_WIDTH = 44 + 90 + 120 + 160 + 120 + 90 + 90 + 90;
+// Columns frozen (sticky-left): select, picture, colour code, name.
+const JJ_FROZEN_COLUMN_COUNT = 4;
 
 function JJOrderRow({
-  order, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
+  order, sizes, frozenOffsets, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
 }: {
-  order: Order; sizes: string[]; thbPerAudCachedRate: number | null; restockSettings: RestockSettings;
+  order: Order; sizes: string[]; frozenOffsets: number[]; thbPerAudCachedRate: number | null; restockSettings: RestockSettings;
   canLoadInventory: boolean; selected: boolean; onToggle: () => void; onLoad: () => void; loading: boolean;
 }) {
+  // Sticky style for the frozen block (matches the Td component's treatment).
+  const frozenTd = (i: number): React.CSSProperties => i < frozenOffsets.length
+    ? {
+        position: "sticky",
+        left: frozenOffsets[i],
+        zIndex: 40,
+        ...(i === frozenOffsets.length - 1 ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
+      }
+    : {};
   const lines = order.lines as Array<{ variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }>;
   const lineForSize = (size: string) =>
     lines.find((l) => (l.variantTitle ?? "").trim().toLowerCase() === size.trim().toLowerCase()) ?? null;
@@ -21203,16 +21234,16 @@ function JJOrderRow({
   const costAud = costBaht ? convertBahtToAud(costBaht, thbPerAudCachedRate) : null;
   return (
     <tr style={s.row}>
-      <td style={{ ...s.td, textAlign: "center" }}>
+      <td style={{ ...s.td, textAlign: "center", ...frozenTd(0) }}>
         {canLoadInventory ? <input type="checkbox" checked={selected} onChange={onToggle} /> : null}
       </td>
-      <td style={s.td}>
+      <td style={{ ...s.td, ...frozenTd(1) }}>
         <div style={s.imageCell}>
           {order.productImageUrl ? <img src={order.productImageUrl} alt="" style={s.thumb} /> : <div style={s.noImg}>—</div>}
         </div>
       </td>
-      <td style={s.td}><JJFieldCell orderId={order.id} field="colourCode" value={(order as { colourCode?: string | null }).colourCode ?? ""} /></td>
-      <td style={s.td}><span style={{ fontSize: 13 }}>{order.productTitle}</span></td>
+      <td style={{ ...s.td, ...frozenTd(2) }}><JJFieldCell orderId={order.id} field="colourCode" value={(order as { colourCode?: string | null }).colourCode ?? ""} /></td>
+      <td style={{ ...s.td, ...frozenTd(3) }}><span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span></td>
       <td style={s.td}><JJFieldCell orderId={order.id} field="styleCode" value={(order as { styleCode?: string | null }).styleCode ?? ""} placeholder="Code" /></td>
       {sizes.map((sz) => {
         const line = lineForSize(sz);
@@ -21258,15 +21289,75 @@ function JJOrderRow({
 }
 
 function JJRestockPanel({
-  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory,
+  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, savedColumnWidths,
 }: {
   orders: Order[]; sizes: string[]; thbPerAudCachedRate: number | null; fxBahtBuffer: number;
-  restockSettings: RestockSettings; canLoadInventory: boolean;
+  restockSettings: RestockSettings; canLoadInventory: boolean; savedColumnWidths: Record<string, number>;
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
   const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
+  const widthsFetcher = useFetcher();
   const loading = loadFetcher.state !== "idle";
+
+  // Column model. Everything up to and including Name is frozen (sticky
+  // left) so it stays visible while scrolling the size columns.
+  const jjColumns = useMemo(() => {
+    const cols: Array<{ id: string; label: string; defaultWidth: number; center?: boolean }> = [
+      { id: "select", label: "#", defaultWidth: 44, center: true },
+      { id: "picture", label: "Picture", defaultWidth: 90 },
+      { id: "colourCode", label: "Colour Code", defaultWidth: 120 },
+      { id: "name", label: "Name", defaultWidth: 160 },
+      { id: "sku", label: "SKU", defaultWidth: 120 },
+      ...sizes.map((sz) => ({ id: `size:${sz}`, label: sz, defaultWidth: JJ_SIZE_COL_WIDTH, center: true })),
+      { id: "totalQty", label: "Total Qty", defaultWidth: 90, center: true },
+      { id: "costBaht", label: "Cost (฿)", defaultWidth: 90, center: true },
+      { id: "costAud", label: "Cost (A$)", defaultWidth: 90, center: true },
+    ];
+    if (canLoadInventory) cols.push({ id: "load", label: "Load", defaultWidth: JJ_LOAD_COL_WIDTH, center: true });
+    return cols;
+  }, [sizes, canLoadInventory]);
+
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
+  useEffect(() => { setColumnWidths(savedColumnWidths); }, [savedColumnWidths]);
+  const widthFor = (id: string) => columnWidths[id] ?? jjColumns.find((c) => c.id === id)?.defaultWidth ?? 110;
+  const startResize = (id: string, event: React.MouseEvent<HTMLSpanElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = widthFor(id);
+    let nextWidths = columnWidths;
+    const prevCursor = document.body.style.cursor;
+    const prevSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (e: MouseEvent) => {
+      const w = Math.max(MIN_COLUMN_WIDTH, startWidth + e.clientX - startX);
+      nextWidths = { ...nextWidths, [id]: w };
+      setColumnWidths(nextWidths);
+    };
+    const onUp = () => {
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevSelect;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      widthsFetcher.submit({ intent: "update_jj_column_widths", value: JSON.stringify(nextWidths) }, { method: "post" });
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  };
+  // Cumulative left offsets for the frozen block (select through name).
+  const frozenOffsets = useMemo(() => {
+    const offs: number[] = [];
+    let cum = 0;
+    for (let i = 0; i < JJ_FROZEN_COLUMN_COUNT; i++) {
+      offs.push(cum);
+      cum += widthFor(jjColumns[i].id);
+    }
+    return offs;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jjColumns, columnWidths]);
+  const jjTableWidth = jjColumns.reduce((sum, c) => sum + widthFor(c.id), 0);
 
   const term = search.trim().toLowerCase();
   const visible = (term
@@ -21317,37 +21408,38 @@ function JJRestockPanel({
         {loadFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{loadFetcher.data.jjError}</span>}
       </div>
       <div className="portal-table-scroll" style={s.tableWrap}>
-        {/* Explicit column widths: the table is tableLayout:fixed, so without
-            these every column gets an equal (too narrow) share and the SKU /
-            barcode text wraps onto a second line. Size columns are wide enough
-            for a full SKU on one line; the table scrolls horizontally. */}
-        <table style={{ ...s.table, width: JJ_FIXED_COL_WIDTH + sizes.length * JJ_SIZE_COL_WIDTH + (canLoadInventory ? JJ_LOAD_COL_WIDTH : 0), minWidth: "100%" }}>
+        {/* Widths come from the resizable column model; everything up to Name
+            is frozen so it stays put while the size columns scroll. */}
+        <table style={{ ...s.table, width: jjTableWidth, minWidth: "100%" }}>
           <colgroup>
-            <col style={{ width: 44 }} />
-            <col style={{ width: 90 }} />
-            <col style={{ width: 120 }} />
-            <col style={{ width: 160 }} />
-            <col style={{ width: 120 }} />
-            {sizes.map((sz) => <col key={sz} style={{ width: JJ_SIZE_COL_WIDTH }} />)}
-            <col style={{ width: 90 }} />
-            <col style={{ width: 90 }} />
-            <col style={{ width: 90 }} />
-            {canLoadInventory && <col style={{ width: JJ_LOAD_COL_WIDTH }} />}
+            {jjColumns.map((c) => <col key={c.id} style={{ width: widthFor(c.id) }} />)}
           </colgroup>
           <thead>
             <tr style={s.headerRow}>
-              <th style={{ ...s.th, ...s.rowNumberHeader }}>
-                {canLoadInventory ? <input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} /> : "#"}
-              </th>
-              <th style={s.th}>Picture</th>
-              <th style={s.th}>Colour Code</th>
-              <th style={s.th}>Name</th>
-              <th style={s.th}>SKU</th>
-              {sizes.map((sz) => <th key={sz} style={{ ...s.th, textAlign: "center" }}>{sz}</th>)}
-              <th style={{ ...s.th, textAlign: "center" }}>Total Qty</th>
-              <th style={{ ...s.th, textAlign: "center" }}>Cost (฿)</th>
-              <th style={{ ...s.th, textAlign: "center" }}>Cost (A$)</th>
-              {canLoadInventory && <th style={{ ...s.th, textAlign: "center" }}>Load</th>}
+              {jjColumns.map((c, i) => {
+                const frozen = i < JJ_FROZEN_COLUMN_COUNT;
+                if (c.id === "select") {
+                  return (
+                    <th
+                      key={c.id}
+                      style={{ ...s.th, ...s.rowNumberHeader, ...(frozen ? { left: frozenOffsets[i], zIndex: 55 } : {}) }}
+                    >
+                      {canLoadInventory ? <input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} /> : "#"}
+                    </th>
+                  );
+                }
+                return (
+                  <Th
+                    key={c.id}
+                    columnId={c.id}
+                    center={c.center}
+                    wrap
+                    onResizeStart={(e) => startResize(c.id, e)}
+                    stickyLeft={frozen ? frozenOffsets[i] : undefined}
+                    isLastFrozen={i === JJ_FROZEN_COLUMN_COUNT - 1}
+                  >{c.label}</Th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
@@ -21356,6 +21448,7 @@ function JJRestockPanel({
                 key={order.id}
                 order={order}
                 sizes={sizes}
+                frozenOffsets={frozenOffsets}
                 thbPerAudCachedRate={thbPerAudCachedRate}
                 restockSettings={restockSettings}
                 canLoadInventory={canLoadInventory}
@@ -21367,7 +21460,7 @@ function JJRestockPanel({
             ))}
             {visible.length === 0 && (
               <tr>
-                <td colSpan={sizes.length + 9} style={{ ...s.td, textAlign: "center", padding: 24, color: "#6b7280" }}>
+                <td colSpan={jjColumns.length} style={{ ...s.td, textAlign: "center", padding: 24, color: "#6b7280" }}>
                   No open JJ orders. Place an order from a Shopify product whose Vendor is “JJ”.
                 </td>
               </tr>
@@ -21656,7 +21749,7 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     color: "#374151",
     lineHeight: 1.2,
-    whiteSpace: "nowrap",
+    wordBreak: "break-word",
   },
   jjSizeBarcode: {
     fontFamily: "monospace",
@@ -21664,7 +21757,7 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     color: "#374151",
     lineHeight: 1.2,
-    whiteSpace: "nowrap",
+    wordBreak: "break-word",
   },
   jjSizeLabel: { fontSize: 9, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.4, textAlign: "center" },
   appShell: {
