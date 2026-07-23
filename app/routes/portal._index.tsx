@@ -1491,6 +1491,35 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  // ─── JJ Restock — edit a per-size line's SKU or barcode. Matches the
+  // line by size (variantTitle) the same way update_qty does; creates an
+  // empty line if that size doesn't have one yet. JJ-only.
+  if (intent === "jj_update_line_field") {
+    if (!currentUser) return null;
+    const size = String(form.get("size") ?? "");
+    const field = String(form.get("field") ?? "");
+    const raw = String(form.get("value") ?? "").trim();
+    if (!size || (field !== "sku" && field !== "barcode")) return null;
+    const data = field === "sku" ? { sku: raw || null } : { barcode: raw || null };
+    try {
+      const existing = await prisma.orderLine.findFirst({
+        where: { orderId, variantTitle: size },
+        orderBy: { id: "asc" },
+        select: { id: true },
+      });
+      if (existing) {
+        await prisma.orderLine.update({ where: { id: existing.id }, data });
+      } else {
+        await prisma.orderLine.create({
+          data: { orderId, variantId: `${orderId}:${size}`, variantTitle: size, qtyOrdered: 0, ...data },
+        });
+      }
+    } catch (e) {
+      console.warn("[jj_update_line_field] failed:", e);
+    }
+    return null;
+  }
+
   // ─── JJ Restock — load one or more orders' arrived quantities straight
   // into Shopify inventory (no packing list), push the baht→AUD unit cost,
   // then close each loaded order so it drops off the page.
@@ -7778,6 +7807,14 @@ export default function PortalDashboard() {
   // shared restock table; the loader has already scoped `orders` to the
   // right vendor. Behaviour below keys off this instead of a single page id.
   const isRestockPage = page === "restock" || page === "jj-restock";
+  // A dedicated JJ supplier (role "user" whose only granted page is
+  // jj-restock) may edit quantities but must NOT see the load-to-Shopify
+  // controls — only staff/admins load inventory.
+  const jjSupplierOnly = (() => {
+    if (currentUser?.role !== "user") return false;
+    const allowed = Object.entries(currentUser.pageAccess ?? {}).filter(([, granted]) => granted).map(([id]) => id);
+    return allowed.length === 1 && allowed[0] === "jj-restock";
+  })();
   const [searchParams, setSearchParams] = useSearchParams();
   const submit = useSubmit();
   const columnWidthsFetcher = useFetcher();
@@ -8335,7 +8372,7 @@ export default function PortalDashboard() {
             thbPerAudCachedRate={thbPerAudCachedRate}
             fxBahtBuffer={fxBahtBuffer}
             restockSettings={restockSettings}
-            canLoadInventory={Boolean(currentUser?.canLoadInventory || currentUser?.admin)}
+            canLoadInventory={Boolean((currentUser?.canLoadInventory || currentUser?.admin) && !jjSupplierOnly)}
           />
         ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -21174,6 +21211,28 @@ function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
   );
 }
 
+// Editable per-size line field (SKU or barcode) for the JJ size cells.
+function JJLineFieldInput({ orderId, size, field, value }: {
+  orderId: number; size: string; field: "sku" | "barcode"; value: string;
+}) {
+  const fetcher = useFetcher();
+  return (
+    <input
+      type="text"
+      defaultValue={value}
+      onBlur={(e) => {
+        const next = e.currentTarget.value.trim();
+        if (next === value.trim()) return;
+        fetcher.submit(
+          { intent: "jj_update_line_field", orderId: String(orderId), size, field, value: next },
+          { method: "post" },
+        );
+      }}
+      style={s.jjLineInput}
+    />
+  );
+}
+
 function JJOrderRow({
   order, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
 }: {
@@ -21203,11 +21262,19 @@ function JJOrderRow({
         const line = lineForSize(sz);
         return (
           <td key={sz} style={{ ...s.td, verticalAlign: "top", textAlign: "center", padding: "4px 6px" }}>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
-              <span style={s.jjSizeSku}>{line?.sku || ""}</span>
-              <QtyCell orderId={order.id} size={sz} value={line?.qtyOrdered ?? 0} restockSettings={restockSettings} />
-              <span style={s.jjSizeBarcode}>{line?.barcode || ""}</span>
-            </div>
+            {line ? (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 2 }}>
+                <span style={s.jjSizeLabel}>SKU</span>
+                <JJLineFieldInput orderId={order.id} size={sz} field="sku" value={line.sku ?? ""} />
+                <div style={{ margin: "3px 0" }}>
+                  <QtyCell orderId={order.id} size={sz} value={line.qtyOrdered ?? 0} restockSettings={restockSettings} />
+                </div>
+                <span style={s.jjSizeLabel}>Barcode</span>
+                <JJLineFieldInput orderId={order.id} size={sz} field="barcode" value={line.barcode ?? ""} />
+              </div>
+            ) : (
+              <QtyCell orderId={order.id} size={sz} value={0} restockSettings={restockSettings} />
+            )}
           </td>
         );
       })}
@@ -21594,6 +21661,8 @@ const s: Record<string, React.CSSProperties> = {
   jjFieldInput: { width: "100%", boxSizing: "border-box", padding: "4px 6px", border: "1px solid transparent", borderRadius: 4, fontSize: 13, background: "transparent", textAlign: "center" },
   jjSizeSku: { fontFamily: "monospace", fontSize: 11, color: "#374151", lineHeight: 1.2 },
   jjSizeBarcode: { fontFamily: "monospace", fontSize: 10, color: "#9ca3af", lineHeight: 1.2 },
+  jjSizeLabel: { fontSize: 9, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.4, textAlign: "center" },
+  jjLineInput: { width: "100%", boxSizing: "border-box", padding: "2px 4px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 11, fontFamily: "monospace", textAlign: "center", background: "#fff" },
   appShell: {
     // Lock the whole portal to viewport height. Sidebar fills the
     // full viewport height; main column is slightly shorter so the
