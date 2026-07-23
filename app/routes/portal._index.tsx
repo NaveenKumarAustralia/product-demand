@@ -3838,6 +3838,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "set_fabric_notes") {
+    // Same find-or-create as set_fabric_type, for the Notes column — lets a
+    // row whose sheet has no Notes column still take a note.
+    const gid = String(form.get("gid") ?? "");
+    const rowIndex = Number(form.get("rowIndex"));
+    const value = String(form.get("value") ?? "");
+    if (!gid || !Number.isInteger(rowIndex) || rowIndex < 0) return null;
+    const sheets = await loadManualFabricSheetsForAction();
+    const sheet = sheets.find((item) => item.gid === gid);
+    if (!sheet?.rows[rowIndex]) return null;
+    let idx = sheet.headers.findIndex((h) => /^notes?$/i.test(h.trim()));
+    if (idx < 0) {
+      if (!value.trim()) return null; // don't add an empty column
+      sheet.headers.push("Notes");
+      idx = sheet.headers.length - 1;
+      for (const r of sheet.rows) { while (r.length <= idx) r.push(""); }
+    }
+    while (sheet.rows[rowIndex].length <= idx) sheet.rows[rowIndex].push("");
+    sheet.rows[rowIndex][idx] = value;
+    await saveManualFabricSheets(sheets);
+    return null;
+  }
+
   if (intent === "upload_fabric_image") {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
@@ -15023,6 +15046,7 @@ const UNIFIED_FABRIC_COLUMNS = [
   { key: "fabricType", label: "Fabric Type", header: "Fabric Type", defaultWidth: 130 },
   { key: "fabricImage", label: "Fabric", header: "Fabric", defaultWidth: 120 },
   { key: "name", label: "Name", header: "Name", defaultWidth: 150 },
+  { key: "notes", label: "Notes", header: "Notes", defaultWidth: 200 },
   { key: "collection", label: "Collection", header: "Collection", defaultWidth: 120 },
   { key: "costPerMeter", label: "Cost per Meter", header: "Cost per Meter", defaultWidth: 100 },
   { key: "cutPieces", label: "Cut Pieces", header: "Cut Pieces", defaultWidth: 110 },
@@ -15062,6 +15086,7 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
   const fabricTypeIdx = find((h) => /^fabric\s*type$/.test(h) || /^type$/.test(h));
   const imageIdx = find((h) => /^fabric$/.test(h) || /^picture$/.test(h));
   const nameIdx = find((h) => /^name$/.test(h));
+  const notesIdx = find((h) => /^notes?$/.test(h));
   const collectionIdx = find((h) => /^collection$/.test(h));
   const costIdx = find((h) => /cost\s*per\s*meter|price\s*per\s*meter|^price$/.test(h));
   const cutPiecesIdx = find((h) => /^cut\s*pieces?$/.test(h));
@@ -15093,6 +15118,7 @@ function unifyFabricRow(sheet: FabricSheetData, displayRowIndex: number): Unifie
       },
       fabricImage: make(imageIdx, "Fabric"),
       name: make(nameIdx, "Name"),
+      notes: make(notesIdx, "Notes"),
       collection: make(collectionIdx, "Collection"),
       costPerMeter: make(costIdx, "Cost per Meter"),
       cutPieces: make(cutPiecesIdx, "Cut Pieces"),
@@ -15248,8 +15274,15 @@ function CombinedFabricStockPanel({
         map.delete(key as UnifiedFabricKey);
       }
     }
-    for (const column of UNIFIED_FABRIC_COLUMNS) {
-      if (map.has(column.key)) ordered.push(column);
+    // Columns missing from a saved order (i.e. added after the user last
+    // reordered) slot in next to their natural neighbour rather than being
+    // dumped at the end — so e.g. Notes still appears right after Name.
+    for (const [index, column] of UNIFIED_FABRIC_COLUMNS.entries()) {
+      if (!map.has(column.key)) continue;
+      const prevKey = index > 0 ? UNIFIED_FABRIC_COLUMNS[index - 1].key : null;
+      const at = prevKey ? ordered.findIndex((c) => c.key === prevKey) : -1;
+      if (at >= 0) ordered.splice(at + 1, 0, column);
+      else ordered.push(column);
     }
     return ordered;
   }, [fabricSettings.combinedColumnOrder]);
@@ -15471,6 +15504,21 @@ function CombinedFabricStockPanel({
   );
 }
 
+// Notes editor for a fabric row whose sheet has no Notes column yet. Same
+// mention textarea as the populated cells; the first save creates the column.
+function FabricRowNotesFallback({ users, onSave }: { users: PortalUser[]; onSave: (value: string) => void }) {
+  const [draft, setDraft] = useState("");
+  return (
+    <FabricMentionCell
+      value={draft}
+      originalValue=""
+      users={users}
+      onDraftChange={setDraft}
+      onSave={onSave}
+    />
+  );
+}
+
 function CombinedFabricRow({
   entry,
   displayIndex,
@@ -15548,6 +15596,13 @@ function CombinedFabricRow({
                 chipKind="fabricTypeOptions"
                 fabricSettings={fabricSettings}
                 onChange={(v) => submitPortalCell(fetcher, { intent: "set_fabric_type", gid: primaryGid, rowIndex: primaryRowIndex, value: v })}
+              />
+            ) : column.key === "notes" ? (
+              // Source sheet has no Notes column — still allow a note; saving
+              // one creates the column on that sheet.
+              <FabricRowNotesFallback
+                users={users}
+                onSave={(v) => submitPortalCell(fetcher, { intent: "set_fabric_notes", gid: primaryGid, rowIndex: primaryRowIndex, value: v })}
               />
             ) : null}
           </FabricTd>
