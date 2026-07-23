@@ -1491,35 +1491,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
-  // ─── JJ Restock — edit a per-size line's SKU or barcode. Matches the
-  // line by size (variantTitle) the same way update_qty does; creates an
-  // empty line if that size doesn't have one yet. JJ-only.
-  if (intent === "jj_update_line_field") {
-    if (!currentUser) return null;
-    const size = String(form.get("size") ?? "");
-    const field = String(form.get("field") ?? "");
-    const raw = String(form.get("value") ?? "").trim();
-    if (!size || (field !== "sku" && field !== "barcode")) return null;
-    const data = field === "sku" ? { sku: raw || null } : { barcode: raw || null };
-    try {
-      const existing = await prisma.orderLine.findFirst({
-        where: { orderId, variantTitle: size },
-        orderBy: { id: "asc" },
-        select: { id: true },
-      });
-      if (existing) {
-        await prisma.orderLine.update({ where: { id: existing.id }, data });
-      } else {
-        await prisma.orderLine.create({
-          data: { orderId, variantId: `${orderId}:${size}`, variantTitle: size, qtyOrdered: 0, ...data },
-        });
-      }
-    } catch (e) {
-      console.warn("[jj_update_line_field] failed:", e);
-    }
-    return null;
-  }
-
   // ─── JJ Restock — load one or more orders' arrived quantities straight
   // into Shopify inventory (no packing list), push the baht→AUD unit cost,
   // then close each loaded order so it drops off the page.
@@ -21211,28 +21182,6 @@ function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
   );
 }
 
-// Editable per-size line field (SKU or barcode) for the JJ size cells.
-function JJLineFieldInput({ orderId, size, field, value }: {
-  orderId: number; size: string; field: "sku" | "barcode"; value: string;
-}) {
-  const fetcher = useFetcher();
-  return (
-    <input
-      type="text"
-      defaultValue={value}
-      onBlur={(e) => {
-        const next = e.currentTarget.value.trim();
-        if (next === value.trim()) return;
-        fetcher.submit(
-          { intent: "jj_update_line_field", orderId: String(orderId), size, field, value: next },
-          { method: "post" },
-        );
-      }}
-      style={s.jjLineInput}
-    />
-  );
-}
-
 function JJOrderRow({
   order, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
 }: {
@@ -21263,14 +21212,14 @@ function JJOrderRow({
         return (
           <td key={sz} style={{ ...s.td, verticalAlign: "top", textAlign: "center", padding: "4px 6px" }}>
             {line ? (
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 2 }}>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
                 <span style={s.jjSizeLabel}>SKU</span>
-                <JJLineFieldInput orderId={order.id} size={sz} field="sku" value={line.sku ?? ""} />
+                <span style={s.jjSizeSku}>{line.sku || "—"}</span>
                 <div style={{ margin: "3px 0" }}>
                   <QtyCell orderId={order.id} size={sz} value={line.qtyOrdered ?? 0} restockSettings={restockSettings} />
                 </div>
                 <span style={s.jjSizeLabel}>Barcode</span>
-                <JJLineFieldInput orderId={order.id} size={sz} field="barcode" value={line.barcode ?? ""} />
+                <span style={s.jjSizeBarcode}>{line.barcode || "—"}</span>
               </div>
             ) : (
               <QtyCell orderId={order.id} size={sz} value={0} restockSettings={restockSettings} />
@@ -21662,7 +21611,6 @@ const s: Record<string, React.CSSProperties> = {
   jjSizeSku: { fontFamily: "monospace", fontSize: 11, color: "#374151", lineHeight: 1.2 },
   jjSizeBarcode: { fontFamily: "monospace", fontSize: 10, color: "#9ca3af", lineHeight: 1.2 },
   jjSizeLabel: { fontSize: 9, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.4, textAlign: "center" },
-  jjLineInput: { width: "100%", boxSizing: "border-box", padding: "2px 4px", border: "1px solid #e5e7eb", borderRadius: 4, fontSize: 11, fontFamily: "monospace", textAlign: "center", background: "#fff" },
   appShell: {
     // Lock the whole portal to viewport height. Sidebar fills the
     // full viewport height; main column is slightly shorter so the
