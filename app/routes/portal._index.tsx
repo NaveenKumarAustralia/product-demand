@@ -21210,16 +21210,20 @@ function JJOrderRow({
       {sizes.map((sz) => {
         const line = lineForSize(sz);
         return (
-          <td key={sz} style={{ ...s.td, verticalAlign: "top", textAlign: "center", padding: "4px 6px" }}>
+          <td key={sz} style={{ ...s.td, textAlign: "center", padding: "6px 6px", height: 1 }}>
             {line ? (
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-                <span style={s.jjSizeLabel}>SKU</span>
-                <span style={s.jjSizeSku}>{line.sku || "—"}</span>
-                <div style={{ margin: "3px 0" }}>
-                  <QtyCell orderId={order.id} size={sz} value={line.qtyOrdered ?? 0} restockSettings={restockSettings} />
+              // SKU pinned to the top, qty centred, barcode pinned to the
+              // bottom — space-between over the full cell height.
+              <div style={s.jjSizeCell}>
+                <div style={s.jjSizeBlock}>
+                  <span style={s.jjSizeLabel}>SKU</span>
+                  <span style={s.jjSizeSku}>{line.sku || "—"}</span>
                 </div>
-                <span style={s.jjSizeLabel}>Barcode</span>
-                <span style={s.jjSizeBarcode}>{line.barcode || "—"}</span>
+                <QtyCell orderId={order.id} size={sz} value={line.qtyOrdered ?? 0} restockSettings={restockSettings} />
+                <div style={s.jjSizeBlock}>
+                  <span style={s.jjSizeLabel}>Barcode</span>
+                  <span style={s.jjSizeBarcode}>{line.barcode || "—"}</span>
+                </div>
               </div>
             ) : (
               <QtyCell orderId={order.id} size={sz} value={0} restockSettings={restockSettings} />
@@ -21608,8 +21612,35 @@ const s: Record<string, React.CSSProperties> = {
   jjSearchInput: { padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13, minWidth: 220 },
   jjLoadBtn: { padding: "7px 14px", background: "#16a34a", color: "#fff", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" },
   jjFieldInput: { width: "100%", boxSizing: "border-box", padding: "4px 6px", border: "1px solid transparent", borderRadius: 4, fontSize: 13, background: "transparent", textAlign: "center" },
-  jjSizeSku: { fontFamily: "monospace", fontSize: 11, color: "#374151", lineHeight: 1.2 },
-  jjSizeBarcode: { fontFamily: "monospace", fontSize: 10, color: "#9ca3af", lineHeight: 1.2 },
+  // JJ size cell: SKU block on top, qty in the middle, barcode block at the
+  // bottom. SKU/barcode use the same font-size variable as the qty input so
+  // all three read at one size (and scale together with the font setting).
+  jjSizeCell: {
+    display: "flex",
+    flexDirection: "column",
+    justifyContent: "space-between",
+    alignItems: "center",
+    height: "100%",
+    minHeight: 96,
+    gap: 6,
+  },
+  jjSizeBlock: { display: "flex", flexDirection: "column", alignItems: "center", gap: 1, width: "100%" },
+  jjSizeSku: {
+    fontFamily: "monospace",
+    fontSize: "var(--portal-inventory-font-size, 13px)",
+    fontWeight: 600,
+    color: "#374151",
+    lineHeight: 1.2,
+    wordBreak: "break-word",
+  },
+  jjSizeBarcode: {
+    fontFamily: "monospace",
+    fontSize: "var(--portal-inventory-font-size, 13px)",
+    fontWeight: 600,
+    color: "#374151",
+    lineHeight: 1.2,
+    wordBreak: "break-word",
+  },
   jjSizeLabel: { fontSize: 9, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.4, textAlign: "center" },
   appShell: {
     // Lock the whole portal to viewport height. Sidebar fills the
