@@ -78,6 +78,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     } catch (e) {
       console.warn("[barcode] column ensure failed:", e);
     }
+    // JJ Restock per-order fields. Safe on a stale DB that hasn't run the
+    // migration yet; no-op once the columns exist.
+    try {
+      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "colourCode" TEXT`);
+      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "styleCode" TEXT`);
+      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "costBaht" DOUBLE PRECISION`);
+    } catch (e) {
+      console.warn("[jj-restock] column ensure failed:", e);
+    }
     // Backfill: fold the old packed / ready_to_send statuses into the new
     // unified `ready`. updateMany is a no-op when no rows match, so this
     // is cheap to run on every load.
@@ -347,6 +356,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productInfo = normalizeProductInfo(productInfoSetting?.value);
   const usersWithSeed = await ensureSuperAdmin(users);
   const currentUser = getCurrentPortalUser(request, usersWithSeed);
+  // JJ-only supplier lockdown: a non-admin user whose ONLY granted page is
+  // "jj-restock" can never leave that page (nav already hides everything
+  // else; this blocks direct-URL access too). Deliberately narrow so it
+  // only affects dedicated JJ users and changes nothing for anyone else.
+  if (currentUser && currentUser.role === "user") {
+    const allowedPages = Object.entries(currentUser.pageAccess ?? {})
+      .filter(([, granted]) => granted)
+      .map(([id]) => id);
+    if (allowedPages.length === 1 && allowedPages[0] === "jj-restock" && page !== "jj-restock") {
+      return new Response(null, { status: 302, headers: { Location: "/portal?page=jj-restock" } });
+    }
+  }
   const activeUsers = await recordAndGetActiveUsers(currentUser, usersWithSeed, activeUsersSetting?.value)
     .catch((error) => {
       console.error("Active user tracking failed", error);
@@ -716,6 +737,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     restockTotalsFiltered,
     inrPerAudCachedRate: (isRestockPage || page === "packing" || page === "collections") ? await getCachedInrPerAud() : null,
     fxRupeeBuffer: FX_RUPEE_BUFFER,
+    thbPerAudCachedRate: page === "jj-restock" ? await getCachedThbPerAud() : null,
+    fxBahtBuffer: FX_BAHT_BUFFER,
     collectionSettings,
     sortBy,
     page,
@@ -1445,6 +1468,79 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     return null;
+  }
+
+  // ─── JJ Restock — edit a per-order JJ field (colour code / style code /
+  // baht cost). JJ-only columns; never touched by the Karma East table.
+  if (intent === "jj_update_order_field") {
+    if (!currentUser) return null;
+    const field = String(form.get("field") ?? "");
+    const raw = String(form.get("value") ?? "").trim();
+    const data: Record<string, unknown> = {};
+    if (field === "colourCode") data.colourCode = raw || null;
+    else if (field === "styleCode") data.styleCode = raw || null;
+    else if (field === "costBaht") {
+      const n = Number(raw);
+      data.costBaht = raw && Number.isFinite(n) && n > 0 ? n : null;
+    } else return null;
+    try {
+      await prisma.supplierOrder.update({ where: { id: orderId }, data });
+    } catch (e) {
+      console.warn("[jj_update_order_field] failed:", e);
+    }
+    return null;
+  }
+
+  // ─── JJ Restock — load one or more orders' arrived quantities straight
+  // into Shopify inventory (no packing list), push the baht→AUD unit cost,
+  // then close each loaded order so it drops off the page.
+  if (intent === "jj_load_inventory") {
+    if (!canLoadPackingInventory) return { jjError: "You don't have permission to load inventory" };
+    const orderIds = String(form.get("orderIds") ?? "")
+      .split(",")
+      .map((value) => Number(value.trim()))
+      .filter((value) => Number.isInteger(value) && value > 0);
+    if (!orderIds.length) return null;
+    const jjOrders = await prisma.supplierOrder.findMany({
+      where: { id: { in: orderIds }, status: "open" },
+      include: { lines: true },
+    });
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    });
+    if (!session?.shop || !session.accessToken) return { jjError: "No Shopify session available" };
+    const thbRate = await getCachedThbPerAud();
+    const loadedOrderIds: number[] = [];
+    for (const order of jjOrders) {
+      if (!order.productId) continue;
+      const variants = await getShopifyInventoryVariants(session.shop, order.productId);
+      const changes: ShopifyInventoryChange[] = [];
+      for (const line of order.lines) {
+        const qty = line.qtyOrdered;
+        if (!qty || qty <= 0) continue;
+        const variant = matchingVariantForSize(variants, line.variantTitle) as ShopifyInventoryVariantInfo | null;
+        if (!variant?.inventoryItemId) continue;
+        changes.push({ size: line.variantTitle, qty, inventoryItemId: variant.inventoryItemId });
+      }
+      if (!changes.length) continue;
+      const loaded = await addShopifyInventory(session.shop, session.accessToken, changes);
+      if (!loaded.length) continue;
+      // Best-effort baht→AUD unit-cost push (rate minus the 1-baht buffer).
+      const costBaht = (order as { costBaht?: number | null }).costBaht ?? null;
+      const costAud = costBaht && costBaht > 0 ? convertBahtToAud(costBaht, thbRate) : null;
+      if (costAud && costAud > 0) {
+        for (const change of changes) {
+          const variant = matchingVariantForSize(variants, change.size) as ShopifyInventoryVariantInfo | null;
+          if (variant?.inventoryItemId) {
+            await updateInventoryItemUnitCost(session.shop, session.accessToken, variant.inventoryItemId, costAud);
+          }
+        }
+      }
+      await prisma.supplierOrder.update({ where: { id: order.id }, data: { status: "closed" } });
+      loadedOrderIds.push(order.id);
+    }
+    return { jjLoaded: loadedOrderIds };
   }
 
   if (intent === "toggle_packing_qty_manual_loaded") {
@@ -6011,6 +6107,71 @@ function convertRupeesToAud(rupees: number, inrPerAud: number | null | undefined
   return rupees / ((inrPerAud as number) - FX_RUPEE_BUFFER);
 }
 
+// ─── JJ Restock (Thailand) — THB → AUD ───────────────────────────
+// Exact mirror of the INR helpers above, but for Thai Baht and with a
+// smaller 1-baht buffer (JJ supplier requirement). Used ONLY by the JJ
+// Restock page; the Karma East flow keeps using the rupee helpers.
+const THB_AUD_CACHE_KEY = "production-portal-thb-aud-rate-v1";
+const FX_BAHT_BUFFER = 1;
+type CachedThbRate = { thbPerAud: number; fetchedAt: string };
+
+async function fetchLiveThbPerAud(): Promise<number | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
+  try {
+    const response = await fetch("https://open.er-api.com/v6/latest/AUD", {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const data = await response.json() as { rates?: Record<string, number> };
+    const rate = Number(data.rates?.THB);
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    return rate;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function getCachedThbPerAud(): Promise<number | null> {
+  try {
+    const setting = await prisma.portalSetting.findUnique({
+      where: { key: THB_AUD_CACHE_KEY },
+      select: { value: true },
+    });
+    const cached = (setting?.value as CachedThbRate | null | undefined);
+    if (cached && typeof cached.thbPerAud === "number" && cached.fetchedAt) {
+      const age = Date.now() - new Date(cached.fetchedAt).getTime();
+      if (Number.isFinite(age) && age < FX_CACHE_TTL_MS && cached.thbPerAud > 0) {
+        return cached.thbPerAud;
+      }
+    }
+  } catch (e) {
+    console.warn("[fx] thb cache read failed:", e);
+  }
+  const live = await fetchLiveThbPerAud();
+  if (live === null) return null;
+  try {
+    const payload: CachedThbRate = { thbPerAud: live, fetchedAt: new Date().toISOString() };
+    await prisma.portalSetting.upsert({
+      where: { key: THB_AUD_CACHE_KEY },
+      create: { key: THB_AUD_CACHE_KEY, value: payload },
+      update: { value: payload },
+    });
+  } catch (e) {
+    console.warn("[fx] thb cache write failed:", e);
+  }
+  return live;
+}
+
+function convertBahtToAud(baht: number, thbPerAud: number | null | undefined): number | null {
+  if (!Number.isFinite(baht) || baht <= 0) return null;
+  if (!Number.isFinite(thbPerAud ?? NaN) || (thbPerAud as number) <= FX_BAHT_BUFFER) return null;
+  return baht / ((thbPerAud as number) - FX_BAHT_BUFFER);
+}
+
 function getFabricSheets(
   overridesValue?: unknown,
   customRowsValue?: unknown,
@@ -7573,6 +7734,8 @@ export default function PortalDashboard() {
     restockTotalsFiltered,
     inrPerAudCachedRate,
     fxRupeeBuffer,
+    thbPerAudCachedRate,
+    fxBahtBuffer,
     sortBy,
     page,
     columnWidths: savedColumnWidths,
@@ -7630,7 +7793,7 @@ export default function PortalDashboard() {
     if (node) node.scrollTop = 0;
   }, []);
   useLayoutEffect(() => {
-    if (!isRestockPage) return;
+    if (page !== "restock") return;
     const el = restockTableScrollRef.current;
     if (el) el.scrollTop = 0;
   }, [page]);
@@ -7724,14 +7887,14 @@ export default function PortalDashboard() {
   }, [searchTitle]);
   useEffect(() => {
     if (!isSearchFocused) return;
-    if (isRestockPage) return;
+    if (page === "restock") return;
     const timer = window.setTimeout(() => {
       if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
     }, 350);
     return () => window.clearTimeout(timer);
   }, [searchTitleInput, isSearchFocused, page]);
-  const restockSearch = isRestockPage ? searchTitleInput.trim().toLowerCase() : "";
-  const visibleOrders = isRestockPage && restockSearch
+  const restockSearch = page === "restock" ? searchTitleInput.trim().toLowerCase() : "";
+  const visibleOrders = page === "restock" && restockSearch
     ? orders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
     : orders;
   // Lookup: product title (e.g. "Vivien Dress Queen Protea") → per-piece
@@ -7966,7 +8129,7 @@ export default function PortalDashboard() {
         <header style={s.pageHeader}>
           <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
             <h1 style={s.pageTitle}>{activePageTitle}</h1>
-            {isRestockPage && (() => {
+            {page === "restock" && (() => {
               const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
               const showFiltered = filtersActive && (
                 restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
@@ -7990,7 +8153,7 @@ export default function PortalDashboard() {
           </div>
           <div style={s.headerControls}>
             <div style={s.utilityBar}>
-              {(isRestockPage || page === "packing" || page === "fabric" || page === "productinfo" || page === "samples") && (
+              {(page === "restock" || page === "packing" || page === "fabric" || page === "productinfo" || page === "samples") && (
                 <label style={s.filterLabel}>
                   Search
                   <input
@@ -8000,7 +8163,7 @@ export default function PortalDashboard() {
                     onFocus={() => setIsSearchFocused(true)}
                     onBlur={() => {
                       setIsSearchFocused(false);
-                      if (!isRestockPage && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
+                      if (page !== "restock" && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
                     }}
                     style={s.searchInput}
                     placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : page === "productinfo" ? "Style name" : page === "samples" ? "Sample name" : "Product title"}
@@ -8024,7 +8187,7 @@ export default function PortalDashboard() {
           </div>
         </header>
 
-        {isRestockPage && (
+        {page === "restock" && (
           <div style={s.restockFilterBar}>
             <label style={s.filterLabel}>
               Product group
@@ -8165,6 +8328,15 @@ export default function PortalDashboard() {
               <PhotoShootPanel photoShoots={photoShoots} productInfo={productInfo} savedColumnWidths={photoShootColumnWidths} />
             </div>
           </div>
+        ) : page === "jj-restock" ? (
+          <JJRestockPanel
+            orders={orders}
+            sizes={sizes}
+            thbPerAudCachedRate={thbPerAudCachedRate}
+            fxBahtBuffer={fxBahtBuffer}
+            restockSettings={restockSettings}
+            canLoadInventory={Boolean(currentUser?.canLoadInventory || currentUser?.admin)}
+          />
         ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : (
@@ -20977,6 +21149,193 @@ function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; s
   );
 }
 
+// ─── JJ Restock (self-contained; does NOT touch the Karma East table) ────
+// Editable text/number cell for the JJ-only per-order fields.
+function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
+  orderId: number; field: string; value: string; numeric?: boolean; placeholder?: string;
+}) {
+  const fetcher = useFetcher();
+  return (
+    <input
+      type="text"
+      inputMode={numeric ? "decimal" : undefined}
+      defaultValue={value}
+      placeholder={placeholder}
+      onBlur={(e) => {
+        const next = e.currentTarget.value.trim();
+        if (next === value.trim()) return;
+        fetcher.submit(
+          { intent: "jj_update_order_field", orderId: String(orderId), field, value: next },
+          { method: "post" },
+        );
+      }}
+      style={s.jjFieldInput}
+    />
+  );
+}
+
+function JJOrderRow({
+  order, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
+}: {
+  order: Order; sizes: string[]; thbPerAudCachedRate: number | null; restockSettings: RestockSettings;
+  canLoadInventory: boolean; selected: boolean; onToggle: () => void; onLoad: () => void; loading: boolean;
+}) {
+  const lines = order.lines as Array<{ variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }>;
+  const lineForSize = (size: string) =>
+    lines.find((l) => (l.variantTitle ?? "").trim().toLowerCase() === size.trim().toLowerCase()) ?? null;
+  const totalQty = lines.reduce((sum, l) => sum + (l.qtyOrdered || 0), 0);
+  const costBaht = (order as { costBaht?: number | null }).costBaht ?? null;
+  const costAud = costBaht ? convertBahtToAud(costBaht, thbPerAudCachedRate) : null;
+  return (
+    <tr style={s.row}>
+      <td style={{ ...s.td, textAlign: "center" }}>
+        {canLoadInventory ? <input type="checkbox" checked={selected} onChange={onToggle} /> : null}
+      </td>
+      <td style={s.td}>
+        <div style={s.imageCell}>
+          {order.productImageUrl ? <img src={order.productImageUrl} alt="" style={s.thumb} /> : <div style={s.noImg}>—</div>}
+        </div>
+      </td>
+      <td style={s.td}><JJFieldCell orderId={order.id} field="colourCode" value={(order as { colourCode?: string | null }).colourCode ?? ""} /></td>
+      <td style={s.td}><span style={{ fontSize: 13 }}>{order.productTitle}</span></td>
+      <td style={s.td}><JJFieldCell orderId={order.id} field="styleCode" value={(order as { styleCode?: string | null }).styleCode ?? ""} placeholder="Code" /></td>
+      {sizes.map((sz) => {
+        const line = lineForSize(sz);
+        return (
+          <td key={sz} style={{ ...s.td, verticalAlign: "top", textAlign: "center", padding: "4px 6px" }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+              <span style={s.jjSizeSku}>{line?.sku || ""}</span>
+              <QtyCell orderId={order.id} size={sz} value={line?.qtyOrdered ?? 0} restockSettings={restockSettings} />
+              <span style={s.jjSizeBarcode}>{line?.barcode || ""}</span>
+            </div>
+          </td>
+        );
+      })}
+      <td style={{ ...s.td, textAlign: "center", fontWeight: 600 }}>{totalQty}</td>
+      <td style={{ ...s.td, textAlign: "center" }}><JJFieldCell orderId={order.id} field="costBaht" numeric value={costBaht != null ? String(costBaht) : ""} placeholder="฿" /></td>
+      <td style={{ ...s.td, textAlign: "center", color: "#6b7280" }}>{costAud != null ? `$${costAud.toFixed(2)}` : "—"}</td>
+      {canLoadInventory && (
+        <td style={{ ...s.td, textAlign: "center" }}>
+          <button
+            type="button"
+            disabled={loading || totalQty <= 0}
+            onClick={onLoad}
+            style={{ ...s.jjLoadBtn, padding: "4px 10px", ...(loading || totalQty <= 0 ? { opacity: 0.5, cursor: "default" } : {}) }}
+          >
+            Load
+          </button>
+        </td>
+      )}
+    </tr>
+  );
+}
+
+function JJRestockPanel({
+  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory,
+}: {
+  orders: Order[]; sizes: string[]; thbPerAudCachedRate: number | null; fxBahtBuffer: number;
+  restockSettings: RestockSettings; canLoadInventory: boolean;
+}) {
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [search, setSearch] = useState("");
+  const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
+  const loading = loadFetcher.state !== "idle";
+
+  const term = search.trim().toLowerCase();
+  const visible = (term
+    ? orders.filter((o) =>
+        (o.productTitle ?? "").toLowerCase().includes(term)
+        || ((o as { styleCode?: string | null }).styleCode ?? "").toLowerCase().includes(term)
+        || ((o as { colourCode?: string | null }).colourCode ?? "").toLowerCase().includes(term))
+    : orders) as Order[];
+
+  const toggle = (id: number) => setSelected((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const allVisibleSelected = visible.length > 0 && visible.every((o) => selected.has(o.id));
+  const toggleAll = () => setSelected((prev) => {
+    const next = new Set(prev);
+    if (visible.every((o) => prev.has(o.id))) visible.forEach((o) => next.delete(o.id));
+    else visible.forEach((o) => next.add(o.id));
+    return next;
+  });
+  const selectedCount = visible.filter((o) => selected.has(o.id)).length;
+  const loadIds = (ids: number[]) => {
+    if (!ids.length) return;
+    loadFetcher.submit({ intent: "jj_load_inventory", orderIds: ids.join(",") }, { method: "post" });
+    setSelected(new Set());
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <input
+          placeholder="Search JJ products…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={s.jjSearchInput}
+        />
+        {canLoadInventory && (
+          <button
+            type="button"
+            disabled={selectedCount === 0 || loading}
+            onClick={() => loadIds(visible.filter((o) => selected.has(o.id)).map((o) => o.id))}
+            style={{ ...s.jjLoadBtn, ...(selectedCount === 0 || loading ? { opacity: 0.5, cursor: "default" } : {}) }}
+          >
+            {loading ? "Loading…" : `Load ${selectedCount || ""} selected to Shopify`.replace("  ", " ")}
+          </button>
+        )}
+        {loadFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{loadFetcher.data.jjError}</span>}
+      </div>
+      <div className="portal-table-scroll" style={s.tableWrap}>
+        <table style={s.table}>
+          <thead>
+            <tr style={s.headerRow}>
+              <th style={{ ...s.th, ...s.rowNumberHeader }}>
+                {canLoadInventory ? <input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} /> : "#"}
+              </th>
+              <th style={s.th}>Picture</th>
+              <th style={s.th}>Colour Code</th>
+              <th style={s.th}>Name</th>
+              <th style={s.th}>SKU</th>
+              {sizes.map((sz) => <th key={sz} style={{ ...s.th, textAlign: "center" }}>{sz}</th>)}
+              <th style={{ ...s.th, textAlign: "center" }}>Total Qty</th>
+              <th style={{ ...s.th, textAlign: "center" }}>Cost (฿)</th>
+              <th style={{ ...s.th, textAlign: "center" }}>Cost (A$)</th>
+              {canLoadInventory && <th style={{ ...s.th, textAlign: "center" }}>Load</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((order) => (
+              <JJOrderRow
+                key={order.id}
+                order={order}
+                sizes={sizes}
+                thbPerAudCachedRate={thbPerAudCachedRate}
+                restockSettings={restockSettings}
+                canLoadInventory={canLoadInventory}
+                selected={selected.has(order.id)}
+                onToggle={() => toggle(order.id)}
+                onLoad={() => loadIds([order.id])}
+                loading={loading}
+              />
+            ))}
+            {visible.length === 0 && (
+              <tr>
+                <td colSpan={sizes.length + 9} style={{ ...s.td, textAlign: "center", padding: 24, color: "#6b7280" }}>
+                  No open JJ orders. Place an order from a Shopify product whose Vendor is “JJ”.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function OrderActionsCell({ orderId }: { orderId: number }) {
   const fetcher = useFetcher();
   const confirmedRef = useRef(false);
@@ -21229,6 +21588,12 @@ function PackingTd({
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s: Record<string, React.CSSProperties> = {
+  // JJ Restock panel styles (scoped to the JJ page only).
+  jjSearchInput: { padding: "7px 10px", border: "1px solid #d1d5db", borderRadius: 6, fontSize: 13, minWidth: 220 },
+  jjLoadBtn: { padding: "7px 14px", background: "#16a34a", color: "#fff", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: "pointer" },
+  jjFieldInput: { width: "100%", boxSizing: "border-box", padding: "4px 6px", border: "1px solid transparent", borderRadius: 4, fontSize: 13, background: "transparent", textAlign: "center" },
+  jjSizeSku: { fontFamily: "monospace", fontSize: 11, color: "#374151", lineHeight: 1.2 },
+  jjSizeBarcode: { fontFamily: "monospace", fontSize: 10, color: "#9ca3af", lineHeight: 1.2 },
   appShell: {
     // Lock the whole portal to viewport height. Sidebar fills the
     // full viewport height; main column is slightly shorter so the

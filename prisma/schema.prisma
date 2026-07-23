@@ -44,6 +44,10 @@ model SupplierOrder {
   eta             DateTime?
   destination     String?
   packingListId   Int?
+  // JJ Restock only — never set for Karma East orders.
+  colourCode      String?
+  styleCode       String?
+  costBaht        Float?
   notes           String?
   totalQty        Int       @default(0)
   createdAt    DateTime    @default(now())
