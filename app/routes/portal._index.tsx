@@ -21182,6 +21182,13 @@ function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
   );
 }
 
+// JJ Restock table column widths. Size columns must fit a full SKU/barcode
+// (e.g. "JJB001-LFFFBL") on one line without wrapping.
+const JJ_SIZE_COL_WIDTH = 132;
+const JJ_LOAD_COL_WIDTH = 84;
+// checkbox 44 + picture 90 + colour code 120 + name 160 + sku 120 + qty 90 + baht 90 + aud 90
+const JJ_FIXED_COL_WIDTH = 44 + 90 + 120 + 160 + 120 + 90 + 90 + 90;
+
 function JJOrderRow({
   order, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
 }: {
@@ -21310,7 +21317,23 @@ function JJRestockPanel({
         {loadFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{loadFetcher.data.jjError}</span>}
       </div>
       <div className="portal-table-scroll" style={s.tableWrap}>
-        <table style={s.table}>
+        {/* Explicit column widths: the table is tableLayout:fixed, so without
+            these every column gets an equal (too narrow) share and the SKU /
+            barcode text wraps onto a second line. Size columns are wide enough
+            for a full SKU on one line; the table scrolls horizontally. */}
+        <table style={{ ...s.table, width: JJ_FIXED_COL_WIDTH + sizes.length * JJ_SIZE_COL_WIDTH + (canLoadInventory ? JJ_LOAD_COL_WIDTH : 0), minWidth: "100%" }}>
+          <colgroup>
+            <col style={{ width: 44 }} />
+            <col style={{ width: 90 }} />
+            <col style={{ width: 120 }} />
+            <col style={{ width: 160 }} />
+            <col style={{ width: 120 }} />
+            {sizes.map((sz) => <col key={sz} style={{ width: JJ_SIZE_COL_WIDTH }} />)}
+            <col style={{ width: 90 }} />
+            <col style={{ width: 90 }} />
+            <col style={{ width: 90 }} />
+            {canLoadInventory && <col style={{ width: JJ_LOAD_COL_WIDTH }} />}
+          </colgroup>
           <thead>
             <tr style={s.headerRow}>
               <th style={{ ...s.th, ...s.rowNumberHeader }}>
@@ -21625,13 +21648,15 @@ const s: Record<string, React.CSSProperties> = {
     gap: 6,
   },
   jjSizeBlock: { display: "flex", flexDirection: "column", alignItems: "center", gap: 1, width: "100%" },
+  // Kept on a single line — the columns are sized (see JJ colgroup) to fit a
+  // full SKU/barcode, so these never wrap onto a second line.
   jjSizeSku: {
     fontFamily: "monospace",
     fontSize: "var(--portal-inventory-font-size, 13px)",
     fontWeight: 600,
     color: "#374151",
     lineHeight: 1.2,
-    wordBreak: "break-word",
+    whiteSpace: "nowrap",
   },
   jjSizeBarcode: {
     fontFamily: "monospace",
@@ -21639,7 +21664,7 @@ const s: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     color: "#374151",
     lineHeight: 1.2,
-    wordBreak: "break-word",
+    whiteSpace: "nowrap",
   },
   jjSizeLabel: { fontSize: 9, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.4, textAlign: "center" },
   appShell: {
