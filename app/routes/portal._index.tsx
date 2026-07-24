@@ -5390,6 +5390,9 @@ type CostBreakdown = {
   roundingAdjustment: number;      // total - rawTotal (so reader sees the +/-)
   total: number;                   // rounded to nearest ₹10
 };
+// What is still preventing a title's cost from computing (and the style
+// name we did resolve), so cells can explain themselves.
+type CostBlocker = { styleName: string | null; missing: "style" | "fabric" | null; detail: string | null };
 type StyleCostLookup = {
   // Resolve a product title to its per-piece cost in rupees, or 0 if
   // anything required is missing.
@@ -5406,6 +5409,10 @@ type StyleCostLookup = {
   // fabrics), this returns a short warning to surface on the price
   // cell so the user knows to fix the link.
   warningForTitle: (title: string | null | undefined) => string | null;
+  // What is still blocking the cost for this title, so the cell can say
+  // so instead of silently showing the same three buttons. Also returns
+  // the resolved/overridden style name for the picker's label.
+  blockerForTitle: (title: string | null | undefined) => CostBlocker;
   // Flat list of every fabric stock entry — surfaced by the fabric
   // picker on the cost cells so staff can resolve "ambiguous fabric"
   // by picking which one to use.
@@ -5644,6 +5651,34 @@ function buildStyleCostLookup(
     },
     allFabrics: () => allFabrics.map((f) => ({ key: f.key, sheetName: f.sheetName, fabricName: f.name, costPerMeter: f.costPerMeter })),
     manualPriceForTitle: manualPriceFor,
+    blockerForTitle: (title) => {
+      const haystack = (title ?? "").trim().toLowerCase();
+      if (!haystack) return { styleName: null, missing: null, detail: null };
+      if (manualPriceFor(title) > 0) return { styleName: null, missing: null, detail: null };
+      const style = findStyle(haystack);
+      if (!style) return { styleName: null, missing: "style", detail: "No style matched this product title — pick one." };
+      const styleName = style.name ?? null;
+      // Style is settled; is the fabric?
+      const fabricKeyOverride = fabricOverridesByTitle[haystack];
+      if (fabricKeyOverride && fabricByKey.has(fabricKeyOverride)) {
+        return { styleName, missing: null, detail: null };
+      }
+      const match = findFabricForStyle(style, haystack);
+      if (match.kind === "ok") {
+        // Style + fabric both resolve; anything still missing is on the
+        // style itself (e.g. no stitching cost entered).
+        const r = resolveWithStyle(haystack, style);
+        if (r && costFromResolved(r) > 0) return { styleName, missing: null, detail: null };
+        return { styleName, missing: null, detail: `Style "${styleName}" and fabric "${match.fabricName}" are set, but the style is missing a stitching cost or average meters in Product Information.` };
+      }
+      if (match.kind === "ambiguous") {
+        return { styleName, missing: "fabric", detail: `Fabric "${match.fabricName}" is linked to this style in ${match.sheets.length} sheets (${match.sheets.join(", ")}). Pick the exact fabric.` };
+      }
+      if (match.kind === "unlinked") {
+        return { styleName, missing: "fabric", detail: `Fabric "${match.fabricName}" isn't linked to a stock entry for this style. Pick the exact fabric.` };
+      }
+      return { styleName, missing: "fabric", detail: `Style "${styleName}" is set — no fabric name was found in the product title. Pick the fabric.` };
+    },
     warningForTitle: (title) => {
       const haystack = (title ?? "").trim().toLowerCase();
       if (!haystack) return null;
@@ -8703,6 +8738,7 @@ export default function PortalDashboard() {
                     costPerPiece={styleCostLookup.costForTitle(order.productTitle)}
                     costBreakdown={styleCostLookup.breakdownForTitle(order.productTitle)}
                     costWarning={styleCostLookup.warningForTitle(order.productTitle)}
+                    costBlocker={styleCostLookup.blockerForTitle(order.productTitle)}
                     inrPerAudCachedRate={inrPerAudCachedRate}
                     fxRupeeBuffer={fxRupeeBuffer}
                     productInfo={productInfo}
@@ -13209,6 +13245,7 @@ function CollectionSpreadsheetPage({
                                 productInfo={productInfo}
                                 allFabrics={allFabrics}
                                 costWarning={styleCostLookup.warningForTitle(rowName)}
+                                costBlocker={styleCostLookup.blockerForTitle(rowName)}
                                 onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
                                 onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
                               />
@@ -13757,6 +13794,7 @@ function CollectionPriceRupeesCell({
   productInfo,
   allFabrics,
   costWarning,
+  costBlocker,
   onPickStyleOverride,
   onClearStyleOverride,
 }: {
@@ -13769,6 +13807,7 @@ function CollectionPriceRupeesCell({
   productInfo: ProductInfo;
   allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
   costWarning: string | null;
+  costBlocker?: CostBlocker;
   onPickStyleOverride: (styleId: string) => void;
   onClearStyleOverride: () => void;
 }) {
@@ -13815,6 +13854,7 @@ function CollectionPriceRupeesCell({
           productTitle={rowName}
           fabrics={allFabrics}
           warning={costWarning}
+          blocker={costBlocker}
         />
       )}
       {overrideStyleName && (
@@ -13841,10 +13881,14 @@ function CollectionStylePicker({
   productInfo,
   currentName,
   onPick,
+  pickedStyleName = null,
 }: {
   productInfo: ProductInfo;
   currentName: string;
   onPick: (styleId: string) => void;
+  // When the title already resolves to a style, show it on the button so a
+  // pick visibly "took" even if the cost still can't compute.
+  pickedStyleName?: string | null;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -13870,9 +13914,11 @@ function CollectionStylePicker({
           borderRadius: 5, padding: "3px 6px", fontSize: 10,
           color: "#6b7280", cursor: "pointer", whiteSpace: "nowrap",
         }}
-        title="No automatic style match — pick one to enable cost auto-fill"
+        title={pickedStyleName
+          ? `Style: ${pickedStyleName} — click to change`
+          : "No automatic style match — pick one to enable cost auto-fill"}
       >
-        + Pick style ▾
+        {pickedStyleName ? `✓ ${pickedStyleName} ▾` : "+ Pick style ▾"}
       </button>
       {open && typeof document !== "undefined" && createPortal(
         <div
@@ -18673,6 +18719,7 @@ function PackingListDetail({
                 autoPriceRupees={styleCostLookup.costForTitle(line.productTitle)}
                 costBreakdown={styleCostLookup.breakdownForTitle(line.productTitle)}
                 costWarning={styleCostLookup.warningForTitle(line.productTitle)}
+                costBlocker={styleCostLookup.blockerForTitle(line.productTitle)}
                 inrPerAudRate={(packingList as { lockedFxRate?: number | null }).lockedFxRate ?? inrPerAudCachedRate}
                 productInfo={productInfo}
                 allFabrics={allFabrics}
@@ -18801,6 +18848,7 @@ function PackingListLineRow({
   autoPriceRupees,
   costBreakdown,
   costWarning,
+  costBlocker,
   inrPerAudRate,
   productInfo,
   allFabrics,
@@ -18820,6 +18868,7 @@ function PackingListLineRow({
   autoPriceRupees: number;
   costBreakdown: CostBreakdown | null;
   costWarning: string | null;
+  costBlocker?: CostBlocker;
   inrPerAudRate: number | null;
   productInfo: ProductInfo;
   allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
@@ -18931,6 +18980,7 @@ function PackingListLineRow({
           autoPrice={autoPriceRupees}
           costBreakdown={costBreakdown}
           costWarning={costWarning}
+          costBlocker={costBlocker}
           productTitle={line.productTitle}
           totalQty={total}
           productInfo={productInfo}
@@ -19511,6 +19561,7 @@ function PackingPriceCell({
   autoPrice,
   costBreakdown,
   costWarning,
+  costBlocker,
   productTitle,
   totalQty,
   productInfo,
@@ -19522,6 +19573,7 @@ function PackingPriceCell({
   autoPrice: number;
   costBreakdown: CostBreakdown | null;
   costWarning: string | null;
+  costBlocker?: CostBlocker;
   productTitle: string;
   totalQty: number;
   productInfo: ProductInfo;
@@ -19596,6 +19648,7 @@ function PackingPriceCell({
             productTitle={productTitle}
             fabrics={allFabrics}
             warning={costWarning}
+            blocker={costBlocker}
           />
         </div>
       ) : (
@@ -20130,6 +20183,7 @@ function OrderRow({
   costPerPiece,
   costBreakdown,
   costWarning,
+  costBlocker,
   inrPerAudCachedRate,
   fxRupeeBuffer,
   productInfo,
@@ -20150,6 +20204,7 @@ function OrderRow({
   costPerPiece: number;
   costBreakdown: CostBreakdown | null;
   costWarning: string | null;
+  costBlocker?: CostBlocker;
   inrPerAudCachedRate: number | null;
   fxRupeeBuffer: number;
   productInfo: ProductInfo;
@@ -20386,6 +20441,7 @@ function OrderRow({
               productTitle={order.productTitle}
               fabrics={allFabrics}
               warning={costWarning}
+              blocker={costBlocker}
             />
           ) : (
             <span style={{ color: "#9ca3af" }}>—</span>
@@ -21317,12 +21373,14 @@ function CostFallbacks({
   productTitle,
   fabrics,
   warning,
+  blocker,
   layout = "stacked",
 }: {
   productInfo: ProductInfo;
   productTitle: string;
   fabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
   warning: string | null;
+  blocker?: CostBlocker;
   layout?: "stacked" | "inline";
 }) {
   const fetcher = useFetcher();
@@ -21348,7 +21406,18 @@ function CostFallbacks({
           ⚠ Ambiguous fabric
         </span>
       )}
-      <CollectionStylePicker productInfo={productInfo} currentName={productTitle} onPick={onPickStyle} />
+      {/* Once a style is picked the cost often still can't compute (usually
+          the fabric). Say so, rather than showing the same three buttons as
+          though the pick did nothing. */}
+      {blocker?.detail && (
+        <span
+          title={blocker.detail}
+          style={{ color: "#b45309", fontSize: 10, fontWeight: 600, textAlign: "center", lineHeight: 1.25, cursor: "help" }}
+        >
+          {blocker.missing === "fabric" ? "Style set — pick fabric" : blocker.missing === "style" ? "Pick a style" : "Style info incomplete"}
+        </span>
+      )}
+      <CollectionStylePicker productInfo={productInfo} currentName={productTitle} onPick={onPickStyle} pickedStyleName={blocker?.styleName ?? null} />
       <TitleFabricPicker fabrics={fabrics} currentTitle={productTitle} onPick={onPickFabric} />
       <TitleManualPriceInput onSave={onSetPrice} />
     </div>
