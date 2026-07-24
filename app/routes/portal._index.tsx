@@ -1509,6 +1509,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // an existing barcode is never overwritten.
   if (intent === "jj_backfill_barcodes") {
     if (!currentUser) return { jjError: "Not signed in" };
+    // mode "backfill" (default): only fill blanks. mode "refresh": overwrite
+    // SKU + barcode from Shopify for every ordered line (used after the user
+    // edits codes in Shopify and wants the portal to catch up).
+    const refresh = String(form.get("mode") ?? "") === "refresh";
     const session = await prisma.session.findFirst({
       where: { accessToken: { not: "" } },
       orderBy: { isOnline: "asc" },
@@ -1520,11 +1524,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       select: { id: true, productId: true, lines: { select: { id: true, variantTitle: true, sku: true, barcode: true, qtyOrdered: true } } },
     }).catch(() => [] as Array<{ id: number; productId: string; lines: Array<{ id: number; variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }> }>);
 
-    // Only lines that were actually ordered and are missing a barcode.
+    // Ordered lines. Backfill only touches lines missing a barcode; refresh
+    // re-pulls every ordered line.
     const targets = orders
-      .map((o) => ({ productId: o.productId, lines: o.lines.filter((l) => (l.qtyOrdered || 0) > 0 && !(l.barcode ?? "").trim()) }))
+      .map((o) => ({ productId: o.productId, lines: o.lines.filter((l) => (l.qtyOrdered || 0) > 0 && (refresh || !(l.barcode ?? "").trim())) }))
       .filter((o) => o.productId && o.lines.length > 0);
-    if (targets.length === 0) return { jjBackfill: { scanned: 0, updated: 0, noMatch: 0 } };
+    if (targets.length === 0) return { jjBackfill: { scanned: 0, updated: 0, noMatch: 0, refresh } };
 
     // One Shopify call per distinct product, reused across its lines.
     const codesByProduct = new Map<string, ShopifyVariantCode[]>();
@@ -1545,18 +1550,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const sku = (match?.sku ?? "").trim();
         if (!barcode && !sku) { noMatch++; continue; }
         const data: Record<string, unknown> = {};
-        if (barcode) data.barcode = barcode;
-        if (!(line.sku ?? "").trim() && sku) data.sku = sku;
+        if (refresh) {
+          // Overwrite from Shopify (only when Shopify actually has a value,
+          // so a blank in Shopify never wipes a good code in the portal).
+          if (barcode && barcode !== (line.barcode ?? "").trim()) data.barcode = barcode;
+          if (sku && sku !== (line.sku ?? "").trim()) data.sku = sku;
+        } else {
+          if (barcode) data.barcode = barcode;
+          if (!(line.sku ?? "").trim() && sku) data.sku = sku;
+        }
         if (Object.keys(data).length === 0) { noMatch++; continue; }
         try {
           await prisma.orderLine.update({ where: { id: line.id }, data });
-          if (barcode) updated++;
+          updated++;
         } catch (e) {
           console.warn("[jj_backfill_barcodes] line update failed:", e);
         }
       }
     }
-    return { jjBackfill: { scanned, updated, noMatch } };
+    return { jjBackfill: { scanned, updated, noMatch, refresh } };
   }
 
   // ─── JJ Restock — load one or more orders' arrived quantities straight
@@ -21724,7 +21736,7 @@ function JJRestockPanel({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
   const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
-  const backfillFetcher = useFetcher<{ jjError?: string; jjBackfill?: { scanned: number; updated: number; noMatch: number } }>();
+  const backfillFetcher = useFetcher<{ jjError?: string; jjBackfill?: { scanned: number; updated: number; noMatch: number; refresh?: boolean } }>();
   const widthsFetcher = useFetcher();
   const loading = loadFetcher.state !== "idle";
 
@@ -21851,12 +21863,32 @@ function JJRestockPanel({
         >
           {backfillFetcher.state !== "idle" ? "Backfilling…" : "Backfill barcodes"}
         </button>
+        <button
+          type="button"
+          disabled={backfillFetcher.state !== "idle"}
+          onClick={() => {
+            if (backfillFetcher.state !== "idle") return;
+            if (!window.confirm("Refresh SKUs & barcodes from Shopify?\n\nFor every ordered JJ line this re-pulls the SKU and barcode from the matching Shopify variant and OVERWRITES the values shown here — use this after editing codes in Shopify. (A blank in Shopify never wipes an existing code.)")) return;
+            backfillFetcher.submit({ intent: "jj_backfill_barcodes", mode: "refresh" }, { method: "post" });
+          }}
+          style={{
+            padding: "7px 14px", background: "#1d4ed8", color: "#fff", border: "none",
+            borderRadius: 6, fontSize: 13, fontWeight: 600,
+            cursor: backfillFetcher.state !== "idle" ? "wait" : "pointer",
+            ...(backfillFetcher.state !== "idle" ? { opacity: 0.6 } : {}),
+          }}
+          title="Re-pull SKUs and barcodes from Shopify, overwriting the values here"
+        >
+          {backfillFetcher.state !== "idle" ? "Refreshing…" : "Refresh from Shopify"}
+        </button>
         {loadFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{loadFetcher.data.jjError}</span>}
         {backfillFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{backfillFetcher.data.jjError}</span>}
         {backfillFetcher.data?.jjBackfill && (
           <span style={{ fontSize: 13, color: "#065f46" }}>
-            Filled {backfillFetcher.data.jjBackfill.updated} barcode(s) across {backfillFetcher.data.jjBackfill.scanned} ordered line(s)
-            {backfillFetcher.data.jjBackfill.noMatch > 0 ? ` · ${backfillFetcher.data.jjBackfill.noMatch} had no match in Shopify` : ""}
+            {backfillFetcher.data.jjBackfill.refresh
+              ? `Updated ${backfillFetcher.data.jjBackfill.updated} line(s) from Shopify across ${backfillFetcher.data.jjBackfill.scanned} ordered line(s)`
+              : `Filled ${backfillFetcher.data.jjBackfill.updated} barcode(s) across ${backfillFetcher.data.jjBackfill.scanned} ordered line(s)`}
+            {backfillFetcher.data.jjBackfill.noMatch > 0 ? ` · ${backfillFetcher.data.jjBackfill.noMatch} had no change` : ""}
           </span>
         )}
       </div>
