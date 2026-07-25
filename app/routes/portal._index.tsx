@@ -1987,14 +1987,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (etaRaw && !eta) return null;
 
     const notes = String(form.get("notes") ?? "").trim();
-    // If this product already has an open order, sit the new row next to it
-    // (inherit the earliest createdAt for that product) so the group doesn't
-    // jump to the top. A genuinely new product keeps createdAt = now (top).
+    // Portal-added rows never jump to the top (only Shopify-placed orders do).
+    //  • Product already has an open order → inherit its earliest createdAt so
+    //    the new row sits with that product's group.
+    //  • Genuinely new product → land at the BOTTOM: give it a createdAt just
+    //    older than the current oldest open order (default sort is newest-
+    //    first, so oldest sits at the bottom). Each new row stacks below the
+    //    last. Falls back to now() only when there are no orders at all.
     const existingForProduct = await prisma.supplierOrder.findFirst({
       where: { productId: product.id, status: "open" },
       orderBy: { createdAt: "asc" },
       select: { createdAt: true },
     }).catch(() => null);
+    let createdAtOverride: Date | undefined;
+    if (existingForProduct) {
+      createdAtOverride = existingForProduct.createdAt;
+    } else {
+      const oldest = await prisma.supplierOrder.findFirst({
+        where: { status: "open" },
+        orderBy: { createdAt: "asc" },
+        select: { createdAt: true },
+      }).catch(() => null);
+      if (oldest) createdAtOverride = new Date(oldest.createdAt.getTime() - 1000);
+    }
     const createdOrder = await prisma.supplierOrder.create({
       data: {
         shop,
@@ -2010,7 +2025,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         eta,
         notes: notes || null,
         totalQty,
-        ...(existingForProduct ? { createdAt: existingForProduct.createdAt } : {}),
+        ...(createdAtOverride ? { createdAt: createdAtOverride } : {}),
         lines: {
           create: variants.map((variant) => ({
             variantId: variant.id,
