@@ -8339,6 +8339,55 @@ export default function PortalDashboard() {
     const el = restockTableScrollRef.current;
     if (el) el.scrollTop = 0;
   }, [page]);
+  // Scroll memory: remember where the user was scrolled (the <main> body and
+  // each table's scroll container), per page, and restore it on a FULL page
+  // reload so a refresh doesn't dump them back at the top. In-app navigation
+  // between pages still starts at the top (we only auto-restore once, on the
+  // initial mount).
+  const scrollPageRef = useRef(page);
+  scrollPageRef.current = page;
+  const didRestoreScrollRef = useRef(false);
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const containers = (): Array<[string, HTMLElement]> => {
+      const list: Array<[string, HTMLElement]> = [];
+      const main = document.querySelector("main");
+      if (main) list.push(["main", main as HTMLElement]);
+      document.querySelectorAll(".portal-table-scroll").forEach((el, i) => list.push([`t${i}`, el as HTMLElement]));
+      return list;
+    };
+    const keyFor = (which: string) => `pd-scroll:${scrollPageRef.current}:${which}`;
+    let raf = 0;
+    const save = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        for (const [which, el] of containers()) {
+          try { sessionStorage.setItem(keyFor(which), String(el.scrollTop)); } catch { /* ignore */ }
+        }
+      });
+    };
+    const els = containers();
+    els.forEach(([, el]) => el.addEventListener("scroll", save, { passive: true }));
+    window.addEventListener("beforeunload", save);
+    // Restore only on the very first mount (a real page load / refresh), after
+    // the layout-reset effects have run.
+    if (!didRestoreScrollRef.current) {
+      didRestoreScrollRef.current = true;
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        for (const [which, el] of containers()) {
+          try {
+            const v = sessionStorage.getItem(keyFor(which));
+            if (v) el.scrollTop = Number(v);
+          } catch { /* ignore */ }
+        }
+      }));
+    }
+    return () => {
+      els.forEach(([, el]) => el.removeEventListener("scroll", save));
+      window.removeEventListener("beforeunload", save);
+      cancelAnimationFrame(raf);
+    };
+  }, [page]);
   const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const [selectedAddCategory, setSelectedAddCategory] = useState<string | null>(null);
   const [newCategoryInput, setNewCategoryInput] = useState("");
