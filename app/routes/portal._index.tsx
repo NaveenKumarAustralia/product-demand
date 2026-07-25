@@ -22356,29 +22356,36 @@ function TitleManualPriceInput({ onSave }: { onSave: (rupees: number) => void })
 
 function QtyCell({ orderId, size, value, restockSettings, loaded }: { orderId: number; size: string; value: number; restockSettings: RestockSettings; loaded?: boolean }) {
   const fetcher = useFetcher();
-  const current = fetcher.formData ? String(fetcher.formData.get("value")) : String(value);
-  const numericCurrent = Number(current) || 0;
-  const normalizeQty = (input: HTMLInputElement) => {
-    input.value = input.value.replace(/\D/g, "");
-  };
+  // Controlled so a typed number is never lost. We only re-sync from the saved
+  // `value` when the user isn't typing here AND no save is in flight —
+  // otherwise a background revalidation (from editing another cell) would
+  // revert the number you just entered.
+  const [draft, setDraft] = useState(value ? String(value) : "");
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (focusedRef.current || fetcher.state !== "idle") return;
+    setDraft(value ? String(value) : "");
+  }, [value, fetcher.state]);
+  const numericCurrent = Number(draft) || 0;
 
   return (
     <input
       type="text"
       inputMode="numeric"
       pattern="[0-9]*"
-      defaultValue={value}
-      onChange={(e) => normalizeQty(e.currentTarget)}
-      onBlur={(e) => submitPortalCell(
-        fetcher,
-        {
-          intent: "update_qty",
-          orderId,
-          size,
-          value: e.currentTarget.value,
-        },
-        { label: "Undo quantity", fields: { intent: "update_qty", orderId, size, value } },
-      )}
+      value={draft}
+      onFocus={() => { focusedRef.current = true; }}
+      onChange={(e) => setDraft(e.currentTarget.value.replace(/\D/g, ""))}
+      onBlur={(e) => {
+        focusedRef.current = false;
+        const next = e.currentTarget.value;
+        if (next === (value ? String(value) : "")) return; // unchanged — skip save
+        submitPortalCell(
+          fetcher,
+          { intent: "update_qty", orderId, size, value: next },
+          { label: "Undo quantity", fields: { intent: "update_qty", orderId, size, value } },
+        );
+      }}
       style={{
         ...s.qtyInput,
         ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
