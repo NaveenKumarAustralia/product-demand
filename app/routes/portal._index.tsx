@@ -9,6 +9,7 @@ import { syncOrderNoteMessages, syncEntityNoteMessages, syncSampleIterationMessa
 import { randomUUID } from "node:crypto";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { unauthenticated } from "../shopify.server";
+import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind } from "../dropbox.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
@@ -3112,6 +3113,40 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     await prisma.collection.update({ where: { id }, data });
     return null;
+  }
+
+  // ─── Collections — import Dropbox image(s) into a row's picture gallery.
+  // Downloads each Dropbox file's bytes into the CollectionImage table (same
+  // storage manual uploads use) and returns { thumb, key } entries for the
+  // client to append — so push-to-Shopify treats them identically.
+  if (intent === "dropbox_import_images") {
+    const collectionId = Number(form.get("collectionId"));
+    if (!collectionId) return jsonResponse({ ok: false, error: "bad_collection" });
+    let paths: string[] = [];
+    try { paths = JSON.parse(String(form.get("paths") ?? "[]")) as string[]; } catch { /* ignore */ }
+    paths = paths.filter((p) => typeof p === "string" && p.trim()).slice(0, 30);
+    if (!paths.length) return jsonResponse({ ok: false, error: "no_paths" });
+    const entries: CollectionImageEntry[] = [];
+    for (const path of paths) {
+      try {
+        if (dbxFileKind(path) !== "image") continue;
+        const { bytes } = await dbxDownload(path);
+        const ext = (path.split(".").pop() || "jpg").toLowerCase();
+        const mime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : "image/jpeg";
+        const key = await persistFullCollectionImage(collectionId, bytes, mime);
+        // Small inline thumb for the grid (Dropbox jpeg thumbnail).
+        let thumb = "";
+        try {
+          const t = await dbxThumbnail(path, "w640h480");
+          thumb = `data:image/jpeg;base64,${t.toString("base64")}`;
+        } catch { /* thumb best-effort; the key still serves the full image */ }
+        entries.push({ thumb, key });
+      } catch (e) {
+        console.warn("[dropbox_import_images] failed for", path, e);
+      }
+    }
+    if (!entries.length) return jsonResponse({ ok: false, error: "import_failed" });
+    return jsonResponse({ ok: true, entries });
   }
 
   if (intent === "move_collection_rows" || intent === "combine_collections") {
@@ -13646,6 +13681,7 @@ function CollectionSpreadsheetPage({
                                 users={users}
                                 rowKey={row.__rowKey ?? ""}
                                 collectionId={listItem.id}
+                                rowName={row.name ?? row.title ?? ""}
                                 threadCounts={threadCounts}
                               />
                             )}
@@ -13909,6 +13945,7 @@ function CollectionCellInner({
   users,
   rowKey,
   collectionId,
+  rowName,
   threadCounts,
 }: {
   value: string;
@@ -13922,6 +13959,7 @@ function CollectionCellInner({
   users?: PortalUser[];
   rowKey?: string;
   collectionId?: number;
+  rowName?: string;
   threadCounts?: Map<string, { total: number; unread: number }>;
 }) {
   const onCommit = useCallback((next: string) => updateCell(rowIndex, columnId, next), [updateCell, rowIndex, columnId]);
@@ -13948,7 +13986,7 @@ function CollectionCellInner({
   // modelPicture is the multi-image product gallery (numbered, sortable,
   // uploaded to Shopify). Fabric + mani-pic columns are single images.
   if (columnId === "modelPicture") {
-    return <CollectionMultiImageCell value={value} onCommit={onCommit} productInfo={productInfo} />;
+    return <CollectionMultiImageCell value={value} onCommit={onCommit} productInfo={productInfo} collectionId={collectionId} rowName={rowName} />;
   }
   if (columnId === "fabric" || columnId === "maniPicsTaken") {
     return <CollectionImageCell value={value} onCommit={onCommit} />;
@@ -14519,7 +14557,104 @@ function serializeMultiImageValue(images: CollectionImageEntry[]): string {
   if (images.length === 0) return "";
   return JSON.stringify(images.map((i) => i.key ? { thumb: i.thumb, key: i.key } : i.thumb));
 }
-function CollectionMultiImageCell({ value, onCommit, productInfo }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo }) {
+// Dropbox image picker for a collection row. Opens pre-searched by the row's
+// product name (auto-find); the user ticks images and adds them. Selected
+// files are imported server-side into CollectionImage and returned as
+// { thumb, key } entries so they push to Shopify like any other image.
+function DropboxImagePicker({
+  collectionId, initialQuery, onAdd, onClose,
+}: {
+  collectionId: number;
+  initialQuery: string;
+  onAdd: (entries: CollectionImageEntry[]) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState(initialQuery);
+  const searchFetcher = useFetcher<{ entries?: Array<{ type: string; name: string; path: string; kind?: string; rev?: string }>; error?: string; configured?: boolean }>();
+  const importFetcher = useFetcher<{ ok?: boolean; entries?: CollectionImageEntry[]; error?: string }>();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const runSearch = (q: string) => { if (q.trim().length >= 2) searchFetcher.load(`/api/dropbox?op=search&q=${encodeURIComponent(q.trim())}`); };
+  // Auto-find on open using the product name.
+  useEffect(() => { runSearch(initialQuery); /* eslint-disable-next-line */ }, []);
+  // Close after a successful import (entries handed back to the cell).
+  useEffect(() => {
+    if (importFetcher.state === "idle" && importFetcher.data?.ok && importFetcher.data.entries?.length) {
+      onAdd(importFetcher.data.entries);
+      onClose();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [importFetcher.state, importFetcher.data]);
+
+  const results = (searchFetcher.data?.entries ?? []).filter((e) => e.type === "file" && e.kind === "image");
+  const importing = importFetcher.state !== "idle";
+  const toggle = (path: string) => setSelected((cur) => { const n = new Set(cur); if (n.has(path)) n.delete(path); else n.add(path); return n; });
+  const addSelected = () => {
+    if (!selected.size || importing) return;
+    importFetcher.submit({ intent: "dropbox_import_images", collectionId: String(collectionId), paths: JSON.stringify(Array.from(selected)) }, { method: "post" });
+  };
+
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ background: "#fff", borderRadius: 10, width: 640, maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb" }}>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>Add images from Dropbox</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") runSearch(query); }}
+              placeholder="Search Dropbox (product name)…"
+              style={{ flex: 1, border: "1px solid #d1d5db", borderRadius: 6, padding: "7px 10px", fontSize: 13, boxSizing: "border-box" }}
+            />
+            <button type="button" onClick={() => runSearch(query)} style={{ ...s.secondaryButton }}>Search</button>
+          </div>
+        </div>
+        <div style={{ overflowY: "auto", flex: 1, padding: 12 }}>
+          {searchFetcher.data?.configured === false ? (
+            <div style={{ padding: 24, textAlign: "center", color: "#b45309", fontSize: 13 }}>Dropbox isn’t connected.</div>
+          ) : searchFetcher.data?.error ? (
+            <div style={{ padding: 24, textAlign: "center", color: "#b91c1c", fontSize: 13 }}>{searchFetcher.data.error}</div>
+          ) : searchFetcher.state !== "idle" && results.length === 0 ? (
+            <div style={{ padding: 24, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Searching…</div>
+          ) : results.length === 0 ? (
+            <div style={{ padding: 24, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>No images found. Try a different search.</div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10 }}>
+              {results.map((r) => {
+                const isSel = selected.has(r.path);
+                return (
+                  <button
+                    key={r.path}
+                    type="button"
+                    onClick={() => toggle(r.path)}
+                    style={{ position: "relative", border: isSel ? "3px solid #0061FF" : "1px solid #d1d5db", borderRadius: 8, padding: 0, background: "#f1f5f9", cursor: "pointer", overflow: "hidden", aspectRatio: "3 / 4" }}
+                    title={r.name}
+                  >
+                    <img src={`/api/dropbox-thumb?path=${encodeURIComponent(r.path)}&rev=${encodeURIComponent(r.rev ?? "")}&size=w256h256`} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} loading="lazy" decoding="async" />
+                    {isSel && <span style={{ position: "absolute", top: 4, left: 4, background: "#0061FF", color: "#fff", borderRadius: "50%", width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800 }}>✓</span>}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <div style={{ padding: "12px 16px", borderTop: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>{selected.size} selected{importFetcher.data?.error ? ` · ${importFetcher.data.error}` : ""}</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={onClose} style={s.secondaryButton}>Cancel</button>
+            <button type="button" onClick={addSelected} disabled={!selected.size || importing} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 6, padding: "7px 16px", fontSize: 13, fontWeight: 700, cursor: !selected.size || importing ? "default" : "pointer", opacity: !selected.size || importing ? 0.6 : 1 }}>
+              {importing ? "Adding…" : `Add ${selected.size || ""} image${selected.size === 1 ? "" : "s"}`.replace("  ", " ")}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string }) {
   const images = useMemo(() => parseMultiImageValue(value), [value]);
   const [open, setOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -14580,6 +14715,8 @@ function CollectionMultiImageCell({ value, onCommit, productInfo }: { value: str
           images={images}
           busy={busy}
           productInfo={productInfo}
+          collectionId={collectionId}
+          rowName={rowName}
           onClose={() => setOpen(false)}
           onAddFiles={addFiles}
           onCommit={commit}
@@ -14600,17 +14737,20 @@ function CollectionMultiImageCell({ value, onCommit, productInfo }: { value: str
 // add more. Saves immediately via onCommit on every change so the user
 // can close at any time without losing edits.
 function CollectionImageManagerModal({
-  images, busy, productInfo, onClose, onAddFiles, onCommit, onPickFile, fileRef,
+  images, busy, productInfo, collectionId, rowName, onClose, onAddFiles, onCommit, onPickFile, fileRef,
 }: {
   images: CollectionImageEntry[];
   busy: boolean;
   productInfo?: ProductInfo;
+  collectionId?: number;
+  rowName?: string;
   onClose: () => void;
   onAddFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
   onCommit: (next: CollectionImageEntry[]) => void;
   onPickFile: () => void;
   fileRef: React.RefObject<HTMLInputElement | null>;
 }) {
+  const [dropboxOpen, setDropboxOpen] = useState(false);
   // Flatten productInfo into a searchable style list (name + imageUrl).
   const allStyles = useMemo(() => {
     if (!productInfo) return [];
@@ -14761,6 +14901,30 @@ function CollectionImageManagerModal({
           {images.length === 0 && (
             <div style={{ marginTop: 14, padding: 14, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 13, color: "#6b7280", textAlign: "center" }}>
               No images yet. Click + to add, paste, or pick from Product Information below.
+            </div>
+          )}
+
+          {collectionId != null && (
+            <div style={{ marginTop: 22, paddingTop: 18, borderTop: "1px solid #e5e7eb" }}>
+              <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>Dropbox</div>
+                <div style={{ fontSize: 11, color: "#6b7280" }}>Auto-find images by product name, or browse to pick.</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDropboxOpen(true)}
+                style={{ background: "#0061FF", color: "#fff", border: "none", borderRadius: 6, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+              >
+                Find images in Dropbox{rowName ? ` for “${rowName}”` : ""}
+              </button>
+              {dropboxOpen && (
+                <DropboxImagePicker
+                  collectionId={collectionId}
+                  initialQuery={rowName ?? ""}
+                  onAdd={(entries) => onCommit([...images, ...entries])}
+                  onClose={() => setDropboxOpen(false)}
+                />
+              )}
             </div>
           )}
 
