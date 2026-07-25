@@ -9,7 +9,7 @@ import { syncOrderNoteMessages, syncEntityNoteMessages, syncSampleIterationMessa
 import { randomUUID } from "node:crypto";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { unauthenticated } from "../shopify.server";
-import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind } from "../dropbox.server";
+import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
@@ -3147,6 +3147,47 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     if (!entries.length) return jsonResponse({ ok: false, error: "import_failed" });
     return jsonResponse({ ok: true, entries });
+  }
+
+  // ─── Dropbox → attach selected files as media to an existing Shopify product.
+  // Uses a Dropbox shared (public raw) link as the media source so Shopify
+  // ingests it directly — no byte copying.
+  if (intent === "dropbox_add_to_shopify_product") {
+    const productId = String(form.get("productId") ?? "").trim();
+    if (!productId) return jsonResponse({ ok: false, error: "no_product" });
+    let paths: string[] = [];
+    try { paths = JSON.parse(String(form.get("paths") ?? "[]")) as string[]; } catch { /* ignore */ }
+    paths = paths.filter((p) => typeof p === "string" && p.trim()).slice(0, 30);
+    if (!paths.length) return jsonResponse({ ok: false, error: "no_paths" });
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "No Shopify session" });
+
+    const media: Array<{ originalSource: string; mediaContentType: string }> = [];
+    for (const path of paths) {
+      try {
+        const kind = dbxFileKind(path);
+        if (kind !== "image" && kind !== "video") continue;
+        const url = await dbxSharedLink(path);
+        media.push({ originalSource: url, mediaContentType: kind === "video" ? "VIDEO" : "IMAGE" });
+      } catch (e) {
+        console.warn("[dropbox_add_to_shopify_product] link failed for", path, e);
+      }
+    }
+    if (!media.length) return jsonResponse({ ok: false, error: "no_media" });
+
+    const resp = await shopifyGraphql<{ data?: { productCreateMedia?: { media?: Array<{ id?: string }>; mediaUserErrors?: Array<{ message?: string }> } } }>(
+      session.shop, session.accessToken,
+      `mutation AddMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+        productCreateMedia(productId: $productId, media: $media) {
+          media { id }
+          mediaUserErrors { message }
+        }
+      }`,
+      { productId, media },
+    );
+    const errs = resp?.data?.productCreateMedia?.mediaUserErrors ?? [];
+    if (errs.length) return jsonResponse({ ok: false, error: errs.map((e) => e.message).filter(Boolean).join("; ") || "Shopify rejected the media" });
+    return jsonResponse({ ok: true, added: media.length });
   }
 
   if (intent === "move_collection_rows" || intent === "combine_collections") {
@@ -11680,25 +11721,80 @@ type DropboxEntryUI =
   | { type: "folder"; name: string; path: string }
   | { type: "file"; name: string; path: string; id?: string; kind?: string; rev?: string };
 
+// ─── Dropbox load throttle ───────────────────────────────────────────────────
+// Dropbox rate-limits, so firing dozens of thumbnail / temp-link requests at
+// once makes tiles come back blank. This client-side gate keeps only a few
+// Dropbox requests in flight; the rest queue and start as slots free.
+const DBX_MAX_CONCURRENT = 4;
+let dbxInFlight = 0;
+const dbxWaiters: Array<() => void> = [];
+function dbxAcquire(): Promise<void> {
+  if (dbxInFlight < DBX_MAX_CONCURRENT) { dbxInFlight++; return Promise.resolve(); }
+  return new Promise((resolve) => { dbxWaiters.push(resolve); });
+}
+function dbxRelease() {
+  const next = dbxWaiters.shift();
+  if (next) next(); // hand the slot straight to the next waiter (no net change)
+  else dbxInFlight = Math.max(0, dbxInFlight - 1);
+}
+
+// Throttled Dropbox image thumbnail: only assigns the <img> src once a slot is
+// free, and releases the slot on load/error so the next tile can start.
+function DropboxThumb({ path, rev, size = "w256h256", style }: { path: string; rev?: string; size?: string; style?: React.CSSProperties }) {
+  const [src, setSrc] = useState<string | null>(null);
+  const releasedRef = useRef(false);
+  useEffect(() => {
+    let active = true;
+    releasedRef.current = false;
+    const release = () => { if (!releasedRef.current) { releasedRef.current = true; dbxRelease(); } };
+    let acquired = false;
+    dbxAcquire().then(() => {
+      acquired = true;
+      if (active) setSrc(`/api/dropbox-thumb?path=${encodeURIComponent(path)}&rev=${encodeURIComponent(rev ?? "")}&size=${size}`);
+      else release();
+    });
+    return () => { active = false; if (acquired) release(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, rev, size]);
+  const done = () => { if (!releasedRef.current) { releasedRef.current = true; dbxRelease(); } };
+  if (!src) return <div style={{ ...style, display: "flex", alignItems: "center", justifyContent: "center", background: "#f1f5f9" }}><span style={{ fontSize: 11, color: "#94a3b8" }}>…</span></div>;
+  return <img src={src} onLoad={done} onError={done} style={style} loading="lazy" decoding="async" alt="" />;
+}
+
 // One media tile: image (Dropbox thumbnail) or video (first frame from a
 // temporary link, with a ▶ overlay), filename, and a Rename action.
 function DropboxFileTile({
-  entry, onOpen, onRenamed,
+  entry, onOpen, onRenamed, selected, onToggleSelect,
 }: {
   entry: Extract<DropboxEntryUI, { type: "file" }>;
   onOpen: (entry: DropboxEntryUI, url?: string) => void;
   onRenamed: () => void;
+  selected: boolean;
+  onToggleSelect: () => void;
 }) {
   const isVideo = entry.kind === "video";
   const isImage = entry.kind === "image";
-  // Videos have no Dropbox thumbnail API, so we fetch a temp link and show the
-  // first frame via a muted <video>. Loaded lazily when the tile mounts.
-  const linkFetcher = useFetcher<{ link?: string }>();
+  // Videos have no Dropbox thumbnail API, so we fetch a temp link (throttled)
+  // and show the first frame via a muted <video>.
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
   useEffect(() => {
-    if (isVideo) linkFetcher.load(`/api/dropbox?op=link&path=${encodeURIComponent(entry.path)}`);
+    if (!isVideo) return;
+    let active = true;
+    let released = false;
+    const release = () => { if (!released) { released = true; dbxRelease(); } };
+    let acquired = false;
+    dbxAcquire().then(async () => {
+      acquired = true;
+      if (!active) { release(); return; }
+      try {
+        const r = await fetch(`/api/dropbox?op=link&path=${encodeURIComponent(entry.path)}`);
+        const j = await r.json() as { link?: string };
+        if (active) setVideoUrl(j.link ?? null);
+      } catch { /* leave placeholder */ } finally { release(); }
+    });
+    return () => { active = false; if (acquired) release(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entry.path]);
-  const videoUrl = isVideo ? linkFetcher.data?.link : undefined;
   const renameFetcher = useFetcher<{ ok?: boolean; error?: string }>();
   useEffect(() => {
     if (renameFetcher.state === "idle" && renameFetcher.data?.ok) onRenamed();
@@ -11711,21 +11807,18 @@ function DropboxFileTile({
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", border: "1px solid #e2e8f0", borderRadius: 10, background: "#fff", overflow: "hidden" }}>
+    <div style={{ position: "relative", display: "flex", flexDirection: "column", border: selected ? "2px solid #0061FF" : "1px solid #e2e8f0", borderRadius: 10, background: "#fff", overflow: "hidden" }}>
+      <label style={{ position: "absolute", top: 8, left: 8, zIndex: 2, width: 22, height: 22, borderRadius: 5, background: "rgba(255,255,255,0.92)", border: "1px solid #cbd5e1", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }} onClick={(e) => e.stopPropagation()}>
+        <input type="checkbox" checked={selected} onChange={onToggleSelect} style={{ cursor: "pointer" }} />
+      </label>
       <button
         type="button"
-        onClick={() => onOpen(entry, videoUrl)}
+        onClick={() => onOpen(entry, videoUrl ?? undefined)}
         style={{ position: "relative", border: "none", padding: 0, background: "#f1f5f9", cursor: "pointer", width: "100%", aspectRatio: "3 / 4", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}
         title={entry.name}
       >
         {isImage ? (
-          <img
-            src={`/api/dropbox-thumb?path=${encodeURIComponent(entry.path)}&rev=${encodeURIComponent(entry.rev ?? "")}&size=w640h480`}
-            alt=""
-            style={{ width: "100%", height: "100%", objectFit: "cover" }}
-            loading="lazy"
-            decoding="async"
-          />
+          <DropboxThumb path={entry.path} rev={entry.rev} size="w640h480" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         ) : isVideo && videoUrl ? (
           <video src={`${videoUrl}#t=0.1`} preload="metadata" muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         ) : (
@@ -11748,6 +11841,65 @@ function DropboxFileTile({
   );
 }
 
+// Pick a Shopify product, then attach the selected Dropbox files as media.
+function DropboxAddToProductModal({ paths, onClose, onDone }: { paths: string[]; onClose: () => void; onDone: () => void }) {
+  const [query, setQuery] = useState("");
+  const searchFetcher = useFetcher<{ products?: Array<{ id: string; title: string; imageUrl: string | null }> }>();
+  const addFetcher = useFetcher<{ ok?: boolean; added?: number; error?: string }>();
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) return;
+    const t = window.setTimeout(() => searchFetcher.load(`/api/packing-search?q=${encodeURIComponent(q)}`), 250);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
+  useEffect(() => {
+    if (addFetcher.state === "idle" && addFetcher.data?.ok) onDone();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addFetcher.state, addFetcher.data]);
+  const products = searchFetcher.data?.products ?? [];
+  const adding = addFetcher.state !== "idle";
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ background: "#fff", borderRadius: 10, width: 520, maxHeight: "82vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb" }}>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 4 }}>Add {paths.length} file{paths.length === 1 ? "" : "s"} to a Shopify product</div>
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search Shopify product…"
+            style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "7px 10px", fontSize: 13, boxSizing: "border-box", marginTop: 6 }}
+          />
+          {addFetcher.data?.error && <div style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>{addFetcher.data.error}</div>}
+        </div>
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          {query.trim().length < 2 ? (
+            <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>Type at least 2 characters.</div>
+          ) : products.length === 0 ? (
+            <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>{searchFetcher.state !== "idle" ? "Searching…" : "No products match."}</div>
+          ) : products.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              disabled={adding}
+              onClick={() => addFetcher.submit({ intent: "dropbox_add_to_shopify_product", productId: p.id, paths: JSON.stringify(paths) }, { method: "post" })}
+              style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", border: "none", borderBottom: "1px solid #f3f4f6", background: "transparent", padding: "8px 16px", fontSize: 13, cursor: adding ? "wait" : "pointer", textAlign: "left" }}
+            >
+              {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 40, height: 48, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} /> : <div style={{ width: 40, height: 48, background: "#f1f5f9", borderRadius: 4, flexShrink: 0 }} />}
+              <span style={{ fontWeight: 600, color: "#111827" }}>{p.title}</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ padding: "10px 16px", borderTop: "1px solid #e5e7eb", textAlign: "right" }}>
+          <button type="button" onClick={onClose} style={s.secondaryButton}>{adding ? "Adding…" : "Cancel"}</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function DropboxPanel() {
   const [path, setPath] = useState("");
   const [query, setQuery] = useState("");
@@ -11755,6 +11907,10 @@ function DropboxPanel() {
   const searchFetcher = useFetcher<{ entries?: DropboxEntryUI[]; error?: string }>();
   const linkFetcher = useFetcher<{ link?: string }>();
   const [preview, setPreview] = useState<{ name: string; url: string } | null>(null);
+  // Multi-select for "add to Shopify product".
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [productModalOpen, setProductModalOpen] = useState(false);
+  const toggleSelect = (path: string) => setSelectedPaths((cur) => { const n = new Set(cur); if (n.has(path)) n.delete(path); else n.add(path); return n; });
 
   const searching = query.trim().length >= 2;
   // Browse the current folder.
@@ -11809,6 +11965,19 @@ function DropboxPanel() {
           </div>
         </div>
         <div style={s.productInfoActions}>
+          {selectedPaths.size > 0 && (
+            <>
+              <span style={{ fontSize: 13, color: "#374151", fontWeight: 600 }}>{selectedPaths.size} selected</span>
+              <button type="button" onClick={() => setSelectedPaths(new Set())} style={s.secondaryButton}>Clear</button>
+              <button
+                type="button"
+                onClick={() => setProductModalOpen(true)}
+                style={{ background: "#16a34a", color: "#fff", border: "none", borderRadius: 6, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+              >
+                Add to Shopify product
+              </button>
+            </>
+          )}
           <input
             type="search"
             value={query}
@@ -11818,6 +11987,14 @@ function DropboxPanel() {
           />
         </div>
       </div>
+
+      {productModalOpen && (
+        <DropboxAddToProductModal
+          paths={Array.from(selectedPaths)}
+          onClose={() => setProductModalOpen(false)}
+          onDone={() => { setProductModalOpen(false); setSelectedPaths(new Set()); }}
+        />
+      )}
 
       {/* Breadcrumb (browse mode only) */}
       {!searching && (
@@ -11858,7 +12035,14 @@ function DropboxPanel() {
               <span style={{ fontSize: 13, fontWeight: 700, color: "#111827", textAlign: "center", wordBreak: "break-word" }}>{entry.name}</span>
             </button>
           ) : (
-            <DropboxFileTile key={entry.path} entry={entry} onOpen={openFile} onRenamed={onRenamed} />
+            <DropboxFileTile
+              key={entry.path}
+              entry={entry}
+              onOpen={openFile}
+              onRenamed={onRenamed}
+              selected={selectedPaths.has(entry.path)}
+              onToggleSelect={() => toggleSelect(entry.path)}
+            />
           ))}
         </div>
       )}
@@ -14631,7 +14815,7 @@ function DropboxImagePicker({
                     style={{ position: "relative", border: isSel ? "3px solid #0061FF" : "1px solid #d1d5db", borderRadius: 8, padding: 0, background: "#f1f5f9", cursor: "pointer", overflow: "hidden", aspectRatio: "3 / 4" }}
                     title={r.name}
                   >
-                    <img src={`/api/dropbox-thumb?path=${encodeURIComponent(r.path)}&rev=${encodeURIComponent(r.rev ?? "")}&size=w256h256`} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} loading="lazy" decoding="async" />
+                    <DropboxThumb path={r.path} rev={r.rev} size="w256h256" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                     {isSel && <span style={{ position: "absolute", top: 4, left: 4, background: "#0061FF", color: "#fff", borderRadius: "50%", width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800 }}>✓</span>}
                   </button>
                 );
