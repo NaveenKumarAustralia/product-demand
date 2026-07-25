@@ -8466,7 +8466,7 @@ export default function PortalDashboard() {
         <header style={s.pageHeader}>
           <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
             <h1 style={s.pageTitle}>{activePageTitle}</h1>
-            {page === "restock" && (() => {
+            {isRestockPage && (() => {
               const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
               const showFiltered = filtersActive && (
                 restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
@@ -21619,23 +21619,48 @@ function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; s
 
 // ─── JJ Restock (self-contained; does NOT touch the Karma East table) ────
 // Editable text/number cell for the JJ-only per-order fields.
-// Colour number → hex swatch. Typing one of these into the Colour Code cell
-// paints the whole cell that colour with large bold text. Add new numbers
-// here as they come up.
-const JJ_COLOUR_CODE_HEX: Record<string, string> = {
-  "2": "#000000",
-  "26": "#1E2D95",
-  "50": "#157F8E",
-  "11": "#6A1FA7",
-  "14": "#326105",
-  "100": "#A31423",
-  "112": "#11669C",
-  "18": "#8B2F18",
-  "10": "#787878",
-  "17": "#FFFFFF",
-  "84": "#FC712B",
-  "115": "#C36349",
+// Colour name → swatch hex. The Colour Code cell colours itself from the
+// colour WORD in the product name (every JJ product ends with its colour,
+// e.g. "Boat Neck Top Teal"), not from the typed number. Multi-word names
+// (e.g. "Navy Blue") are matched before single words.
+const JJ_COLOUR_NAME_HEX: Record<string, string> = {
+  // multi-word first
+  "navy blue": "#1e3a5f", "royal blue": "#1d4ed8", "sky blue": "#60a5fa", "light blue": "#93c5fd",
+  "baby blue": "#a7d0f0", "powder blue": "#b0d4de", "dark blue": "#1e3a8a", "cobalt blue": "#2545c9",
+  "forest green": "#14532d", "olive green": "#6b8e23", "dark green": "#14532d", "sage green": "#9caf88",
+  "army green": "#4b5320", "emerald green": "#059669", "hot pink": "#ec4899", "baby pink": "#f7b6cd",
+  "dusty pink": "#d8a3ab", "dusty rose": "#c9868a", "light grey": "#c4c4c4", "dark grey": "#4b4b4b",
+  "off white": "#f2ede3",
+  // single words
+  black: "#111111", white: "#ffffff", ivory: "#f6f0e4", cream: "#f3ead3", beige: "#e5d5b8",
+  grey: "#808080", gray: "#808080", charcoal: "#36454f", silver: "#c0c0c0", stone: "#a8a29e",
+  taupe: "#8b8589", sand: "#dcc9a0", nude: "#e3bc9a", tan: "#c19a6b", camel: "#c19a6b",
+  navy: "#1e3a5f", blue: "#2563eb", indigo: "#4f46e5", denim: "#3b5b92", cobalt: "#2545c9",
+  teal: "#0d9488", turquoise: "#14b8a6", aqua: "#22d3ee", mint: "#86e0b0",
+  green: "#16a34a", olive: "#6b8e23", khaki: "#b6a874", sage: "#9caf88", forest: "#14532d",
+  lime: "#84cc16", emerald: "#059669",
+  yellow: "#eab308", mustard: "#d4a017", gold: "#d4af37", ochre: "#cc7722",
+  orange: "#f97316", rust: "#b7410e", terracotta: "#c36349", copper: "#b87333",
+  peach: "#ffb997", coral: "#ff6f61", apricot: "#f0a868",
+  red: "#dc2626", crimson: "#b91c1c", cherry: "#b21e35", burgundy: "#7b1e2b", maroon: "#7a1f2b",
+  wine: "#722f37", brick: "#9c3b28", scarlet: "#e0201b",
+  pink: "#ec4899", rose: "#e05a72", blush: "#e6a5ad", fuchsia: "#d946ef", magenta: "#c026d3",
+  purple: "#7c3aed", plum: "#6a1b6a", lavender: "#b57edc", lilac: "#c8a2c8", violet: "#8b5cf6",
+  mauve: "#b784a7", aubergine: "#4b2d4b",
+  brown: "#8b5a2b", chocolate: "#5c3a21", mocha: "#6f4e37", coffee: "#6f4e37", caramel: "#c68e17",
+  bronze: "#a97142", multi: "#9333ea", print: "#9333ea",
 };
+// Keys ordered longest-first so multi-word colours win over their single-word
+// parts (e.g. "navy blue" beats "blue").
+const JJ_COLOUR_NAME_KEYS = Object.keys(JJ_COLOUR_NAME_HEX).sort((a, b) => b.length - a.length);
+function colourFromProductName(name: string): string | undefined {
+  const hay = ` ${(name ?? "").toLowerCase().replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ")} `;
+  // Longest key first, so "navy blue" wins over "blue".
+  for (const key of JJ_COLOUR_NAME_KEYS) {
+    if (hay.includes(` ${key} `)) return JJ_COLOUR_NAME_HEX[key];
+  }
+  return undefined;
+}
 // Perceived-luminance pick so a light swatch (e.g. 17 = white) uses black text.
 function readableTextOn(hex: string): string {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
@@ -21669,14 +21694,15 @@ function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
   );
 }
 
-// Colour Code cell. The input is absolutely positioned to fill the entire
-// cell (rows can be tall, and a plain input won't stretch), so the swatch
-// covers the whole cell edge-to-edge. Recolours live as you type.
-function JJColourCodeCell({ orderId, value }: { orderId: number; value: string }) {
+// Colour Code cell. The cell's fill colour is derived from the colour word in
+// the product name (not the typed number). The input is absolutely positioned
+// to fill the entire cell (rows can be tall, and a plain input won't stretch),
+// so the swatch covers the whole cell edge-to-edge.
+function JJColourCodeCell({ orderId, value, productName }: { orderId: number; value: string; productName: string }) {
   const fetcher = useFetcher();
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
-  const swatch = JJ_COLOUR_CODE_HEX[draft.trim()];
+  const swatch = colourFromProductName(productName);
   return (
     <input
       type="text"
@@ -21742,7 +21768,7 @@ function JJOrderRow({
           {order.productImageUrl ? <img src={order.productImageUrl} alt="" style={s.thumb} /> : <div style={s.noImg}>—</div>}
         </div>
       </td>
-      <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(2) }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} /></td>
+      <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(2) }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} productName={order.productTitle} /></td>
       <td style={{ ...s.td, ...frozenTd(3) }}><span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span></td>
       {sizes.map((sz) => {
         const line = lineForSize(sz);
