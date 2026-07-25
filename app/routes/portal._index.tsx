@@ -21725,7 +21725,6 @@ function JJOrderRow({
       </td>
       <td style={{ ...s.td, padding: 0, ...frozenTd(2) }}><JJFieldCell orderId={order.id} field="colourCode" value={(order as { colourCode?: string | null }).colourCode ?? ""} /></td>
       <td style={{ ...s.td, ...frozenTd(3) }}><span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span></td>
-      <td style={s.td}><JJFieldCell orderId={order.id} field="styleCode" value={(order as { styleCode?: string | null }).styleCode ?? ""} placeholder="Code" /></td>
       {sizes.map((sz) => {
         const line = lineForSize(sz);
         return (
@@ -21790,7 +21789,6 @@ function JJRestockPanel({
       { id: "picture", label: "Picture", defaultWidth: 90 },
       { id: "colourCode", label: "Colour Code", defaultWidth: 120 },
       { id: "name", label: "Name", defaultWidth: 160 },
-      { id: "sku", label: "SKU", defaultWidth: 120 },
       ...sizes.map((sz) => ({ id: `size:${sz}`, label: sz, defaultWidth: JJ_SIZE_COL_WIDTH, center: true })),
       { id: "totalQty", label: "Total Qty", defaultWidth: 90, center: true },
       { id: "costBaht", label: "Cost (฿)", defaultWidth: 90, center: true },
