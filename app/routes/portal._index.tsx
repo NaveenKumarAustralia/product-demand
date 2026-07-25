@@ -1922,26 +1922,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       include: { lines: { orderBy: { id: "asc" } } },
     });
     if (!order) return null;
-    const shopifyVariants = await getShopifyProductVariants(order.shop, order.productId);
-    const linesByVariantId = new Map(order.lines.map((line) => [line.variantId, line]));
-    const linesToCreate = shopifyVariants.length
-      ? shopifyVariants.map((variant) => {
-          const sourceLine = linesByVariantId.get(variant.id);
-          return {
-            variantId: variant.id,
-            variantTitle: variant.title,
-            sku: variant.sku ?? sourceLine?.sku ?? null,
-            qtyOrdered: 0,
-            costPrice: sourceLine?.costPrice ?? null,
-          };
-        })
-      : order.lines.map((line) => ({
-          variantId: line.variantId,
-          variantTitle: line.variantTitle,
-          sku: line.sku,
-          qtyOrdered: 0,
-          costPrice: line.costPrice,
-        }));
+    // Copy the source's own lines (no Shopify round-trip) so the duplicate is
+    // instant, and reuse the source's createdAt so it stays next to the
+    // original in the list instead of jumping to the top (only orders placed
+    // from Shopify — with a fresh createdAt — belong at the top).
+    const linesToCreate = order.lines.map((line) => ({
+      variantId: line.variantId,
+      variantTitle: line.variantTitle,
+      sku: line.sku,
+      barcode: line.barcode,
+      qtyOrdered: 0,
+      costPrice: line.costPrice,
+    }));
 
     await prisma.supplierOrder.create({
       data: {
@@ -1956,6 +1948,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         priority: order.priority,
         productImageUrl: order.productImageUrl,
         eta: order.eta,
+        destination: order.destination,
+        createdAt: order.createdAt,
         totalQty: 0,
         lines: { create: linesToCreate },
       },
@@ -1993,6 +1987,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (etaRaw && !eta) return null;
 
     const notes = String(form.get("notes") ?? "").trim();
+    // If this product already has an open order, sit the new row next to it
+    // (inherit the earliest createdAt for that product) so the group doesn't
+    // jump to the top. A genuinely new product keeps createdAt = now (top).
+    const existingForProduct = await prisma.supplierOrder.findFirst({
+      where: { productId: product.id, status: "open" },
+      orderBy: { createdAt: "asc" },
+      select: { createdAt: true },
+    }).catch(() => null);
     const createdOrder = await prisma.supplierOrder.create({
       data: {
         shop,
@@ -2008,6 +2010,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         eta,
         notes: notes || null,
         totalQty,
+        ...(existingForProduct ? { createdAt: existingForProduct.createdAt } : {}),
         lines: {
           create: variants.map((variant) => ({
             variantId: variant.id,
