@@ -21650,27 +21650,12 @@ function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
   orderId: number; field: string; value: string; numeric?: boolean; placeholder?: string;
 }) {
   const fetcher = useFetcher();
-  // Live swatch: track the typed value so the cell recolours as you type,
-  // not only after blur/save.
-  const [draft, setDraft] = useState(value);
-  useEffect(() => { setDraft(value); }, [value]);
-  const isColour = field === "colourCode";
-  const swatch = isColour ? JJ_COLOUR_CODE_HEX[draft.trim()] : undefined;
-  // The colour input fills the whole cell (its <td> drops its padding) so the
-  // swatch reaches the cell edges.
-  const fillStyle: React.CSSProperties = isColour
-    ? { width: "100%", height: "100%", minHeight: 44, margin: 0, boxSizing: "border-box", padding: "8px 6px", borderRadius: 0 }
-    : {};
-  const swatchStyle: React.CSSProperties = swatch
-    ? { background: swatch, color: readableTextOn(swatch), fontSize: 20, fontWeight: 800, textAlign: "center" }
-    : {};
   return (
     <input
       type="text"
       inputMode={numeric ? "decimal" : undefined}
-      value={draft}
+      defaultValue={value}
       placeholder={placeholder}
-      onChange={(e) => setDraft(e.currentTarget.value)}
       onBlur={(e) => {
         const next = e.currentTarget.value.trim();
         if (next === value.trim()) return;
@@ -21679,7 +21664,41 @@ function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
           { method: "post" },
         );
       }}
-      style={{ ...s.jjFieldInput, ...fillStyle, ...swatchStyle }}
+      style={s.jjFieldInput}
+    />
+  );
+}
+
+// Colour Code cell. The input is absolutely positioned to fill the entire
+// cell (rows can be tall, and a plain input won't stretch), so the swatch
+// covers the whole cell edge-to-edge. Recolours live as you type.
+function JJColourCodeCell({ orderId, value }: { orderId: number; value: string }) {
+  const fetcher = useFetcher();
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  const swatch = JJ_COLOUR_CODE_HEX[draft.trim()];
+  return (
+    <input
+      type="text"
+      value={draft}
+      onChange={(e) => setDraft(e.currentTarget.value)}
+      onBlur={(e) => {
+        const next = e.currentTarget.value.trim();
+        if (next === value.trim()) return;
+        fetcher.submit(
+          { intent: "jj_update_order_field", orderId: String(orderId), field: "colourCode", value: next },
+          { method: "post" },
+        );
+      }}
+      style={{
+        position: "absolute", inset: 0, width: "100%", height: "100%",
+        border: "none", outline: "none", boxSizing: "border-box",
+        textAlign: "center", padding: "4px 6px",
+        background: swatch ?? "transparent",
+        color: swatch ? readableTextOn(swatch) : "#111827",
+        fontSize: swatch ? 20 : 13,
+        fontWeight: swatch ? 800 : 400,
+      }}
     />
   );
 }
@@ -21723,7 +21742,7 @@ function JJOrderRow({
           {order.productImageUrl ? <img src={order.productImageUrl} alt="" style={s.thumb} /> : <div style={s.noImg}>—</div>}
         </div>
       </td>
-      <td style={{ ...s.td, padding: 0, ...frozenTd(2) }}><JJFieldCell orderId={order.id} field="colourCode" value={(order as { colourCode?: string | null }).colourCode ?? ""} /></td>
+      <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(2) }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} /></td>
       <td style={{ ...s.td, ...frozenTd(3) }}><span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span></td>
       {sizes.map((sz) => {
         const line = lineForSize(sz);
@@ -21777,7 +21796,6 @@ function JJRestockPanel({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
   const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
-  const backfillFetcher = useFetcher<{ jjError?: string; jjBackfill?: { scanned: number; updated: number; noMatch: number; refresh?: boolean } }>();
   const widthsFetcher = useFetcher();
   const loading = loadFetcher.state !== "idle";
 
@@ -21885,42 +21903,6 @@ function JJRestockPanel({
             {loading ? "Loading…" : `Load ${selectedCount || ""} selected to Shopify`.replace("  ", " ")}
           </button>
         )}
-        <button
-          type="button"
-          disabled={backfillFetcher.state !== "idle"}
-          onClick={() => {
-            if (backfillFetcher.state !== "idle") return;
-            if (!window.confirm("Backfill barcodes from Shopify?\n\nFor every JJ order line with a quantity ordered but no barcode, this pulls the barcode (and SKU if missing) from the matching Shopify variant. Existing barcodes are never overwritten.")) return;
-            backfillFetcher.submit({ intent: "jj_backfill_barcodes" }, { method: "post" });
-          }}
-          style={{
-            padding: "7px 14px", background: "#0d9488", color: "#fff", border: "none",
-            borderRadius: 6, fontSize: 13, fontWeight: 600,
-            cursor: backfillFetcher.state !== "idle" ? "wait" : "pointer",
-            ...(backfillFetcher.state !== "idle" ? { opacity: 0.6 } : {}),
-          }}
-          title="Pull missing barcodes from Shopify for ordered lines"
-        >
-          {backfillFetcher.state !== "idle" ? "Backfilling…" : "Backfill barcodes"}
-        </button>
-        <button
-          type="button"
-          disabled={backfillFetcher.state !== "idle"}
-          onClick={() => {
-            if (backfillFetcher.state !== "idle") return;
-            if (!window.confirm("Refresh SKUs & barcodes from Shopify?\n\nFor every ordered JJ line this re-pulls the SKU and barcode from the matching Shopify variant and OVERWRITES the values shown here — use this after editing codes in Shopify. (A blank in Shopify never wipes an existing code.)")) return;
-            backfillFetcher.submit({ intent: "jj_backfill_barcodes", mode: "refresh" }, { method: "post" });
-          }}
-          style={{
-            padding: "7px 14px", background: "#1d4ed8", color: "#fff", border: "none",
-            borderRadius: 6, fontSize: 13, fontWeight: 600,
-            cursor: backfillFetcher.state !== "idle" ? "wait" : "pointer",
-            ...(backfillFetcher.state !== "idle" ? { opacity: 0.6 } : {}),
-          }}
-          title="Re-pull SKUs and barcodes from Shopify, overwriting the values here"
-        >
-          {backfillFetcher.state !== "idle" ? "Refreshing…" : "Refresh from Shopify"}
-        </button>
         <a
           href={`/portal/jj-restock/export${term ? `?q=${encodeURIComponent(term)}` : ""}`}
           style={{
@@ -21932,15 +21914,6 @@ function JJRestockPanel({
           Download Excel
         </a>
         {loadFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{loadFetcher.data.jjError}</span>}
-        {backfillFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{backfillFetcher.data.jjError}</span>}
-        {backfillFetcher.data?.jjBackfill && (
-          <span style={{ fontSize: 13, color: "#065f46" }}>
-            {backfillFetcher.data.jjBackfill.refresh
-              ? `Updated ${backfillFetcher.data.jjBackfill.updated} line(s) from Shopify across ${backfillFetcher.data.jjBackfill.scanned} ordered line(s)`
-              : `Filled ${backfillFetcher.data.jjBackfill.updated} barcode(s) across ${backfillFetcher.data.jjBackfill.scanned} ordered line(s)`}
-            {backfillFetcher.data.jjBackfill.noMatch > 0 ? ` · ${backfillFetcher.data.jjBackfill.noMatch} had no change` : ""}
-          </span>
-        )}
       </div>
       <div className="portal-table-scroll" style={s.tableWrap}>
         {/* Widths come from the resizable column model; everything up to Name
