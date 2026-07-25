@@ -550,6 +550,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const totalsFor = (rows: typeof normalizedOrders) => ({
     orderCount: rows.length,
     totalQty: rows.reduce((sum, order) => sum + (order.totalQty ?? 0), 0),
+    // JJ-only: total order value in baht (per-piece cost × qty). 0 for Karma
+    // East orders, which have no costBaht.
+    totalBaht: rows.reduce((sum, order) => sum + ((order as { costBaht?: number | null }).costBaht ?? 0) * (order.totalQty ?? 0), 0),
   });
   const restockTotalsAll = totalsFor(normalizedOrders);
   const restockTotalsFiltered = totalsFor(filteredOrders);
@@ -1491,6 +1494,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const data: Record<string, unknown> = {};
     if (field === "colourCode") data.colourCode = raw || null;
     else if (field === "styleCode") data.styleCode = raw || null;
+    else if (field === "name") data.productTitle = raw || "New product";
     else if (field === "costBaht") {
       const n = Number(raw);
       data.costBaht = raw && Number.isFinite(n) && n > 0 ? n : null;
@@ -1501,6 +1505,69 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       console.warn("[jj_update_order_field] failed:", e);
     }
     return null;
+  }
+
+  // ─── JJ Restock — add a blank product row (admin only). Used to place an
+  // order for a product that doesn't exist in Shopify yet. No productId, so
+  // it shows the "Link to Shopify" action instead of Load until linked.
+  if (intent === "jj_add_order") {
+    if (!currentUser?.admin) return { jjError: "Admins only" };
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    await prisma.supplierOrder.create({
+      data: {
+        shop: session?.shop ?? "",
+        supplier: "JJ",
+        productId: "",
+        productTitle: String(form.get("name") ?? "").trim() || "New product",
+        status: "open",
+        supplierStatus: "on_order",
+        totalQty: 0,
+      },
+    });
+    return { jjAdded: true };
+  }
+
+  // ─── JJ Restock — delete a product row (admin only).
+  if (intent === "jj_delete_order") {
+    if (!currentUser?.admin) return { jjError: "Admins only" };
+    const id = Number(form.get("orderId"));
+    if (!id) return null;
+    const ord = await prisma.supplierOrder.findUnique({ where: { id }, select: { supplier: true } });
+    if (ord?.supplier !== "JJ") return { jjError: "Not a JJ order" };
+    await prisma.supplierOrder.delete({ where: { id } }); // cascades to lines
+    return { jjDeleted: id };
+  }
+
+  // ─── JJ Restock — link a manually-added order to a Shopify product once it
+  // exists there (admin only). Sets productId + image, adopts the Shopify
+  // title, and matches each existing size line to its variant so SKU/barcode
+  // and the Load button light up.
+  if (intent === "jj_link_shopify") {
+    if (!currentUser?.admin) return { jjError: "Admins only" };
+    const id = Number(form.get("orderId"));
+    const productId = String(form.get("productId") ?? "").trim();
+    const imageUrl = String(form.get("imageUrl") ?? "").trim();
+    const title = String(form.get("title") ?? "").trim();
+    if (!id || !productId) return { jjError: "Pick a product to link" };
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return { jjError: "No Shopify session" };
+    const order = await prisma.supplierOrder.findUnique({ where: { id }, include: { lines: true } });
+    if (!order || order.supplier !== "JJ") return { jjError: "Order not found" };
+    const codes = await getShopifyVariantCodes(session.shop, session.accessToken, productId).catch(() => [] as ShopifyVariantCode[]);
+    await prisma.supplierOrder.update({
+      where: { id },
+      data: { productId, ...(imageUrl ? { productImageUrl: imageUrl } : {}), ...(title ? { productTitle: title } : {}) },
+    });
+    for (const line of order.lines) {
+      const wanted = normalizeVariantSizeLabel(line.variantTitle ?? "");
+      const match = codes.find((c) => normalizeVariantSizeLabel(c.title) === wanted);
+      if (!match) continue;
+      await prisma.orderLine.update({
+        where: { id: line.id },
+        data: { variantId: match.id, sku: match.sku ?? line.sku, barcode: match.barcode ?? line.barcode },
+      });
+    }
+    return { jjLinked: id };
   }
 
   // ─── JJ Restock — backfill barcodes (and any missing SKUs) from Shopify
@@ -1571,9 +1638,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { jjBackfill: { scanned, updated, noMatch, refresh } };
   }
 
-  // ─── JJ Restock — load one or more orders' arrived quantities straight
-  // into Shopify inventory (no packing list), push the baht→AUD unit cost,
-  // then close each loaded order so it drops off the page.
+  // ─── JJ Restock — load one or more orders' NOT-YET-LOADED quantities into
+  // Shopify inventory. Adds only the delta (qtyOrdered − qtyReceived) so the
+  // same order can be loaded again after more arrives, marks each loaded size
+  // (qtyReceived = qtyOrdered) for the green cell, and pushes a weighted-
+  // average baht→AUD unit cost exactly like the packing list. The order is
+  // NOT closed, so it stays on the page and can be loaded again.
   if (intent === "jj_load_inventory") {
     if (!canLoadPackingInventory) return { jjError: "You don't have permission to load inventory" };
     const orderIds = String(form.get("orderIds") ?? "")
@@ -1592,35 +1662,69 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!session?.shop || !session.accessToken) return { jjError: "No Shopify session available" };
     const thbRate = await getCachedThbPerAud();
     const loadedOrderIds: number[] = [];
+    let loadedLineCount = 0;
     for (const order of jjOrders) {
       if (!order.productId) continue;
       const variants = await getShopifyInventoryVariants(session.shop, order.productId);
-      const changes: ShopifyInventoryChange[] = [];
+      const costBaht = (order as { costBaht?: number | null }).costBaht ?? null;
+      // Per-piece AUD cost of the newly-arrived stock (rate minus buffer).
+      const newCostAud = costBaht && costBaht > 0 ? convertBahtToAud(costBaht, thbRate) : null;
+
+      // Build the delta changes: only the qty not already loaded.
+      type JJChange = { size: string; qty: number; inventoryItemId: string; lineId: number; target: number };
+      const jjChanges: JJChange[] = [];
       for (const line of order.lines) {
-        const qty = line.qtyOrdered;
-        if (!qty || qty <= 0) continue;
+        const target = line.qtyOrdered ?? 0;
+        const delta = target - (line.qtyReceived ?? 0);
+        if (delta <= 0) continue;
         const variant = matchingVariantForSize(variants, line.variantTitle) as ShopifyInventoryVariantInfo | null;
         if (!variant?.inventoryItemId) continue;
-        changes.push({ size: line.variantTitle, qty, inventoryItemId: variant.inventoryItemId });
+        jjChanges.push({ size: line.variantTitle, qty: delta, inventoryItemId: variant.inventoryItemId, lineId: line.id, target });
       }
-      if (!changes.length) continue;
-      const loaded = await addShopifyInventory(session.shop, session.accessToken, changes);
-      if (!loaded.length) continue;
-      // Best-effort baht→AUD unit-cost push (rate minus the 1-baht buffer).
-      const costBaht = (order as { costBaht?: number | null }).costBaht ?? null;
-      const costAud = costBaht && costBaht > 0 ? convertBahtToAud(costBaht, thbRate) : null;
-      if (costAud && costAud > 0) {
-        for (const change of changes) {
-          const variant = matchingVariantForSize(variants, change.size) as ShopifyInventoryVariantInfo | null;
-          if (variant?.inventoryItemId) {
-            await updateInventoryItemUnitCost(session.shop, session.accessToken, variant.inventoryItemId, costAud);
-          }
+      if (!jjChanges.length) continue;
+
+      // Snapshot each variant's current cost + qty BEFORE we add, so the WAC
+      // math uses the pre-load state.
+      const preSnapshots = new Map<string, InventoryItemSnapshot>();
+      if (newCostAud && newCostAud > 0) {
+        for (const change of jjChanges) {
+          const snap = await fetchInventoryItemCostAndQty(session.shop, session.accessToken, change.inventoryItemId);
+          if (snap) preSnapshots.set(change.inventoryItemId, snap);
         }
       }
-      await prisma.supplierOrder.update({ where: { id: order.id }, data: { status: "closed" } });
+
+      const loadedSizes = await addShopifyInventory(
+        session.shop,
+        session.accessToken,
+        jjChanges.map((c) => ({ size: c.size, qty: c.qty, inventoryItemId: c.inventoryItemId })),
+      );
+      if (!loadedSizes.length) continue;
+
+      // Weighted-average cost push per successfully-loaded variant:
+      //   existing_qty 0 / no prior cost → new cost; else weighted average.
+      if (newCostAud && newCostAud > 0) {
+        for (const change of jjChanges) {
+          if (!loadedSizes.includes(change.size)) continue;
+          const pre = preSnapshots.get(change.inventoryItemId);
+          let newWac: number;
+          if (!pre || pre.totalQty <= 0 || pre.unitCost == null || pre.unitCost <= 0) {
+            newWac = newCostAud;
+          } else {
+            newWac = (pre.totalQty * pre.unitCost + change.qty * newCostAud) / (pre.totalQty + change.qty);
+          }
+          await updateInventoryItemUnitCost(session.shop, session.accessToken, change.inventoryItemId, newWac);
+        }
+      }
+
+      // Mark each loaded line fully received so its size cell turns green.
+      for (const change of jjChanges) {
+        if (!loadedSizes.includes(change.size)) continue;
+        await prisma.orderLine.update({ where: { id: change.lineId }, data: { qtyReceived: change.target } });
+        loadedLineCount++;
+      }
       loadedOrderIds.push(order.id);
     }
-    return { jjLoaded: loadedOrderIds };
+    return { jjLoaded: loadedOrderIds, jjLoadedLines: loadedLineCount };
   }
 
   if (intent === "toggle_packing_qty_manual_loaded") {
@@ -8475,6 +8579,8 @@ export default function PortalDashboard() {
               const totals = showFiltered ? restockTotalsFiltered : restockTotalsAll;
               const label = showFiltered ? "Filtered" : "Total";
               const fmt = (n: number) => n.toLocaleString();
+              // JJ page also shows the total order value in baht + AUD.
+              const totalAud = page === "jj-restock" ? convertBahtToAud(totals.totalBaht, thbPerAudCachedRate) : null;
               return (
                 <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   <span style={s.restockTotalsLabel}>{label}</span>
@@ -8484,6 +8590,16 @@ export default function PortalDashboard() {
                   <span style={{ ...s.restockTotalsBadge, ...(showFiltered ? s.restockTotalsBadgeFiltered : {}) }}>
                     {fmt(totals.totalQty)} pcs
                   </span>
+                  {page === "jj-restock" && totals.totalBaht > 0 && (
+                    <span style={{ ...s.restockTotalsBadge, ...(showFiltered ? s.restockTotalsBadgeFiltered : {}) }}>
+                      ฿{fmt(Math.round(totals.totalBaht))}
+                    </span>
+                  )}
+                  {page === "jj-restock" && totalAud != null && totalAud > 0 && (
+                    <span style={{ ...s.restockTotalsBadge, ...(showFiltered ? s.restockTotalsBadgeFiltered : {}) }}>
+                      ${fmt(Math.round(totalAud))} AUD
+                    </span>
+                  )}
                 </div>
               );
             })()}
@@ -8673,6 +8789,7 @@ export default function PortalDashboard() {
             fxBahtBuffer={fxBahtBuffer}
             restockSettings={restockSettings}
             canLoadInventory={Boolean((currentUser?.canLoadInventory || currentUser?.admin) && !jjSupplierOnly)}
+            isAdmin={Boolean(currentUser?.admin)}
             savedColumnWidths={jjColumnWidths}
           />
         ) : !isRestockPage ? (
@@ -17372,12 +17489,11 @@ function AddUserForm({ currentUser, onAdd }: { currentUser: PortalUser | null; o
 }
 
 function UserEditForm({
-  user, currentUser, navItems, onSave,
+  user, currentUser, navItems,
 }: {
   user: PortalUser;
   currentUser: PortalUser | null;
   navItems: typeof ALL_NAV_ITEMS;
-  onSave: (fields: Record<string, string>) => void;
 }) {
   const [name, setName] = useState(user.name);
   const [password, setPassword] = useState("");
@@ -17387,6 +17503,22 @@ function UserEditForm({
   const [canLoadInventory, setCanLoadInventory] = useState(user.canLoadInventory);
   const allowedRoles: PortalUserRole[] = currentUser?.role === "superadmin" ? ["superadmin", "admin", "user"] : ["admin", "user"];
   const showPageAccess = role !== "superadmin";
+  // Own fetcher so the Save button can show real Saving…/Saved ✓ state and
+  // the editor doesn't close blindly (the old flow closed instantly with no
+  // confirmation, which made a successful save look like it hadn't saved and
+  // led to double-saving).
+  const saveFetcher = useFetcher<{ userError?: string } | null>();
+  const saving = saveFetcher.state !== "idle";
+  const wasSaving = useRef(false);
+  const [justSaved, setJustSaved] = useState(false);
+  useEffect(() => {
+    if (saving) { wasSaving.current = true; return; }
+    if (wasSaving.current) {
+      wasSaving.current = false;
+      // Only flag success when the server didn't return an error.
+      if (!saveFetcher.data?.userError) setJustSaved(true);
+    }
+  }, [saving, saveFetcher.data]);
   return (
     <div style={{ width: "100%", background: "#f8fafc", borderRadius: 8, padding: 14, display: "flex", flexDirection: "column" as const, gap: 12, marginTop: 4 }}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
@@ -17416,7 +17548,7 @@ function UserEditForm({
       </div>
 
       <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
-        <input type="checkbox" checked={canLoadInventory} onChange={(e) => setCanLoadInventory(e.target.checked)} />
+        <input type="checkbox" checked={canLoadInventory} onChange={(e) => { setJustSaved(false); setCanLoadInventory(e.target.checked); }} />
         Can load Shopify inventory (Packing Lists)
       </label>
 
@@ -17429,7 +17561,7 @@ function UserEditForm({
                 <input
                   type="checkbox"
                   checked={Boolean(pageAccess[item.id])}
-                  onChange={(e) => setPageAccess((p) => ({ ...p, [item.id]: e.target.checked }))}
+                  onChange={(e) => { setJustSaved(false); setPageAccess((p) => ({ ...p, [item.id]: e.target.checked })); }}
                 />
                 {item.label}
               </label>
@@ -17438,17 +17570,23 @@ function UserEditForm({
         </div>
       )}
 
-      <button
-        type="button"
-        style={s.loginButton}
-        onClick={() => {
-          const fields: Record<string, string> = { name, role, canLoadInventory: canLoadInventory ? "on" : "off", pageAccess: JSON.stringify(pageAccess) };
-          if (password) fields.password = password;
-          onSave(fields);
-        }}
-      >
-        Save changes
-      </button>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <button
+          type="button"
+          disabled={saving}
+          style={{ ...s.loginButton, flex: 1, ...(saving ? { opacity: 0.7, cursor: "wait" } : {}) }}
+          onClick={() => {
+            const fields: Record<string, string> = { intent: "update_portal_user", userId: user.id, name, role, canLoadInventory: canLoadInventory ? "on" : "off", pageAccess: JSON.stringify(pageAccess) };
+            if (password) fields.password = password;
+            setJustSaved(false);
+            saveFetcher.submit(fields, { method: "post" });
+          }}
+        >
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+        {justSaved && <span style={{ color: "#166534", fontWeight: 700, fontSize: 13, whiteSpace: "nowrap" }}>Saved ✓</span>}
+        {saveFetcher.data?.userError && <span style={{ color: "#b91c1c", fontWeight: 600, fontSize: 13 }}>{saveFetcher.data.userError}</span>}
+      </div>
     </div>
   );
 }
@@ -17548,7 +17686,6 @@ function SettingsPanel({
                       user={user}
                       currentUser={currentUser}
                       navItems={ALL_NAV_ITEMS}
-                      onSave={(fields) => { settingsFetcher.submit({ intent: "update_portal_user", userId: user.id, ...fields }, { method: "post" }); setEditUserId(null); }}
                     />
                   )}
                 </div>
@@ -21583,7 +21720,7 @@ function TitleManualPriceInput({ onSave }: { onSave: (rupees: number) => void })
   );
 }
 
-function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; size: string; value: number; restockSettings: RestockSettings }) {
+function QtyCell({ orderId, size, value, restockSettings, loaded }: { orderId: number; size: string; value: number; restockSettings: RestockSettings; loaded?: boolean }) {
   const fetcher = useFetcher();
   const current = fetcher.formData ? String(fetcher.formData.get("value")) : String(value);
   const numericCurrent = Number(current) || 0;
@@ -21612,6 +21749,7 @@ function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; s
         ...s.qtyInput,
         ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
         ...(numericCurrent > 0 ? { color: restockSettings.quantityFontColor } : {}),
+        ...(loaded ? { color: "#fff" } : {}),
       }}
     />
   );
@@ -21738,11 +21876,23 @@ const JJ_LOAD_COL_WIDTH = 84;
 const JJ_FROZEN_COLUMN_COUNT = 4;
 
 function JJOrderRow({
-  order, sizes, frozenOffsets, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
+  order, sizes, rowIndex, frozenOffsets, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
+  isAdmin, onAddRow, onDelete, onLink,
 }: {
-  order: Order; sizes: string[]; frozenOffsets: number[]; thbPerAudCachedRate: number | null; restockSettings: RestockSettings;
+  order: Order; sizes: string[]; rowIndex: number; frozenOffsets: number[]; thbPerAudCachedRate: number | null; restockSettings: RestockSettings;
   canLoadInventory: boolean; selected: boolean; onToggle: () => void; onLoad: () => void; loading: boolean;
+  isAdmin: boolean; onAddRow: () => void; onDelete: () => void; onLink: () => void;
 }) {
+  // Right-click menu on the first column (admin only): add / delete rows.
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!rowMenu) return;
+    const close = () => setRowMenu(null);
+    document.addEventListener("mousedown", close);
+    document.addEventListener("scroll", close, true);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("scroll", close, true); };
+  }, [rowMenu]);
+  const linked = Boolean(order.productId);
   // Sticky style for the frozen block (matches the Td component's treatment).
   const frozenTd = (i: number): React.CSSProperties => i < frozenOffsets.length
     ? {
@@ -21752,16 +21902,30 @@ function JJOrderRow({
         ...(i === frozenOffsets.length - 1 ? { boxShadow: "4px 0 6px -2px rgba(0,0,0,0.1)" } : {}),
       }
     : {};
-  const lines = order.lines as Array<{ variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }>;
+  const lines = order.lines as Array<{ variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number; qtyReceived?: number }>;
   const lineForSize = (size: string) =>
     lines.find((l) => (l.variantTitle ?? "").trim().toLowerCase() === size.trim().toLowerCase()) ?? null;
+  // A size is "loaded" (green) once its received qty covers what was ordered.
+  const isLoaded = (line: { qtyOrdered: number; qtyReceived?: number } | null) =>
+    !!line && (line.qtyOrdered ?? 0) > 0 && (line.qtyReceived ?? 0) >= (line.qtyOrdered ?? 0);
   const totalQty = lines.reduce((sum, l) => sum + (l.qtyOrdered || 0), 0);
   const costBaht = (order as { costBaht?: number | null }).costBaht ?? null;
   const costAud = costBaht ? convertBahtToAud(costBaht, thbPerAudCachedRate) : null;
   return (
     <tr style={s.row}>
-      <td style={{ ...s.td, textAlign: "center", ...frozenTd(0) }}>
+      <td
+        style={{ ...s.td, textAlign: "center", ...frozenTd(0) }}
+        onContextMenu={isAdmin ? (e) => { e.preventDefault(); setRowMenu({ x: e.clientX, y: e.clientY }); } : undefined}
+        title={isAdmin ? "Right-click to add / delete rows" : undefined}
+      >
         {canLoadInventory ? <input type="checkbox" checked={selected} onChange={onToggle} /> : null}
+        {rowMenu && typeof document !== "undefined" && createPortal(
+          <div style={{ position: "fixed", left: rowMenu.x, top: rowMenu.y, zIndex: 2147483647, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.16)", padding: 4, minWidth: 150 }} onMouseDown={(e) => e.stopPropagation()}>
+            <button type="button" onClick={() => { setRowMenu(null); onAddRow(); }} style={s.contextMenuButton}>+ Add product row</button>
+            <button type="button" onClick={() => { setRowMenu(null); onDelete(); }} style={{ ...s.contextMenuButton, color: "#dc2626" }}>Delete this row</button>
+          </div>,
+          document.body,
+        )}
       </td>
       <td style={{ ...s.td, ...frozenTd(1) }}>
         <div style={s.imageCell}>
@@ -21769,27 +21933,38 @@ function JJOrderRow({
         </div>
       </td>
       <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(2) }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} productName={order.productTitle} /></td>
-      <td style={{ ...s.td, ...frozenTd(3) }}><span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span></td>
-      {sizes.map((sz) => {
+      <td style={{ ...s.td, ...frozenTd(3) }}>
+        {linked
+          ? <span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span>
+          : <JJFieldCell orderId={order.id} field="name" value={order.productTitle ?? ""} placeholder="Product name" />}
+      </td>
+      {sizes.map((sz, sizeIdx) => {
         const line = lineForSize(sz);
+        const loaded = isLoaded(line);
         return (
-          <td key={sz} style={{ ...s.td, textAlign: "center", padding: "6px 6px", height: 1 }}>
+          <td
+            key={sz}
+            data-grid-row={rowIndex}
+            data-grid-col={sizeIdx}
+            tabIndex={0}
+            style={{ ...s.td, textAlign: "center", padding: "6px 6px", height: 1, ...(loaded ? s.loadedInventoryCell : {}) }}
+          >
             {line ? (
               // SKU pinned to the top, qty centred, barcode pinned to the
               // bottom — space-between over the full cell height.
               <div style={s.jjSizeCell}>
                 <div style={s.jjSizeBlock}>
-                  <span style={s.jjSizeLabel}>SKU</span>
-                  <span style={s.jjSizeSku}>{line.sku || "—"}</span>
+                  <span style={{ ...s.jjSizeLabel, ...(loaded ? { color: "rgba(255,255,255,0.85)" } : {}) }}>SKU</span>
+                  <span style={{ ...s.jjSizeSku, ...(loaded ? { color: "#fff" } : {}) }}>{line.sku || "—"}</span>
                 </div>
-                <QtyCell orderId={order.id} size={sz} value={line.qtyOrdered ?? 0} restockSettings={restockSettings} />
+                <QtyCell orderId={order.id} size={sz} value={line.qtyOrdered ?? 0} restockSettings={restockSettings} loaded={loaded} />
                 <div style={s.jjSizeBlock}>
-                  <span style={s.jjSizeLabel}>Barcode</span>
-                  <span style={s.jjSizeBarcode}>{line.barcode || "—"}</span>
+                  <span style={{ ...s.jjSizeLabel, ...(loaded ? { color: "rgba(255,255,255,0.85)" } : {}) }}>Barcode</span>
+                  <span style={{ ...s.jjSizeBarcode, ...(loaded ? { color: "#fff" } : {}) }}>{line.barcode || "—"}</span>
                 </div>
               </div>
             ) : (
-              <QtyCell orderId={order.id} size={sz} value={0} restockSettings={restockSettings} />
+              <QtyCell orderId={order.id} size={sz} value={0} restockSettings={restockSettings} loaded={false} />
             )}
           </td>
         );
@@ -21799,14 +21974,27 @@ function JJOrderRow({
       <td style={{ ...s.td, textAlign: "center", color: "#6b7280" }}>{costAud != null ? `$${costAud.toFixed(2)}` : "—"}</td>
       {canLoadInventory && (
         <td style={{ ...s.td, textAlign: "center" }}>
-          <button
-            type="button"
-            disabled={loading || totalQty <= 0}
-            onClick={onLoad}
-            style={{ ...s.jjLoadBtn, padding: "4px 10px", ...(loading || totalQty <= 0 ? { opacity: 0.5, cursor: "default" } : {}) }}
-          >
-            Load
-          </button>
+          {linked ? (
+            <button
+              type="button"
+              disabled={loading || totalQty <= 0}
+              onClick={onLoad}
+              style={{ ...s.jjLoadBtn, padding: "4px 10px", ...(loading || totalQty <= 0 ? { opacity: 0.5, cursor: "default" } : {}) }}
+            >
+              Load
+            </button>
+          ) : isAdmin ? (
+            <button
+              type="button"
+              onClick={onLink}
+              style={{ padding: "4px 10px", background: "#1d4ed8", color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+              title="Link this row to a Shopify product (once created there)"
+            >
+              Link to Shopify
+            </button>
+          ) : (
+            <span style={{ color: "#9ca3af", fontSize: 11 }}>Not in Shopify</span>
+          )}
         </td>
       )}
     </tr>
@@ -21814,16 +22002,24 @@ function JJOrderRow({
 }
 
 function JJRestockPanel({
-  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, savedColumnWidths,
+  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths,
 }: {
   orders: Order[]; sizes: string[]; thbPerAudCachedRate: number | null; fxBahtBuffer: number;
-  restockSettings: RestockSettings; canLoadInventory: boolean; savedColumnWidths: Record<string, number>;
+  restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>;
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
   const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
+  const rowFetcher = useFetcher<{ jjError?: string }>();
   const widthsFetcher = useFetcher();
   const loading = loadFetcher.state !== "idle";
+  // Which order (if any) is picking a Shopify product to link to.
+  const [linkingOrderId, setLinkingOrderId] = useState<number | null>(null);
+  const addOrder = () => rowFetcher.submit({ intent: "jj_add_order" }, { method: "post" });
+  const deleteOrder = (orderId: number) => {
+    if (!window.confirm("Delete this product row? This can't be undone.")) return;
+    rowFetcher.submit({ intent: "jj_delete_order", orderId: String(orderId) }, { method: "post" });
+  };
 
   // Column model. Everything up to and including Name is frozen (sticky
   // left) so it stays visible while scrolling the size columns.
@@ -21939,12 +22135,24 @@ function JJRestockPanel({
         >
           Download Excel
         </a>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={addOrder}
+            disabled={rowFetcher.state !== "idle"}
+            style={{ padding: "7px 14px", background: "#16a34a", color: "#fff", border: "none", borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: rowFetcher.state !== "idle" ? "wait" : "pointer" }}
+            title="Add a product row — for placing an order on a product not yet in Shopify"
+          >
+            + Add product
+          </button>
+        )}
         {loadFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{loadFetcher.data.jjError}</span>}
+        {rowFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{rowFetcher.data.jjError}</span>}
       </div>
       <div className="portal-table-scroll" style={s.tableWrap}>
         {/* Widths come from the resizable column model; everything up to Name
             is frozen so it stays put while the size columns scroll. */}
-        <table style={{ ...s.table, width: jjTableWidth, minWidth: "100%" }}>
+        <table style={{ ...s.table, width: jjTableWidth, minWidth: "100%" }} onKeyDown={handleTableGridKeyDown}>
           <colgroup>
             {jjColumns.map((c) => <col key={c.id} style={{ width: widthFor(c.id) }} />)}
           </colgroup>
@@ -21977,11 +22185,12 @@ function JJRestockPanel({
             </tr>
           </thead>
           <tbody>
-            {visible.map((order) => (
+            {visible.map((order, rowIndex) => (
               <JJOrderRow
                 key={order.id}
                 order={order}
                 sizes={sizes}
+                rowIndex={rowIndex}
                 frozenOffsets={frozenOffsets}
                 thbPerAudCachedRate={thbPerAudCachedRate}
                 restockSettings={restockSettings}
@@ -21990,19 +22199,93 @@ function JJRestockPanel({
                 onToggle={() => toggle(order.id)}
                 onLoad={() => loadIds([order.id])}
                 loading={loading}
+                isAdmin={isAdmin}
+                onAddRow={addOrder}
+                onDelete={() => deleteOrder(order.id)}
+                onLink={() => setLinkingOrderId(order.id)}
               />
             ))}
             {visible.length === 0 && (
               <tr>
                 <td colSpan={jjColumns.length} style={{ ...s.td, textAlign: "center", padding: 24, color: "#6b7280" }}>
-                  No open JJ orders. Place an order from a Shopify product whose Vendor is “JJ”.
+                  No open JJ orders. Place an order from a Shopify product whose Vendor is “JJ”{isAdmin ? ", or use “+ Add product” for one not yet in Shopify." : "."}
                 </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+      {linkingOrderId != null && (
+        <JJLinkShopifyModal
+          orderId={linkingOrderId}
+          onClose={() => setLinkingOrderId(null)}
+        />
+      )}
     </div>
+  );
+}
+
+// Admin-only modal: search Shopify products and link the chosen one to a
+// manually-added JJ order (sets productId + image + matches size lines).
+function JJLinkShopifyModal({ orderId, onClose }: { orderId: number; onClose: () => void }) {
+  const [query, setQuery] = useState("");
+  const searchFetcher = useFetcher<{ products?: Array<{ id: string; title: string; imageUrl: string | null }> }>();
+  const linkFetcher = useFetcher<{ jjLinked?: number; jjError?: string }>();
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) return;
+    const t = window.setTimeout(() => searchFetcher.load(`/api/packing-search?q=${encodeURIComponent(q)}`), 250);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
+  // Close once the link succeeds.
+  useEffect(() => {
+    if (linkFetcher.state === "idle" && linkFetcher.data?.jjLinked) onClose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkFetcher.state, linkFetcher.data]);
+  const products = searchFetcher.data?.products ?? [];
+  const linking = linkFetcher.state !== "idle";
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ background: "#fff", borderRadius: 10, width: 480, maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb" }}>
+          <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Link to a Shopify product</div>
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search Shopify product title or SKU…"
+            style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 10px", fontSize: 13, boxSizing: "border-box" }}
+          />
+          {linkFetcher.data?.jjError && <div style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>{linkFetcher.data.jjError}</div>}
+        </div>
+        <div style={{ overflowY: "auto", flex: 1 }}>
+          {query.trim().length < 2 ? (
+            <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>Type at least 2 characters.</div>
+          ) : products.length === 0 ? (
+            <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>{searchFetcher.state !== "idle" ? "Searching…" : "No products match."}</div>
+          ) : products.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              disabled={linking}
+              onClick={() => linkFetcher.submit(
+                { intent: "jj_link_shopify", orderId: String(orderId), productId: p.id, imageUrl: p.imageUrl ?? "", title: p.title },
+                { method: "post" },
+              )}
+              style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", border: "none", borderBottom: "1px solid #f3f4f6", background: "transparent", padding: "8px 16px", fontSize: 13, cursor: linking ? "wait" : "pointer", textAlign: "left" }}
+            >
+              {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 40, height: 48, objectFit: "cover", borderRadius: 4, flexShrink: 0 }} /> : <div style={{ width: 40, height: 48, background: "#f1f5f9", borderRadius: 4, flexShrink: 0 }} />}
+              <span style={{ fontWeight: 600, color: "#111827" }}>{p.title}</span>
+            </button>
+          ))}
+        </div>
+        <div style={{ padding: "10px 16px", borderTop: "1px solid #e5e7eb", textAlign: "right" }}>
+          <button type="button" onClick={onClose} style={s.secondaryButton}>Cancel</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
