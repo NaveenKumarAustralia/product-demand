@@ -108,7 +108,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         ? prisma.supplierOrder.findMany({
             where: { status: "open" },
             include: { lines: { orderBy: { id: "asc" } } },
-            orderBy: { createdAt: "desc" },
+            // id is a stable tiebreaker so duplicate rows of one product (which
+            // share a createdAt) don't swap order between reloads.
+            orderBy: [{ createdAt: "desc" }, { id: "asc" }],
           })
         : (Promise.resolve([]) as ReturnType<typeof prisma.supplierOrder.findMany<{ include: { lines: true } }>>),
       needsPackingLists
@@ -526,8 +528,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
   for (const bucket of orderGroups.values()) {
     bucket.sort((a, b) => {
-      if (sortBy === "orderDateAsc") return a.createdAt.getTime() - b.createdAt.getTime();
-      return b.createdAt.getTime() - a.createdAt.getTime();
+      const t = sortBy === "orderDateAsc"
+        ? a.createdAt.getTime() - b.createdAt.getTime()
+        : b.createdAt.getTime() - a.createdAt.getTime();
+      // Stable tiebreaker: same-createdAt duplicates keep a fixed order
+      // instead of swapping on every save.
+      return t !== 0 ? t : a.id - b.id;
     });
   }
   const filteredOrders = Array.from(orderGroups.values())
