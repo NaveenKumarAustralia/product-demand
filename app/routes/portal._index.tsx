@@ -5025,7 +5025,7 @@ const FABRIC_TOTAL_EXCLUDED_NAMES = new Set([
 ]);
 const ALL_NAV_ITEMS = [
   { id: "restock", label: "Existing Products Restock", href: "/portal" },
-  { id: "jj-restock", label: "JJ Restock", href: "/portal?page=jj-restock" },
+  { id: "jj-restock", label: "JJ Order", href: "/portal?page=jj-restock" },
   { id: "fabric", label: "Fabric in stock", href: "/portal?page=fabric" },
   { id: "packing", label: "Packing Lists", href: "/portal?page=packing" },
   { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
@@ -8361,7 +8361,7 @@ export default function PortalDashboard() {
     : page === "collections" ? "Collections"
     : page === "photoshoot" ? "Photo Shoots"
     : page === "newproduct" ? "New Product Orders"
-    : page === "jj-restock" ? (selectedProductGroup || "JJ Restock")
+    : page === "jj-restock" ? (selectedProductGroup || "JJ Order")
     : selectedProductGroup || "Existing Products Restock";
   const orderedNavItems = navOrder
     .map((id) => ALL_NAV_ITEMS.find((item) => item.id === id))
