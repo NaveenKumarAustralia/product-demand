@@ -21619,16 +21619,58 @@ function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; s
 
 // ─── JJ Restock (self-contained; does NOT touch the Karma East table) ────
 // Editable text/number cell for the JJ-only per-order fields.
+// Colour number → hex swatch. Typing one of these into the Colour Code cell
+// paints the whole cell that colour with large bold text. Add new numbers
+// here as they come up.
+const JJ_COLOUR_CODE_HEX: Record<string, string> = {
+  "2": "#000000",
+  "26": "#111121",
+  "50": "#0F282E",
+  "11": "#1A1020",
+  "14": "#1E2417",
+  "100": "#2B1414",
+  "112": "#15262F",
+  "18": "#1F1511",
+  "10": "#292928",
+  "17": "#FFFFFF",
+  "84": "#853D23",
+  "115": "#572D23",
+};
+// Perceived-luminance pick so a light swatch (e.g. 17 = white) uses black text.
+function readableTextOn(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return "#ffffff";
+  const n = parseInt(m[1], 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return lum > 0.6 ? "#000000" : "#ffffff";
+}
+
 function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
   orderId: number; field: string; value: string; numeric?: boolean; placeholder?: string;
 }) {
   const fetcher = useFetcher();
+  // Live swatch: track the typed value so the cell recolours as you type,
+  // not only after blur/save.
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  const isColour = field === "colourCode";
+  const swatch = isColour ? JJ_COLOUR_CODE_HEX[draft.trim()] : undefined;
+  // The colour input fills the whole cell (its <td> drops its padding) so the
+  // swatch reaches the cell edges.
+  const fillStyle: React.CSSProperties = isColour
+    ? { width: "100%", height: "100%", minHeight: 44, margin: 0, boxSizing: "border-box", padding: "8px 6px", borderRadius: 0 }
+    : {};
+  const swatchStyle: React.CSSProperties = swatch
+    ? { background: swatch, color: readableTextOn(swatch), fontSize: 20, fontWeight: 800, textAlign: "center" }
+    : {};
   return (
     <input
       type="text"
       inputMode={numeric ? "decimal" : undefined}
-      defaultValue={value}
+      value={draft}
       placeholder={placeholder}
+      onChange={(e) => setDraft(e.currentTarget.value)}
       onBlur={(e) => {
         const next = e.currentTarget.value.trim();
         if (next === value.trim()) return;
@@ -21637,7 +21679,7 @@ function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
           { method: "post" },
         );
       }}
-      style={s.jjFieldInput}
+      style={{ ...s.jjFieldInput, ...fillStyle, ...swatchStyle }}
     />
   );
 }
@@ -21681,7 +21723,7 @@ function JJOrderRow({
           {order.productImageUrl ? <img src={order.productImageUrl} alt="" style={s.thumb} /> : <div style={s.noImg}>—</div>}
         </div>
       </td>
-      <td style={{ ...s.td, ...frozenTd(2) }}><JJFieldCell orderId={order.id} field="colourCode" value={(order as { colourCode?: string | null }).colourCode ?? ""} /></td>
+      <td style={{ ...s.td, padding: 0, ...frozenTd(2) }}><JJFieldCell orderId={order.id} field="colourCode" value={(order as { colourCode?: string | null }).colourCode ?? ""} /></td>
       <td style={{ ...s.td, ...frozenTd(3) }}><span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span></td>
       <td style={s.td}><JJFieldCell orderId={order.id} field="styleCode" value={(order as { styleCode?: string | null }).styleCode ?? ""} placeholder="Code" /></td>
       {sizes.map((sz) => {
@@ -21881,6 +21923,16 @@ function JJRestockPanel({
         >
           {backfillFetcher.state !== "idle" ? "Refreshing…" : "Refresh from Shopify"}
         </button>
+        <a
+          href={`/portal/jj-restock/export${term ? `?q=${encodeURIComponent(term)}` : ""}`}
+          style={{
+            padding: "7px 14px", background: "#7c3aed", color: "#fff",
+            borderRadius: 6, fontSize: 13, fontWeight: 600, textDecoration: "none",
+          }}
+          title="Download the orders as an Excel file, with product images"
+        >
+          Download Excel
+        </a>
         {loadFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{loadFetcher.data.jjError}</span>}
         {backfillFetcher.data?.jjError && <span style={{ color: "#b91c1c", fontSize: 13 }}>{backfillFetcher.data.jjError}</span>}
         {backfillFetcher.data?.jjBackfill && (
