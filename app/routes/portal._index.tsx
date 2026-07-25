@@ -21624,17 +21624,17 @@ function QtyCell({ orderId, size, value, restockSettings }: { orderId: number; s
 // here as they come up.
 const JJ_COLOUR_CODE_HEX: Record<string, string> = {
   "2": "#000000",
-  "26": "#111121",
-  "50": "#0F282E",
-  "11": "#1A1020",
-  "14": "#1E2417",
-  "100": "#2B1414",
-  "112": "#15262F",
-  "18": "#1F1511",
-  "10": "#292928",
+  "26": "#1E2D95",
+  "50": "#157F8E",
+  "11": "#6A1FA7",
+  "14": "#326105",
+  "100": "#A31423",
+  "112": "#11669C",
+  "18": "#8B2F18",
+  "10": "#787878",
   "17": "#FFFFFF",
-  "84": "#853D23",
-  "115": "#572D23",
+  "84": "#FC712B",
+  "115": "#C36349",
 };
 // Perceived-luminance pick so a light swatch (e.g. 17 = white) uses black text.
 function readableTextOn(hex: string): string {
