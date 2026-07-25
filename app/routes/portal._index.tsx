@@ -5032,9 +5032,10 @@ const ALL_NAV_ITEMS = [
   { id: "samples", label: "Samples", href: "/portal?page=samples" },
   { id: "visionboard", label: "Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
   { id: "collections", label: "Collections", href: "/portal?page=collections" },
+  { id: "dropbox", label: "Dropbox", href: "/portal?page=dropbox" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "fabric", "packing", "productinfo", "samples", "visionboard", "collections"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -8359,6 +8360,7 @@ export default function PortalDashboard() {
     : page === "samples" ? "Samples"
     : page === "visionboard" ? "Vision Board"
     : page === "collections" ? "Collections"
+    : page === "dropbox" ? "Dropbox"
     : page === "photoshoot" ? "Photo Shoots"
     : page === "newproduct" ? "New Product Orders"
     : page === "jj-restock" ? (selectedProductGroup || "JJ Order")
@@ -8781,6 +8783,8 @@ export default function PortalDashboard() {
               <PhotoShootPanel photoShoots={photoShoots} productInfo={productInfo} savedColumnWidths={photoShootColumnWidths} />
             </div>
           </div>
+        ) : page === "dropbox" ? (
+          <DropboxPanel />
         ) : page === "jj-restock" ? (
           <JJRestockPanel
             orders={orders}
@@ -11634,6 +11638,215 @@ function normalizeCollectionRows(value: unknown): Record<string, string>[] {
     for (const [k, v] of Object.entries(row ?? {})) out[k] = v == null ? "" : String(v);
     return out;
   });
+}
+
+// ─── Dropbox browser ─────────────────────────────────────────────────────────
+type DropboxEntryUI =
+  | { type: "folder"; name: string; path: string }
+  | { type: "file"; name: string; path: string; id?: string; kind?: string; rev?: string };
+
+// One media tile: image (Dropbox thumbnail) or video (first frame from a
+// temporary link, with a ▶ overlay), filename, and a Rename action.
+function DropboxFileTile({
+  entry, onOpen, onRenamed,
+}: {
+  entry: Extract<DropboxEntryUI, { type: "file" }>;
+  onOpen: (entry: DropboxEntryUI, url?: string) => void;
+  onRenamed: () => void;
+}) {
+  const isVideo = entry.kind === "video";
+  const isImage = entry.kind === "image";
+  // Videos have no Dropbox thumbnail API, so we fetch a temp link and show the
+  // first frame via a muted <video>. Loaded lazily when the tile mounts.
+  const linkFetcher = useFetcher<{ link?: string }>();
+  useEffect(() => {
+    if (isVideo) linkFetcher.load(`/api/dropbox?op=link&path=${encodeURIComponent(entry.path)}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entry.path]);
+  const videoUrl = isVideo ? linkFetcher.data?.link : undefined;
+  const renameFetcher = useFetcher<{ ok?: boolean; error?: string }>();
+  useEffect(() => {
+    if (renameFetcher.state === "idle" && renameFetcher.data?.ok) onRenamed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renameFetcher.state, renameFetcher.data]);
+  const doRename = () => {
+    const next = window.prompt("Rename file:", entry.name)?.trim();
+    if (!next || next === entry.name) return;
+    renameFetcher.submit({ path: entry.path, newName: next }, { method: "post", action: "/api/dropbox" });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", border: "1px solid #e2e8f0", borderRadius: 10, background: "#fff", overflow: "hidden" }}>
+      <button
+        type="button"
+        onClick={() => onOpen(entry, videoUrl)}
+        style={{ position: "relative", border: "none", padding: 0, background: "#f1f5f9", cursor: "pointer", width: "100%", aspectRatio: "3 / 4", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}
+        title={entry.name}
+      >
+        {isImage ? (
+          <img
+            src={`/api/dropbox-thumb?path=${encodeURIComponent(entry.path)}&rev=${encodeURIComponent(entry.rev ?? "")}&size=w640h480`}
+            alt=""
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            loading="lazy"
+            decoding="async"
+          />
+        ) : isVideo && videoUrl ? (
+          <video src={`${videoUrl}#t=0.1`} preload="metadata" muted playsInline style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        ) : (
+          <span style={{ fontSize: 40 }}>{isVideo ? "🎬" : "📄"}</span>
+        )}
+        {isVideo && (
+          <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+            <span style={{ width: 52, height: 52, borderRadius: "50%", background: "rgba(0,0,0,0.45)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, paddingLeft: 4 }}>▶</span>
+          </span>
+        )}
+      </button>
+      <div style={{ padding: "8px 10px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+        <span style={{ fontSize: 12, color: "#374151", wordBreak: "break-word", lineHeight: 1.3 }}>{entry.name}</span>
+        <div>
+          <button type="button" onClick={doRename} style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "3px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Rename</button>
+        </div>
+        {renameFetcher.data?.error && <span style={{ color: "#b91c1c", fontSize: 11 }}>{renameFetcher.data.error}</span>}
+      </div>
+    </div>
+  );
+}
+
+function DropboxPanel() {
+  const [path, setPath] = useState("");
+  const [query, setQuery] = useState("");
+  const browseFetcher = useFetcher<{ configured?: boolean; path?: string; entries?: DropboxEntryUI[]; error?: string }>();
+  const searchFetcher = useFetcher<{ entries?: DropboxEntryUI[]; error?: string }>();
+  const linkFetcher = useFetcher<{ link?: string }>();
+  const [preview, setPreview] = useState<{ name: string; url: string } | null>(null);
+
+  const searching = query.trim().length >= 2;
+  // Browse the current folder.
+  useEffect(() => {
+    if (searching) return;
+    browseFetcher.load(`/api/dropbox?op=browse&path=${encodeURIComponent(path)}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, searching]);
+  // Search across all allowed folders (debounced).
+  useEffect(() => {
+    if (!searching) return;
+    const t = window.setTimeout(() => searchFetcher.load(`/api/dropbox?op=search&q=${encodeURIComponent(query.trim())}`), 300);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, searching]);
+  // Open a full preview once the temporary link resolves (only used when the
+  // tile didn't already have a link, e.g. images).
+  useEffect(() => {
+    if (linkFetcher.state === "idle" && linkFetcher.data?.link) {
+      setPreview((p) => p && !p.url ? { ...p, url: linkFetcher.data!.link! } : p);
+    }
+  }, [linkFetcher.state, linkFetcher.data]);
+
+  const entries: DropboxEntryUI[] = (searching ? searchFetcher.data?.entries : browseFetcher.data?.entries) ?? [];
+  const loading = (searching ? searchFetcher.state : browseFetcher.state) !== "idle";
+  const configured = browseFetcher.data?.configured ?? true;
+  const error = (searching ? searchFetcher.data?.error : browseFetcher.data?.error);
+
+  // Breadcrumb segments from the current path.
+  const crumbs = path ? path.replace(/^\//, "").split("/") : [];
+  const openFile = (entry: DropboxEntryUI, url?: string) => {
+    if (url) { setPreview({ name: entry.name, url }); return; }
+    setPreview({ name: entry.name, url: "" });
+    linkFetcher.load(`/api/dropbox?op=link&path=${encodeURIComponent(entry.path)}`);
+  };
+  const onRenamed = () => {
+    // Refresh the current view after a rename.
+    if (searching) searchFetcher.load(`/api/dropbox?op=search&q=${encodeURIComponent(query.trim())}`);
+    else browseFetcher.load(`/api/dropbox?op=browse&path=${encodeURIComponent(path)}`);
+  };
+
+  return (
+    <div style={s.productInfoPage}>
+      <div style={{ ...s.productInfoToolbar, alignItems: "center" }}>
+        <div style={s.productInfoToolbarLeft}>
+          <div>
+            <h2 style={s.productInfoHeading}>Dropbox</h2>
+            <div style={s.productInfoMeta}>
+              {searching ? `${entries.length} result${entries.length === 1 ? "" : "s"} for “${query.trim()}”`
+                : (browseFetcher.data?.entries?.length ?? 0) + " item(s)"}
+            </div>
+          </div>
+        </div>
+        <div style={s.productInfoActions}>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search all Dropbox folders…"
+            style={{ ...s.searchInput, minWidth: 260 }}
+          />
+        </div>
+      </div>
+
+      {/* Breadcrumb (browse mode only) */}
+      {!searching && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontSize: 13, color: "#475569", margin: "0 4px 10px" }}>
+          <button type="button" onClick={() => setPath("")} style={{ background: "none", border: "none", color: path ? "#0d9488" : "#111827", fontWeight: 700, cursor: "pointer", padding: 0 }}>Dropbox</button>
+          {crumbs.map((seg, i) => {
+            const upto = "/" + crumbs.slice(0, i + 1).join("/");
+            const isLast = i === crumbs.length - 1;
+            return (
+              <span key={upto} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ color: "#94a3b8" }}>/</span>
+                <button type="button" disabled={isLast} onClick={() => setPath(upto)} style={{ background: "none", border: "none", color: isLast ? "#111827" : "#0d9488", fontWeight: isLast ? 700 : 500, cursor: isLast ? "default" : "pointer", padding: 0 }}>{seg}</button>
+              </span>
+            );
+          })}
+        </div>
+      )}
+
+      {!configured ? (
+        <div style={{ padding: 40, textAlign: "center", color: "#b45309", fontSize: 14 }}>Dropbox isn’t connected. Add the DROPBOX_* environment variables.</div>
+      ) : error ? (
+        <div style={{ padding: 40, textAlign: "center", color: "#b91c1c", fontSize: 14 }}>{error}</div>
+      ) : loading && entries.length === 0 ? (
+        <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
+      ) : entries.length === 0 ? (
+        <div style={{ padding: 40, textAlign: "center", color: "#9ca3af", fontSize: 14 }}>{searching ? "No matching files." : "This folder is empty."}</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 14, padding: "4px 0 14px" }}>
+          {entries.map((entry) => entry.type === "folder" ? (
+            <button
+              key={entry.path}
+              type="button"
+              onClick={() => { setQuery(""); setPath(entry.path); }}
+              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, padding: 16, border: "1px solid #e2e8f0", borderRadius: 10, background: "#fff", cursor: "pointer", minHeight: 160, justifyContent: "center" }}
+              title={entry.name}
+            >
+              <span style={{ fontSize: 48 }}>📁</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "#111827", textAlign: "center", wordBreak: "break-word" }}>{entry.name}</span>
+            </button>
+          ) : (
+            <DropboxFileTile key={entry.path} entry={entry} onOpen={openFile} onRenamed={onRenamed} />
+          ))}
+        </div>
+      )}
+
+      {preview && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }} onClick={() => setPreview(null)}>
+          <div style={{ maxWidth: "90vw", maxHeight: "90vh", display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }} onClick={(e) => e.stopPropagation()}>
+            {preview.url
+              ? (/\.(mp4|mov|m4v|webm)$/i.test(preview.name)
+                  ? <video src={preview.url} controls style={{ maxWidth: "90vw", maxHeight: "80vh", borderRadius: 8, background: "#000" }} />
+                  : <img src={preview.url} alt={preview.name} style={{ maxWidth: "90vw", maxHeight: "80vh", borderRadius: 8, objectFit: "contain" }} />)
+              : <div style={{ color: "#fff", fontSize: 14 }}>Loading preview…</div>}
+            <div style={{ color: "#fff", fontSize: 13, display: "flex", gap: 12, alignItems: "center" }}>
+              <span>{preview.name}</span>
+              {preview.url && <a href={preview.url} target="_blank" rel="noopener noreferrer" style={{ color: "#7dd3fc" }}>Open</a>}
+              <button type="button" onClick={() => setPreview(null)} style={{ background: "rgba(255,255,255,0.15)", color: "#fff", border: "none", borderRadius: 6, padding: "4px 12px", cursor: "pointer" }}>Close</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
 }
 
 type PhotoShootListItem = { id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date | string; updatedAt: Date | string };
