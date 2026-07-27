@@ -22527,6 +22527,10 @@ function TitleFabricPicker({
                 placeholder="Search by fabric or sheet…"
                 style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 10px", fontSize: 13, boxSizing: "border-box" }}
               />
+              {/* TEMP debug — tells us if the query is reaching the filter. */}
+              <div style={{ fontSize: 11, color: "#b45309", marginTop: 6 }}>
+                debug: query=&quot;{query}&quot; · showing {filtered.length} of {fabrics.length}
+              </div>
             </div>
             <div style={{ overflowY: "auto", flex: 1 }}>
               {filtered.length === 0 ? (
