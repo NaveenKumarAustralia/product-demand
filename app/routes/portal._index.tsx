@@ -383,9 +383,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ...order,
       productType: normalizeProductGroup(order.productType) || null,
     }))
-    // On a vendor-scoped restock page, only keep that vendor's orders. The
-    // packing page (restockVendor === null) keeps every order.
-    .filter((order) => !restockVendor || (order.supplier ?? "").trim() === restockVendor);
+    // Split orders across the two restock pages. Supplier is a free-text field
+    // typed in the Shopify order block, so an exact "Karma East" match used to
+    // hide any order whose supplier was cased/spelled differently (it showed on
+    // neither page). Instead: the JJ page shows supplier "JJ" (case-insensitive)
+    // and the Existing Products Restock page shows everything else — so every
+    // open order always appears on exactly one page. Packing (null) keeps all.
+    .filter((order) => {
+      if (!restockVendor) return true;
+      const isJJ = (order.supplier ?? "").trim().toLowerCase() === "jj";
+      return page === "jj-restock" ? isJJ : !isJJ;
+    });
   // Open packing lists (id + invoiceNumber + title) for the In Shipment
   // picker. A packing list counts as "open" when:
   //   - the master Load Inventory button hasn't been pressed, AND
