@@ -4072,6 +4072,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "update_fabric_cell") {
+    return withFabricSheetsLock(async () => {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
     const colIndex = Number(form.get("colIndex"));
@@ -4095,9 +4096,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       await syncFabricRowNote(rowKey, value, currentUser?.name ?? null, productTitle);
     }
     return null;
+    });
   }
 
   if (intent === "set_fabric_type") {
+    return withFabricSheetsLock(async () => {
     // Assign a fabric type to a row whose source sheet has no Fabric Type
     // column yet — creates the column (padding every row) then writes the
     // value. Lets the combined view show a chip selector on rows that
@@ -4120,9 +4123,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     sheet.rows[rowIndex][idx] = value;
     await saveManualFabricSheets(sheets);
     return null;
+    });
   }
 
   if (intent === "set_fabric_notes") {
+    return withFabricSheetsLock(async () => {
     // Same find-or-create as set_fabric_type, for the Notes column — lets a
     // row whose sheet has no Notes column still take a note.
     const gid = String(form.get("gid") ?? "");
@@ -4146,9 +4151,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await saveManualFabricSheets(sheets);
     if (notesRowKey) await syncFabricRowNote(notesRowKey, value, currentUser?.name ?? null, notesTitle);
     return null;
+    });
   }
 
   if (intent === "upload_fabric_image") {
+    return withFabricSheetsLock(async () => {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
     const colIndex = Number(form.get("colIndex"));
@@ -4176,9 +4183,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     sheet.rows[rowIndex][colIndex] = dataUrl;
     await saveManualFabricSheets(sheets);
     return null;
+    });
   }
 
   if (intent === "delete_fabric_row" || intent === "move_fabric_row" || intent === "duplicate_fabric_row") {
+    return withFabricSheetsLock(async () => {
     const gid = String(form.get("gid") ?? "");
     const rowIndex = Number(form.get("rowIndex"));
     const targetGid = String(form.get("targetGid") ?? "");
@@ -4240,9 +4249,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }).catch(() => null);
     }
     return null;
+    });
   }
 
   if (intent === "add_fabric_row") {
+    return withFabricSheetsLock(async () => {
     const gid = String(form.get("gid") ?? "");
     const sheets = await loadManualFabricSheetsForAction();
     const sheet = sheets.find((item) => item.gid === gid);
@@ -4250,6 +4261,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     sheet.rows.push(Array.from({ length: sheet.headers.length }, () => ""));
     await saveManualFabricSheets(sheets);
     return null;
+    });
   }
 
   if (intent === "update_status")        updates.supplierStatus = form.get("value");
@@ -6393,6 +6405,21 @@ async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
     create: { key: FABRIC_MANUAL_SHEETS_KEY, value },
     update: { value },
   });
+}
+
+// Every fabric mutation is a read-modify-write of the ENTIRE sheets blob
+// (load all sheets → change one cell/row → save all sheets). If two of those
+// overlap, the second one's load can happen before the first one's save
+// commits, so the first edit is silently lost — this is what made cell values
+// "reappear" or "disappear" when editing quickly. Serialize every fabric write
+// through this promise chain so each one sees the previous one's saved result.
+let fabricWriteQueue: Promise<unknown> = Promise.resolve();
+function withFabricSheetsLock<T>(fn: () => Promise<T>): Promise<T> {
+  const result = fabricWriteQueue.then(() => fn());
+  // Keep the chain alive whether fn resolves or rejects, so one failed write
+  // never wedges every subsequent write.
+  fabricWriteQueue = result.then(() => undefined, () => undefined);
+  return result;
 }
 
 // Build an index of fabric stock entries: one entry per row in any stock sheet.
@@ -16900,7 +16927,7 @@ function FabricCell({
   fabricImageUrl,
   fabricName,
   header,
-  fetcher,
+  fetcher: _sharedFetcher,
   fabricSettings,
   productInfo,
   users,
@@ -16918,6 +16945,12 @@ function FabricCell({
   productInfo: ProductInfo;
   users: PortalUser[];
 }) {
+  // Each cell gets its OWN fetcher. A single shared fetcher (the old prop)
+  // meant editing one cell aborted the still-in-flight save of the previous
+  // cell — so quick successive edits silently reverted. A per-cell fetcher
+  // lets every edit complete independently; the server serializes the writes.
+  void _sharedFetcher;
+  const fetcher = useFetcher();
   const revalidator = useRevalidator();
   const [draft, setDraft] = useState(value);
   const [imageHover, setImageHover] = useState(false);
