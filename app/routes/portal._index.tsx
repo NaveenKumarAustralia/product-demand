@@ -12843,24 +12843,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
       )}
 
-      {(() => {
-        const hiddenCount = collections.filter((c) => c.hidden).length;
-        if (hiddenCount === 0) return null;
-        return (
-          <div style={{ padding: "0 14px 8px", display: "flex", justifyContent: "flex-end" }}>
-            <button
-              type="button"
-              onClick={() => setShowHidden((v) => !v)}
-              style={{ background: "transparent", border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 10px", fontSize: 12, color: "#6b7280", cursor: "pointer" }}
-            >
-              {showHidden ? `Hide hidden (${hiddenCount})` : `Show hidden (${hiddenCount})`}
-            </button>
-          </div>
-        );
-      })()}
-
       <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
-        {collections.filter((c) => showHidden || !c.hidden).map((c) => (
+        {/* When "Show hidden" is on, show ONLY the hidden collections;
+            otherwise only the visible ones. */}
+        {collections.filter((c) => showHidden ? c.hidden : !c.hidden).map((c) => (
           <CollectionCard
             key={c.id}
             collection={c}
@@ -12880,12 +12866,29 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             onDragEnd={() => { setDragId(null); setDragOverId(null); }}
           />
         ))}
-        {collections.filter((c) => showHidden || !c.hidden).length === 0 && (
+        {collections.filter((c) => showHidden ? c.hidden : !c.hidden).length === 0 && (
           <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-            No collections yet. Click Add Collection to create your first one.
+            {showHidden ? "No hidden collections." : "No collections yet. Click Add Collection to create your first one."}
           </div>
         )}
       </div>
+
+      {/* Show hidden / back-to-active toggle, at the BOTTOM of the page. */}
+      {(() => {
+        const hiddenCount = collections.filter((c) => c.hidden).length;
+        if (hiddenCount === 0 && !showHidden) return null;
+        return (
+          <div style={{ padding: "16px 14px 24px", display: "flex", justifyContent: "center" }}>
+            <button
+              type="button"
+              onClick={() => setShowHidden((v) => !v)}
+              style={{ background: "transparent", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 14px", fontSize: 13, color: "#6b7280", cursor: "pointer" }}
+            >
+              {showHidden ? "← Back to active collections" : `Show hidden collections (${hiddenCount})`}
+            </button>
+          </div>
+        );
+      })()}
 
       {addOpen && typeof document !== "undefined" && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center" }}>
