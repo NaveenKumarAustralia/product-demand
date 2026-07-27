@@ -322,12 +322,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           "createdAt", "updatedAt"
         FROM "Collection"
         ORDER BY "sortOrder" ASC, "createdAt" ASC
-      `).then((rows) => rows.map((r) => ({
-        id: r.id, name: r.name, sortOrder: r.sortOrder,
-        hasThumbnail: Boolean(r.hasThumbnail),
-        rowCount: Number(r.rowCount),
-        createdAt: r.createdAt, updatedAt: r.updatedAt,
-      }))).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date }>)
+      `).then((rows) => {
+        const hiddenIds = new Set(
+          (Array.isArray(settingsMap.get(COLLECTION_HIDDEN_KEY)) ? settingsMap.get(COLLECTION_HIDDEN_KEY) as unknown[] : [])
+            .map((v) => Number(v)).filter((n) => Number.isFinite(n)),
+        );
+        return rows.map((r) => ({
+          id: r.id, name: r.name, sortOrder: r.sortOrder,
+          hasThumbnail: Boolean(r.hasThumbnail),
+          rowCount: Number(r.rowCount),
+          createdAt: r.createdAt, updatedAt: r.updatedAt,
+          hidden: hiddenIds.has(r.id),
+        }));
+      }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean }>)
     : [];
   // Photo shoots: slim tab list (id/name/sortOrder/rowCount). The active
   // shoot's full rows are fetched on demand via ps_get_shoot. Loaded for
@@ -3062,6 +3069,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await prisma.collection.delete({ where: { id } });
     return null;
   }
+  if (intent === "set_collection_hidden") {
+    // Hide (or unhide) a collection without deleting it. Stores the set of
+    // hidden collection ids in a portal setting — the collection row and all
+    // its data stay intact.
+    const id = Number(form.get("collectionId"));
+    const hide = String(form.get("hidden") ?? "true") !== "false";
+    if (!id) return null;
+    const existing = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_HIDDEN_KEY }, select: { value: true } });
+    const current = new Set(
+      (Array.isArray(existing?.value) ? existing!.value as unknown[] : [])
+        .map((v) => Number(v)).filter((n) => Number.isFinite(n)),
+    );
+    if (hide) current.add(id); else current.delete(id);
+    const value = Array.from(current);
+    await prisma.portalSetting.upsert({
+      where: { key: COLLECTION_HIDDEN_KEY },
+      create: { key: COLLECTION_HIDDEN_KEY, value },
+      update: { value },
+    });
+    return null;
+  }
   if (intent === "reorder_collections") {
     const ids = JSON.parse(String(form.get("collectionIds") ?? "[]")) as number[];
     await Promise.all(ids.map((id, index) => prisma.collection.update({ where: { id }, data: { sortOrder: index } })));
@@ -4764,6 +4792,9 @@ const TABLE_CUSTOM_CELLS_KEY = "production-portal-table-custom-cells-v1";
 const TABLE_ROW_HEIGHTS_KEY = "production-portal-table-row-heights-v1";
 const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
 const COLLECTION_SETTINGS_KEY = "collections-settings-v1";
+// Hidden collections: a JSON array of collection ids the user has hidden.
+// We hide (never delete) so no collection is ever destroyed.
+const COLLECTION_HIDDEN_KEY = "collections-hidden-v1";
 // Chip catalogs for the Collections Status + Sample columns. Reuses
 // the same shape as RestockOption so the dropdown UI can be reused.
 type CollectionChipOption = { value: string; label: string; bg: string; color: string };
@@ -11819,6 +11850,7 @@ type CollectionListItem = {
   rowCount: number;
   createdAt: Date | string;
   updatedAt: Date | string;
+  hidden?: boolean;
 };
 
 // Cell types — drives the input rendered in CollectionCell:
@@ -12618,6 +12650,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const deletedRef = useRef<Set<number>>(new Set());
   const [addOpen, setAddOpen] = useState(false);
   const [addName, setAddName] = useState("");
+  const [showHidden, setShowHidden] = useState(false);
 
   useEffect(() => {
     setCollections(initialCollections.filter((c) => !deletedRef.current.has(c.id)));
@@ -12642,11 +12675,16 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     setAddName("");
   };
 
-  const handleDelete = (id: number) => {
-    deletedRef.current.add(id);
-    setCollections((prev) => prev.filter((c) => c.id !== id));
+  // Hide (never delete) a collection. The row + all its data stay in the DB;
+  // it just drops out of the grid until "Show hidden" is toggled on.
+  const handleHide = (id: number) => {
+    setCollections((prev) => prev.map((c) => c.id === id ? { ...c, hidden: true } : c));
     if (selectedId === id) closeCollection();
-    fetcher.submit({ intent: "delete_collection", collectionId: String(id) }, { method: "post" });
+    fetcher.submit({ intent: "set_collection_hidden", collectionId: String(id), hidden: "true" }, { method: "post" });
+  };
+  const handleUnhide = (id: number) => {
+    setCollections((prev) => prev.map((c) => c.id === id ? { ...c, hidden: false } : c));
+    fetcher.submit({ intent: "set_collection_hidden", collectionId: String(id), hidden: "false" }, { method: "post" });
   };
 
   const handleRename = (id: number, name: string) => {
@@ -12804,8 +12842,24 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
       )}
 
+      {(() => {
+        const hiddenCount = collections.filter((c) => c.hidden).length;
+        if (hiddenCount === 0) return null;
+        return (
+          <div style={{ padding: "0 14px 8px", display: "flex", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => setShowHidden((v) => !v)}
+              style={{ background: "transparent", border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 10px", fontSize: 12, color: "#6b7280", cursor: "pointer" }}
+            >
+              {showHidden ? `Hide hidden (${hiddenCount})` : `Show hidden (${hiddenCount})`}
+            </button>
+          </div>
+        );
+      })()}
+
       <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
-        {collections.map((c) => (
+        {collections.filter((c) => showHidden || !c.hidden).map((c) => (
           <CollectionCard
             key={c.id}
             collection={c}
@@ -12813,7 +12867,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             isDragOver={dragOverId === c.id && dragId !== c.id}
             onOpen={() => openCollection(c.id)}
             onRename={(name) => handleRename(c.id, name)}
-            onDelete={() => handleDelete(c.id)}
+            onDelete={() => handleHide(c.id)}
+            onUnhide={c.hidden ? () => handleUnhide(c.id) : undefined}
+            hidden={Boolean(c.hidden)}
+            actionVerb="Hide"
             onSetCover={(file) => handleSetCover(c.id, file)}
             onDragStart={(e) => { setDragId(c.id); e.dataTransfer.effectAllowed = "move"; }}
             onDragOver={(e) => { if (!dragId) return; e.preventDefault(); setDragOverId(c.id); }}
@@ -12822,7 +12879,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             onDragEnd={() => { setDragId(null); setDragOverId(null); }}
           />
         ))}
-        {collections.length === 0 && (
+        {collections.filter((c) => showHidden || !c.hidden).length === 0 && (
           <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
             No collections yet. Click Add Collection to create your first one.
           </div>
@@ -12860,6 +12917,9 @@ function CollectionCard({
   onOpen,
   onRename,
   onDelete,
+  onUnhide,
+  hidden = false,
+  actionVerb = "Delete",
   onSetCover,
   onDragStart,
   onDragOver,
@@ -12875,7 +12935,13 @@ function CollectionCard({
   isDragOver: boolean;
   onOpen: () => void;
   onRename: (name: string) => void;
+  // The primary destructive/archive action. For Collections this hides
+  // (actionVerb="Hide"); for Photo Shoots it still deletes.
   onDelete: () => void;
+  // When set, the card is hidden and shows an Unhide button instead.
+  onUnhide?: () => void;
+  hidden?: boolean;
+  actionVerb?: string;
   onSetCover: (file: File) => void;
   onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
@@ -12897,7 +12963,7 @@ function CollectionCard({
 
   return (
     <div
-      style={{ ...s.productStyleCard, ...(isDragging ? s.productStyleCardDragging : {}), ...(isDragOver ? s.productStyleCardDropTarget : {}), cursor: "pointer" }}
+      style={{ ...s.productStyleCard, ...(isDragging ? s.productStyleCardDragging : {}), ...(isDragOver ? s.productStyleCardDropTarget : {}), ...(hidden ? { opacity: 0.45 } : {}), cursor: "pointer" }}
       onClick={() => { if (!editing) onOpen(); }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -12913,19 +12979,29 @@ function CollectionCard({
         onDragEnd={onDragEnd}
         onClick={(e) => e.stopPropagation()}
       >::</span>
-      {(hover || confirmDelete) && (
+      {/* When hidden (Collections only), show an Unhide button instead of the
+          hide/delete control. */}
+      {hidden && onUnhide && (hover || true) && (
         <button
           type="button"
-          title={`Delete ${noun}`}
+          title={`Unhide ${noun}`}
+          onClick={(e) => { e.stopPropagation(); onUnhide(); }}
+          style={{ position: "absolute", top: 8, right: 8, padding: "4px 10px", borderRadius: 7, border: "none", background: "#0d9488", color: "#fff", cursor: "pointer", fontSize: 11, fontWeight: 700, lineHeight: 1, zIndex: 3, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" }}
+        >Unhide</button>
+      )}
+      {!hidden && (hover || confirmDelete) && (
+        <button
+          type="button"
+          title={`${actionVerb} ${noun}`}
           onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
-          style={{ position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: "50%", border: "none", background: "#ef4444", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, lineHeight: 1, padding: 0, zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" }}
+          style={{ position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: "50%", border: "none", background: actionVerb === "Delete" ? "#ef4444" : "#6b7280", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, lineHeight: 1, padding: 0, zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" }}
         >×</button>
       )}
       {confirmDelete && (
         <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 8 }} onClick={(e) => e.stopPropagation()}>
-          <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>Delete this {noun}?</div>
+          <div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>{actionVerb} this {noun}?</div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Delete</button>
+            <button type="button" onClick={(e) => { e.stopPropagation(); onDelete(); setConfirmDelete(false); }} style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: actionVerb === "Delete" ? "#ef4444" : "#0d9488", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{actionVerb}</button>
             <button type="button" onClick={(e) => { e.stopPropagation(); setConfirmDelete(false); }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}>Cancel</button>
           </div>
         </div>
