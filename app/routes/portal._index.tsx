@@ -5676,7 +5676,7 @@ type StyleCostLookup = {
   // Flat list of every fabric stock entry — surfaced by the fabric
   // picker on the cost cells so staff can resolve "ambiguous fabric"
   // by picking which one to use.
-  allFabrics: () => Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  allFabrics: () => Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
   // Returns the manual rupees override for a title, or 0 when none.
   // Cells use this to render the value in bold and skip the right-
   // click breakdown popover (there's no fabric breakdown to show).
@@ -5701,7 +5701,7 @@ function buildStyleCostLookup(
   // Group every fabric stock entry by lowercase name so we can
   // disambiguate same-named fabrics (e.g. multiple "Black"s) using
   // each entry's per-style meters override from the Products popup.
-  type FabricCandidate = { costPerMeter: number; styleMeters?: Record<string, number>; sheetName: string; name: string };
+  type FabricCandidate = { costPerMeter: number; styleMeters?: Record<string, number>; sheetName: string; fabricType?: string; name: string };
   const candidatesByName = new Map<string, FabricCandidate[]>();
   // Flat list of every fabric stock entry — used by the fabric
   // picker on the cost cells AND by titleFabricOverrides lookup.
@@ -5713,7 +5713,7 @@ function buildStyleCostLookup(
     const nameLower = entry.name.trim().toLowerCase();
     if (!nameLower) continue;
     const costed = isFilled(entry.costPerMeter);
-    const cand: FabricCandidate = { costPerMeter: costed ? entry.costPerMeter! : 0, styleMeters: entry.styleMeters, sheetName: entry.sheetName, name: nameLower };
+    const cand: FabricCandidate = { costPerMeter: costed ? entry.costPerMeter! : 0, styleMeters: entry.styleMeters, sheetName: entry.sheetName, fabricType: entry.fabricType, name: nameLower };
     // Only COSTED fabrics take part in automatic title matching — a fabric
     // with no Cost per Meter can't produce a cost, so it must never silently
     // win the auto-match. But it DOES go into allFabrics / fabricByKey so it's
@@ -5930,7 +5930,7 @@ function buildStyleCostLookup(
       const r = resolveOverride(title, styleId);
       return r ? breakdownFromResolved(r) : null;
     },
-    allFabrics: () => allFabrics.map((f) => ({ key: f.key, sheetName: f.sheetName, fabricName: f.name, costPerMeter: f.costPerMeter })),
+    allFabrics: () => allFabrics.map((f) => ({ key: f.key, sheetName: f.sheetName, fabricName: f.name, costPerMeter: f.costPerMeter, fabricType: f.fabricType })),
     manualPriceForTitle: manualPriceFor,
     blockerForTitle: (title) => {
       const haystack = (title ?? "").trim().toLowerCase();
@@ -6458,6 +6458,11 @@ type FabricStockEntry = {
   name: string;
   meters: number;
   sheetName: string;
+  // The fabric TYPE (e.g. "60x60 Printed") from the row's Fabric Type column —
+  // what the user actually recognises the fabric by. Shown in the picker
+  // instead of the raw storage tab name (which can read "On Order" even for
+  // in-stock fabrics).
+  fabricType?: string;
   kind: "stock" | "order";
   costPerMeter?: number;
   // Per-style meters overrides from the fabric row's Products popup.
@@ -6505,6 +6510,7 @@ function buildFabricStockIndex(sheets: Array<{ gid: string; kind: string; name: 
     const productsIdx = isStock
       ? sheet.headers.findIndex((h) => /^products?$/i.test(h))
       : -1;
+    const fabricTypeIdx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h) || /^type$/i.test(h));
     // Only a Name column is required. A missing stock-quantity column no longer
     // drops the whole sheet — the quantity just defaults to 0 (cost matching
     // depends on cost + style meters, not on the on-hand quantity).
@@ -6543,7 +6549,8 @@ function buildFabricStockIndex(sheets: Array<{ gid: string; kind: string; name: 
           /* Plain-text legacy values aren't usable for meters; ignore */
         }
       }
-      out.push({ name, meters: m, sheetName: sheet.name, kind: isStock ? "stock" : "order", costPerMeter, styleMeters });
+      const fabricType = fabricTypeIdx >= 0 ? (row[fabricTypeIdx] ?? "").toString().trim() : "";
+      out.push({ name, meters: m, sheetName: sheet.name, fabricType: fabricType || undefined, kind: isStock ? "stock" : "order", costPerMeter, styleMeters });
     }
   }
   return out;
@@ -10360,7 +10367,7 @@ function CostBreakdownMenu({
   onClose: () => void;
   // When provided (Collections page), the breakdown gets a "Pick a different
   // fabric" footer so a wrong auto-matched fabric can be corrected in place.
-  fabrics?: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  fabrics?: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
   onPickFabric?: (fabricKey: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -13144,7 +13151,7 @@ function CollectionSpreadsheetPage({
   const [costBreakdownMenu, setCostBreakdownMenu] = useState<
     {
       x: number; y: number; breakdown: CostBreakdown; productTitle: string; totalQty: number;
-      fabrics?: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+      fabrics?: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
       onPickFabric?: (fabricKey: string) => void;
     } | null
   >(null);
@@ -13152,7 +13159,7 @@ function CollectionSpreadsheetPage({
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as {
         x: number; y: number; breakdown: CostBreakdown; productTitle: string; totalQty: number;
-        fabrics?: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+        fabrics?: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
         onPickFabric?: (fabricKey: string) => void;
       };
       setCostBreakdownMenu(detail);
@@ -14568,7 +14575,7 @@ function CollectionPriceRupeesCell({
   rowName: string;
   styleOverrideId: string;
   productInfo: ProductInfo;
-  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
   costWarning: string | null;
   costBlocker?: CostBlocker;
   costBreakdown: CostBreakdown | null;
@@ -18920,7 +18927,7 @@ function PackingListsPanel({
   styleCostLookup: StyleCostLookup;
   inrPerAudCachedRate: number | null;
   productInfo: ProductInfo;
-  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
 }) {
   const fetcher = useFetcher();
 
@@ -19151,7 +19158,7 @@ function PackingListDetail({
   styleCostLookup: StyleCostLookup;
   inrPerAudCachedRate: number | null;
   productInfo: ProductInfo;
-  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
 }) {
   const fetcher = useFetcher();
   const loadInventoryFetcher = useFetcher();
@@ -19819,7 +19826,7 @@ function PackingListLineRow({
   costBlocker?: CostBlocker;
   inrPerAudRate: number | null;
   productInfo: ProductInfo;
-  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
 }) {
   const fetcher = useFetcher();
   const qtys = normalizeQtys(line.qtys);
@@ -20525,7 +20532,7 @@ function PackingPriceCell({
   productTitle: string;
   totalQty: number;
   productInfo: ProductInfo;
-  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
   onCommit?: (value: number) => void;
 }) {
   const fetcher = useFetcher();
@@ -21156,7 +21163,7 @@ function OrderRow({
   inrPerAudCachedRate: number | null;
   fxRupeeBuffer: number;
   productInfo: ProductInfo;
-  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
 }) {
   const fetcher = useFetcher();
   // On-demand Shopify inventory fetch — populated the first time staff
@@ -22326,7 +22333,7 @@ function CostFallbacks({
 }: {
   productInfo: ProductInfo;
   productTitle: string;
-  fabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  fabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
   warning: string | null;
   blocker?: CostBlocker;
   layout?: "stacked" | "inline";
@@ -22380,7 +22387,7 @@ function TitleFabricPicker({
   currentTitle,
   onPick,
 }: {
-  fabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  fabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
   currentTitle: string;
   onPick: (fabricKey: string) => void;
 }) {
@@ -22394,7 +22401,8 @@ function TitleFabricPicker({
     return fabrics.filter((f) => {
       const name = (f.fabricName || "").toLowerCase();
       const sheet = (f.sheetName || "").toLowerCase();
-      const hay = `${name} ${sheet}`;
+      const type = (f.fabricType || "").toLowerCase();
+      const hay = `${name} ${sheet} ${type}`;
       // Direct substring match (e.g. "candy" → "Candy").
       if (hay.includes(q)) return true;
       // The query CONTAINS the whole fabric name — so a longer search like
@@ -22458,7 +22466,10 @@ function TitleFabricPicker({
                 >
                   <span>
                     <span style={{ fontWeight: 600, color: "#111827", textTransform: "capitalize" }}>{f.fabricName}</span>
-                    <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 8 }}>{f.sheetName}</span>
+                    {/* Show the fabric TYPE (e.g. "60x60 Printed") — what the
+                        user recognises — rather than the raw storage tab, which
+                        can read "On Order" even for in-stock fabrics. */}
+                    <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 8 }}>{f.fabricType || f.sheetName}</span>
                   </span>
                   <span style={{ fontSize: 11, fontFamily: "monospace", color: f.costPerMeter > 0 ? "#6b7280" : "#b45309" }}>
                     {f.costPerMeter > 0
