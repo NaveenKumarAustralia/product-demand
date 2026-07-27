@@ -22390,18 +22390,19 @@ function TitleFabricPicker({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return fabrics;
-    // Forgiving match: a hit if the fabric/sheet contains the query, OR the
-    // query contains the fabric name (so searching "candy print" still finds a
-    // fabric named "Candy"), OR any word of the query matches. Fixes the case
-    // where the collection is "Candy print" but the stock fabric is just
-    // "Candy" and a full-string search returned nothing.
     const words = q.split(/\s+/).filter((w) => w.length >= 2);
     return fabrics.filter((f) => {
-      const name = f.fabricName;
-      const sheet = f.sheetName.toLowerCase();
-      if (name.includes(q) || sheet.includes(q)) return true;
-      if (name && q.includes(name)) return true;
-      return words.some((w) => name.includes(w) || sheet.includes(w));
+      const name = (f.fabricName || "").toLowerCase();
+      const sheet = (f.sheetName || "").toLowerCase();
+      const hay = `${name} ${sheet}`;
+      // Direct substring match (e.g. "candy" → "Candy").
+      if (hay.includes(q)) return true;
+      // The query CONTAINS the whole fabric name — so a longer search like
+      // "candy print" still finds a fabric named just "Candy". Guard on
+      // length ≥ 3 so short names don't over-match.
+      if (name.length >= 3 && q.includes(name)) return true;
+      // Only for genuine multi-word searches: require every word to appear.
+      return words.length > 1 && words.every((w) => hay.includes(w));
     });
   }, [fabrics, query]);
   return (
