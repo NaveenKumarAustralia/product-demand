@@ -652,7 +652,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         return [] as PortalMessageItem[];
       })
     : [];
-  const needsFabricSheets = page === "fabric" || isRestockPage || page === "packing";
+  // Collections needs the fabric sheets too — the "Pick a fabric" picker and
+  // fabric-cost lookups on the Collections detail table read from them. Without
+  // this the picker is empty ("No fabrics match").
+  const needsFabricSheets = page === "fabric" || isRestockPage || page === "packing" || page === "collections";
   const fabricCellOverridesSetting = needsFabricSheets
     ? await prisma.portalSetting.findUnique({
         where: { key: FABRIC_CELL_OVERRIDES_KEY },
@@ -7602,6 +7605,32 @@ function sumCollectionRowQuantity(row: Record<string, string>): number {
   return n;
 }
 
+// Recover the numeric base from a SKU cell so SKUs/barcodes can be
+// auto-regenerated. Matches a bare number ("2785"), "K2785", or an already-
+// generated "K2785XS" — but NOT a custom SKU, so manual entries aren't
+// clobbered. Returns "" when there's no recognisable base.
+function deriveCollectionSkuBase(sku: string): string {
+  const first = (sku ?? "").split(/\r?\n/)[0].trim();
+  const m = first.match(/^K?(\d{2,})(?:[A-Za-z/]{0,6})?$/);
+  return m ? m[1] : "";
+}
+
+// Build the per-size SKU + barcode from a base number and the row's ordered
+// quantities. Free Size (single variant) gets one value; otherwise one line
+// per ordered size. Shared by the auto-generate path and the manual button.
+function buildCollectionSkuBarcode(row: Record<string, string>, base: string): { sku: string; barcode: string } {
+  const freeSizeQty = Number(row.freeSize) || 0;
+  if (freeSizeQty > 0) return { sku: `K${base}`, barcode: base };
+  const orderedSizes = COLLECTION_SIZE_COLUMN_LABELS
+    .filter(([id]) => (Number(row[id]) || 0) > 0)
+    .map(([, label]) => label);
+  if (orderedSizes.length === 0) return { sku: `K${base}`, barcode: base };
+  return {
+    sku: orderedSizes.map((s) => `K${base}${collectionSizeSfx(s)}`).join("\n"),
+    barcode: orderedSizes.map((s) => `${base}${collectionSizeSfx(s)}`).join("\n"),
+  };
+}
+
 // Longest-prefix-match a product name against the styles in product info.
 // Returns the matched style name (e.g. "Corduroy Jacket" from "Corduroy
 // Jacket Black") or empty string when nothing matches. Used by the
@@ -13184,6 +13213,20 @@ function CollectionSpreadsheetPage({
           const rupees = autoPriceRupees(value);
           if (rupees) patched.priceRupees = rupees;
         }
+        // Auto-generate SKU + barcode. As soon as a size quantity changes (or
+        // the base number is entered in the SKU cell), rebuild K<base><size>
+        // SKUs and <base><size> barcodes for every ordered size — no need to
+        // press a button. Only runs when the SKU holds a recognisable base
+        // number, so custom SKUs are never overwritten.
+        const isQtyCol = COLLECTION_QTY_COLUMN_IDS.includes(colId);
+        if (isQtyCol || colId === "sku") {
+          const base = deriveCollectionSkuBase(patched.sku ?? "");
+          if (base) {
+            const gen = buildCollectionSkuBarcode(patched, base);
+            patched.sku = gen.sku;
+            patched.barcode = gen.barcode;
+          }
+        }
         return patched;
       });
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
@@ -13199,24 +13242,7 @@ function CollectionSpreadsheetPage({
     const num = baseNumber.trim();
     if (!num) return;
     setRows((prev) => {
-      const next = prev.map((r, i) => {
-        if (i !== rowIdx) return r;
-        const freeSizeQty = Number(r.freeSize) || 0;
-        if (freeSizeQty > 0) {
-          return { ...r, sku: `K${num}`, barcode: num };
-        }
-        const orderedSizes = COLLECTION_SIZE_COLUMN_LABELS
-          .filter(([id]) => (Number(r[id]) || 0) > 0)
-          .map(([, label]) => label);
-        if (orderedSizes.length === 0) {
-          // No sizes ordered yet — just set the base values; user can
-          // re-click "+K" once they've entered quantities.
-          return { ...r, sku: `K${num}`, barcode: num };
-        }
-        const skus = orderedSizes.map((s) => `K${num}${collectionSizeSfx(s)}`).join("\n");
-        const barcodes = orderedSizes.map((s) => `${num}${collectionSizeSfx(s)}`).join("\n");
-        return { ...r, sku: skus, barcode: barcodes };
-      });
+      const next = prev.map((r, i) => i === rowIdx ? { ...r, ...buildCollectionSkuBarcode(r, num) } : r);
       persistRows(next, prev, `Undo SKU/barcode generate on row ${rowIdx + 1}`);
       return next;
     });
@@ -14281,7 +14307,7 @@ function CollectionCellInner({
 }
 
 function CollectionSkuCell({
-  value, draft, setDraft, onCommit, rowIndex, generateSkuAndBarcode,
+  value, draft, setDraft, onCommit,
 }: {
   value: string;
   draft: string;
@@ -14290,37 +14316,11 @@ function CollectionSkuCell({
   rowIndex: number;
   generateSkuAndBarcode?: (rowIdx: number, baseNumber: string) => void;
 }) {
-  const showButton = /^\d+$/.test(draft.trim());
-  const apply = () => {
-    if (!generateSkuAndBarcode) return;
-    generateSkuAndBarcode(rowIndex, draft.trim());
-  };
+  // SKU + barcode are generated automatically in updateCell as soon as a base
+  // number is entered here or a size quantity is added — no manual button.
   return (
     <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
       <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
-      {showButton && (
-        <div style={{ display: "flex", justifyContent: "center", padding: "2px 0 3px" }}>
-          <button
-            type="button"
-            onMouseDown={(e) => { e.preventDefault(); apply(); }}
-            title={`Generate K${draft.trim()}XS, K${draft.trim()}S, … for every ordered size`}
-            style={{
-              padding: "2px 8px",
-              fontSize: 10,
-              fontWeight: 700,
-              color: "#fff",
-              background: "#7a1f2b",
-              border: "none",
-              borderRadius: 3,
-              cursor: "pointer",
-              lineHeight: 1.2,
-              whiteSpace: "nowrap",
-            }}
-          >
-            Generate
-          </button>
-        </div>
-      )}
     </div>
   );
 }
