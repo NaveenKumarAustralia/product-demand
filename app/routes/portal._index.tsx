@@ -5657,6 +5657,9 @@ type StyleCostLookup = {
   // still resolve), but the style is taken as given.
   costForOverride: (title: string | null | undefined, styleId: string) => number;
   breakdownForOverride: (title: string | null | undefined, styleId: string) => CostBreakdown | null;
+  // The pure style+fabric cost, IGNORING any manual/sheet price override on
+  // this title. Used when resetting a row back to the automatic cost.
+  fabricCostForTitle: (title: string | null | undefined, styleId?: string) => number;
   // When the matcher saw a fabric name in the title but couldn't pick
   // a single fabric (e.g. style is linked to TWO different "Black"
   // fabrics), this returns a short warning to surface on the price
@@ -5897,6 +5900,12 @@ function buildStyleCostLookup(
       const manual = manualPriceFor(title);
       if (manual > 0) return manual;
       const r = resolveOverride(title, styleId);
+      return r ? costFromResolved(r) : 0;
+    },
+    // Pure fabric+style cost, skipping any manual/sheet price override — so a
+    // row can be reset from a stuck manual price back to the automatic cost.
+    fabricCostForTitle: (title, styleId) => {
+      const r = styleId ? resolveOverride(title, styleId) : resolve(title);
       return r ? costFromResolved(r) : 0;
     },
     breakdownForTitle: (title) => {
@@ -13152,6 +13161,29 @@ function CollectionSpreadsheetPage({
     if (!rupees) return "";
     return String(Math.round(rupees));
   }, [styleCostLookup]);
+  // Reset a row's Price ₹ back to AUTOMATIC (the style+fabric cost). Clears
+  // any manual/sheet price override on this title AND drops in the pure fabric
+  // cost right away, so a stuck imported price can be replaced by the computed
+  // one in a single click. If the fabric cost can't compute yet, the cell goes
+  // empty and shows the pick style/fabric buttons.
+  const resetPriceToAutomatic = useCallback((rowIdx: number, rowName: string, styleOverrideId: string) => {
+    const title = rowName.trim();
+    if (title) {
+      // rupees "0" makes the server delete the manual override for this title.
+      fabricOverrideFetcher.submit(
+        { intent: "set_title_price_override", title, rupees: "0" },
+        { method: "post" },
+      );
+    }
+    const fabricRupees = styleCostLookup.fabricCostForTitle(title, styleOverrideId || undefined);
+    const next = fabricRupees ? String(Math.round(fabricRupees)) : "";
+    setRows((prev) => {
+      const updated = prev.map((r, i) => i === rowIdx ? { ...r, priceRupees: next } : r);
+      persistRows(updated, prev, `Undo reset price on row ${rowIdx + 1}`);
+      return updated;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [styleCostLookup, listItem.id]);
   useEffect(() => {
     if (!loaded) return;
     setRows((prev) => {
@@ -13332,17 +13364,6 @@ function CollectionSpreadsheetPage({
         if (colId === "name" && !(patched.priceRupees ?? "").trim()) {
           const rupees = autoPriceRupees(value);
           if (rupees) patched.priceRupees = rupees;
-        }
-        // Clearing a Price ₹ cell reverts that row to AUTOMATIC: recompute the
-        // cost from the row's style + fabric right away. If it resolves, the
-        // auto number drops straight back in; if it can't (e.g. fabric not
-        // linked yet) it stays empty and the row shows the pick style/fabric
-        // buttons. This is how a manually-typed or imported cost is switched
-        // back to automatic.
-        if (colId === "priceRupees" && !value.trim()) {
-          const rowName = (patched.name ?? patched.title ?? "").trim();
-          const overrideId = (patched.styleOverrideId ?? "").trim();
-          patched.priceRupees = autoPriceRupees(rowName, overrideId || undefined);
         }
         // Auto-generate SKU + barcode. As soon as a size quantity changes (or
         // the base number is entered in the SKU cell), rebuild K<base><size>
@@ -13970,6 +13991,7 @@ function CollectionSpreadsheetPage({
                                   { intent: "set_title_fabric_override", title: rowName, fabricKey },
                                   { method: "post" },
                                 )}
+                                onResetToAutomatic={() => resetPriceToAutomatic(rIdx, rowName, overrideId)}
                                 onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
                                 onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
                               />
@@ -14524,6 +14546,7 @@ function CollectionPriceRupeesCell({
   costBreakdown,
   totalQty,
   onPickFabric,
+  onResetToAutomatic,
   onPickStyleOverride,
   onClearStyleOverride,
 }: {
@@ -14540,12 +14563,21 @@ function CollectionPriceRupeesCell({
   costBreakdown: CostBreakdown | null;
   totalQty: number;
   onPickFabric: (fabricKey: string) => void;
+  // Clearing the cell resets the row to the automatic style+fabric cost
+  // (also clears any manual/sheet price override that would mask it).
+  onResetToAutomatic: () => void;
   onPickStyleOverride: (styleId: string) => void;
   onClearStyleOverride: () => void;
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
-  const onCommit = (next: string) => updateCell(rowIndex, "priceRupees", next);
+  // Emptying the cell means "make this automatic" — clear the manual/sheet
+  // price (and its override) and fall back to the computed fabric cost.
+  // A non-empty value is a manual override the user typed.
+  const onCommit = (next: string) => {
+    if (!next.trim()) { onResetToAutomatic(); return; }
+    updateCell(rowIndex, "priceRupees", next);
+  };
   // Right-click the price to pop the full cost breakdown (fabric, meters,
   // stitching, profit …) — same popup as the packing list — with a
   // "Pick a different fabric" footer to correct a wrong auto-match.
