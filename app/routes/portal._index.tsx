@@ -9210,6 +9210,7 @@ function RowNumberCell({
   heightKey,
   selected,
   onToggleSelect,
+  dragHandle,
 }: {
   rowNumber: number | string;
   actions: RowMenuAction[];
@@ -9218,6 +9219,10 @@ function RowNumberCell({
   // before the row number (used by the Collections move/combine UI).
   selected?: boolean;
   onToggleSelect?: () => void;
+  // When true, the cell shows a grab cursor + grip glyph to advertise that
+  // grabbing the number column drags the whole row up/down (Collections).
+  // The actual drag lives on the <tr>; this is just the visible handle.
+  dragHandle?: boolean;
 }) {
   const fetcher = useFetcher();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -9266,12 +9271,12 @@ function RowNumberCell({
     <>
       <td
         tabIndex={0}
-        style={s.rowNumberCell}
+        style={dragHandle ? { ...s.rowNumberCell, cursor: "grab" } : s.rowNumberCell}
         onContextMenu={(event) => {
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
-        title="Right click for row actions"
+        title={dragHandle ? "Drag to move this row up or down • right click for row actions" : "Right click for row actions"}
       >
         {onToggleSelect ? (
           <input
@@ -9283,6 +9288,14 @@ function RowNumberCell({
             style={{ width: 15, height: 15, marginRight: 5, cursor: "pointer", verticalAlign: "middle" }}
             title="Select row"
           />
+        ) : null}
+        {dragHandle ? (
+          <span
+            aria-hidden
+            style={{ color: "#c1c7cd", fontSize: 12, marginRight: 3, cursor: "grab", userSelect: "none", verticalAlign: "middle" }}
+          >
+            ⠿
+          </span>
         ) : null}
         {rowNumber}
         {heightKey ? <span style={s.rowResizeHandle} onMouseDown={startRowResize} title="Drag to resize row" /> : null}
@@ -13766,6 +13779,7 @@ function CollectionSpreadsheetPage({
                   >
                     <RowNumberCell
                       rowNumber={rIdx + 1}
+                      dragHandle
                       selected={selectedRowIdxs.has(rIdx)}
                       onToggleSelect={() => setSelectedRowIdxs((cur) => {
                         const next = new Set(cur);
