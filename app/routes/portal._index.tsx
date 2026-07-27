@@ -12960,7 +12960,13 @@ function CollectionSpreadsheetPage({
     const col = loadFetcher.data?.collection;
     if (col && col.id === listItem.id) {
       setColumns(normalizeCollectionColumns(col.columns));
-      setRows(normalizeCollectionRows(col.rows));
+      const loadedRows = normalizeCollectionRows(col.rows);
+      // A brand-new (empty) collection starts with 10 blank rows ready to fill
+      // so there's always something to type into. These are local until the
+      // first edit saves them, so an untouched empty collection stays empty.
+      setRows(loadedRows.length === 0
+        ? Array.from({ length: 10 }, () => ({ __rowKey: `r_${Math.random().toString(36).slice(2, 9)}` } as Record<string, string>))
+        : loadedRows);
       setLoaded(true);
     }
   }, [loadFetcher.data, listItem.id]);
@@ -13893,8 +13899,21 @@ function CollectionSpreadsheetPage({
           (instead of an inline row inside the table or a button up
           in the toolbar). */}
       {loaded && (
-        <div style={{ ...s.packingFooterActions, padding: "6px 0 0" }}>
-          <button type="button" style={s.smallButton} onClick={addRow}>+ Add row</button>
+        <div style={{ display: "flex", gap: 8, padding: "8px 0 0", flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={addRow}
+            style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+          >+ Add row</button>
+          <button
+            type="button"
+            onClick={() => setRows((prev) => {
+              const next = [...prev, ...Array.from({ length: 10 }, () => ({ __rowKey: `r_${Math.random().toString(36).slice(2, 9)}` } as Record<string, string>))];
+              persistRows(next, prev, "Undo add 10 rows");
+              return next;
+            })}
+            style={{ background: "transparent", color: "#0d9488", border: "1px solid #0d9488", borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+          >+ Add 10 rows</button>
         </div>
       )}
     </div>
