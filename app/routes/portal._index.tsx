@@ -9271,13 +9271,27 @@ function RowNumberCell({
     <>
       <td
         tabIndex={0}
-        style={dragHandle ? { ...s.rowNumberCell, cursor: "grab" } : s.rowNumberCell}
+        style={dragHandle ? { ...s.rowNumberCell, paddingTop: 15 } : s.rowNumberCell}
         onContextMenu={(event) => {
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
-        title={dragHandle ? "Drag to move this row up or down • right click for row actions" : "Right click for row actions"}
+        title="Right click for row actions"
       >
+        {dragHandle ? (
+          <span
+            data-row-drag-handle
+            aria-hidden
+            title="Drag to move this row up or down"
+            style={{
+              position: "absolute", top: 1, left: 0, right: 0,
+              textAlign: "center", lineHeight: 1, letterSpacing: 1,
+              color: "#b6bcc4", fontSize: 11, cursor: "grab", userSelect: "none",
+            }}
+          >
+            ⠿
+          </span>
+        ) : null}
         {onToggleSelect ? (
           <input
             type="checkbox"
@@ -9288,14 +9302,6 @@ function RowNumberCell({
             style={{ width: 15, height: 15, marginRight: 5, cursor: "pointer", verticalAlign: "middle" }}
             title="Select row"
           />
-        ) : null}
-        {dragHandle ? (
-          <span
-            aria-hidden
-            style={{ color: "#c1c7cd", fontSize: 12, marginRight: 3, cursor: "grab", userSelect: "none", verticalAlign: "middle" }}
-          >
-            ⠿
-          </span>
         ) : null}
         {rowNumber}
         {heightKey ? <span style={s.rowResizeHandle} onMouseDown={startRowResize} title="Drag to resize row" /> : null}
@@ -13743,13 +13749,12 @@ function CollectionSpreadsheetPage({
                     key={rIdx}
                     draggable
                     onDragStart={(e) => {
-                      // Allow drag only when the user grabs from a
-                      // non-editable area (row number cell, plain text,
-                      // image cell). Dragging FROM an input/textarea
-                      // would interrupt text selection.
+                      // Reorder only starts when the grab began on the row
+                      // number's 6-dots grip — dragging from anywhere else
+                      // (cells, text, images) does nothing so it never
+                      // interferes with editing or text selection.
                       const t = e.target as HTMLElement;
-                      const tag = t.tagName;
-                      if (tag === "INPUT" || tag === "TEXTAREA" || t.isContentEditable) {
+                      if (!t.closest("[data-row-drag-handle]")) {
                         e.preventDefault();
                         return;
                       }
