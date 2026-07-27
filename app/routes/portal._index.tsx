@@ -4388,16 +4388,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 // Reorder is handled optimistically in the UI — skip the expensive full loader reload
 export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultShouldRevalidate, currentUrl, nextUrl }) => {
-  // Pure URL changes that only flip the thread drawer params should
-  // never re-run the (expensive) loader. The drawer reads the URL
-  // client-side; the page state is unchanged.
+  // Pure URL changes that only flip in-page view params should never re-run
+  // the (expensive) loader:
+  //  • thread / row  — the thread drawer reads these client-side.
+  //  • collectionId  — opening/closing a collection; the detail view fetches
+  //    its own data via get_collection_full, so the grid loader is unchanged.
+  //  • shootId       — same for opening/closing a photo shoot.
+  // This makes tile ↔ detail navigation instant instead of re-loading the
+  // whole collections/photoshoots/fabric payload each time.
   if (!formData && currentUrl && nextUrl) {
     const cur = new URL(currentUrl);
     const nxt = new URL(nextUrl);
-    cur.searchParams.delete("thread");
-    cur.searchParams.delete("row");
-    nxt.searchParams.delete("thread");
-    nxt.searchParams.delete("row");
+    for (const p of ["thread", "row", "collectionId", "shootId"]) {
+      cur.searchParams.delete(p);
+      nxt.searchParams.delete(p);
+    }
     if (cur.pathname === nxt.pathname && cur.search === nxt.search) return false;
   }
   // Background callers (e.g. the silent image-compression hook) opt out of
