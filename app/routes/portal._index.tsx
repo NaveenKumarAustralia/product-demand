@@ -13299,6 +13299,17 @@ function CollectionSpreadsheetPage({
           const rupees = autoPriceRupees(value);
           if (rupees) patched.priceRupees = rupees;
         }
+        // Clearing a Price ₹ cell reverts that row to AUTOMATIC: recompute the
+        // cost from the row's style + fabric right away. If it resolves, the
+        // auto number drops straight back in; if it can't (e.g. fabric not
+        // linked yet) it stays empty and the row shows the pick style/fabric
+        // buttons. This is how a manually-typed or imported cost is switched
+        // back to automatic.
+        if (colId === "priceRupees" && !value.trim()) {
+          const rowName = (patched.name ?? patched.title ?? "").trim();
+          const overrideId = (patched.styleOverrideId ?? "").trim();
+          patched.priceRupees = autoPriceRupees(rowName, overrideId || undefined);
+        }
         // Auto-generate SKU + barcode. As soon as a size quantity changes (or
         // the base number is entered in the SKU cell), rebuild K<base><size>
         // SKUs and <base><size> barcodes for every ordered size — no need to
