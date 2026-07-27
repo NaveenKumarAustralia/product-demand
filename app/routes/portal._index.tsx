@@ -10252,13 +10252,17 @@ function CellHistoryMenu({
 }
 
 function CostBreakdownMenu({
-  x, y, breakdown, productTitle, totalQty, onClose,
+  x, y, breakdown, productTitle, totalQty, onClose, fabrics, onPickFabric,
 }: {
   x: number; y: number;
   breakdown: CostBreakdown;
   productTitle: string;
   totalQty: number;
   onClose: () => void;
+  // When provided (Collections page), the breakdown gets a "Pick a different
+  // fabric" footer so a wrong auto-matched fabric can be corrected in place.
+  fabrics?: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+  onPickFabric?: (fabricKey: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -10356,6 +10360,18 @@ function CostBreakdownMenu({
           </div>
         )}
       </div>
+      {fabrics && onPickFabric && (
+        <div style={{ padding: "10px 16px", borderTop: "1px solid #e5e7eb" }}>
+          <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 6 }}>
+            Wrong fabric? Pick the correct stock entry — the cost recalculates.
+          </div>
+          <TitleFabricPicker
+            fabrics={fabrics}
+            currentTitle={productTitle}
+            onPick={(fabricKey) => { onPickFabric(fabricKey); onClose(); }}
+          />
+        </div>
+      )}
     </div>
   );
 
@@ -13021,6 +13037,30 @@ function CollectionSpreadsheetPage({
     [productInfo, fabricStockIndex],
   );
   const allFabrics = useMemo(() => styleCostLookup.allFabrics(), [styleCostLookup]);
+  // Right-click cost breakdown popup for the Price ₹ cells (same UX as the
+  // packing list / restock pages). The extra `fabrics`/`onPickFabric` fields
+  // give the menu a "Pick a different fabric" footer so a wrong auto-matched
+  // fabric can be corrected in place.
+  const fabricOverrideFetcher = useFetcher();
+  const [costBreakdownMenu, setCostBreakdownMenu] = useState<
+    {
+      x: number; y: number; breakdown: CostBreakdown; productTitle: string; totalQty: number;
+      fabrics?: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+      onPickFabric?: (fabricKey: string) => void;
+    } | null
+  >(null);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as {
+        x: number; y: number; breakdown: CostBreakdown; productTitle: string; totalQty: number;
+        fabrics?: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
+        onPickFabric?: (fabricKey: string) => void;
+      };
+      setCostBreakdownMenu(detail);
+    };
+    document.addEventListener("show-cost-breakdown", handler);
+    return () => document.removeEventListener("show-cost-breakdown", handler);
+  }, []);
   // Per-row style override (set via the picker when the row's Name
   // doesn't auto-resolve). When present, costForOverride wins over
   // costForTitle. Empty / unset styleOverrideId falls back to the
@@ -13817,6 +13857,9 @@ function CollectionSpreadsheetPage({
                           const rowName = (row.name ?? row.title ?? "").trim();
                           const overrideId = (row.styleOverrideId ?? "").trim();
                           const autoValue = autoPriceRupees(rowName, overrideId || undefined);
+                          const priceBreakdown = overrideId
+                            ? styleCostLookup.breakdownForOverride(rowName, overrideId)
+                            : styleCostLookup.breakdownForTitle(rowName);
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
                               <CollectionPriceRupeesCell
@@ -13830,6 +13873,12 @@ function CollectionSpreadsheetPage({
                                 allFabrics={allFabrics}
                                 costWarning={styleCostLookup.warningForTitle(rowName)}
                                 costBlocker={styleCostLookup.blockerForTitle(rowName)}
+                                costBreakdown={priceBreakdown}
+                                totalQty={sumCollectionRowQuantity(row)}
+                                onPickFabric={(fabricKey) => fabricOverrideFetcher.submit(
+                                  { intent: "set_title_fabric_override", title: rowName, fabricKey },
+                                  { method: "post" },
+                                )}
                                 onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
                                 onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
                               />
@@ -13954,6 +14003,18 @@ function CollectionSpreadsheetPage({
             style={{ background: "transparent", color: "#0d9488", border: "1px solid #0d9488", borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
           >+ Add 10 rows</button>
         </div>
+      )}
+      {costBreakdownMenu && typeof document !== "undefined" && (
+        <CostBreakdownMenu
+          x={costBreakdownMenu.x}
+          y={costBreakdownMenu.y}
+          breakdown={costBreakdownMenu.breakdown}
+          productTitle={costBreakdownMenu.productTitle}
+          totalQty={costBreakdownMenu.totalQty}
+          fabrics={costBreakdownMenu.fabrics}
+          onPickFabric={costBreakdownMenu.onPickFabric}
+          onClose={() => setCostBreakdownMenu(null)}
+        />
       )}
     </div>
   );
@@ -14369,6 +14430,9 @@ function CollectionPriceRupeesCell({
   allFabrics,
   costWarning,
   costBlocker,
+  costBreakdown,
+  totalQty,
+  onPickFabric,
   onPickStyleOverride,
   onClearStyleOverride,
 }: {
@@ -14382,12 +14446,30 @@ function CollectionPriceRupeesCell({
   allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number }>;
   costWarning: string | null;
   costBlocker?: CostBlocker;
+  costBreakdown: CostBreakdown | null;
+  totalQty: number;
+  onPickFabric: (fabricKey: string) => void;
   onPickStyleOverride: (styleId: string) => void;
   onClearStyleOverride: () => void;
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
   const onCommit = (next: string) => updateCell(rowIndex, "priceRupees", next);
+  // Right-click the price to pop the full cost breakdown (fabric, meters,
+  // stitching, profit …) — same popup as the packing list — with a
+  // "Pick a different fabric" footer to correct a wrong auto-match.
+  const openBreakdown = (event: React.MouseEvent) => {
+    if (!costBreakdown) return;
+    event.preventDefault();
+    event.stopPropagation();
+    document.dispatchEvent(new CustomEvent("show-cost-breakdown", {
+      detail: {
+        x: event.clientX, y: event.clientY,
+        breakdown: costBreakdown, productTitle: rowName, totalQty,
+        fabrics: allFabrics, onPickFabric,
+      },
+    }));
+  };
   // The picker shows only when there's a row name to pick FOR, the
   // user hasn't typed a manual value, and the title-based lookup
   // can't auto-resolve. Otherwise the cell is a plain number input.
@@ -14409,8 +14491,10 @@ function CollectionPriceRupeesCell({
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => { if (draft !== value) onCommit(draft); }}
         onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+        onContextMenu={openBreakdown}
         className="no-number-arrows"
         placeholder={autoValue || undefined}
+        title={costBreakdown ? "Right-click to see the cost breakdown / change fabric" : undefined}
         style={{
           width: "100%", border: "none", outline: "none",
           padding: "1px 2px",
