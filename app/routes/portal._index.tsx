@@ -15371,7 +15371,7 @@ function CollectionImageCell({
         title="Paste, drop, or click to upload image"
       >
         {hasImage
-          ? <img src={displaySrc || trimmed} alt="" style={s.fabricSheetImage} />
+          ? <img src={displaySrc || trimmed} alt="" style={{ ...s.fabricSheetImage, objectFit: "contain", background: "#f9fafb" }} />
           : <span>{busy ? "Uploading…" : "Paste, drop or upload"}</span>}
         {hasImage && (
           <>
