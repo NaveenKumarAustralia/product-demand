@@ -5703,12 +5703,21 @@ function buildStyleCostLookup(
   const fabricKeyFor = (sheetName: string, name: string) => `${sheetName.trim().toLowerCase()}::${name.trim().toLowerCase()}`;
   for (const entry of fabricStockIndex) {
     if (entry.kind !== "stock") continue;
-    if (!isFilled(entry.costPerMeter)) continue;
     const nameLower = entry.name.trim().toLowerCase();
-    const cand: FabricCandidate = { costPerMeter: entry.costPerMeter!, styleMeters: entry.styleMeters, sheetName: entry.sheetName, name: nameLower };
-    const bucket = candidatesByName.get(nameLower) ?? [];
-    bucket.push(cand);
-    candidatesByName.set(nameLower, bucket);
+    if (!nameLower) continue;
+    const costed = isFilled(entry.costPerMeter);
+    const cand: FabricCandidate = { costPerMeter: costed ? entry.costPerMeter! : 0, styleMeters: entry.styleMeters, sheetName: entry.sheetName, name: nameLower };
+    // Only COSTED fabrics take part in automatic title matching — a fabric
+    // with no Cost per Meter can't produce a cost, so it must never silently
+    // win the auto-match. But it DOES go into allFabrics / fabricByKey so it's
+    // still findable and pickable in the manual "Pick fabric" list (surfaced
+    // there with a "no cost" flag). This is why a fabric like "Candy" that
+    // hasn't had its cost entered yet was invisible in the picker before.
+    if (costed) {
+      const bucket = candidatesByName.get(nameLower) ?? [];
+      bucket.push(cand);
+      candidatesByName.set(nameLower, bucket);
+    }
     const key = fabricKeyFor(entry.sheetName, entry.name);
     const withKey = { ...cand, key };
     allFabrics.push(withKey);
@@ -6447,7 +6456,13 @@ function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
     if (!isStock && !isOrder) continue;
     const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
     const metersIdx = isStock
-      ? sheet.headers.findIndex((h) => /meters?\s*in\s*stock/i.test(h))
+      // Tolerant match for the stock-quantity column. Accept "Meters in Stock",
+      // a bare "In Stock", "Meters available", "Meters", and — as a last
+      // resort — "Cut Pieces" (some imported sheets put the stock quantity
+      // there). Without this, a sheet whose stock column is named slightly
+      // differently was dropped ENTIRELY, hiding all its fabrics from the cost
+      // matcher and the fabric picker even when they had costs entered.
+      ? sheet.headers.findIndex((h) => /meters?\s*in\s*stock|in\s*stock|meters?\s*available|^meters?$|^cut\s*pieces?$/i.test(h))
       : sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered/i.test(h));
     const costIdx = isStock
       ? sheet.headers.findIndex((h) => /cost\s*per\s*meter/i.test(h))
@@ -6455,12 +6470,15 @@ function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
     const productsIdx = isStock
       ? sheet.headers.findIndex((h) => /^products?$/i.test(h))
       : -1;
-    if (nameIdx < 0 || metersIdx < 0) continue;
+    // Only a Name column is required. A missing stock-quantity column no longer
+    // drops the whole sheet — the quantity just defaults to 0 (cost matching
+    // depends on cost + style meters, not on the on-hand quantity).
+    if (nameIdx < 0) continue;
     for (const row of sheet.rows) {
       const name = (row[nameIdx] ?? "").trim();
       if (!name || name.length < 2) continue;
-      const cleaned = (row[metersIdx] ?? "").toString().split(/[^0-9.]/)[0];
-      const m = Number(cleaned);
+      const cleaned = metersIdx >= 0 ? (row[metersIdx] ?? "").toString().split(/[^0-9.]/)[0] : "";
+      const m = Number(cleaned) || 0;
       if (!Number.isFinite(m)) continue;
       // Skip zero on-order rows so we don't clutter the cell with empty entries
       if (isOrder && m === 0) continue;
@@ -14541,7 +14559,7 @@ function CollectionPriceRupeesCell({
     return "";
   }, [productInfo.categories, styleOverrideId]);
   return (
-    <div style={{ display: "flex", flexDirection: "column", width: "100%", gap: 2 }}>
+    <div style={{ display: "flex", flexDirection: "column", width: "100%", gap: 2 }} onContextMenu={openBreakdown}>
       <input
         type="number"
         value={draft}
@@ -14551,7 +14569,7 @@ function CollectionPriceRupeesCell({
         onContextMenu={openBreakdown}
         className="no-number-arrows"
         placeholder={autoValue || undefined}
-        title={costBreakdown ? "Right-click to see the cost breakdown / change fabric" : undefined}
+        title={costBreakdown ? "Right-click (or click the fabric name below) for the cost breakdown / change fabric" : undefined}
         style={{
           width: "100%", border: "none", outline: "none",
           padding: "1px 2px",
@@ -14578,10 +14596,19 @@ function CollectionPriceRupeesCell({
           breakdown and a compact picker. */}
       {!showPicker && rowName.length > 0 && (draft.trim() !== "" || autoValue !== "") && (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, paddingBottom: 2 }}>
-          {costBreakdown?.fabricName && (
-            <span style={{ fontSize: 9, color: "#9ca3af", textTransform: "capitalize", lineHeight: 1.1 }} title="Fabric used for this cost">
-              {costBreakdown.fabricName}
-            </span>
+          {costBreakdown && (
+            <button
+              type="button"
+              onClick={openBreakdown}
+              title="Click to see the full cost breakdown"
+              style={{
+                background: "transparent", border: "none", cursor: "pointer",
+                fontSize: 9, color: "#0d9488", textTransform: "capitalize",
+                lineHeight: 1.1, padding: 0, textDecoration: "underline", textUnderlineOffset: 2,
+              }}
+            >
+              {costBreakdown.fabricName || "cost breakdown"} ⓘ
+            </button>
           )}
           <TitleFabricPicker fabrics={allFabrics} currentTitle={rowName} onPick={onPickFabric} />
         </div>
@@ -22392,8 +22419,10 @@ function TitleFabricPicker({
                     <span style={{ fontWeight: 600, color: "#111827", textTransform: "capitalize" }}>{f.fabricName}</span>
                     <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 8 }}>{f.sheetName}</span>
                   </span>
-                  <span style={{ fontSize: 11, color: "#6b7280", fontFamily: "monospace" }}>
-                    ₹{f.costPerMeter.toLocaleString(undefined, { maximumFractionDigits: 2 })}/m
+                  <span style={{ fontSize: 11, fontFamily: "monospace", color: f.costPerMeter > 0 ? "#6b7280" : "#b45309" }}>
+                    {f.costPerMeter > 0
+                      ? `₹${f.costPerMeter.toLocaleString(undefined, { maximumFractionDigits: 2 })}/m`
+                      : "no cost set"}
                   </span>
                 </button>
               ))}
