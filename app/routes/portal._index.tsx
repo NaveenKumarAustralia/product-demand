@@ -5660,6 +5660,10 @@ type StyleCostLookup = {
   // The pure style+fabric cost, IGNORING any manual/sheet price override on
   // this title. Used when resetting a row back to the automatic cost.
   fabricCostForTitle: (title: string | null | undefined, styleId?: string) => number;
+  // The style+fabric breakdown, IGNORING any manual/sheet price override.
+  // The Collections cost cell uses this so right-click always shows the
+  // breakdown of the computed cost (an override no longer suppresses it).
+  fabricBreakdownForTitle: (title: string | null | undefined, styleId?: string) => CostBreakdown | null;
   // When the matcher saw a fabric name in the title but couldn't pick
   // a single fabric (e.g. style is linked to TWO different "Black"
   // fabrics), this returns a short warning to surface on the price
@@ -5907,6 +5911,12 @@ function buildStyleCostLookup(
     fabricCostForTitle: (title, styleId) => {
       const r = styleId ? resolveOverride(title, styleId) : resolve(title);
       return r ? costFromResolved(r) : 0;
+    },
+    // Same, for the breakdown popup — skips the override short-circuit so the
+    // breakdown of the computed cost always shows when the fabric resolves.
+    fabricBreakdownForTitle: (title, styleId) => {
+      const r = styleId ? resolveOverride(title, styleId) : resolve(title);
+      return r ? breakdownFromResolved(r) : null;
     },
     breakdownForTitle: (title) => {
       // Manual price overrides skip the fabric/style breakdown —
@@ -13969,9 +13979,10 @@ function CollectionSpreadsheetPage({
                           const rowName = (row.name ?? row.title ?? "").trim();
                           const overrideId = (row.styleOverrideId ?? "").trim();
                           const autoValue = autoPriceRupees(rowName, overrideId || undefined);
-                          const priceBreakdown = overrideId
-                            ? styleCostLookup.breakdownForOverride(rowName, overrideId)
-                            : styleCostLookup.breakdownForTitle(rowName);
+                          // Use the fabric breakdown (ignores any manual/sheet price
+                          // override) so right-click shows the breakdown of the computed
+                          // cost even on rows that once had a Google-sheet price.
+                          const priceBreakdown = styleCostLookup.fabricBreakdownForTitle(rowName, overrideId || undefined);
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
                               <CollectionPriceRupeesCell
