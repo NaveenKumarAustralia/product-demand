@@ -692,7 +692,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       })
     : [];
   const fabricStockIndex: FabricStockEntry[] = (isRestockPage || page === "packing" || page === "collections")
-    ? buildFabricStockIndex(manualFabricSheets)
+    ? buildFabricStockIndex(combinedFabricSheetsForIndex(manualFabricSheets))
     : [];
   if (page === "fabric") {
     fabricSettings = {
@@ -1371,7 +1371,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           deletedRowsValue,
           deletedSheetsValue: deletedSheetsSetting?.value,
         });
-        const fabricStockIndex = buildFabricStockIndex(manualFabricSheets);
+        const fabricStockIndex = buildFabricStockIndex(combinedFabricSheetsForIndex(manualFabricSheets));
         styleCostLookupForPush = buildStyleCostLookup(productInfo, fabricStockIndex);
       } catch (e) {
         console.warn("[cost push] failed to build cost lookup; auto-derived prices won't be pushed:", e);
@@ -6448,11 +6448,27 @@ type FabricStockEntry = {
   styleMeters?: Record<string, number>;
 };
 
-function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
+// The same combined + padded fabric sheets the Fabric-in-stock page renders.
+// Costing must index THESE (not the raw manual sheets) so what you see on the
+// page is exactly what the cost matcher uses — otherwise a fabric can look
+// in-stock on the page yet be invisible to costing (the "Candy" bug).
+function combinedFabricSheetsForIndex(manualFabricSheets: FabricStockSheet[]): FabricSheetData[] {
+  return getFabricSheets(undefined, undefined, undefined, [], [], {}, {}, manualFabricSheets)
+    .filter(isCombinedFabricSource)
+    .map(padCombinedFabricSheet);
+}
+
+function buildFabricStockIndex(sheets: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>): FabricStockEntry[] {
   const out: FabricStockEntry[] = [];
   for (const sheet of sheets) {
-    const isStock = sheet.kind === "stock";
-    const isOrder = sheet.kind === "order";
+    // Treat every in-stock source the same way the Fabric-in-stock display
+    // does: real stock sheets, simple-stock sheets, AND the special combined
+    // on-order sheet (which the display pads with Cost/Meters/Products columns
+    // and shows as in-stock). Feeding this the combined+padded sheets means
+    // costing sees EXACTLY what the page shows — fixing fabrics like "Candy"
+    // that were visible on the page but invisible to the cost matcher.
+    const isStock = sheet.kind === "stock" || sheet.kind === "simple-stock" || sheet.gid === COMBINED_FABRIC_ON_ORDER_GID;
+    const isOrder = !isStock && (sheet.kind === "order" || sheet.kind === "wide-order");
     if (!isStock && !isOrder) continue;
     const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
     const metersIdx = isStock
@@ -6465,7 +6481,7 @@ function buildFabricStockIndex(sheets: FabricStockSheet[]): FabricStockEntry[] {
       ? sheet.headers.findIndex((h) => /meters?\s*in\s*stock|in\s*stock|meters?\s*available|^meters?$|^cut\s*pieces?$/i.test(h))
       : sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered/i.test(h));
     const costIdx = isStock
-      ? sheet.headers.findIndex((h) => /cost\s*per\s*meter/i.test(h))
+      ? sheet.headers.findIndex((h) => /cost\s*per\s*meter|price\s*per\s*meter|^price$/i.test(h))
       : -1;
     const productsIdx = isStock
       ? sheet.headers.findIndex((h) => /^products?$/i.test(h))
@@ -14590,26 +14606,10 @@ function CollectionPriceRupeesCell({
           blocker={costBlocker}
         />
       )}
-      {/* When a cost is already resolved, don't clutter the cell with a fabric
-          picker — just a small link to the breakdown (which itself has a
-          "Pick a different fabric" option if it needs changing). The full
-          pick style/fabric/price buttons only show when there's no cost yet. */}
-      {!showPicker && costBreakdown && (
-        <div style={{ display: "flex", justifyContent: "center", paddingBottom: 2 }}>
-          <button
-            type="button"
-            onClick={openBreakdown}
-            title="Click to see the cost breakdown / change fabric"
-            style={{
-              background: "transparent", border: "none", cursor: "pointer",
-              fontSize: 9, color: "#0d9488", textTransform: "capitalize",
-              lineHeight: 1.1, padding: 0, textDecoration: "underline", textUnderlineOffset: 2,
-            }}
-          >
-            {costBreakdown.fabricName || "cost breakdown"} ⓘ
-          </button>
-        </div>
-      )}
+      {/* When a cost is already resolved the cell just shows the number —
+          right-click opens the full cost breakdown (with "Pick a different
+          fabric"). The pick style/fabric/price buttons only show when there's
+          no cost yet. */}
       {overrideStyleName && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, fontSize: 10, color: "#6b7280", paddingBottom: 2 }}>
           <span title="This row uses an explicit style override">Style: {overrideStyleName}</span>
