@@ -14590,27 +14590,24 @@ function CollectionPriceRupeesCell({
           blocker={costBlocker}
         />
       )}
-      {/* Cost already resolves — still let the user verify / change the fabric
-          it used, so they're never stuck when the auto-match picked wrong or
-          they want to confirm it. Shows the linked fabric name from the
-          breakdown and a compact picker. */}
-      {!showPicker && rowName.length > 0 && (draft.trim() !== "" || autoValue !== "") && (
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, paddingBottom: 2 }}>
-          {costBreakdown && (
-            <button
-              type="button"
-              onClick={openBreakdown}
-              title="Click to see the full cost breakdown"
-              style={{
-                background: "transparent", border: "none", cursor: "pointer",
-                fontSize: 9, color: "#0d9488", textTransform: "capitalize",
-                lineHeight: 1.1, padding: 0, textDecoration: "underline", textUnderlineOffset: 2,
-              }}
-            >
-              {costBreakdown.fabricName || "cost breakdown"} ⓘ
-            </button>
-          )}
-          <TitleFabricPicker fabrics={allFabrics} currentTitle={rowName} onPick={onPickFabric} />
+      {/* When a cost is already resolved, don't clutter the cell with a fabric
+          picker — just a small link to the breakdown (which itself has a
+          "Pick a different fabric" option if it needs changing). The full
+          pick style/fabric/price buttons only show when there's no cost yet. */}
+      {!showPicker && costBreakdown && (
+        <div style={{ display: "flex", justifyContent: "center", paddingBottom: 2 }}>
+          <button
+            type="button"
+            onClick={openBreakdown}
+            title="Click to see the cost breakdown / change fabric"
+            style={{
+              background: "transparent", border: "none", cursor: "pointer",
+              fontSize: 9, color: "#0d9488", textTransform: "capitalize",
+              lineHeight: 1.1, padding: 0, textDecoration: "underline", textUnderlineOffset: 2,
+            }}
+          >
+            {costBreakdown.fabricName || "cost breakdown"} ⓘ
+          </button>
         </div>
       )}
       {overrideStyleName && (
