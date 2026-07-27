@@ -14572,6 +14572,20 @@ function CollectionPriceRupeesCell({
           blocker={costBlocker}
         />
       )}
+      {/* Cost already resolves — still let the user verify / change the fabric
+          it used, so they're never stuck when the auto-match picked wrong or
+          they want to confirm it. Shows the linked fabric name from the
+          breakdown and a compact picker. */}
+      {!showPicker && rowName.length > 0 && (draft.trim() !== "" || autoValue !== "") && (
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, paddingBottom: 2 }}>
+          {costBreakdown?.fabricName && (
+            <span style={{ fontSize: 9, color: "#9ca3af", textTransform: "capitalize", lineHeight: 1.1 }} title="Fabric used for this cost">
+              {costBreakdown.fabricName}
+            </span>
+          )}
+          <TitleFabricPicker fabrics={allFabrics} currentTitle={rowName} onPick={onPickFabric} />
+        </div>
+      )}
       {overrideStyleName && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, fontSize: 10, color: "#6b7280", paddingBottom: 2 }}>
           <span title="This row uses an explicit style override">Style: {overrideStyleName}</span>
@@ -22309,7 +22323,19 @@ function TitleFabricPicker({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return fabrics;
-    return fabrics.filter((f) => f.fabricName.includes(q) || f.sheetName.toLowerCase().includes(q));
+    // Forgiving match: a hit if the fabric/sheet contains the query, OR the
+    // query contains the fabric name (so searching "candy print" still finds a
+    // fabric named "Candy"), OR any word of the query matches. Fixes the case
+    // where the collection is "Candy print" but the stock fabric is just
+    // "Candy" and a full-string search returned nothing.
+    const words = q.split(/\s+/).filter((w) => w.length >= 2);
+    return fabrics.filter((f) => {
+      const name = f.fabricName;
+      const sheet = f.sheetName.toLowerCase();
+      if (name.includes(q) || sheet.includes(q)) return true;
+      if (name && q.includes(name)) return true;
+      return words.some((w) => name.includes(w) || sheet.includes(w));
+    });
   }, [fabrics, query]);
   return (
     <>
