@@ -12447,14 +12447,12 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
 
 function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[] }) {
   const fetcher = useFetcher();
+  // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
+  // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
+  // delete-all / backfill / pull-sheet-images buttons were removed from the UI.
   const importFetcher = useFetcher<{ ok?: boolean; totalCollections?: number; summary?: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }>; error?: string }>();
-  const backfillFetcher = useFetcher<{ ok?: boolean; scanned?: number; updated?: number; error?: string }>();
-  const imagesFetcher = useFetcher<{ ok?: boolean; summary?: Array<{ tab: string; imagesFound: number; rowsPatched: number; error?: string }>; error?: string }>();
-  const xlsxInputRef = useRef<HTMLInputElement>(null);
   const tabImportFetcher = useFetcher<{ ok?: boolean; collectionsCreated?: number; summary?: Array<{ tab: string; rows: number; images: number; linked: number; error?: string }>; error?: string }>();
   const tabImportInputRef = useRef<HTMLInputElement>(null);
-  const deleteAllFetcher = useFetcher<{ ok?: boolean; deleted?: number; error?: string }>();
-  const recompressFetcher = useFetcher<{ ok?: boolean; collectionsTouched?: number; imagesProcessed?: number; mbSavedApprox?: number; error?: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const collectionIdParam = searchParams.get("collectionId");
   const selectedId = collectionIdParam ? Number(collectionIdParam) : null;
@@ -12565,41 +12563,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               <button
                 type="button"
                 onClick={() => {
-                  if (deleteAllFetcher.state !== "idle") return;
-                  if (!window.confirm("Delete EVERY collection in the portal?\n\nThis wipes all collections and their rows. Cannot be undone.\n\nUse this when you're ready to start fresh (re-importing tab by tab).")) return;
-                  if (!window.confirm("Really delete every collection? This is destructive and irreversible.")) return;
-                  deleteAllFetcher.submit({ intent: "delete_all_collections" }, { method: "post" });
-                }}
-                disabled={deleteAllFetcher.state !== "idle"}
-                style={{
-                  background: "#dc2626", color: "#fff", border: "none",
-                  borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600,
-                  cursor: deleteAllFetcher.state !== "idle" ? "wait" : "pointer",
-                }}
-                title="Wipe every collection — for starting fresh before tab-by-tab re-import"
-              >
-                {deleteAllFetcher.state !== "idle" ? "Deleting…" : "Delete all collections"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (recompressFetcher.state !== "idle") return;
-                  if (!window.confirm("Recompress all images in existing collections?\n\nFor every inline image still stored as a fat base64 blob, this:\n• Generates a small thumbnail (1200px JPEG q80)\n• Moves full bytes into the CollectionImage table\n• Updates the row to point at the new thumbnail + key\n\nShopify CDN images are left alone. Safe to run multiple times.")) return;
-                  recompressFetcher.submit({ intent: "recompress_collection_images" }, { method: "post" });
-                }}
-                disabled={recompressFetcher.state !== "idle"}
-                style={{
-                  background: "#f59e0b", color: "#fff", border: "none",
-                  borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600,
-                  cursor: recompressFetcher.state !== "idle" ? "wait" : "pointer",
-                }}
-                title="Split inline images into thumbnail + lazy-loaded full bytes so the spreadsheet loads quickly"
-              >
-                {recompressFetcher.state !== "idle" ? "Recompressing…" : "Recompress images"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
                   if (tabImportFetcher.state !== "idle") return;
                   tabImportInputRef.current?.click();
                 }}
@@ -12633,23 +12596,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 type="button"
                 onClick={() => {
                   if (importFetcher.state !== "idle") return;
-                  if (!window.confirm("Import all collections from Google Sheet?\n\nThis will:\n• Fetch ~48 tabs from the master sheet\n• Create one collection per tab\n• Pre-link rows whose Link column has a Shopify URL\n• Pull Shopify images for linked rows\n\nCollections that already exist (by name) are skipped. This can take several minutes.")) return;
-                  importFetcher.submit({ intent: "import_collections_from_google_sheet" }, { method: "post" });
-                }}
-                disabled={importFetcher.state !== "idle"}
-                style={{
-                  background: "#7e22ce", color: "#fff", border: "none",
-                  borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600,
-                  cursor: importFetcher.state !== "idle" ? "wait" : "pointer",
-                }}
-                title="Bulk CSV-only import for all tabs (no images from sheet — only Shopify pulls for linked rows)"
-              >
-                {importFetcher.state !== "idle" ? "Importing…" : "Bulk CSV import"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (importFetcher.state !== "idle") return;
                   const tab = window.prompt("Import ONE tab from the Google Sheet.\n\nType the tab name EXACTLY as it appears in the sheet (including any emoji/✅):")?.trim();
                   if (!tab) return;
                   const sheetUrl = window.prompt("Google Sheet URL? Leave blank to use the default master sheet.", "")?.trim() ?? "";
@@ -12665,55 +12611,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               >
                 {importFetcher.state !== "idle" ? "Importing…" : "Import one tab (Google Sheet)"}
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (backfillFetcher.state !== "idle") return;
-                  if (!window.confirm("Backfill storefront links for every linked row that doesn't have a product handle yet?\n\nFetches the handle from Shopify for each row. Can take a few minutes for hundreds of rows.")) return;
-                  backfillFetcher.submit({ intent: "backfill_collection_handles" }, { method: "post" });
-                }}
-                disabled={backfillFetcher.state !== "idle"}
-                style={{
-                  background: "#0d9488", color: "#fff", border: "none",
-                  borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600,
-                  cursor: backfillFetcher.state !== "idle" ? "wait" : "pointer",
-                }}
-                title="Pull product handles so the Link column can show the live storefront URL"
-              >
-                {backfillFetcher.state !== "idle" ? "Backfilling…" : "Backfill storefront links"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (imagesFetcher.state !== "idle") return;
-                  xlsxInputRef.current?.click();
-                }}
-                disabled={imagesFetcher.state !== "idle"}
-                style={{
-                  background: "#1d4ed8", color: "#fff", border: "none",
-                  borderRadius: 6, padding: "8px 14px", fontSize: 13, fontWeight: 600,
-                  cursor: imagesFetcher.state !== "idle" ? "wait" : "pointer",
-                }}
-                title="Upload the Google Sheet as XLSX (File → Download → Microsoft Excel) to patch row images. Google blocks the runtime XLSX download even for public sheets."
-              >
-                {imagesFetcher.state !== "idle" ? "Pulling images…" : "Upload sheet (XLSX) for images"}
-              </button>
-              <input
-                ref={xlsxInputRef}
-                type="file"
-                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  e.target.value = "";
-                  if (!f) return;
-                  if (!window.confirm(`Patch every collection row with images from "${f.name}"?\n\nMatches portal rows to sheet rows by position. Rows that already have a modelPicture are skipped. This can take a couple of minutes for a large workbook.`)) return;
-                  const fd = new FormData();
-                  fd.set("intent", "pull_sheet_images");
-                  fd.set("xlsx", f);
-                  imagesFetcher.submit(fd, { method: "post", encType: "multipart/form-data" });
-                }}
-              />
             </>
           )}
           <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
@@ -12722,17 +12619,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
       </div>
 
-      {recompressFetcher.data?.ok && (
-        <div style={{ margin: "0 14px 10px", padding: "8px 12px", background: "#fef3c7", border: "1px solid #fde68a", color: "#78350f", borderRadius: 6, fontSize: 12 }}>
-          Recompressed {recompressFetcher.data.imagesProcessed ?? 0} images across {recompressFetcher.data.collectionsTouched ?? 0} collection(s).
-          Approx {recompressFetcher.data.mbSavedApprox ?? 0} MB freed from inline storage. Refresh to see faster loads.
-        </div>
-      )}
-      {deleteAllFetcher.data?.ok && (
-        <div style={{ margin: "0 14px 10px", padding: "8px 12px", background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b", borderRadius: 6, fontSize: 12 }}>
-          Deleted {deleteAllFetcher.data.deleted ?? 0} collection{deleteAllFetcher.data.deleted === 1 ? "" : "s"}. Ready for a fresh import.
-        </div>
-      )}
       {tabImportFetcher.data?.ok && tabImportFetcher.data.summary && (
         <div style={{ margin: "0 14px 10px", padding: 12, background: "#ecfdf5", border: "1px solid #a7f3d0", borderRadius: 8, fontSize: 12, color: "#065f46" }}>
           <div style={{ fontWeight: 700, marginBottom: 6 }}>
@@ -12744,27 +12630,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 <strong>{s.tab}</strong> — {s.error ? <span style={{ color: "#b45309" }}>{s.error}</span> : `${s.rows} rows, ${s.images} images, ${s.linked} pre-linked`}
               </div>
             ))}
-          </div>
-        </div>
-      )}
-      {backfillFetcher.data?.ok && (
-        <div style={{ margin: "0 14px 10px", padding: "8px 12px", background: "#ecfdf5", border: "1px solid #a7f3d0", color: "#065f46", borderRadius: 6, fontSize: 12 }}>
-          Scanned {backfillFetcher.data.scanned ?? 0} linked rows, backfilled handles for {backfillFetcher.data.updated ?? 0}. Refresh to see the storefront links.
-        </div>
-      )}
-      {imagesFetcher.data?.ok && imagesFetcher.data.summary && (
-        <div style={{ margin: "0 14px 10px", padding: 12, background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 6, fontSize: 12, color: "#1e3a8a" }}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>
-            Pulled sheet images. Total rows patched: {imagesFetcher.data.summary.reduce((a, b) => a + b.rowsPatched, 0)}.
-          </div>
-          <div style={{ maxHeight: 180, overflowY: "auto" }}>
-            {imagesFetcher.data.summary
-              .filter((s) => s.imagesFound > 0 || s.error)
-              .map((s) => (
-                <div key={s.tab} style={{ padding: "2px 0" }}>
-                  <strong>{s.tab}</strong> — {s.error ? <span style={{ color: "#b45309" }}>{s.error}</span> : `${s.rowsPatched} rows patched, ${s.imagesFound} images found in sheet`}
-                </div>
-              ))}
           </div>
         </div>
       )}
