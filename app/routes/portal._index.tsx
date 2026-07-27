@@ -3403,11 +3403,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "import_collections_from_google_sheet") {
-    // One-shot importer: fetch each tab from the user's Google Sheet,
-    // parse the CSV, build collection rows, link rows whose Link cell
-    // contains a Shopify admin URL (extract the product GID), and for
-    // those linked rows pull the product's media images so the row
-    // has its modelPicture pre-filled.
+    // Live CSV importer (no XLSX download needed): fetch a tab from the Google
+    // Sheet, parse the CSV, build collection rows, link rows whose Link cell
+    // contains a Shopify admin URL (extract the product GID), and for those
+    // linked rows pull the product's media images so modelPicture is pre-
+    // filled. Runs for ONE tab when `tab` is provided (one-at-a-time), else
+    // every known tab. An optional `sheetUrl` overrides the default workbook.
     if (!currentUser?.admin) return jsonResponse({ ok: false, error: "forbidden" });
     const session = await prisma.session.findFirst({
       where: { accessToken: { not: "" } },
@@ -3415,6 +3416,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }).catch(() => null);
     const shop = session?.shop ?? "";
     const accessToken = session?.accessToken ?? "";
+
+    const sheetUrlRaw = String(form.get("sheetUrl") ?? "").trim();
+    const sheetId = (sheetUrlRaw.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)?.[1]) || sheetUrlRaw || SHEET_IMPORT_SPREADSHEET_ID;
+    const singleTab = String(form.get("tab") ?? "").trim();
+    const tabsToImport = singleTab ? [singleTab] : SHEET_IMPORT_ALL_TABS;
 
     const summary: Array<{ tab: string; rows: number; linked: number; skipped: number; error?: string }> = [];
     let totalCollections = 0;
@@ -3429,14 +3435,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const chipSampleOptions = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_SETTINGS_KEY }, select: { value: true } })
       .then((s) => normalizeCollectionSettings(s?.value).sampleOptions);
 
-    for (const tabName of SHEET_IMPORT_ALL_TABS) {
-      if (SHEET_IMPORT_SKIP_TABS.has(tabName)) continue;
+    for (const tabName of tabsToImport) {
+      // Skip the meta tabs only in the bulk (all-tabs) run — a single explicit
+      // tab is always honoured.
+      if (!singleTab && SHEET_IMPORT_SKIP_TABS.has(tabName)) continue;
       if (existingNames.has(tabName)) {
         summary.push({ tab: tabName, rows: 0, linked: 0, skipped: 0, error: "already exists" });
         continue;
       }
       try {
-        const csvUrl = `https://docs.google.com/spreadsheets/d/${SHEET_IMPORT_SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
+        const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
         const res = await fetch(csvUrl);
         if (!res.ok) { summary.push({ tab: tabName, rows: 0, linked: 0, skipped: 0, error: `fetch ${res.status}` }); continue; }
         const csv = await res.text();
@@ -12637,6 +12645,25 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 title="Bulk CSV-only import for all tabs (no images from sheet — only Shopify pulls for linked rows)"
               >
                 {importFetcher.state !== "idle" ? "Importing…" : "Bulk CSV import"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (importFetcher.state !== "idle") return;
+                  const tab = window.prompt("Import ONE tab from the Google Sheet.\n\nType the tab name EXACTLY as it appears in the sheet (including any emoji/✅):")?.trim();
+                  if (!tab) return;
+                  const sheetUrl = window.prompt("Google Sheet URL? Leave blank to use the default master sheet.", "")?.trim() ?? "";
+                  importFetcher.submit({ intent: "import_collections_from_google_sheet", tab, ...(sheetUrl ? { sheetUrl } : {}) }, { method: "post" });
+                }}
+                disabled={importFetcher.state !== "idle"}
+                style={{
+                  background: "#0d9488", color: "#fff", border: "none",
+                  borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600,
+                  cursor: importFetcher.state !== "idle" ? "wait" : "pointer",
+                }}
+                title="Import one tab live from the Google Sheet (no XLSX download). Text + Shopify-linked images; add other images via the Dropbox picker."
+              >
+                {importFetcher.state !== "idle" ? "Importing…" : "Import one tab (Google Sheet)"}
               </button>
               <button
                 type="button"
