@@ -12847,6 +12847,17 @@ function CollectionCard({
   );
 }
 
+// Minimum width so a column's heading always shows in full (headers are
+// uppercase + bold + letter-spaced, so ~9px/char + padding). Column widths
+// are stored per collection (shared across all users); we never render or
+// resize a column narrower than its heading.
+function collectionHeadingWidth(label: string): number {
+  return Math.max(60, Math.ceil((label ?? "").length * 9) + 30);
+}
+function collectionColWidth(col: { label: string; width?: number }): number {
+  return Math.max(col.width ?? 110, collectionHeadingWidth(col.label));
+}
+
 function CollectionSpreadsheetPage({
   listItem,
   collectionSettings,
@@ -13355,6 +13366,8 @@ function CollectionSpreadsheetPage({
     const startX = event.clientX;
     const target = columns.find((c) => c.id === columnId);
     const startWidth = target?.width ?? 110;
+    // Never let a column resize narrower than its heading text.
+    const minWidth = Math.max(MIN_COLUMN_WIDTH, collectionHeadingWidth(target?.label ?? ""));
     const startCols = columns;
     let nextCols = columns;
     const prevCursor = document.body.style.cursor;
@@ -13362,7 +13375,7 @@ function CollectionSpreadsheetPage({
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     const handleMove = (moveEvent: MouseEvent) => {
-      const nextWidth = Math.max(MIN_COLUMN_WIDTH, startWidth + moveEvent.clientX - startX);
+      const nextWidth = Math.max(minWidth, startWidth + moveEvent.clientX - startX);
       nextCols = columns.map((c) => c.id === columnId ? { ...c, width: nextWidth } : c);
       setColumns(nextCols);
     };
@@ -13558,9 +13571,9 @@ function CollectionSpreadsheetPage({
           cum += 48;
           for (const c of frozenCols) {
             frozenOffsets.push(cum);
-            cum += c.width ?? 110;
+            cum += collectionColWidth(c);
           }
-          const tableWidth = 48 + frozenCols.reduce((s, c) => s + (c.width ?? 110), 0) + SHOPIFY_COL_WIDTH + restCols.reduce((s, c) => s + (c.width ?? 110), 0);
+          const tableWidth = 48 + frozenCols.reduce((s, c) => s + collectionColWidth(c), 0) + SHOPIFY_COL_WIDTH + restCols.reduce((s, c) => s + collectionColWidth(c), 0);
           return (
           <table
             style={{ ...s.table, width: tableWidth, minWidth: 900 }}
@@ -13569,11 +13582,11 @@ function CollectionSpreadsheetPage({
             <colgroup>
               <col style={{ width: 48 }} />
               {frozenCols.map((col) => (
-                <col key={col.id} style={{ width: col.width ?? 110 }} />
+                <col key={col.id} style={{ width: collectionColWidth(col) }} />
               ))}
               <col style={{ width: SHOPIFY_COL_WIDTH }} />
               {restCols.map((col) => (
-                <col key={col.id} style={{ width: col.width ?? 110 }} />
+                <col key={col.id} style={{ width: collectionColWidth(col) }} />
               ))}
             </colgroup>
             <thead>
