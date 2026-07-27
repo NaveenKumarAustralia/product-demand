@@ -54,6 +54,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     PORTAL_USERS_KEY,
     PORTAL_ACTIVE_USERS_KEY,
     PORTAL_NAV_ORDER_KEY,
+    COLLECTION_HIDDEN_KEY,
   ];
   const needsOrders = isRestockPage || page === "packing";
   const needsPackingLists = page === "packing" || packingId !== null;
@@ -22469,7 +22470,8 @@ function TitleFabricPicker({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  useEffect(() => { if (open) setQuery(""); }, [open]);
+  const openPicker = () => { setQuery(""); setOpen(true); };
+  const closePicker = () => setOpen(false);
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return fabrics;
@@ -22493,7 +22495,7 @@ function TitleFabricPicker({
     <>
       <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={openPicker}
         style={{
           width: "100%", textAlign: "center",
           background: "transparent", border: "1px dashed #d1d5db",
@@ -22507,7 +22509,7 @@ function TitleFabricPicker({
       {open && typeof document !== "undefined" && createPortal(
         <div
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }}
-          onClick={() => setOpen(false)}
+          onClick={closePicker}
         >
           <div style={{ background: "#fff", borderRadius: 10, width: 520, maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb" }}>
