@@ -14663,7 +14663,7 @@ function CollectionCellInner({
   // modelPicture is the multi-image product gallery (numbered, sortable,
   // uploaded to Shopify). Fabric + mani-pic columns are single images.
   if (columnId === "modelPicture") {
-    return <CollectionMultiImageCell value={value} onCommit={onCommit} productInfo={productInfo} collectionId={collectionId} rowName={rowName} />;
+    return <CollectionMultiImageCell value={value} onCommit={onCommit} productInfo={productInfo} collectionId={collectionId} rowName={rowName} onPickStyleName={(name) => updateCell(rowIndex, "name", name)} />;
   }
   if (columnId === "fabric" || columnId === "maniPicsTaken") {
     return <CollectionImageCell value={value} onCommit={onCommit} />;
@@ -15342,7 +15342,7 @@ function DropboxImagePicker({
   );
 }
 
-function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string }) {
+function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName, onPickStyleName }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string; onPickStyleName?: (styleName: string) => void }) {
   const images = useMemo(() => parseMultiImageValue(value), [value]);
   const [open, setOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -15409,6 +15409,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
           onAddFiles={addFiles}
           onCommit={commit}
           onPickFile={() => fileRef.current?.click()}
+          onPickStyleName={onPickStyleName}
           fileRef={fileRef}
         />,
         document.body,
@@ -15425,7 +15426,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
 // add more. Saves immediately via onCommit on every change so the user
 // can close at any time without losing edits.
 function CollectionImageManagerModal({
-  images, busy, productInfo, collectionId, rowName, onClose, onAddFiles, onCommit, onPickFile, fileRef,
+  images, busy, productInfo, collectionId, rowName, onClose, onAddFiles, onCommit, onPickFile, onPickStyleName, fileRef,
 }: {
   images: CollectionImageEntry[];
   busy: boolean;
@@ -15436,6 +15437,7 @@ function CollectionImageManagerModal({
   onAddFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
   onCommit: (next: CollectionImageEntry[]) => void;
   onPickFile: () => void;
+  onPickStyleName?: (styleName: string) => void;
   fileRef: React.RefObject<HTMLInputElement | null>;
 }) {
   const [dropboxOpen, setDropboxOpen] = useState(false);
@@ -15638,7 +15640,12 @@ function CollectionImageManagerModal({
                       <button
                         key={s.id}
                         type="button"
-                        onClick={() => onCommit([...images, { thumb: s.imageUrl }])}
+                        onClick={() => {
+                          onCommit([...images, { thumb: s.imageUrl }]);
+                          // Also drop the style's name into the row's Name so
+                          // it's pre-filled; the user can type over it later.
+                          onPickStyleName?.(s.name);
+                        }}
                         disabled={alreadyAdded}
                         style={{
                           background: "transparent", border: alreadyAdded ? "2px solid #0d9488" : "1px solid #d1d5db",
