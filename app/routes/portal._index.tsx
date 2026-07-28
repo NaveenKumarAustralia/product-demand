@@ -16636,6 +16636,12 @@ function ProductInformationPanel({
               <span style={s.productStyleMeta}>
                 {style.hidden ? "Hidden" : style.averageMeters ? `${style.averageMeters}m avg fabric` : "Click image for details"}
               </span>
+              {!style.hidden && !(style.productType ?? "").trim() && (
+                <span
+                  title="No Shopify product type set — click the image to add it in the style details."
+                  style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4, fontSize: 11, fontWeight: 700, color: "#b45309", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 4, padding: "2px 6px", cursor: "help" }}
+                >⚠ No product type</span>
+              )}
             </div>
             <div style={s.productStyleCardActions}>
               <label style={s.secondaryButton}>
