@@ -2658,6 +2658,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     style.sheetCount = readNumber("sheetCount");
     style.zipButtonType = String(form.get("zipButtonType") ?? "").trim();
     style.costingNotes = String(form.get("costingNotes") ?? "").trim();
+    if (form.has("productType")) style.productType = String(form.get("productType") ?? "").trim() || undefined;
     // Recompute totalCost so the per-piece cost displayed elsewhere
     // (restock / packing list) reflects the latest inputs without
     // depending on the user manually saving it. fabricCost is set by
@@ -4074,6 +4075,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // Convert row.priceRupees → AUD via the cached live FX rate so
     // the per-variant inventory cost lands in Shopify's shop currency.
     const inrPerAudForPush = await getCachedInrPerAud().catch(() => null);
+    // Product Information → for the auto product type on each row's style.
+    const productInfoForPush = await loadProductInfoForAction().catch(() => null);
 
     let targetIndexes: number[];
     if (intent === "push_collection_row_to_shopify") {
@@ -4096,7 +4099,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         results.push({ index: idx, ok: true, productId: row[COL_ROW_SHOPIFY_PRODUCT_ID] });
         continue;
       }
-      const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush });
+      const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush, productInfo: productInfoForPush ?? undefined });
       if (res.ok && res.productId) {
         rows[idx] = {
           ...row,
@@ -5358,6 +5361,10 @@ type ProductInfoStyle = {
   totalCost?: number;
   sheetCount?: number;
   costingNotes?: string;
+  // Shopify product type for this style (e.g. "Short Sleeve Dress"). Entered on
+  // the Product Information page; auto-fills the collection row's product type
+  // on Shopify-create so the sheet doesn't need a column for it.
+  productType?: string;
   hidden?: boolean;
 };
 type ProductInfoCategory = {
@@ -6087,6 +6094,7 @@ function normalizeProductInfo(value: unknown): ProductInfo {
             totalCost: Number(style.totalCost) || defaults.totalCost,
             sheetCount: Number(style.sheetCount) || defaults.sheetCount,
             costingNotes: String(style.costingNotes ?? defaults.costingNotes ?? "").trim(),
+            productType: String(style.productType ?? "").trim() || undefined,
             hidden: style.hidden === true,
           } : null;
         }).filter(Boolean) as ProductInfoStyle[]
@@ -7861,42 +7869,32 @@ type CollectionPushResult = {
 // row's price; SKU uses row.sku + "-" + size; Inventory item Cost
 // uses row.cost). Status defaults to DRAFT. Returns the created
 // product id + handle so the caller can store it back on the row.
-// Derive a Shopify product type from the product/style name by looking for a
-// garment keyword (longest match wins). Auto-fills the product type so it
-// doesn't need its own column.
-const PRODUCT_TYPE_KEYWORDS: Array<[RegExp, string]> = [
-  [/\bmaxi\s*dress|\bmidi\s*dress|\bdress(es)?\b/i, "Dress"],
-  [/\bjumpsuit/i, "Jumpsuit"],
-  [/\bplaysuit|\bromper/i, "Playsuit"],
-  [/\bskirt/i, "Skirt"],
-  [/\bshort(s)?\b/i, "Shorts"],
-  [/\bpant(s)?\b|\btrouser/i, "Pants"],
-  [/\bculotte/i, "Pants"],
-  [/\bjacket|\bcoat|\bblazer/i, "Jacket"],
-  [/\bcardigan|\bknit|\bjumper|\bsweater/i, "Knitwear"],
-  [/\bblouse|\bshirt/i, "Shirt"],
-  [/\btop\b|\btee\b|\bt-shirt|\bcami\b|\bsinglet|\btank\b/i, "Top"],
-  [/\bkaftan|\bkimono/i, "Kaftan"],
-  [/\bscarf|\bshawl/i, "Accessories"],
-  [/\bbag\b|\btote\b|\bclutch/i, "Bags"],
-];
-function deriveProductTypeFromName(name: string): string {
-  const n = (name ?? "").toLowerCase();
-  for (const [re, type] of PRODUCT_TYPE_KEYWORDS) if (re.test(n)) return type;
-  return "";
-}
-// A Shopify custom "categories" value from the product type (used for SEO).
+// A Shopify custom "categories" value (used for SEO) from the product type by
+// scanning it for a garment keyword — so a specific type like
+// "Short Sleeve Dress" still maps to the "Dresses" category.
 function deriveCategoryFromProductType(productType: string): string {
-  if (!productType) return "";
-  const map: Record<string, string> = { Dress: "Dresses", Skirt: "Skirts", Pants: "Pants", Shorts: "Shorts", Top: "Tops", Shirt: "Tops", Jacket: "Jackets", Knitwear: "Knitwear", Jumpsuit: "Jumpsuits", Playsuit: "Playsuits", Kaftan: "Kaftans", Bags: "Bags", Accessories: "Accessories" };
-  return map[productType] ?? productType;
+  const p = (productType ?? "").toLowerCase();
+  if (!p) return "";
+  if (/dress/.test(p)) return "Dresses";
+  if (/jumpsuit/.test(p)) return "Jumpsuits";
+  if (/playsuit|romper/.test(p)) return "Playsuits";
+  if (/skirt/.test(p)) return "Skirts";
+  if (/short/.test(p)) return "Shorts";
+  if (/pant|trouser|culotte/.test(p)) return "Pants";
+  if (/jacket|coat|blazer/.test(p)) return "Jackets";
+  if (/cardigan|knit|jumper|sweater/.test(p)) return "Knitwear";
+  if (/top|tee|t-shirt|cami|singlet|tank|blouse|shirt/.test(p)) return "Tops";
+  if (/kaftan|kimono/.test(p)) return "Kaftans";
+  if (/scarf|shawl/.test(p)) return "Accessories";
+  if (/bag|tote|clutch/.test(p)) return "Bags";
+  return productType;
 }
 
 async function createShopifyProductFromRow(
   shop: string,
   accessToken: string,
   row: Record<string, string>,
-  opts: { status: "DRAFT" | "ACTIVE"; inrPerAud?: number | null } = { status: "DRAFT" },
+  opts: { status: "DRAFT" | "ACTIVE"; inrPerAud?: number | null; productInfo?: ProductInfo } = { status: "DRAFT" },
 ): Promise<CollectionPushResult> {
   // Title is required. Name is the title column (Title column was
   // removed in V2). We still fall back to legacy `title` for any rows
@@ -8021,8 +8019,20 @@ async function createShopifyProductFromRow(
   };
   const description = (row.description ?? "").trim();
   if (description) input.descriptionHtml = description;
-  // Product type: use the typed value, else auto-derive from the name.
-  const productType = (row.productType ?? "").trim() || deriveProductTypeFromName(title);
+  // Product type: use the typed value, else the product type set on the
+  // matched style in Product Information (e.g. "Short Sleeve Dress").
+  let styleProductType = "";
+  if (opts.productInfo) {
+    const matchedName = extractStyleFromName(title, opts.productInfo);
+    if (matchedName) {
+      for (const cat of opts.productInfo.categories ?? []) {
+        for (const st of cat.styles ?? []) {
+          if (st.name === matchedName) { styleProductType = (st.productType ?? "").trim(); break; }
+        }
+      }
+    }
+  }
+  const productType = (row.productType ?? "").trim() || styleProductType;
   if (productType) input.productType = productType;
   const vendor = (row.vendor ?? "").trim();
   if (vendor) input.vendor = vendor;
@@ -16344,6 +16354,7 @@ function ProductInformationPanel({
       factoryProfit: numberToDraft(style.factoryProfit),
       sheetCount: numberToDraft(style.sheetCount),
       costingNotes: style.costingNotes ?? "",
+      productType: style.productType ?? "",
     });
   };
 
@@ -16581,6 +16592,16 @@ function ProductInformationPanel({
                   type="text"
                   value={detailDraft.zipButtonType ?? ""}
                   onChange={(event) => updateDetailDraft("zipButtonType", event.currentTarget.value)}
+                  style={s.productInfoDetailsInput}
+                />
+              </label>
+              <label style={s.productInfoDetailsField}>
+                Product type (Shopify)
+                <input
+                  type="text"
+                  value={detailDraft.productType ?? ""}
+                  onChange={(event) => updateDetailDraft("productType", event.currentTarget.value)}
+                  placeholder="e.g. Short Sleeve Dress"
                   style={s.productInfoDetailsInput}
                 />
               </label>
