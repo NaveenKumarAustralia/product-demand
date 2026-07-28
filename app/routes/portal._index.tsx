@@ -4469,6 +4469,14 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // count badges refresh via their own fetcher — so these edits don't need the
   // heavy loader re-run either. (This was a source of "Load failed" on save.)
   if (intent === "update_notes" || intent === "update_factory_notes") return false;
+  // Status is now a controlled chip (statusLocal) and ETA is an uncontrolled
+  // text input — both keep their displayed value without a loader refresh.
+  if (intent === "update_status" || intent === "update_eta") return false;
+  // Fabric-in-stock cell edits: each FabricCell keeps its own draft state and
+  // the write is already serialized server-side, so a single cell edit never
+  // needs the (heavy) fabric-page loader to re-run. Rapid fabric editing was a
+  // prime trigger for the cascading "Load failed".
+  if (intent === "update_fabric_cell" || intent === "upload_fabric_image") return false;
   // Linking a restock row to a packing list updates one column on one
   // row — local optimistic state handles the badge.
   if (intent === "update_packing_list_link") return false;
@@ -22020,13 +22028,14 @@ function StatusCell({
     <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
       <RestockOptionChipDropdown
         orderId={orderId}
-        value={value}
+        value={statusLocal}
         options={restockSettings.statusOptions}
         optionKind="statusOptions"
         restockSettings={restockSettings}
         updateIntent="update_status"
         undoLabel="Undo status"
         onChange={setStatusLocal}
+        controlled
       />
       {showLinkUI && (
         linkedBadge ? (
@@ -26370,6 +26379,39 @@ export function ErrorBoundary() {
     : error instanceof Error
     ? error.message
     : "An unexpected error occurred.";
+
+  // Most of these errors are TRANSIENT: a background reload (revalidation after
+  // a cell edit) hit a network blip or a server restart (deploy), and React
+  // Router surfaced it as a fatal error page. Rather than dumping the user out
+  // — losing their scroll and their place — silently self-heal: reload once.
+  // A short-lived sessionStorage guard prevents a reload loop if the failure is
+  // real/persistent, in which case we fall through to the manual error page.
+  const msg = String(message ?? "").toLowerCase();
+  const isTransient = /load failed|failed to fetch|networkerror|network error|the operation was aborted|load unsuccessful|fetch/.test(msg);
+  const [recovering, setRecovering] = useState(isTransient);
+  useEffect(() => {
+    if (!isTransient || typeof window === "undefined") { setRecovering(false); return; }
+    let recentlyRetried = false;
+    try {
+      const last = Number(sessionStorage.getItem("portal-auto-recover-ts") || "0");
+      recentlyRetried = Date.now() - last < 12000; // within 12s → treat as a loop
+    } catch { /* sessionStorage may be unavailable */ }
+    if (recentlyRetried) { setRecovering(false); return; }
+    try { sessionStorage.setItem("portal-auto-recover-ts", String(Date.now())); } catch { /* ignore */ }
+    // Reload preserves scroll in modern browsers; do it on the next tick so the
+    // "Reconnecting…" frame paints first.
+    const t = setTimeout(() => window.location.reload(), 350);
+    return () => clearTimeout(t);
+  }, [isTransient]);
+
+  if (recovering) {
+    return (
+      <div style={{ fontFamily: "Inter, sans-serif", padding: "3rem 2rem", maxWidth: 480, margin: "0 auto", color: "#6b7280", fontSize: 14 }}>
+        Reconnecting…
+      </div>
+    );
+  }
+
   return (
     <div style={{ fontFamily: "Inter, sans-serif", padding: "3rem 2rem", maxWidth: 480, margin: "0 auto", color: "#374151" }}>
       <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Something went wrong</h2>
