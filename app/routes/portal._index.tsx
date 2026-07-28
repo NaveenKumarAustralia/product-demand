@@ -12969,7 +12969,14 @@ function CoverImagePickerModal({
   const [query, setQuery] = useState(initialQuery);
   const searchFetcher = useFetcher<{ entries?: Array<{ type: string; name: string; path: string; kind?: string; rev?: string }>; error?: string; configured?: boolean }>();
   const runSearch = (q: string) => { if (q.trim().length >= 2) searchFetcher.load(`/api/dropbox?op=search&q=${encodeURIComponent(q.trim())}`); };
-  useEffect(() => { runSearch(initialQuery); /* eslint-disable-next-line */ }, []);
+  // Predictive search: search as the user types (debounced). Also fires on
+  // open since query starts as initialQuery.
+  useEffect(() => {
+    if (query.trim().length < 2) return;
+    const t = setTimeout(() => runSearch(query), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
 
   const useFile = (file: File | null | undefined) => {
     if (!file || !file.type.startsWith("image/")) return;
@@ -13000,7 +13007,9 @@ function CoverImagePickerModal({
     if (busy) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/dropbox-thumb?path=${encodeURIComponent(path)}&rev=${encodeURIComponent(rev ?? "")}&size=w640h640`);
+      // w480h640 is a VALID Dropbox thumbnail size (w640h640 is not, which is
+      // why picking previously 502'd even though the small grid thumbs worked).
+      const res = await fetch(`/api/dropbox-thumb?path=${encodeURIComponent(path)}&rev=${encodeURIComponent(rev ?? "")}&size=w480h640`);
       if (!res.ok) throw new Error("fetch failed");
       const blob = await res.blob();
       useFile(new File([blob], "cover.jpg", { type: blob.type || "image/jpeg" }));
