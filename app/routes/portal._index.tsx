@@ -12097,6 +12097,64 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "swatches", label: "Swatches", type: "tickbox", width: 90 },
 ];
 
+// Hover help for each Collections column — surfaced as an ⓘ on the header.
+const COLLECTION_COLUMN_HELP: Record<string, string> = {
+  factoryNotes: "Free-text notes to the factory. Supports @mentions and comment threads.",
+  release: "Release marker / date for this row.",
+  modelPicture: "Model-photo gallery. Numbered, drag to reorder — these become the product images in Shopify. Pull from Product Information or Dropbox.",
+  fabric: "A single fabric swatch image for this row.",
+  name: "The product / style name. Drives the auto cost (style + fabric), the auto SKU/barcode, and becomes the Shopify product title.",
+  notes: "General notes for this row (@mentions + threads).",
+  sku: "Type a base number (e.g. 2785) — it auto-generates one SKU per ordered size (K2785XS, K2785S…).",
+  barcode: "Auto-generated per size from the SKU base (2785XS, 2785S…).",
+  freeSize: "Quantity when the product has no size options (a single variant).",
+  totalOrdered: "Read-only: the sum of all size quantities on this row.",
+  status: "Production status (Under consideration, etc.).",
+  sample: "Sample status.",
+  sampleReceived: "Date the sample arrived — auto-fills when the Sample chip flips to received.",
+  sampleSizesReceived: "Which sample sizes have come in.",
+  price: "Retail selling price (AUD RRP) → becomes the Shopify price.",
+  priceRupees: "Production cost in ₹, auto-computed from style + fabric (or typed). Right-click for the breakdown. Clear it to re-pick style/fabric.",
+  priceAud: "Read-only: Price ₹ converted to AUD at the cached FX rate — becomes the inventory cost in Shopify.",
+  eta: "Expected arrival date.",
+  maniPicsTaken: "Mannequin-photo image cell.",
+  loadingNotes: "Notes for shipment / loading.",
+  duplicateFrom: "Pick another style to copy its data into this row.",
+  modelHeightSize: "Model height and size (text).",
+  createdBy: "Who created / last updated this row.",
+  link: "Read-only storefront link, once the product exists in Shopify.",
+  description: "Product description → Shopify description.",
+  categories: "Product category (also used for SEO) → custom metafield.",
+  productType: "Shopify product type.",
+  tags: "Comma-separated Shopify tags.",
+  hsCode: "Customs harmonized (HS) code → Shopify.",
+  countryOfOrigin: "Country of origin → Shopify.",
+  compareAtPrice: "Shopify 'compare at' (strike-through / sale) price.",
+  complProducts: "Tick when complementary products are done.",
+  colour: "Colour → custom metafield (also used for SEO).",
+  seoTitle: "SEO title → Shopify.",
+  seoDescription: "SEO description → Shopify.",
+  schedules: "Tick when scheduled activation is set.",
+  reviews: "Tick when reviews are done.",
+  swatches: "Tick when swatches are done.",
+};
+
+function CollectionColumnHeader({ col }: { col: { id: string; label: string } }) {
+  const help = COLLECTION_COLUMN_HELP[col.id];
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+      {col.label}
+      {help && (
+        <span
+          title={help}
+          style={{ fontSize: 10, color: "#9ca3af", cursor: "help", fontWeight: 400, border: "1px solid #cbd5e1", borderRadius: "50%", width: 12, height: 12, lineHeight: "10px", display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+          onClick={(e) => e.stopPropagation()}
+        >i</span>
+      )}
+    </span>
+  );
+}
+
 // Photo shoot table columns. Mirror the photographer's styling sheet:
 // product image + name/SKU, pairing notes, and accessory images.
 type PhotoShootColumnDef = { id: string; label: string; type?: "image-multi" | "image" | "tickbox" | "text"; width: number };
@@ -14206,7 +14264,7 @@ function CollectionSpreadsheetPage({
                     stickyLeft={frozenOffsets[i + 1]}
                     isLastFrozen={i === frozenCols.length - 1}
                   >
-                    {col.label}
+                    <CollectionColumnHeader col={col} />
                   </Th>
                 ))}
                 <th style={{ ...s.th, textAlign: "center" }}>Shopify</th>
@@ -14217,7 +14275,7 @@ function CollectionSpreadsheetPage({
                     columnId={col.id}
                     onResizeStart={(e) => startResize(col.id, e)}
                   >
-                    {col.label}
+                    <CollectionColumnHeader col={col} />
                   </Th>
                 ))}
               </tr>
