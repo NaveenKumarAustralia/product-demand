@@ -4104,6 +4104,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           [COL_ROW_SHOPIFY_HANDLE]: res.handle ?? "",
           [COL_ROW_SHOPIFY_CREATED_AT]: now,
           [COL_ROW_SHOPIFY_STATUS]: statusOpt,
+          // The person who created the product in Shopify — replaces any
+          // manually-typed "Created by" once the product actually exists.
+          ...(currentUser?.name ? { createdBy: currentUser.name } : {}),
         };
         results.push({ index: idx, ok: true, productId: res.productId });
       } else {
@@ -7906,8 +7909,8 @@ async function createShopifyProductFromRow(
   };
   const priceRaw = (row.price ?? "").trim();
   const price = priceRaw ? String(Number(priceRaw) || 0) : "0";
-  const compareAtRaw = (row.compareAtPrice ?? "").trim();
-  const compareAt = compareAtRaw ? String(Number(compareAtRaw) || 0) : null;
+  // Compare-at price is always the RRP price (no separate column needed).
+  const compareAt = Number(price) > 0 ? price : null;
   // Inventory cost: convert Price ₹ to AUD via the cached FX rate
   // (rate threaded from the push action). Legacy rows that still hold
   // an AUD value in `row.cost` keep working as a fallback so we don't
@@ -7918,7 +7921,9 @@ async function createShopifyProductFromRow(
   const computedCost = audFromRupees ?? (legacyCostRaw > 0 ? legacyCostRaw : null);
   const cost = computedCost != null ? String(Math.round(computedCost * 100) / 100) : null;
   const hsCode = (row.hsCode ?? "").trim();
-  const countryCode = (row.countryOfOrigin ?? "").trim().toUpperCase().slice(0, 2);
+  // Country of origin: default to India (Karma East / Collections products);
+  // a value typed on the row still wins. No column needed on the sheet.
+  const countryCode = ((row.countryOfOrigin ?? "").trim().toUpperCase().slice(0, 2)) || "IN";
 
   type Variant = {
     optionValues?: Array<{ optionName: string; name: string }>;
@@ -12097,6 +12102,11 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "swatches", label: "Swatches", type: "tickbox", width: 90 },
 ];
 
+// Columns whose value is now set automatically at Shopify-create, so they no
+// longer need to show on the sheet (the data still lives on the row; it's just
+// hidden and/or auto-filled).
+const COLLECTION_HIDDEN_COLUMN_IDS = new Set<string>(["compareAtPrice", "countryOfOrigin"]);
+
 // Hover help for each Collections column — surfaced as an ⓘ on the header.
 const COLLECTION_COLUMN_HELP: Record<string, string> = {
   factoryNotes: "Free-text notes to the factory. Supports @mentions and comment threads.",
@@ -14204,9 +14214,11 @@ function CollectionSpreadsheetPage({
           // as the restock page. Shopify column moves to the right
           // of name and scrolls with the rest.
           const SHOPIFY_COL_WIDTH = 140;
-          const nameIdx = columns.findIndex((c) => c.id === "name");
-          const frozenCols = nameIdx >= 0 ? columns.slice(0, nameIdx + 1) : [];
-          const restCols = nameIdx >= 0 ? columns.slice(nameIdx + 1) : columns;
+          // Hide auto-handled columns from the sheet (values are set at push).
+          const visibleColumns = columns.filter((c) => !COLLECTION_HIDDEN_COLUMN_IDS.has(c.id));
+          const nameIdx = visibleColumns.findIndex((c) => c.id === "name");
+          const frozenCols = nameIdx >= 0 ? visibleColumns.slice(0, nameIdx + 1) : [];
+          const restCols = nameIdx >= 0 ? visibleColumns.slice(nameIdx + 1) : visibleColumns;
           // stickyLeft offset per frozen index: 0 = row number,
           // 1..N = each frozen column.
           const frozenOffsets: number[] = [];
@@ -14552,7 +14564,7 @@ function CollectionSpreadsheetPage({
               })}
               {rows.length === 0 && (
                 <tr style={s.row}>
-                  <td colSpan={columns.length + 2} style={{ ...s.td, padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                  <td colSpan={frozenCols.length + restCols.length + 2} style={{ ...s.td, padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
                     No rows yet. Click + Add row below to add one.
                   </td>
                 </tr>
