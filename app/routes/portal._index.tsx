@@ -2819,8 +2819,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!sampleId) return null;
     const existing = await prisma.sampleIteration.findMany({ where: { sampleId }, select: { version: true } });
     const nextVersion = existing.length > 0 ? Math.max(...existing.map((i) => i.version)) + 1 : 1;
-    await prisma.sampleIteration.create({ data: { sampleId, version: nextVersion, status: "under_consideration" } });
-    return null;
+    const created = await prisma.sampleIteration.create({ data: { sampleId, version: nextVersion, status: "under_consideration" } });
+    // Return the created version so the drawer can add it optimistically
+    // (instant, and reliable — no dependence on a heavy loader revalidation
+    // that could fail and make the new version look lost).
+    const c = created as Record<string, unknown>;
+    return jsonResponse({
+      ok: true,
+      iteration: {
+        id: created.id, sampleId: created.sampleId, version: created.version,
+        name: (c.name as string | null) ?? null, notes: (c.notes as string | null) ?? null,
+        fabricType: (c.fabricType as string | null) ?? null, sampleSize: (c.sampleSize as string | null) ?? null,
+        buttonType: (c.buttonType as string | null) ?? null, factoryCost: (c.factoryCost as string | null) ?? null,
+        status: created.status,
+        images: [] as string[], imageCount: 0, hasThumbnail: false,
+        taggedUsers: (c.taggedUsers as unknown) ?? null,
+        createdAt: created.createdAt, updatedAt: created.updatedAt,
+      },
+    });
   }
   if (intent === "update_sample_iteration") {
     const iterationId = Number(form.get("iterationId"));
@@ -4455,6 +4471,10 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (formData?.get("noRevalidate") === "1") return false;
   const intent = formData?.get("intent") as string | null;
   if (intent === "reorder_samples" || intent === "rename_sample" || intent === "update_sample_iteration") return false;
+  // Adding a version returns the created iteration; the drawer appends it
+  // optimistically, so no heavy samples-loader re-run is needed (that re-run
+  // was the slow/flaky step that made new versions look lost).
+  if (intent === "add_sample_iteration") return false;
   // Destination updates only flip a column on one row. The chip dropdown
   // shows the new value optimistically via its own fetcher formData, and
   // OrderRow keeps the destination in local state so the row tint /
@@ -10667,6 +10687,14 @@ function SamplesPanel({
     })));
   };
 
+  // Append a newly-created version to the sample immediately (deduped by id so
+  // a re-render can't add it twice).
+  const handleIterationAdded = (sampleId: number, iteration: SampleIterationType) => {
+    setLocalSamples((prev) => prev.map((s) => s.id === sampleId
+      ? { ...s, iterations: s.iterations.some((it) => it.id === iteration.id) ? s.iterations : [...s.iterations, iteration] }
+      : s));
+  };
+
   const reorderSamples = (targetId: number) => {
     if (!dragSampleId || dragSampleId === targetId || normalizedSearch) return;
     const fromIndex = localSamples.findIndex((s) => s.id === dragSampleId);
@@ -10744,7 +10772,7 @@ function SamplesPanel({
       </div>
 
       {selectedSample && typeof document !== "undefined" && createPortal(
-        <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} users={users} currentUser={currentUser} onIterationLocalUpdate={handleIterationLocalUpdate} />,
+        <SampleDetailPanel sample={selectedSample} onClose={() => setSelectedSampleId(null)} users={users} currentUser={currentUser} onIterationLocalUpdate={handleIterationLocalUpdate} onIterationAdded={handleIterationAdded} />,
         document.body,
       )}
 
@@ -10912,14 +10940,16 @@ function SampleDetailPanel({
   users,
   currentUser,
   onIterationLocalUpdate,
+  onIterationAdded,
 }: {
   sample: SampleType;
   onClose: () => void;
   users: PortalUser[];
   currentUser: PortalUser | null;
   onIterationLocalUpdate: (iterationId: number, patch: Partial<SampleIterationType>) => void;
+  onIterationAdded: (sampleId: number, iteration: SampleIterationType) => void;
 }) {
-  const fetcher = useFetcher();
+  const fetcher = useFetcher<{ ok?: boolean; iteration?: SampleIterationType }>();
   const [isEditingName, setIsEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(sample.name);
   const [iterations, setIterations] = useState<SampleIterationType[]>(sample.iterations);
@@ -10953,6 +10983,14 @@ function SampleDetailPanel({
   const addIteration = () => {
     fetcher.submit({ intent: "add_sample_iteration", sampleId: String(sample.id) }, { method: "post" });
   };
+  // When the add action returns the created version, append it to the sample
+  // immediately (parent state → flows back into this drawer's iterations).
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.ok && fetcher.data.iteration) {
+      onIterationAdded(sample.id, fetcher.data.iteration);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetcher.state, fetcher.data]);
 
   const sortedIterations = [...iterations].sort((a, b) => b.version - a.version);
 
