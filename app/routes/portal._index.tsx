@@ -12951,6 +12951,148 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   );
 }
 
+// Cover-image picker modal for collection / photo-shoot cards. Three ways to
+// set the cover: drag & drop (or click to browse), paste from the clipboard
+// (⌘/Ctrl-V), or pick an image from Dropbox. Whichever the user chooses hands
+// a File up via onPick, which the card compresses into the thumbnail.
+function CoverImagePickerModal({
+  noun, initialQuery, onPick, onClose,
+}: {
+  noun: string;
+  initialQuery: string;
+  onPick: (file: File) => void;
+  onClose: () => void;
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState(initialQuery);
+  const searchFetcher = useFetcher<{ entries?: Array<{ type: string; name: string; path: string; kind?: string; rev?: string }>; error?: string; configured?: boolean }>();
+  const runSearch = (q: string) => { if (q.trim().length >= 2) searchFetcher.load(`/api/dropbox?op=search&q=${encodeURIComponent(q.trim())}`); };
+  useEffect(() => { runSearch(initialQuery); /* eslint-disable-next-line */ }, []);
+
+  const useFile = (file: File | null | undefined) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    onPick(file);
+    onClose();
+  };
+
+  // Paste-from-clipboard while the modal is open.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const it of Array.from(items)) {
+        if (it.type.startsWith("image/")) {
+          const file = it.getAsFile();
+          if (file) { e.preventDefault(); useFile(file); return; }
+        }
+      }
+    };
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Pull a Dropbox image through our own thumbnail endpoint (avoids CORS) and
+  // hand it up as a File.
+  const pickDropbox = async (path: string, rev?: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/dropbox-thumb?path=${encodeURIComponent(path)}&rev=${encodeURIComponent(rev ?? "")}&size=w640h640`);
+      if (!res.ok) throw new Error("fetch failed");
+      const blob = await res.blob();
+      useFile(new File([blob], "cover.jpg", { type: blob.type || "image/jpeg" }));
+    } catch {
+      window.alert("Couldn't load that Dropbox image. Try another.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const results = (searchFetcher.data?.entries ?? []).filter((e) => e.type === "file" && e.kind === "image");
+
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
+      <div style={{ background: "#fff", borderRadius: 10, width: 560, maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb", fontWeight: 800, fontSize: 15 }}>Set cover image</div>
+
+        {/* Drop / browse / paste zone */}
+        <div style={{ padding: 16 }}>
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => { e.preventDefault(); setDragOver(false); useFile(e.dataTransfer.files?.[0]); }}
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              border: `2px dashed ${dragOver ? "#0d9488" : "#cbd5e1"}`,
+              background: dragOver ? "#f0fdfa" : "#f8fafc",
+              borderRadius: 10, padding: "26px 16px", textAlign: "center",
+              cursor: "pointer", color: "#475569", fontSize: 13,
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>Drag &amp; drop an image here</div>
+            <div style={{ fontSize: 12, color: "#64748b" }}>or click to browse · or paste (⌘/Ctrl-V)</div>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; useFile(f); }}
+          />
+        </div>
+
+        {/* Dropbox */}
+        <div style={{ padding: "0 16px 6px", borderTop: "1px solid #f1f5f9" }}>
+          <div style={{ fontWeight: 700, fontSize: 13, margin: "12px 0 8px" }}>…or pick from Dropbox</div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") runSearch(query); }}
+              placeholder="Search Dropbox…"
+              style={{ flex: 1, border: "1px solid #d1d5db", borderRadius: 6, padding: "7px 10px", fontSize: 13, boxSizing: "border-box" }}
+            />
+            <button type="button" onClick={() => runSearch(query)} style={{ ...s.secondaryButton }}>Search</button>
+          </div>
+        </div>
+        <div style={{ overflowY: "auto", flex: 1, padding: "0 16px 12px", minHeight: 80 }}>
+          {searchFetcher.data?.configured === false ? (
+            <div style={{ padding: 18, textAlign: "center", color: "#b45309", fontSize: 12 }}>Dropbox isn’t connected.</div>
+          ) : searchFetcher.data?.error ? (
+            <div style={{ padding: 18, textAlign: "center", color: "#b91c1c", fontSize: 12 }}>{searchFetcher.data.error}</div>
+          ) : searchFetcher.state !== "idle" && results.length === 0 ? (
+            <div style={{ padding: 18, textAlign: "center", color: "#94a3b8", fontSize: 12 }}>Searching…</div>
+          ) : results.length === 0 ? (
+            <div style={{ padding: 18, textAlign: "center", color: "#94a3b8", fontSize: 12 }}>Search Dropbox for an image.</div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+              {results.map((r) => (
+                <button
+                  key={r.path}
+                  type="button"
+                  onClick={() => pickDropbox(r.path, r.rev)}
+                  title={r.name}
+                  style={{ border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", padding: 0, cursor: busy ? "wait" : "pointer", background: "#fff", aspectRatio: "1 / 1" }}
+                >
+                  <DropboxThumb path={r.path} rev={r.rev} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div style={{ padding: "10px 16px", borderTop: "1px solid #e5e7eb", textAlign: "right" }}>
+          <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 5, padding: "6px 14px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function CollectionCard({
   collection,
   isDragging,
@@ -12999,7 +13141,7 @@ function CollectionCard({
   const [hover, setHover] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(collection.name);
-  const coverInputRef = useRef<HTMLInputElement>(null);
+  const [coverPickerOpen, setCoverPickerOpen] = useState(false);
   useEffect(() => { setDraft(collection.name); }, [collection.name]);
 
   return (
@@ -13062,7 +13204,7 @@ function CollectionCard({
         {(hover || !collection.hasThumbnail) && (
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); coverInputRef.current?.click(); }}
+            onClick={(e) => { e.stopPropagation(); setCoverPickerOpen(true); }}
             style={{
               position: "absolute", bottom: 8, right: 8,
               padding: "4px 10px", borderRadius: 6,
@@ -13076,18 +13218,14 @@ function CollectionCard({
             {collection.hasThumbnail ? "Change cover" : "+ Cover image"}
           </button>
         )}
-        <input
-          ref={coverInputRef}
-          type="file"
-          accept="image/*"
-          style={{ display: "none" }}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            e.target.value = "";
-            if (file) onSetCover(file);
-          }}
-        />
+        {coverPickerOpen && (
+          <CoverImagePickerModal
+            noun={noun}
+            initialQuery={collection.name}
+            onPick={onSetCover}
+            onClose={() => setCoverPickerOpen(false)}
+          />
+        )}
       </div>
       <div style={{ ...s.productStyleCardBody, paddingBottom: 14 }}>
         {editing ? (
