@@ -10802,6 +10802,98 @@ function SamplesPanel({
   );
 }
 
+// Concurrency gate so the samples grid never fires every high-res image at
+// once — at most a handful download in parallel; the rest wait their turn.
+const SAMPLE_IMG_MAX_CONCURRENT = 5;
+let sampleImgActive = 0;
+const sampleImgQueue: Array<() => void> = [];
+function sampleImgAcquire(): Promise<void> {
+  return new Promise((resolve) => {
+    if (sampleImgActive < SAMPLE_IMG_MAX_CONCURRENT) { sampleImgActive++; resolve(); }
+    else sampleImgQueue.push(() => { sampleImgActive++; resolve(); });
+  });
+}
+function sampleImgRelease() {
+  sampleImgActive = Math.max(0, sampleImgActive - 1);
+  const next = sampleImgQueue.shift();
+  if (next) next();
+}
+
+// Sample card image with "blur-up" + on-demand hi-res:
+//  1. The tiny 240px thumbnail loads immediately (native lazy) so the card is
+//     never blank and the page feels instant.
+//  2. An IntersectionObserver waits until the card is near the viewport, then
+//     — through the concurrency gate above — loads the crisp ~800px image and
+//     fades it in over the placeholder.
+// Net effect: fast first paint, images stream in as you scroll (not all at
+// once), and the final quality is sharp.
+function SampleCardImage({ iterationId, updatedAt, alt }: { iterationId: number; updatedAt: string | Date; alt: string }) {
+  const v = new Date(updatedAt).getTime();
+  const lowSrc = `/portal/thumbnail/sample/${iterationId}?v=${v}`;
+  const hiSrc = `/portal/thumbnail/sample/${iterationId}?v=${v}&size=full`;
+  const ref = useRef<HTMLDivElement>(null);
+  const [inView, setInView] = useState(false);
+  const [hiLoad, setHiLoad] = useState(false); // slot acquired → start hi-res fetch
+  const [hiReady, setHiReady] = useState(false); // hi-res finished → fade in
+  const releasedRef = useRef(false);
+  const acquiredRef = useRef(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === "undefined") { setInView(true); return; }
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) { setInView(true); io.disconnect(); }
+    }, { rootMargin: "400px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!inView) return;
+    let active = true;
+    sampleImgAcquire().then(() => {
+      acquiredRef.current = true;
+      if (active) setHiLoad(true);
+      else { releasedRef.current = true; sampleImgRelease(); }
+    });
+    // On unmount: if we grabbed a slot and the image hasn't reported load yet,
+    // free it so the queue keeps moving (no slot leak).
+    return () => {
+      active = false;
+      if (acquiredRef.current && !releasedRef.current) { releasedRef.current = true; sampleImgRelease(); }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inView]);
+
+  const done = () => { if (!releasedRef.current) { releasedRef.current = true; sampleImgRelease(); } };
+
+  return (
+    <div ref={ref} style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden" }}>
+      <img
+        src={lowSrc}
+        alt={alt}
+        loading="lazy"
+        decoding="async"
+        style={{ ...s.productStyleImage, filter: hiReady ? "none" : "blur(0.5px)" }}
+      />
+      {hiLoad && (
+        <img
+          src={hiSrc}
+          alt={alt}
+          decoding="async"
+          onLoad={() => { setHiReady(true); done(); }}
+          onError={done}
+          style={{
+            ...s.productStyleImage,
+            position: "absolute", inset: 0,
+            opacity: hiReady ? 1 : 0, transition: "opacity 0.25s ease",
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 function SampleCard({
   sample,
   isDragging,
@@ -10903,13 +10995,7 @@ function SampleCard({
       {/* Image */}
       <div style={s.productStyleImageWrap}>
         {expectsImage && latestIteration ? (
-          <img
-            src={`/portal/thumbnail/sample/${latestIteration.id}?v=${new Date(latestIteration.updatedAt).getTime()}`}
-            alt={sample.name}
-            style={s.productStyleImage}
-            loading="lazy"
-            decoding="async"
-          />
+          <SampleCardImage iterationId={latestIteration.id} updatedAt={latestIteration.updatedAt} alt={sample.name} />
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
         )}

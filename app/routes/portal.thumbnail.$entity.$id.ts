@@ -8,12 +8,16 @@ import prisma from "../db.server";
 // URL form: /portal/thumbnail/vision/123 or /portal/thumbnail/sample/456
 // A `?v=<timestamp>` cache-buster is appended by the client so an updated
 // thumbnail invalidates the cache.
-export async function loader({ params }: LoaderFunctionArgs) {
+export async function loader({ params, request }: LoaderFunctionArgs) {
   const entity = params.entity;
   const id = Number(params.id);
   if (!id || (entity !== "vision" && entity !== "visionV2" && entity !== "sample" && entity !== "collection" && entity !== "photoshoot")) {
     return new Response("Not found", { status: 404 });
   }
+  // ?size=full serves the higher-resolution stored image (images[0], ~800px)
+  // instead of the tiny 240px thumbnail — used by the sample cards to upgrade
+  // from a blur-up placeholder to a crisp image once in view.
+  const wantsFull = new URL(request.url).searchParams.get("size") === "full";
 
   let dataUrl: string | null = null;
   try {
@@ -47,11 +51,12 @@ export async function loader({ params }: LoaderFunctionArgs) {
         select: { thumbnail: true, images: true },
       });
       if (it) {
-        if (it.thumbnail) dataUrl = it.thumbnail;
-        else if (Array.isArray(it.images) && it.images.length > 0) {
-          const first = (it.images as unknown[])[0];
-          if (typeof first === "string") dataUrl = first;
-        }
+        const firstFull = Array.isArray(it.images) && it.images.length > 0 && typeof it.images[0] === "string"
+          ? (it.images[0] as string) : null;
+        // Full-res request: prefer the stored full image; fall back to the
+        // thumbnail. Default request: prefer the small thumbnail; fall back to
+        // the full image (older rows without a generated thumbnail).
+        dataUrl = wantsFull ? (firstFull ?? it.thumbnail) : (it.thumbnail ?? firstFull);
       }
     } else if (entity === "photoshoot") {
       const ps = await prisma.photoShoot.findUnique({
