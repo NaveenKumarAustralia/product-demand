@@ -5271,6 +5271,7 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   costRupees: 110,
   costAud: 110,
   fabricStock: 170,
+  barcode: 130,
   delete: 104,
 };
 
@@ -8647,6 +8648,7 @@ export default function PortalDashboard() {
     { id: "costRupees", label: "Cost (₹)", center: true },
     { id: "costAud", label: "Cost (A$)", center: true },
     { id: "fabricStock", label: "Fabric in stock", center: true },
+    { id: "barcode", label: "Barcode", center: true },
     ...customColumns.restock.map((column) => ({ id: column.id, label: column.label })),
   ];
 
@@ -21323,6 +21325,7 @@ function OrderRow({
   const costRupeesCol = totalCol + 6;
   const costAudCol = totalCol + 7;
   const fabricStockCol = totalCol + 8;
+  const barcodeCol = totalCol + 9;
   const fabricMatches = findFabricStockMatches(order.productTitle, fabricStockIndex);
   const rowHeightKey = `restock:${order.id}`;
   const shouldSkipDeleteConfirm = () => {
@@ -21432,7 +21435,6 @@ function OrderRow({
           <div style={s.skuCellWithToggle}>
             <div style={{ display: "flex", flexDirection: "column" }}>
               <span style={s.sku}>{allSkus || "—"}</span>
-              {allBarcodes && <span style={s.barcode} title="Barcode">{allBarcodes}</span>}
             </div>
             <button
               type="button"
@@ -21583,8 +21585,18 @@ function OrderRow({
           )}
         </Td>
 
+        {/* Barcode — its own column at the end, pulled from the order lines
+            (previously shown under the SKU). */}
+        <Td rowIndex={rowIndex} colIndex={barcodeCol} center overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Barcode" historyEntityName={order.productTitle}>
+          {allBarcodes ? (
+            <span style={s.barcode} title="Barcode">{allBarcodes}</span>
+          ) : (
+            <span style={{ color: "#9ca3af" }}>—</span>
+          )}
+        </Td>
+
         {customColumns.map((column, customIndex) => (
-          <Td key={column.id} rowIndex={rowIndex} colIndex={fabricStockCol + 1 + customIndex}>
+          <Td key={column.id} rowIndex={rowIndex} colIndex={barcodeCol + 1 + customIndex}>
             <TableCustomCell cellKey={`restock:${order.id}:${column.id}`} value={customCells[`restock:${order.id}:${column.id}`] ?? ""} />
           </Td>
         ))}
@@ -21592,7 +21604,7 @@ function OrderRow({
       </tr>
       {deleteConfirmOpen && (
         <tr>
-          <td colSpan={fabricStockCol + customColumns.length + 2}>
+          <td colSpan={barcodeCol + customColumns.length + 2}>
             <div style={s.deleteConfirm} onClick={() => setDeleteConfirmOpen(false)}>
               <div style={s.deleteConfirmCard} onClick={(event) => event.stopPropagation()}>
                 <div style={s.deleteConfirmTitle}>Delete this restock row?</div>
