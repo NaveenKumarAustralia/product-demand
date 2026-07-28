@@ -7861,6 +7861,37 @@ type CollectionPushResult = {
 // row's price; SKU uses row.sku + "-" + size; Inventory item Cost
 // uses row.cost). Status defaults to DRAFT. Returns the created
 // product id + handle so the caller can store it back on the row.
+// Derive a Shopify product type from the product/style name by looking for a
+// garment keyword (longest match wins). Auto-fills the product type so it
+// doesn't need its own column.
+const PRODUCT_TYPE_KEYWORDS: Array<[RegExp, string]> = [
+  [/\bmaxi\s*dress|\bmidi\s*dress|\bdress(es)?\b/i, "Dress"],
+  [/\bjumpsuit/i, "Jumpsuit"],
+  [/\bplaysuit|\bromper/i, "Playsuit"],
+  [/\bskirt/i, "Skirt"],
+  [/\bshort(s)?\b/i, "Shorts"],
+  [/\bpant(s)?\b|\btrouser/i, "Pants"],
+  [/\bculotte/i, "Pants"],
+  [/\bjacket|\bcoat|\bblazer/i, "Jacket"],
+  [/\bcardigan|\bknit|\bjumper|\bsweater/i, "Knitwear"],
+  [/\bblouse|\bshirt/i, "Shirt"],
+  [/\btop\b|\btee\b|\bt-shirt|\bcami\b|\bsinglet|\btank\b/i, "Top"],
+  [/\bkaftan|\bkimono/i, "Kaftan"],
+  [/\bscarf|\bshawl/i, "Accessories"],
+  [/\bbag\b|\btote\b|\bclutch/i, "Bags"],
+];
+function deriveProductTypeFromName(name: string): string {
+  const n = (name ?? "").toLowerCase();
+  for (const [re, type] of PRODUCT_TYPE_KEYWORDS) if (re.test(n)) return type;
+  return "";
+}
+// A Shopify custom "categories" value from the product type (used for SEO).
+function deriveCategoryFromProductType(productType: string): string {
+  if (!productType) return "";
+  const map: Record<string, string> = { Dress: "Dresses", Skirt: "Skirts", Pants: "Pants", Shorts: "Shorts", Top: "Tops", Shirt: "Tops", Jacket: "Jackets", Knitwear: "Knitwear", Jumpsuit: "Jumpsuits", Playsuit: "Playsuits", Kaftan: "Kaftans", Bags: "Bags", Accessories: "Accessories" };
+  return map[productType] ?? productType;
+}
+
 async function createShopifyProductFromRow(
   shop: string,
   accessToken: string,
@@ -7990,7 +8021,8 @@ async function createShopifyProductFromRow(
   };
   const description = (row.description ?? "").trim();
   if (description) input.descriptionHtml = description;
-  const productType = (row.productType ?? "").trim();
+  // Product type: use the typed value, else auto-derive from the name.
+  const productType = (row.productType ?? "").trim() || deriveProductTypeFromName(title);
   if (productType) input.productType = productType;
   const vendor = (row.vendor ?? "").trim();
   if (vendor) input.vendor = vendor;
@@ -8009,7 +8041,8 @@ async function createShopifyProductFromRow(
   // Metafields: colour + categories live as custom metafields. Strings
   // for now — the next push can introduce typed (list.single_line, etc).
   const colour = (row.colour ?? "").trim();
-  const categories = (row.categories ?? "").trim();
+  // Categories: use the typed value, else derive from the (auto) product type.
+  const categories = (row.categories ?? "").trim() || deriveCategoryFromProductType(productType);
   const metafields: Array<{ namespace: string; key: string; type: string; value: string }> = [];
   if (colour) metafields.push({ namespace: "custom", key: "colour", type: "single_line_text_field", value: colour });
   if (categories) metafields.push({ namespace: "custom", key: "categories", type: "single_line_text_field", value: categories });
@@ -12105,7 +12138,7 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
 // Columns whose value is now set automatically at Shopify-create, so they no
 // longer need to show on the sheet (the data still lives on the row; it's just
 // hidden and/or auto-filled).
-const COLLECTION_HIDDEN_COLUMN_IDS = new Set<string>(["compareAtPrice", "countryOfOrigin"]);
+const COLLECTION_HIDDEN_COLUMN_IDS = new Set<string>(["compareAtPrice", "countryOfOrigin", "productType", "categories"]);
 
 // Hover help for each Collections column — surfaced as an ⓘ on the header.
 const COLLECTION_COLUMN_HELP: Record<string, string> = {
