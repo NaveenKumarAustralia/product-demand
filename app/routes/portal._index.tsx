@@ -4461,6 +4461,14 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // stamp react instantly — there's no reason to re-run the (expensive)
   // restock loader (Shopify variant enrichment etc.) just for this.
   if (intent === "update_destination") return false;
+  // Priority is now kept in the row's local state (controlled chip), so a
+  // priority change no longer needs the expensive restock loader re-run.
+  if (intent === "update_priority") return false;
+  // Notes / factory notes: the MentionableTextarea keeps the typed text in
+  // local state, @mention fan-out runs server-side in the action, and thread
+  // count badges refresh via their own fetcher — so these edits don't need the
+  // heavy loader re-run either. (This was a source of "Load failed" on save.)
+  if (intent === "update_notes" || intent === "update_factory_notes") return false;
   // Linking a restock row to a packing list updates one column on one
   // row — local optimistic state handles the badge.
   if (intent === "update_packing_list_link") return false;
@@ -6509,9 +6517,11 @@ type FabricStockEntry = {
 // page is exactly what the cost matcher uses — otherwise a fabric can look
 // in-stock on the page yet be invisible to costing (the "Candy" bug).
 function combinedFabricSheetsForIndex(manualFabricSheets: FabricStockSheet[]): FabricSheetData[] {
-  return getFabricSheets(undefined, undefined, undefined, [], [], {}, {}, manualFabricSheets)
-    .filter(isCombinedFabricSource)
-    .map(padCombinedFabricSheet);
+  // manualFabricSheets is already the fully-resolved saved state, so we can
+  // filter + pad it directly instead of re-running the heavier getFabricSheets
+  // pipeline on every loader/revalidation — that overhead was adding latency to
+  // every restock edit's reload.
+  return manualFabricSheets.filter(isCombinedFabricSource).map(padCombinedFabricSheet);
 }
 
 function buildFabricStockIndex(sheets: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>): FabricStockEntry[] {
@@ -21314,6 +21324,10 @@ function OrderRow({
   // useState re-initialises from scratch; within the lifetime of a single
   // order, only the user's clicks change the destination here.
   const [destinationLocal, setDestinationLocal] = useState(order.destination ?? "");
+  // Priority is kept local (same reasoning as destination) so its edit doesn't
+  // need to re-run the heavy restock loader (Shopify enrichment) — which was a
+  // source of intermittent "Load failed" errors.
+  const [priorityLocal, setPriorityLocal] = useState(order.priority ?? "");
   // Whenever a destination is set, tint the whole row and overlay a
   // translucent stamp across the first frozen cells (order date /
   // picture / name) using the per-destination palette. Hard to miss
@@ -21434,7 +21448,7 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle} style={{ height: 1, padding: 0, position: "relative", verticalAlign: "top" }}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
 
         {/* Priority */}
-        <Td rowIndex={rowIndex} colIndex={priorityCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Priority" historyEntityName={order.productTitle}><PriorityCell orderId={order.id} value={order.priority ?? ""} restockSettings={restockSettings} /></Td>
+        <Td rowIndex={rowIndex} colIndex={priorityCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Priority" historyEntityName={order.productTitle}><PriorityCell orderId={order.id} value={priorityLocal} restockSettings={restockSettings} onChange={setPriorityLocal} /></Td>
 
         {/* ETA */}
         <Td rowIndex={rowIndex} colIndex={etaCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="ETA" historyEntityName={order.productTitle}><EtaCell orderId={order.id} value={etaValue} /></Td>
@@ -22076,7 +22090,7 @@ function StatusCell({
   );
 }
 
-function PriorityCell({ orderId, value, restockSettings }: { orderId: number; value: string; restockSettings: RestockSettings }) {
+function PriorityCell({ orderId, value, restockSettings, onChange }: { orderId: number; value: string; restockSettings: RestockSettings; onChange?: (next: string) => void }) {
   return (
     <RestockOptionChipDropdown
       orderId={orderId}
@@ -22087,6 +22101,8 @@ function PriorityCell({ orderId, value, restockSettings }: { orderId: number; va
       updateIntent="update_priority"
       undoLabel="Undo priority"
       emptyLabel="— Priority —"
+      onChange={onChange}
+      controlled
     />
   );
 }
