@@ -15047,8 +15047,72 @@ function CollectionCellInner({
       />
     );
   }
+  if (columnId === "description" || columnId === "seoTitle" || columnId === "seoDescription") {
+    return (
+      <CollectionAiTextCell
+        value={value}
+        draft={draft}
+        setDraft={setDraft}
+        onCommit={onCommit}
+        kind={columnId === "seoTitle" ? "seoTitle" : columnId === "seoDescription" ? "seoDescription" : "description"}
+        productName={rowName ?? ""}
+        productInfo={productInfo}
+      />
+    );
+  }
   return (
     <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+  );
+}
+
+// A text cell with a ✨ "Generate with AI" button (Description / SEO). Calls
+// /api/ai-generate with the row's product name + its style's product type, and
+// uses whatever is already in the cell as the source to rewrite/improve.
+function CollectionAiTextCell({
+  value, draft, setDraft, onCommit, kind, productName, productInfo,
+}: {
+  value: string;
+  draft: string;
+  setDraft: (next: string) => void;
+  onCommit: (next: string) => void;
+  kind: "description" | "seoTitle" | "seoDescription";
+  productName: string;
+  productInfo?: ProductInfo;
+}) {
+  const fetcher = useFetcher<{ ok?: boolean; text?: string; error?: string }>();
+  const generating = fetcher.state !== "idle";
+  const productType = useMemo(() => {
+    if (!productInfo || !productName.trim()) return "";
+    const styleName = extractStyleFromName(productName, productInfo);
+    if (!styleName) return "";
+    for (const cat of productInfo.categories ?? []) for (const st of cat.styles ?? []) if (st.name === styleName) return st.productType ?? "";
+    return "";
+  }, [productInfo, productName]);
+  useEffect(() => {
+    if (fetcher.state === "idle" && fetcher.data?.ok && fetcher.data.text) {
+      setDraft(fetcher.data.text);
+      onCommit(fetcher.data.text);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetcher.state, fetcher.data]);
+  const generate = () => {
+    if (!productName.trim() || generating) return;
+    fetcher.submit({ kind, productName, productType, source: draft }, { method: "post", action: "/api/ai-generate" });
+  };
+  return (
+    <div style={{ position: "relative", width: "100%" }}>
+      <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); generate(); }}
+        disabled={generating || !productName.trim()}
+        title={!productName.trim() ? "Add a Name first" : generating ? "Generating…" : "Generate with AI"}
+        style={{ position: "absolute", top: 2, right: 2, zIndex: 2, background: generating ? "#e5e7eb" : "#111827", color: "#fff", border: "none", borderRadius: 4, fontSize: 11, padding: "2px 6px", cursor: generating || !productName.trim() ? "default" : "pointer", opacity: !productName.trim() ? 0.4 : 1 }}
+      >{generating ? "…" : "✨ AI"}</button>
+      {fetcher.data?.ok === false && (
+        <span title={fetcher.data.error} style={{ position: "absolute", bottom: 2, right: 4, color: "#b45309", fontSize: 11, cursor: "help" }}>⚠</span>
+      )}
+    </div>
   );
 }
 
