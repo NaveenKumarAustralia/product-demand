@@ -16055,6 +16055,9 @@ function CollectionDuplicateFromCell({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(styleHint || currentName.trim().split(/\s+/).slice(0, -1).join(" "));
   const [pickedLabelPending, setPickedLabelPending] = useState<string | null>(null);
+  // When true, the next search result set is auto-applied (most recent match)
+  // — the "auto-pick latest same-style product" one-click flow.
+  const [autoPicking, setAutoPicking] = useState(false);
 
   const runSearch = (q: string) => {
     const params = new URLSearchParams();
@@ -16091,22 +16094,50 @@ function CollectionDuplicateFromCell({
   const isFetching = pickFetcher.state !== "idle";
   const products = searchFetcher.data?.products ?? [];
 
+  // Auto-pick: kick off a search by the style, then apply the most recent
+  // (first) result as soon as it arrives — no browsing.
+  const autoPick = () => {
+    const q = styleHint || currentName.trim().split(/\s+/).slice(0, -1).join(" ");
+    if (!q.trim()) return;
+    setAutoPicking(true);
+    setQuery(q);
+    runSearch(q);
+  };
+  useEffect(() => {
+    if (!autoPicking || searchFetcher.state !== "idle") return;
+    const list = searchFetcher.data?.products ?? [];
+    if (list.length > 0) pick(list[0]);
+    setAutoPicking(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoPicking, searchFetcher.state, searchFetcher.data]);
+
   return (
     <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        style={{
-          width: "100%", textAlign: "left",
-          background: "transparent", border: "1px dashed #d1d5db",
-          borderRadius: 5, padding: "5px 8px", fontSize: 12,
-          color: value ? "#111827" : "#6b7280",
-          cursor: "pointer",
-        }}
-        title="Pick a Shopify product to duplicate from"
-      >
-        {value || "+ Duplicate from…"}
-      </button>
+      <div style={{ display: "flex", gap: 4, alignItems: "stretch" }}>
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          style={{
+            flex: 1, textAlign: "left",
+            background: "transparent", border: "1px dashed #d1d5db",
+            borderRadius: 5, padding: "5px 8px", fontSize: 12,
+            color: value ? "#111827" : "#6b7280",
+            cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}
+          title="Browse / pick a Shopify product to duplicate from"
+        >
+          {value || "+ Duplicate from…"}
+        </button>
+        {!value && (styleHint || currentName.trim()) && (
+          <button
+            type="button"
+            onClick={autoPick}
+            disabled={autoPicking || isFetching}
+            title={`Auto-pick the latest ${styleHint || "same-style"} product from Shopify`}
+            style={{ flexShrink: 0, background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 8px", fontSize: 12, fontWeight: 600, cursor: autoPicking || isFetching ? "wait" : "pointer" }}
+          >{autoPicking || isFetching ? "…" : "⚡ Auto"}</button>
+        )}
+      </div>
       {open && typeof document !== "undefined" && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setOpen(false)}>
           <div style={{ background: "#fff", borderRadius: 10, width: 540, maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
