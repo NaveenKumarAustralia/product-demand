@@ -14978,11 +14978,16 @@ function CollectionPriceRupeesCell({
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
+  // Set when the user just cleared the price, so the style/fabric pickers show
+  // even if a stale value would otherwise auto-resolve. Reset once a real value
+  // lands again (so it doesn't flash pickers on every auto-resolved row).
+  const [justCleared, setJustCleared] = useState(false);
+  useEffect(() => { if (value.trim()) setJustCleared(false); }, [value]);
   // Emptying the cell means "make this automatic" — clear the manual/sheet
   // price (and its override) and fall back to the computed fabric cost.
   // A non-empty value is a manual override the user typed.
   const onCommit = (next: string) => {
-    if (!next.trim()) { onResetToAutomatic(); return; }
+    if (!next.trim()) { setJustCleared(true); onResetToAutomatic(); return; }
     updateCell(rowIndex, "priceRupees", next);
   };
   // Right-click the price to pop the full cost breakdown (fabric, meters,
@@ -15000,10 +15005,11 @@ function CollectionPriceRupeesCell({
       },
     }));
   };
-  // The picker shows only when there's a row name to pick FOR, the
-  // user hasn't typed a manual value, and the title-based lookup
-  // can't auto-resolve. Otherwise the cell is a plain number input.
-  const showPicker = !draft.trim() && !autoValue && rowName.length > 0 && !styleOverrideId;
+  // Show the style/fabric pickers when the cell is EMPTY and there's a row name
+  // to pick for — either nothing auto-resolves, OR the user just cleared the
+  // price (so they can re-select style + fabric to bring in a new cost even if
+  // a stale value would otherwise resolve). A committed value hides them.
+  const showPicker = !draft.trim() && rowName.length > 0 && !styleOverrideId && (!autoValue || justCleared);
   // Resolve the override style's name from productInfo so the
   // subtext can say "Style: Tiered Maxi Dress" instead of an id.
   const overrideStyleName = useMemo(() => {
