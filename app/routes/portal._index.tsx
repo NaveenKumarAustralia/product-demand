@@ -5777,6 +5777,11 @@ function buildStyleCostLookup(
   const allFabrics: Array<FabricCandidate & { key: string }> = [];
   const fabricByKey = new Map<string, FabricCandidate & { key: string }>();
   const fabricKeyFor = (sheetName: string, name: string) => `${sheetName.trim().toLowerCase()}::${name.trim().toLowerCase()}`;
+  // Two fabrics with the same sheet + name would collapse to one key, so a
+  // manual pick couldn't tell them apart (it kept reverting to whichever was
+  // stored last). Append an occurrence index to make each key UNIQUE. The
+  // first occurrence keeps the plain key so older stored overrides still work.
+  const keyOccurrences = new Map<string, number>();
   for (const entry of fabricStockIndex) {
     if (entry.kind !== "stock") continue;
     const nameLower = entry.name.trim().toLowerCase();
@@ -5794,7 +5799,10 @@ function buildStyleCostLookup(
       bucket.push(cand);
       candidatesByName.set(nameLower, bucket);
     }
-    const key = fabricKeyFor(entry.sheetName, entry.name);
+    const baseKey = fabricKeyFor(entry.sheetName, entry.name);
+    const occ = keyOccurrences.get(baseKey) ?? 0;
+    keyOccurrences.set(baseKey, occ + 1);
+    const key = occ === 0 ? baseKey : `${baseKey}::${occ}`;
     const withKey = { ...cand, key };
     allFabrics.push(withKey);
     fabricByKey.set(key, withKey);
@@ -5823,17 +5831,11 @@ function buildStyleCostLookup(
         // Unique fabric name → match without requiring a style link.
         return { kind: "ok", fabric: candidates[0], fabricName: name };
       }
-      // Multiple candidates → disambiguate via the per-style meters
-      // override that staff set in the Products popup on Fabric in
-      // Stock. A style is "linked" to a fabric if that fabric has a
-      // meters value > 0 for this style.id.
-      const linked = candidates.filter((c) => isFilled(c.styleMeters?.[style.id]));
-      if (linked.length === 1) return { kind: "ok", fabric: linked[0], fabricName: name };
-      if (linked.length > 1) return { kind: "ambiguous", fabricName: name, sheets: linked.map((c) => c.sheetName) };
-      // No candidates linked. Don't keep searching for shorter names —
-      // the user clearly intended this fabric word, they just haven't
-      // told us which stock entry it is. Surface that so they know.
-      return { kind: "unlinked", fabricName: name };
+      // Two or more fabrics share this name — NEVER auto-guess which one. The
+      // user must pick the exact fabric (a title fabric override, handled in
+      // resolveWithStyle before this runs). This avoids silently costing from
+      // the wrong duplicate.
+      return { kind: "ambiguous", fabricName: name, sheets: candidates.map((c) => c.sheetName) };
     }
     return { kind: "no-match" };
   };
@@ -6022,7 +6024,7 @@ function buildStyleCostLookup(
         return { styleName, missing: null, detail: `Style "${styleName}" and fabric "${match.fabricName}" are set, but the style is missing a stitching cost or average meters in Product Information.` };
       }
       if (match.kind === "ambiguous") {
-        return { styleName, missing: "fabric", detail: `Fabric "${match.fabricName}" is linked to this style in ${match.sheets.length} sheets (${match.sheets.join(", ")}). Pick the exact fabric.` };
+        return { styleName, missing: "fabric", detail: `There are ${match.sheets.length} fabrics named "${match.fabricName}" — pick the exact one so the cost isn't guessed.` };
       }
       if (match.kind === "unlinked") {
         return { styleName, missing: "fabric", detail: `Fabric "${match.fabricName}" isn't linked to a stock entry for this style. Pick the exact fabric.` };
@@ -6040,7 +6042,7 @@ function buildStyleCostLookup(
       if (!style) return null;
       const match = findFabricForStyle(style, haystack);
       if (match.kind === "ambiguous") {
-        return `Fabric "${match.fabricName}" is linked to this style in ${match.sheets.length} fabric sheets (${match.sheets.join(", ")}). Pick one in the Products popup on Fabric in Stock so the cost can be calculated.`;
+        return `There are ${match.sheets.length} fabrics named "${match.fabricName}". Pick the exact one on the Price ₹ cell so the cost isn't guessed from the wrong fabric.`;
       }
       return null;
     },
