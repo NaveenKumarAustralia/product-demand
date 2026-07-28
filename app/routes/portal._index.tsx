@@ -8919,6 +8919,13 @@ export default function PortalDashboard() {
               const fmt = (n: number) => n.toLocaleString();
               // JJ page also shows the total order value in baht + AUD.
               const totalAud = page === "jj-restock" ? convertBahtToAud(totals.totalBaht, thbPerAudCachedRate) : null;
+              // Existing Products Restock: total cost value = per-piece rupee
+              // cost (style + fabric) × qty, summed over the CURRENTLY FILTERED
+              // orders so it tracks the filters exactly like the pcs badge.
+              const restockCostRupees = page === "restock"
+                ? orders.reduce((sum: number, o: { productTitle?: string; totalQty?: number | null }) => sum + (styleCostLookup.costForTitle(o.productTitle) || 0) * (o.totalQty ?? 0), 0)
+                : 0;
+              const restockCostAud = restockCostRupees > 0 ? convertRupeesToAud(restockCostRupees, inrPerAudCachedRate) : null;
               return (
                 <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   <span style={s.restockTotalsLabel}>{label}</span>
@@ -8928,6 +8935,16 @@ export default function PortalDashboard() {
                   <span style={{ ...s.restockTotalsBadge, ...(showFiltered ? s.restockTotalsBadgeFiltered : {}) }}>
                     {fmt(totals.totalQty)} pcs
                   </span>
+                  {page === "restock" && restockCostRupees > 0 && (
+                    <span style={{ ...s.restockTotalsBadge, ...(showFiltered ? s.restockTotalsBadgeFiltered : {}) }}>
+                      ₹{fmt(Math.round(restockCostRupees))}
+                    </span>
+                  )}
+                  {page === "restock" && restockCostAud != null && restockCostAud > 0 && (
+                    <span style={{ ...s.restockTotalsBadge, ...(showFiltered ? s.restockTotalsBadgeFiltered : {}) }}>
+                      ${fmt(Math.round(restockCostAud))} AUD
+                    </span>
+                  )}
                   {page === "jj-restock" && totals.totalBaht > 0 && (
                     <span style={{ ...s.restockTotalsBadge, ...(showFiltered ? s.restockTotalsBadgeFiltered : {}) }}>
                       ฿{fmt(Math.round(totals.totalBaht))}
