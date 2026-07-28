@@ -25734,8 +25734,8 @@ const s: Record<string, React.CSSProperties> = {
   thumb: { width: 86, height: 115, objectFit: "cover", borderRadius: 2, display: "block", margin: "0 auto" },
   noImg: { color: "#d1d5db", textAlign: "center" },
   productName: { fontWeight: 600, color: "#111827", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 },
-  sku: { fontFamily: "monospace", fontSize: 11, color: "#6b7280", whiteSpace: "pre-line" },
-  barcode: { fontFamily: "monospace", fontSize: 10, color: "#9ca3af", whiteSpace: "pre-line", marginTop: 2 },
+  sku: { fontFamily: "monospace", fontSize: 11, color: "#111827", whiteSpace: "pre-line" },
+  barcode: { fontFamily: "monospace", fontSize: 10, color: "#111827", whiteSpace: "pre-line", marginTop: 2 },
   skuCellWithToggle: {
     position: "relative",
     minHeight: 72,
