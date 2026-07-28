@@ -12192,6 +12192,56 @@ const COLLECTION_COLUMN_HELP: Record<string, string> = {
   swatches: "Tick when swatches are done.",
 };
 
+// Searchable picker for a Shopify product type (or tag) that already exists in
+// the store. Loads the list on first focus, filters as you type, and lets you
+// pick one or type a brand-new value.
+function ShopifyValueCombobox({ value, onChange, kind, placeholder }: { value: string; onChange: (v: string) => void; kind: "types" | "tags"; placeholder?: string }) {
+  const fetcher = useFetcher<{ types?: string[]; tags?: string[] }>();
+  const [open, setOpen] = useState(false);
+  const loadedRef = useRef(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const load = () => { if (!loadedRef.current) { loadedRef.current = true; fetcher.load(`/api/shopify-product-meta${kind === "tags" ? "?kind=tags" : ""}`); } };
+  const all = (kind === "tags" ? fetcher.data?.tags : fetcher.data?.types) ?? [];
+  const q = value.trim().toLowerCase();
+  const matches = (q ? all.filter((t) => t.toLowerCase().includes(q)) : all).slice(0, 40);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (!wrapRef.current?.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+  return (
+    <div ref={wrapRef} style={{ position: "relative" }}>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => { load(); setOpen(true); }}
+        placeholder={placeholder}
+        style={s.productInfoDetailsInput}
+      />
+      {open && (
+        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 30, background: "#fff", border: "1px solid #d1d5db", borderRadius: 6, maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.14)", marginTop: 2 }}>
+          {fetcher.state !== "idle" && all.length === 0 ? (
+            <div style={{ padding: "8px 10px", fontSize: 12, color: "#9ca3af" }}>Loading from Shopify…</div>
+          ) : matches.length === 0 ? (
+            <div style={{ padding: "8px 10px", fontSize: 12, color: "#9ca3af" }}>{value.trim() ? `No match — "${value.trim()}" will be created new.` : "No product types found."}</div>
+          ) : matches.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onMouseDown={(e) => { e.preventDefault(); onChange(t); setOpen(false); }}
+              style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 10px", border: "none", borderBottom: "1px solid #f3f4f6", background: t === value ? "#ecfeff" : "transparent", fontSize: 13, cursor: "pointer" }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f3f4f6"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = t === value ? "#ecfeff" : "transparent"; }}
+            >{t}</button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CollectionColumnHeader({ col }: { col: { id: string; label: string } }) {
   const help = COLLECTION_COLUMN_HELP[col.id];
   return (
@@ -16597,12 +16647,11 @@ function ProductInformationPanel({
               </label>
               <label style={s.productInfoDetailsField}>
                 Product type (Shopify)
-                <input
-                  type="text"
+                <ShopifyValueCombobox
                   value={detailDraft.productType ?? ""}
-                  onChange={(event) => updateDetailDraft("productType", event.currentTarget.value)}
-                  placeholder="e.g. Short Sleeve Dress"
-                  style={s.productInfoDetailsInput}
+                  onChange={(v) => updateDetailDraft("productType", v)}
+                  kind="types"
+                  placeholder="Search Shopify types, or type a new one…"
                 />
               </label>
               <label style={s.productInfoDetailsField}>
