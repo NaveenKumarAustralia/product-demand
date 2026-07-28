@@ -351,6 +351,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       `).then((rows) => rows.map((r) => ({ id: r.id, name: r.name, sortOrder: r.sortOrder, rowCount: Number(r.rowCount), hasThumbnail: Boolean(r.hasThumbnail), createdAt: r.createdAt, updatedAt: r.updatedAt })))
         .catch(() => [] as Array<{ id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date; updatedAt: Date }>)
     : [];
+  // Collections ETA source: map each Shopify product to the estimated-arrival
+  // date of the packing list (shipment) it's in, so the ETA column can show the
+  // shipment date automatically (overriding a manual one once it's shipping).
+  const collectionEtaByProductId: Record<string, string> = {};
+  if (page === "collections") {
+    try {
+      const lines = await prisma.packingListLine.findMany({
+        where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } },
+        select: { productId: true, packingList: { select: { expectedLeaveFactoryDate: true, shipmentDate: true } } },
+      });
+      for (const line of lines) {
+        if (!line.productId) continue;
+        const d = line.packingList.expectedLeaveFactoryDate ?? line.packingList.shipmentDate;
+        if (!d) continue;
+        const iso = d.toISOString();
+        const existing = collectionEtaByProductId[line.productId];
+        if (!existing || iso > existing) collectionEtaByProductId[line.productId] = iso; // keep the latest
+      }
+    } catch (e) {
+      console.warn("[collection eta] lookup failed:", e);
+    }
+  }
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const activityLogs = needsActivityLogs
     ? await prisma.activityLog.findMany({
@@ -813,6 +835,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     samples,
     visionBoardData,
     collections,
+    collectionEtaByProductId,
     photoShoots,
     photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
     jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
@@ -8561,6 +8584,7 @@ export default function PortalDashboard() {
     samples,
     visionBoardData,
     collections,
+    collectionEtaByProductId,
     photoShoots,
     photoShootColumnWidths,
     jjColumnWidths,
@@ -9198,6 +9222,7 @@ export default function PortalDashboard() {
                 shopDomain={shopDomain}
                 users={users}
                 photoShoots={photoShoots}
+                etaByProductId={collectionEtaByProductId}
               />
             </div>
           </div>
@@ -12958,7 +12983,7 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   );
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[] }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string> }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -13061,6 +13086,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         users={users}
         allCollections={collections}
         photoShoots={photoShoots}
+        etaByProductId={etaByProductId}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
       />
@@ -13571,6 +13597,7 @@ function CollectionSpreadsheetPage({
   users,
   allCollections,
   photoShoots,
+  etaByProductId,
   onBack,
   onLocalNameChange,
 }: {
@@ -13583,6 +13610,7 @@ function CollectionSpreadsheetPage({
   users: PortalUser[];
   allCollections: CollectionListItem[];
   photoShoots: PhotoShootListItem[];
+  etaByProductId: Record<string, string>;
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
 }) {
@@ -14522,6 +14550,18 @@ function CollectionSpreadsheetPage({
                                     return next;
                                   });
                                 }}
+                              />
+                            </Td>
+                          );
+                        }
+                        if (col.id === "eta") {
+                          const shipmentEta = linkedProductId ? (etaByProductId[linkedProductId] ?? null) : null;
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionEtaCell
+                                value={value}
+                                shipmentEta={shipmentEta}
+                                onCommit={(v) => updateCell(rIdx, "eta", v)}
                               />
                             </Td>
                           );
@@ -15468,6 +15508,21 @@ function CollectionDateCell({ value, onCommit }: { value: string; onCommit: (nex
       }}
     />
   );
+}
+
+// ETA cell: if the row's linked product is in a packing list (shipment), show
+// that shipment's estimated-arrival date (read-only) — it overrides any manual
+// ETA. Otherwise it's a normal editable date cell.
+function CollectionEtaCell({ value, shipmentEta, onCommit }: { value: string; shipmentEta: string | null; onCommit: (next: string) => void }) {
+  if (shipmentEta) {
+    return (
+      <div title="From the linked packing list (shipment) — this overrides a manual ETA" style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, padding: "1px 2px", cursor: "help" }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: "#0e7490" }}>{formatPortalDate(shipmentEta)}</span>
+        <span style={{ fontSize: 9, color: "#0891b2", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>shipment</span>
+      </div>
+    );
+  }
+  return <CollectionDateCell value={value} onCommit={onCommit} />;
 }
 
 // Auto-growing wrapping text cell. Uses a textarea so the value wraps
