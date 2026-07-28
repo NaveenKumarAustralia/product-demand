@@ -13007,10 +13007,11 @@ function CoverImagePickerModal({
     if (busy) return;
     setBusy(true);
     try {
-      // w480h640 is a VALID Dropbox thumbnail size (w640h640 is not, which is
-      // why picking previously 502'd even though the small grid thumbs worked).
-      const res = await fetch(`/api/dropbox-thumb?path=${encodeURIComponent(path)}&rev=${encodeURIComponent(rev ?? "")}&size=w480h640`);
-      if (!res.ok) throw new Error("fetch failed");
+      // Fetch the cover at the SAME size the grid thumbnails use — that call
+      // is proven to work here, whereas larger sizes were 502'ing. The cover is
+      // re-compressed into a small thumbnail anyway, so 256px is plenty.
+      const res = await fetch(`/api/dropbox-thumb?path=${encodeURIComponent(path)}&rev=${encodeURIComponent(rev ?? "")}&size=w256h256`);
+      if (!res.ok) throw new Error(`thumb ${res.status}`);
       const blob = await res.blob();
       useFile(new File([blob], "cover.jpg", { type: blob.type || "image/jpeg" }));
     } catch {
@@ -13084,7 +13085,7 @@ function CoverImagePickerModal({
                   type="button"
                   onClick={() => pickDropbox(r.path, r.rev)}
                   title={r.name}
-                  style={{ border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", padding: 0, cursor: busy ? "wait" : "pointer", background: "#fff", aspectRatio: "1 / 1" }}
+                  style={{ border: "1px solid #e5e7eb", borderRadius: 8, overflow: "hidden", padding: 0, cursor: busy ? "wait" : "pointer", background: "#fff", aspectRatio: "3 / 4" }}
                 >
                   <DropboxThumb path={r.path} rev={r.rev} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                 </button>
