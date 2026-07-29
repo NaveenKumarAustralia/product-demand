@@ -8042,20 +8042,9 @@ async function createShopifyProductFromRow(
   };
   const description = (row.description ?? "").trim();
   if (description) input.descriptionHtml = description;
-  // Product type: use the typed value, else the product type set on the
-  // matched style in Product Information (e.g. "Short Sleeve Dress").
-  let styleProductType = "";
-  if (opts.productInfo) {
-    const matchedName = extractStyleFromName(title, opts.productInfo);
-    if (matchedName) {
-      for (const cat of opts.productInfo.categories ?? []) {
-        for (const st of cat.styles ?? []) {
-          if (st.name === matchedName) { styleProductType = (st.productType ?? "").trim(); break; }
-        }
-      }
-    }
-  }
-  const productType = (row.productType ?? "").trim() || styleProductType;
+  // Product type comes from the row's Product type column (auto-filled from the
+  // duplicated product, or picked from the Shopify types list).
+  const productType = (row.productType ?? "").trim();
   if (productType) input.productType = productType;
   const vendor = (row.vendor ?? "").trim();
   if (vendor) input.vendor = vendor;
@@ -12173,7 +12162,7 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
 // Columns whose value is now set automatically at Shopify-create, so they no
 // longer need to show on the sheet (the data still lives on the row; it's just
 // hidden and/or auto-filled).
-const COLLECTION_HIDDEN_COLUMN_IDS = new Set<string>(["compareAtPrice", "countryOfOrigin", "productType", "categories"]);
+const COLLECTION_HIDDEN_COLUMN_IDS = new Set<string>(["compareAtPrice", "countryOfOrigin", "categories"]);
 
 // Hover help for each Collections column — surfaced as an ⓘ on the header.
 const COLLECTION_COLUMN_HELP: Record<string, string> = {
@@ -12220,7 +12209,7 @@ const COLLECTION_COLUMN_HELP: Record<string, string> = {
 // Searchable picker for a Shopify product type (or tag) that already exists in
 // the store. Loads the list on first focus, filters as you type, and lets you
 // pick one or type a brand-new value.
-function ShopifyValueCombobox({ value, onChange, kind, placeholder }: { value: string; onChange: (v: string) => void; kind: "types" | "tags"; placeholder?: string }) {
+function ShopifyValueCombobox({ value, onChange, onCommit, kind, placeholder, inputStyle }: { value: string; onChange: (v: string) => void; onCommit?: (v: string) => void; kind: "types" | "tags"; placeholder?: string; inputStyle?: React.CSSProperties }) {
   const fetcher = useFetcher<{ types?: string[]; tags?: string[] }>();
   const [open, setOpen] = useState(false);
   const loadedRef = useRef(false);
@@ -12235,6 +12224,7 @@ function ShopifyValueCombobox({ value, onChange, kind, placeholder }: { value: s
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
+  const commit = (v: string) => { onChange(v); onCommit?.(v); };
   return (
     <div ref={wrapRef} style={{ position: "relative" }}>
       <input
@@ -12242,8 +12232,9 @@ function ShopifyValueCombobox({ value, onChange, kind, placeholder }: { value: s
         value={value}
         onChange={(e) => { onChange(e.target.value); setOpen(true); }}
         onFocus={() => { load(); setOpen(true); }}
+        onBlur={() => { onCommit?.(value); }}
         placeholder={placeholder}
-        style={s.productInfoDetailsInput}
+        style={inputStyle ?? s.productInfoDetailsInput}
       />
       {open && (
         <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 30, background: "#fff", border: "1px solid #d1d5db", borderRadius: 6, maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 20px rgba(0,0,0,0.14)", marginTop: 2 }}>
@@ -12255,7 +12246,7 @@ function ShopifyValueCombobox({ value, onChange, kind, placeholder }: { value: s
             <button
               key={t}
               type="button"
-              onMouseDown={(e) => { e.preventDefault(); onChange(t); setOpen(false); }}
+              onMouseDown={(e) => { e.preventDefault(); commit(t); setOpen(false); }}
               style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 10px", border: "none", borderBottom: "1px solid #f3f4f6", background: t === value ? "#ecfeff" : "transparent", fontSize: 13, cursor: "pointer" }}
               onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f3f4f6"; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = t === value ? "#ecfeff" : "transparent"; }}
@@ -15087,6 +15078,9 @@ function CollectionCellInner({
       />
     );
   }
+  if (columnId === "productType") {
+    return <CollectionProductTypeCell value={value} onCommit={onCommit} />;
+  }
   if (columnId === "description" || columnId === "seoTitle" || columnId === "seoDescription") {
     return (
       <CollectionAiTextCell
@@ -15102,6 +15096,23 @@ function CollectionCellInner({
   }
   return (
     <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+  );
+}
+
+// Product type cell — a searchable picker of existing Shopify product types
+// (or type a new one). Auto-filled from the duplicated product; editable here.
+function CollectionProductTypeCell({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  return (
+    <ShopifyValueCombobox
+      value={draft}
+      onChange={setDraft}
+      onCommit={(v) => { if (v !== value) onCommit(v); }}
+      kind="types"
+      placeholder="Search Shopify types…"
+      inputStyle={{ width: "100%", border: "none", outline: "none", padding: "1px 2px", fontSize: 13, fontFamily: "inherit", background: "transparent", boxSizing: "border-box" }}
+    />
   );
 }
 
@@ -16554,7 +16565,6 @@ function ProductInformationPanel({
       factoryProfit: numberToDraft(style.factoryProfit),
       sheetCount: numberToDraft(style.sheetCount),
       costingNotes: style.costingNotes ?? "",
-      productType: style.productType ?? "",
     });
   };
 
@@ -16691,12 +16701,6 @@ function ProductInformationPanel({
               <span style={s.productStyleMeta}>
                 {style.hidden ? "Hidden" : style.averageMeters ? `${style.averageMeters}m avg fabric` : "Click image for details"}
               </span>
-              {!style.hidden && !(style.productType ?? "").trim() && (
-                <span
-                  title="No Shopify product type set — click the image to add it in the style details."
-                  style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4, fontSize: 11, fontWeight: 700, color: "#b45309", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 4, padding: "2px 6px", cursor: "help" }}
-                >⚠ No product type</span>
-              )}
             </div>
             <div style={s.productStyleCardActions}>
               <label style={s.secondaryButton}>
@@ -16799,15 +16803,6 @@ function ProductInformationPanel({
                   value={detailDraft.zipButtonType ?? ""}
                   onChange={(event) => updateDetailDraft("zipButtonType", event.currentTarget.value)}
                   style={s.productInfoDetailsInput}
-                />
-              </label>
-              <label style={s.productInfoDetailsField}>
-                Product type (Shopify)
-                <ShopifyValueCombobox
-                  value={detailDraft.productType ?? ""}
-                  onChange={(v) => updateDetailDraft("productType", v)}
-                  kind="types"
-                  placeholder="Search Shopify types, or type a new one…"
                 />
               </label>
               <label style={s.productInfoDetailsField}>
