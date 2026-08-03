@@ -13943,11 +13943,16 @@ function CollectionSpreadsheetPage({
     }
     // Force-show a manually-linked fabric even if no rows resolved to it yet.
     if (linkedFabric && !usedByName.has(linkedFabric.fabricName)) usedByName.set(linkedFabric.fabricName, 0);
-    const entries = Array.from(usedByName.entries()).map(([name, used]) => {
-      const f = allFabrics.find((af) => af.fabricName === name);
-      const inStock = styleCostLookup.stockMetersForName(name);
-      return { name, fabricType: f?.fabricType, inStock, used, left: inStock - used };
-    });
+    const entries = Array.from(usedByName.entries())
+      // Only show fabrics actually being used (meters consumed), plus one the
+      // user explicitly picked — so 0-used fabrics that a blank/placeholder row
+      // happens to resolve to don't clutter the bar.
+      .filter(([name, used]) => used > 0 || (linkedFabric && linkedFabric.fabricName === name))
+      .map(([name, used]) => {
+        const f = allFabrics.find((af) => af.fabricName === name);
+        const inStock = styleCostLookup.stockMetersForName(name);
+        return { name, fabricType: f?.fabricType, inStock, used, left: inStock - used };
+      });
     entries.sort((a, b) => b.used - a.used);
     return entries;
   }, [rows, styleCostLookup, allFabrics, linkedFabric]);
