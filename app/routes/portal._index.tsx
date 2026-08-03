@@ -14384,23 +14384,9 @@ function CollectionSpreadsheetPage({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
-      {/* Top row: the Collections / Photo Shoot menu with the fabric-meters
-          summary sitting right beside it. */}
+      {/* Top row: the Collections / Photo Shoot menu. */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", flexShrink: 0 }}>
         <CollectionsPhotoShootToggle active="collections" />
-        {fabricMeters.hasData && (
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-            <span title="Fabric on hand (from the wired fabric, or the fabrics this collection uses)" style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 9px" }}>
-              {Math.round(fabricMeters.onHand).toLocaleString()}m in stock
-            </span>
-            <span title="Meters used by the quantities entered (meters per piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 9px" }}>
-              {Math.round(fabricMeters.used).toLocaleString()}m used
-            </span>
-            <span title="On hand minus used" style={{ fontSize: 12, fontWeight: 700, background: fabricMeters.remaining < 0 ? "#fee2e2" : "#e0f2fe", color: fabricMeters.remaining < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 9px" }}>
-              {Math.round(fabricMeters.remaining).toLocaleString()}m left
-            </span>
-          </div>
-        )}
       </div>
       <div style={{ ...s.productInfoToolbar, flexShrink: 0 }}>
         <div style={s.productInfoToolbarLeft}>
@@ -14429,32 +14415,6 @@ function CollectionSpreadsheetPage({
                 ? `${rows.filter(rowMatchesFilters).length} of ${rows.length} row${rows.length !== 1 ? "s" : ""}`
                 : `${rows.length} row${rows.length !== 1 ? "s" : ""}`}
               {selectedRowIdxs.size > 0 ? ` · ${selectedRowIdxs.size} selected` : ""}
-            </div>
-            {/* Wire this collection to a specific fabric-in-stock entry so the
-                "in stock" meters read that fabric's real on-hand meters. */}
-            <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
-              <span style={{ fontSize: 12, color: "#6b7280" }}>Fabric:</span>
-              {linkedFabric ? (
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, background: "#eef2ff", color: "#3730a3", borderRadius: 6, padding: "3px 9px", textTransform: "capitalize" }}>
-                  {linkedFabric.fabricName}
-                  {linkedFabric.fabricType ? <span style={{ fontWeight: 500, color: "#6366f1" }}>· {linkedFabric.fabricType}</span> : null}
-                  <button
-                    type="button"
-                    title="Unlink this fabric"
-                    onClick={() => onSetFabricLink("")}
-                    style={{ border: "none", background: "transparent", color: "#6366f1", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}
-                  >×</button>
-                </span>
-              ) : (
-                <span style={{ fontSize: 12, color: "#9ca3af" }}>none linked (in-stock guessed from rows)</span>
-              )}
-              <div style={{ width: 160 }}>
-                <TitleFabricPicker
-                  fabrics={allFabrics}
-                  currentTitle={listItem.name || ""}
-                  onPick={(fabricKey) => onSetFabricLink(fabricKey)}
-                />
-              </div>
             </div>
           </div>
         </div>
@@ -14571,6 +14531,49 @@ function CollectionSpreadsheetPage({
           </button>
         </div>
       </div>
+      {/* Fabric bar: pick the fabric this collection uses, and see how much is
+          in stock / used / left. In-stock meters come from the Fabric in stock
+          page once a fabric is selected. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", flexShrink: 0, padding: "10px 14px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>Fabric</span>
+          {linkedFabric ? (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, background: "#eef2ff", color: "#3730a3", borderRadius: 6, padding: "4px 10px", textTransform: "capitalize" }}>
+              {linkedFabric.fabricName}
+              {linkedFabric.fabricType ? <span style={{ fontWeight: 500, color: "#6366f1" }}>· {linkedFabric.fabricType}</span> : null}
+              <button
+                type="button"
+                title="Unlink this fabric"
+                onClick={() => onSetFabricLink("")}
+                style={{ border: "none", background: "transparent", color: "#6366f1", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}
+              >×</button>
+            </span>
+          ) : (
+            <span style={{ fontSize: 12, color: "#9ca3af" }}>none selected</span>
+          )}
+          <div style={{ width: 150 }}>
+            <TitleFabricPicker
+              fabrics={allFabrics}
+              currentTitle={listItem.name || ""}
+              onPick={(fabricKey) => onSetFabricLink(fabricKey)}
+            />
+          </div>
+        </div>
+        {/* Meters, right-aligned. In stock is pulled from the linked fabric. */}
+        {fabricMeters.hasData && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginLeft: "auto" }}>
+            <span title={linkedFabric ? "On-hand meters from the linked fabric (Fabric in stock page)" : "Pick a fabric to pull real on-hand meters"} style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 9px" }}>
+              {Math.round(fabricMeters.onHand).toLocaleString()}m in stock
+            </span>
+            <span title="Meters used by the quantities entered (meters per piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 9px" }}>
+              {Math.round(fabricMeters.used).toLocaleString()}m used
+            </span>
+            <span title="On hand minus used" style={{ fontSize: 12, fontWeight: 700, background: fabricMeters.remaining < 0 ? "#fee2e2" : "#e0f2fe", color: fabricMeters.remaining < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 9px" }}>
+              {Math.round(fabricMeters.remaining).toLocaleString()}m left
+            </span>
+          </div>
+        )}
+      </div>
       {pushStatus && (
         <div style={{
           margin: "0 0 0 4px",
@@ -14583,7 +14586,7 @@ function CollectionSpreadsheetPage({
         }}>{pushStatus.msg}</div>
       )}
 
-      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 175px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
+      <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 230px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
         ) : (() => {
