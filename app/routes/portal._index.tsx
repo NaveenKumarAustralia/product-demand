@@ -56,6 +56,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     PORTAL_NAV_ORDER_KEY,
     COLLECTION_HIDDEN_KEY,
     COLLECTION_FABRIC_STATUS_KEY,
+    COLLECTION_ORDER_STATUS_KEY,
+    COLLECTION_FABRIC_LINK_KEY,
   ];
   const needsOrders = isRestockPage || page === "packing";
   const needsPackingLists = page === "packing" || packingId !== null;
@@ -331,6 +333,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         );
         const fabricStatusRaw = settingsMap.get(COLLECTION_FABRIC_STATUS_KEY);
         const fabricStatusMap = (fabricStatusRaw && typeof fabricStatusRaw === "object" && !Array.isArray(fabricStatusRaw)) ? fabricStatusRaw as Record<string, string> : {};
+        const orderStatusRaw = settingsMap.get(COLLECTION_ORDER_STATUS_KEY);
+        const orderStatusMap = (orderStatusRaw && typeof orderStatusRaw === "object" && !Array.isArray(orderStatusRaw)) ? orderStatusRaw as Record<string, string> : {};
+        const fabricLinkRaw = settingsMap.get(COLLECTION_FABRIC_LINK_KEY);
+        const fabricLinkMap = (fabricLinkRaw && typeof fabricLinkRaw === "object" && !Array.isArray(fabricLinkRaw)) ? fabricLinkRaw as Record<string, string> : {};
         return rows.map((r) => ({
           id: r.id, name: r.name, sortOrder: r.sortOrder,
           hasThumbnail: Boolean(r.hasThumbnail),
@@ -338,8 +344,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           createdAt: r.createdAt, updatedAt: r.updatedAt,
           hidden: hiddenIds.has(r.id),
           fabricStatus: String(fabricStatusMap[String(r.id)] ?? ""),
+          orderStatus: String(orderStatusMap[String(r.id)] ?? ""),
+          fabricLink: String(fabricLinkMap[String(r.id)] ?? ""),
         }));
-      }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string }>)
+      }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string; orderStatus: string; fabricLink: string }>)
     : [];
   // Photo shoots: slim tab list (id/name/sortOrder/rowCount). The active
   // shoot's full rows are fetched on demand via ps_get_shoot. Loaded for
@@ -3151,6 +3159,38 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
     return null;
   }
+  if (intent === "set_collection_order_status") {
+    // Per-collection "products ordered?" status (yes / no / partial), stored as
+    // a { [collectionId]: status } object. Empty clears it.
+    const id = Number(form.get("collectionId"));
+    const status = String(form.get("status") ?? "").trim();
+    if (!id) return null;
+    const existing = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_ORDER_STATUS_KEY }, select: { value: true } });
+    const map: Record<string, string> = (existing?.value && typeof existing.value === "object" && !Array.isArray(existing.value)) ? { ...(existing.value as Record<string, string>) } : {};
+    if (status === "yes" || status === "no" || status === "partial") map[String(id)] = status; else delete map[String(id)];
+    await prisma.portalSetting.upsert({
+      where: { key: COLLECTION_ORDER_STATUS_KEY },
+      create: { key: COLLECTION_ORDER_STATUS_KEY, value: map },
+      update: { value: map },
+    });
+    return null;
+  }
+  if (intent === "set_collection_fabric_link") {
+    // Per-collection link to a specific fabric-in-stock entry (fabricKey).
+    // Empty clears it (back to auto per-row matching for the meters).
+    const id = Number(form.get("collectionId"));
+    const fabricKey = String(form.get("fabricKey") ?? "").trim();
+    if (!id) return null;
+    const existing = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_FABRIC_LINK_KEY }, select: { value: true } });
+    const map: Record<string, string> = (existing?.value && typeof existing.value === "object" && !Array.isArray(existing.value)) ? { ...(existing.value as Record<string, string>) } : {};
+    if (fabricKey) map[String(id)] = fabricKey; else delete map[String(id)];
+    await prisma.portalSetting.upsert({
+      where: { key: COLLECTION_FABRIC_LINK_KEY },
+      create: { key: COLLECTION_FABRIC_LINK_KEY, value: map },
+      update: { value: map },
+    });
+    return null;
+  }
   if (intent === "reorder_collections") {
     const ids = JSON.parse(String(form.get("collectionIds") ?? "[]")) as number[];
     await Promise.all(ids.map((id, index) => prisma.collection.update({ where: { id }, data: { sortOrder: index } })));
@@ -4561,7 +4601,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // sees the new items prop.
   if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
-  if (intent === "set_collection_fabric_status") return false;
+  if (intent === "set_collection_fabric_status" || intent === "set_collection_order_status" || intent === "set_collection_fabric_link") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths" || intent === "update_photoshoot_column_widths" || intent === "update_jj_column_widths") return false;
   // Photo shoot row edits keep their own local state; the slim shoot list
   // (loader) only needs refreshing on add/rename/delete, not row edits.
@@ -4885,6 +4925,13 @@ const COLLECTION_HIDDEN_KEY = "collections-hidden-v1";
 // Per-collection fabric status ("in_stock" | "on_order"), keyed by collection
 // id, stored as a JSON object. Set on the tile; used by the tiles filter.
 const COLLECTION_FABRIC_STATUS_KEY = "collections-fabric-status-v1";
+// Per-collection "products ordered?" status ("yes" | "no" | "partial"),
+// keyed by collection id — has the factory order for these styles been placed.
+const COLLECTION_ORDER_STATUS_KEY = "collections-order-status-v1";
+// Per-collection link to a specific fabric-in-stock entry (a fabricKey), keyed
+// by collection id. When set, the detail-page "in stock" meters read that
+// fabric's on-hand meters instead of guessing from the rows.
+const COLLECTION_FABRIC_LINK_KEY = "collections-fabric-link-v1";
 // Chip catalogs for the Collections Status + Sample columns. Reuses
 // the same shape as RestockOption so the dropdown UI can be reused.
 type CollectionChipOption = { value: string; label: string; bg: string; color: string };
@@ -5802,7 +5849,7 @@ type StyleCostLookup = {
   // Flat list of every fabric stock entry — surfaced by the fabric
   // picker on the cost cells so staff can resolve "ambiguous fabric"
   // by picking which one to use.
-  allFabrics: () => Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
+  allFabrics: () => Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string; stockMeters?: number }>;
   // Returns the manual rupees override for a title, or 0 when none.
   // Cells use this to render the value in bold and skip the right-
   // click breakdown popover (there's no fabric breakdown to show).
@@ -6062,7 +6109,7 @@ function buildStyleCostLookup(
       const r = resolveOverride(title, styleId);
       return r ? breakdownFromResolved(r) : null;
     },
-    allFabrics: () => allFabrics.map((f) => ({ key: f.key, sheetName: f.sheetName, fabricName: f.name, costPerMeter: f.costPerMeter, fabricType: f.fabricType })),
+    allFabrics: () => allFabrics.map((f) => ({ key: f.key, sheetName: f.sheetName, fabricName: f.name, costPerMeter: f.costPerMeter, fabricType: f.fabricType, stockMeters: f.stockMeters })),
     manualPriceForTitle: manualPriceFor,
     metersInfoForTitle: (title, styleId) => {
       const haystack = (title ?? "").trim().toLowerCase();
@@ -9246,7 +9293,9 @@ export default function PortalDashboard() {
           />
         ) : page === "collections" ? (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
-            <CollectionsPhotoShootToggle active="collections" />
+            {/* The Collections/Photo Shoot toggle is rendered INSIDE the panel
+                (landing) and the detail page, so the fabric-meters summary can
+                sit beside it when a collection is open. */}
             <div style={{ flex: 1, minHeight: 0 }}>
               <CollectionsPanel
                 collections={collections}
@@ -12125,6 +12174,8 @@ type CollectionListItem = {
   updatedAt: Date | string;
   hidden?: boolean;
   fabricStatus?: string;
+  orderStatus?: string;
+  fabricLink?: string;
 };
 
 // Cell types — drives the input rendered in CollectionCell:
@@ -13081,6 +13132,14 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     setCollections((prev) => prev.map((c) => c.id === id ? { ...c, fabricStatus: status } : c));
     fetcher.submit({ intent: "set_collection_fabric_status", collectionId: String(id), status }, { method: "post" });
   };
+  const handleSetOrderStatus = (id: number, status: string) => {
+    setCollections((prev) => prev.map((c) => c.id === id ? { ...c, orderStatus: status } : c));
+    fetcher.submit({ intent: "set_collection_order_status", collectionId: String(id), status }, { method: "post" });
+  };
+  const handleSetFabricLink = (id: number, fabricKey: string) => {
+    setCollections((prev) => prev.map((c) => c.id === id ? { ...c, fabricLink: fabricKey } : c));
+    fetcher.submit({ intent: "set_collection_fabric_link", collectionId: String(id), fabricKey }, { method: "post" });
+  };
 
   const handleRename = (id: number, name: string) => {
     setCollections((prev) => prev.map((c) => c.id === id ? { ...c, name } : c));
@@ -13134,12 +13193,15 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         etaByProductId={etaByProductId}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
+        onSetFabricLink={(fabricKey) => handleSetFabricLink(selectedCollection.id, fabricKey)}
       />
     );
   }
 
   return (
-    <div style={s.productInfoPage}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
+      <CollectionsPhotoShootToggle active="collections" />
+      <div style={{ ...s.productInfoPage, flex: 1, minHeight: 0 }}>
       <div style={s.productInfoToolbar}>
         <div style={s.productInfoToolbarLeft}>
           <div>
@@ -13268,6 +13330,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             actionVerb="Hide"
             fabricStatus={c.fabricStatus ?? ""}
             onSetFabricStatus={(st) => handleSetFabricStatus(c.id, st)}
+            orderStatus={c.orderStatus ?? ""}
+            onSetOrderStatus={(st) => handleSetOrderStatus(c.id, st)}
             onSetCover={(file) => handleSetCover(c.id, file)}
             onDragStart={(e) => { setDragId(c.id); e.dataTransfer.effectAllowed = "move"; }}
             onDragOver={(e) => { if (!dragId) return; e.preventDefault(); setDragOverId(c.id); }}
@@ -13320,6 +13384,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>,
         document.body,
       )}
+      </div>
     </div>
   );
 }
@@ -13488,6 +13553,8 @@ function CollectionCard({
   actionVerb = "Delete",
   fabricStatus,
   onSetFabricStatus,
+  orderStatus,
+  onSetOrderStatus,
   onSetCover,
   onDragStart,
   onDragOver,
@@ -13510,9 +13577,11 @@ function CollectionCard({
   onUnhide?: () => void;
   hidden?: boolean;
   actionVerb?: string;
-  // Per-collection fabric status (Collections tiles only).
+  // Per-collection fabric status + order status (Collections tiles only).
   fabricStatus?: string;
   onSetFabricStatus?: (status: string) => void;
+  orderStatus?: string;
+  onSetOrderStatus?: (status: string) => void;
   onSetCover: (file: File) => void;
   onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
@@ -13638,30 +13707,50 @@ function CollectionCard({
         </span>
         {onSetFabricStatus && (
           <div
-            style={{ marginTop: 8, display: "flex", gap: 6, justifyContent: "center" }}
+            style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}
             onClick={(e) => e.stopPropagation()}
           >
-            {([
-              { key: "in_stock", label: "In stock", on: "#065f46", onBg: "#d1fae5", onBorder: "#10b981" },
-              { key: "on_order", label: "On order", on: "#92400e", onBg: "#fef3c7", onBorder: "#f59e0b" },
-            ] as const).map((opt) => {
-              const active = (fabricStatus ?? "") === opt.key;
-              return (
-                <button
-                  key={opt.key}
-                  type="button"
-                  title={active ? `Clear "${opt.label}"` : `Mark fabric ${opt.label}`}
-                  onClick={(e) => { e.stopPropagation(); onSetFabricStatus(active ? "" : opt.key); }}
+            <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 11, fontWeight: 700, color: "#6b7280" }}>
+              <span>Fabric</span>
+              <select
+                value={fabricStatus ?? ""}
+                onChange={(e) => { e.stopPropagation(); onSetFabricStatus(e.target.value); }}
+                onClick={(e) => e.stopPropagation()}
+                title="Fabric status for this collection"
+                style={{
+                  flex: 1, maxWidth: 130, fontSize: 11, fontWeight: 700, padding: "4px 6px", borderRadius: 6, cursor: "pointer", outline: "none",
+                  border: `1px solid ${fabricStatus === "in_stock" ? "#10b981" : fabricStatus === "on_order" ? "#f59e0b" : "#e5e7eb"}`,
+                  background: fabricStatus === "in_stock" ? "#d1fae5" : fabricStatus === "on_order" ? "#fef3c7" : "#fff",
+                  color: fabricStatus === "in_stock" ? "#065f46" : fabricStatus === "on_order" ? "#92400e" : "#6b7280",
+                }}
+              >
+                <option value="">— set —</option>
+                <option value="in_stock">In stock</option>
+                <option value="on_order">On order</option>
+              </select>
+            </label>
+            {onSetOrderStatus && (
+              <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 11, fontWeight: 700, color: "#6b7280" }}>
+                <span>Ordered?</span>
+                <select
+                  value={orderStatus ?? ""}
+                  onChange={(e) => { e.stopPropagation(); onSetOrderStatus(e.target.value); }}
+                  onClick={(e) => e.stopPropagation()}
+                  title="Has the factory order for these styles been placed?"
                   style={{
-                    padding: "3px 10px", borderRadius: 999, cursor: "pointer",
-                    fontSize: 11, fontWeight: 700, lineHeight: 1.2,
-                    border: `1px solid ${active ? opt.onBorder : "#e5e7eb"}`,
-                    background: active ? opt.onBg : "#fff",
-                    color: active ? opt.on : "#9ca3af",
+                    flex: 1, maxWidth: 130, fontSize: 11, fontWeight: 700, padding: "4px 6px", borderRadius: 6, cursor: "pointer", outline: "none",
+                    border: `1px solid ${orderStatus === "yes" ? "#10b981" : orderStatus === "partial" ? "#f59e0b" : orderStatus === "no" ? "#ef4444" : "#e5e7eb"}`,
+                    background: orderStatus === "yes" ? "#d1fae5" : orderStatus === "partial" ? "#fef3c7" : orderStatus === "no" ? "#fee2e2" : "#fff",
+                    color: orderStatus === "yes" ? "#065f46" : orderStatus === "partial" ? "#92400e" : orderStatus === "no" ? "#991b1b" : "#6b7280",
                   }}
-                >{opt.label}</button>
-              );
-            })}
+                >
+                  <option value="">— set —</option>
+                  <option value="yes">Yes</option>
+                  <option value="no">No</option>
+                  <option value="partial">Partially</option>
+                </select>
+              </label>
+            )}
           </div>
         )}
       </div>
@@ -13693,6 +13782,7 @@ function CollectionSpreadsheetPage({
   etaByProductId,
   onBack,
   onLocalNameChange,
+  onSetFabricLink,
 }: {
   listItem: CollectionListItem;
   collectionSettings: CollectionSettings;
@@ -13706,6 +13796,7 @@ function CollectionSpreadsheetPage({
   etaByProductId: Record<string, string>;
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
+  onSetFabricLink: (fabricKey: string) => void;
 }) {
   // Thread message counts keyed by "<entityType>:<entityId>:<entityKey>:<field>".
   // Populated by a fetcher on mount + after row saves so the 💬 badges
@@ -13819,6 +13910,13 @@ function CollectionSpreadsheetPage({
   // Fabric-meters summary for the header: for each row, resolve its fabric →
   // meters-per-piece (× qty = used) and the fabric's on-hand stock (counted
   // once per fabric). Updates live as quantities and fabric picks change.
+  // The fabric explicitly wired to this collection (if any) — its on-hand
+  // meters drive the "in stock" figure so it isn't guessed from the rows.
+  const linkedFabricKey = (listItem.fabricLink ?? "").trim();
+  const linkedFabric = useMemo(
+    () => (linkedFabricKey ? allFabrics.find((f) => f.key === linkedFabricKey) ?? null : null),
+    [allFabrics, linkedFabricKey],
+  );
   const fabricMeters = useMemo(() => {
     let used = 0;
     const stockByFabric = new Map<string, number>();
@@ -13830,10 +13928,14 @@ function CollectionSpreadsheetPage({
       used += info.metersPerPiece * sumCollectionRowQuantity(r);
       if (!stockByFabric.has(info.fabricKey)) stockByFabric.set(info.fabricKey, info.stockMeters);
     }
+    // When a fabric is explicitly linked, its on-hand meters are the source of
+    // truth for "in stock"; otherwise fall back to summing the auto-matched
+    // fabrics found across the rows.
     let onHand = 0;
-    for (const m of stockByFabric.values()) onHand += m;
-    return { onHand, used, remaining: onHand - used, hasData: stockByFabric.size > 0 || used > 0 };
-  }, [rows, styleCostLookup]);
+    if (linkedFabric) onHand = linkedFabric.stockMeters ?? 0;
+    else for (const m of stockByFabric.values()) onHand += m;
+    return { onHand, used, remaining: onHand - used, hasData: Boolean(linkedFabric) || stockByFabric.size > 0 || used > 0 };
+  }, [rows, styleCostLookup, linkedFabric]);
   // Right-click cost breakdown popup for the Price ₹ cells (same UX as the
   // packing list / restock pages). The extra `fabrics`/`onPickFabric` fields
   // give the menu a "Pick a different fabric" footer so a wrong auto-matched
@@ -14281,7 +14383,25 @@ function CollectionSpreadsheetPage({
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 14 }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
+      {/* Top row: the Collections / Photo Shoot menu with the fabric-meters
+          summary sitting right beside it. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", flexShrink: 0 }}>
+        <CollectionsPhotoShootToggle active="collections" />
+        {fabricMeters.hasData && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <span title="Fabric on hand (from the wired fabric, or the fabrics this collection uses)" style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 9px" }}>
+              {Math.round(fabricMeters.onHand).toLocaleString()}m in stock
+            </span>
+            <span title="Meters used by the quantities entered (meters per piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 9px" }}>
+              {Math.round(fabricMeters.used).toLocaleString()}m used
+            </span>
+            <span title="On hand minus used" style={{ fontSize: 12, fontWeight: 700, background: fabricMeters.remaining < 0 ? "#fee2e2" : "#e0f2fe", color: fabricMeters.remaining < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 9px" }}>
+              {Math.round(fabricMeters.remaining).toLocaleString()}m left
+            </span>
+          </div>
+        )}
+      </div>
       <div style={{ ...s.productInfoToolbar, flexShrink: 0 }}>
         <div style={s.productInfoToolbarLeft}>
           <button
@@ -14310,19 +14430,32 @@ function CollectionSpreadsheetPage({
                 : `${rows.length} row${rows.length !== 1 ? "s" : ""}`}
               {selectedRowIdxs.size > 0 ? ` · ${selectedRowIdxs.size} selected` : ""}
             </div>
-            {fabricMeters.hasData && (
-              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
-                <span title="Fabric on hand across the fabrics this collection uses" style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 9px" }}>
-                  {Math.round(fabricMeters.onHand).toLocaleString()}m in stock
+            {/* Wire this collection to a specific fabric-in-stock entry so the
+                "in stock" meters read that fabric's real on-hand meters. */}
+            <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 12, color: "#6b7280" }}>Fabric:</span>
+              {linkedFabric ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, background: "#eef2ff", color: "#3730a3", borderRadius: 6, padding: "3px 9px", textTransform: "capitalize" }}>
+                  {linkedFabric.fabricName}
+                  {linkedFabric.fabricType ? <span style={{ fontWeight: 500, color: "#6366f1" }}>· {linkedFabric.fabricType}</span> : null}
+                  <button
+                    type="button"
+                    title="Unlink this fabric"
+                    onClick={() => onSetFabricLink("")}
+                    style={{ border: "none", background: "transparent", color: "#6366f1", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}
+                  >×</button>
                 </span>
-                <span title="Meters used by the quantities entered (meters per piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 9px" }}>
-                  {Math.round(fabricMeters.used).toLocaleString()}m used
-                </span>
-                <span title="On hand minus used" style={{ fontSize: 12, fontWeight: 700, background: fabricMeters.remaining < 0 ? "#fee2e2" : "#e0f2fe", color: fabricMeters.remaining < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 9px" }}>
-                  {Math.round(fabricMeters.remaining).toLocaleString()}m left
-                </span>
+              ) : (
+                <span style={{ fontSize: 12, color: "#9ca3af" }}>none linked (in-stock guessed from rows)</span>
+              )}
+              <div style={{ width: 160 }}>
+                <TitleFabricPicker
+                  fabrics={allFabrics}
+                  currentTitle={listItem.name || ""}
+                  onPick={(fabricKey) => onSetFabricLink(fabricKey)}
+                />
               </div>
-            )}
+            </div>
           </div>
         </div>
         <div style={s.productInfoActions}>
