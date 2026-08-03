@@ -5858,6 +5858,10 @@ type StyleCostLookup = {
   // piece (from Product Information / the fabric's per-style override) plus
   // that fabric's on-hand stock — for the collection's fabric-meters summary.
   metersInfoForTitle: (title: string | null | undefined, styleId?: string) => { fabricKey: string; fabricName: string; metersPerPiece: number; stockMeters: number } | null;
+  // Total on-hand meters for a fabric NAME, summed across every stock entry
+  // that shares that name (across tabs). A single matched entry can read 0 when
+  // the on-hand meters live on a different same-name row — this sees them all.
+  stockMetersForName: (name: string | null | undefined) => number;
 };
 function buildStyleCostLookup(
   productInfo: ProductInfo,
@@ -6110,6 +6114,13 @@ function buildStyleCostLookup(
       return r ? breakdownFromResolved(r) : null;
     },
     allFabrics: () => allFabrics.map((f) => ({ key: f.key, sheetName: f.sheetName, fabricName: f.name, costPerMeter: f.costPerMeter, fabricType: f.fabricType, stockMeters: f.stockMeters })),
+    stockMetersForName: (name) => {
+      const n = (name ?? "").trim().toLowerCase();
+      if (!n) return 0;
+      let sum = 0;
+      for (const f of allFabrics) if (f.name === n) sum += f.stockMeters || 0;
+      return sum;
+    },
     manualPriceForTitle: manualPriceFor,
     metersInfoForTitle: (title, styleId) => {
       const haystack = (title ?? "").trim().toLowerCase();
@@ -13910,32 +13921,36 @@ function CollectionSpreadsheetPage({
   // Fabric-meters summary for the header: for each row, resolve its fabric →
   // meters-per-piece (× qty = used) and the fabric's on-hand stock (counted
   // once per fabric). Updates live as quantities and fabric picks change.
-  // The fabric explicitly wired to this collection (if any) — its on-hand
-  // meters drive the "in stock" figure so it isn't guessed from the rows.
+  // The fabric explicitly wired to this collection (if any). A collection can
+  // use several fabrics, so this is only a fallback to force-show one that the
+  // rows don't auto-resolve to.
   const linkedFabricKey = (listItem.fabricLink ?? "").trim();
   const linkedFabric = useMemo(
     () => (linkedFabricKey ? allFabrics.find((f) => f.key === linkedFabricKey) ?? null : null),
     [allFabrics, linkedFabricKey],
   );
-  const fabricMeters = useMemo(() => {
-    let used = 0;
-    const stockByFabric = new Map<string, number>();
+  // Per-fabric meters. Each row's product name resolves to a fabric; group the
+  // rows by that fabric and, for each, show in-stock (summed across every
+  // same-name stock entry), used (meters/piece × qty), and what's left.
+  const fabricBreakdown = useMemo(() => {
+    const usedByName = new Map<string, number>();
     for (const r of rows) {
       const name = (r.name ?? r.title ?? "").trim();
       if (!name) continue;
       const info = styleCostLookup.metersInfoForTitle(name, (r.styleOverrideId ?? "").trim() || undefined);
       if (!info) continue;
-      used += info.metersPerPiece * sumCollectionRowQuantity(r);
-      if (!stockByFabric.has(info.fabricKey)) stockByFabric.set(info.fabricKey, info.stockMeters);
+      usedByName.set(info.fabricName, (usedByName.get(info.fabricName) ?? 0) + info.metersPerPiece * sumCollectionRowQuantity(r));
     }
-    // When a fabric is explicitly linked, its on-hand meters are the source of
-    // truth for "in stock"; otherwise fall back to summing the auto-matched
-    // fabrics found across the rows.
-    let onHand = 0;
-    if (linkedFabric) onHand = linkedFabric.stockMeters ?? 0;
-    else for (const m of stockByFabric.values()) onHand += m;
-    return { onHand, used, remaining: onHand - used, hasData: Boolean(linkedFabric) || stockByFabric.size > 0 || used > 0 };
-  }, [rows, styleCostLookup, linkedFabric]);
+    // Force-show a manually-linked fabric even if no rows resolved to it yet.
+    if (linkedFabric && !usedByName.has(linkedFabric.fabricName)) usedByName.set(linkedFabric.fabricName, 0);
+    const entries = Array.from(usedByName.entries()).map(([name, used]) => {
+      const f = allFabrics.find((af) => af.fabricName === name);
+      const inStock = styleCostLookup.stockMetersForName(name);
+      return { name, fabricType: f?.fabricType, inStock, used, left: inStock - used };
+    });
+    entries.sort((a, b) => b.used - a.used);
+    return entries;
+  }, [rows, styleCostLookup, allFabrics, linkedFabric]);
   // Right-click cost breakdown popup for the Price ₹ cells (same UX as the
   // packing list / restock pages). The extra `fabrics`/`onPickFabric` fields
   // give the menu a "Pick a different fabric" footer so a wrong auto-matched
@@ -14531,48 +14546,49 @@ function CollectionSpreadsheetPage({
           </button>
         </div>
       </div>
-      {/* Fabric bar: pick the fabric this collection uses, and see how much is
-          in stock / used / left. In-stock meters come from the Fabric in stock
-          page once a fabric is selected. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", flexShrink: 0, padding: "10px 14px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>Fabric</span>
-          {linkedFabric ? (
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, background: "#eef2ff", color: "#3730a3", borderRadius: 6, padding: "4px 10px", textTransform: "capitalize" }}>
-              {linkedFabric.fabricName}
-              {linkedFabric.fabricType ? <span style={{ fontWeight: 500, color: "#6366f1" }}>· {linkedFabric.fabricType}</span> : null}
-              <button
-                type="button"
-                title="Unlink this fabric"
-                onClick={() => onSetFabricLink("")}
-                style={{ border: "none", background: "transparent", color: "#6366f1", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}
-              >×</button>
-            </span>
-          ) : (
-            <span style={{ fontSize: 12, color: "#9ca3af" }}>none selected</span>
-          )}
-          <div style={{ width: 150 }}>
-            <TitleFabricPicker
-              fabrics={allFabrics}
-              currentTitle={listItem.name || ""}
-              onPick={(fabricKey) => onSetFabricLink(fabricKey)}
-            />
-          </div>
-        </div>
-        {/* Meters, right-aligned. In stock is pulled from the linked fabric. */}
-        {fabricMeters.hasData && (
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginLeft: "auto" }}>
-            <span title={linkedFabric ? "On-hand meters from the linked fabric (Fabric in stock page)" : "Pick a fabric to pull real on-hand meters"} style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 9px" }}>
-              {Math.round(fabricMeters.onHand).toLocaleString()}m in stock
-            </span>
-            <span title="Meters used by the quantities entered (meters per piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 9px" }}>
-              {Math.round(fabricMeters.used).toLocaleString()}m used
-            </span>
-            <span title="On hand minus used" style={{ fontSize: 12, fontWeight: 700, background: fabricMeters.remaining < 0 ? "#fee2e2" : "#e0f2fe", color: fabricMeters.remaining < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 9px" }}>
-              {Math.round(fabricMeters.remaining).toLocaleString()}m left
-            </span>
-          </div>
+      {/* Fabric bar: one entry per fabric the collection uses (detected from the
+          product names in the rows), each with in stock / used / left. In-stock
+          meters are summed from the Fabric in stock page across every same-name
+          entry. The picker force-adds a fabric the rows don't resolve to. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0, padding: "10px 14px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>Fabric</span>
+        {fabricBreakdown.length === 0 && (
+          <span style={{ fontSize: 12, color: "#9ca3af" }}>No fabric detected from the product names yet.</span>
         )}
+        {fabricBreakdown.map((fb) => {
+          const isLinked = Boolean(linkedFabric && linkedFabric.fabricName === fb.name);
+          return (
+            <div key={fb.name} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 8px 4px 10px", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 700, color: "#111827", textTransform: "capitalize" }}>
+                {fb.name}{fb.fabricType ? <span style={{ fontWeight: 500, color: "#6b7280" }}> · {fb.fabricType}</span> : null}
+              </span>
+              <span title="On-hand meters (summed from the Fabric in stock page)" style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 8px" }}>
+                {Math.round(fb.inStock).toLocaleString()}m in stock
+              </span>
+              <span title="Meters used by the quantities on this collection's rows (meters/piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 8px" }}>
+                {Math.round(fb.used).toLocaleString()}m used
+              </span>
+              <span title="In stock minus used" style={{ fontSize: 12, fontWeight: 700, background: fb.left < 0 ? "#fee2e2" : "#e0f2fe", color: fb.left < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 8px" }}>
+                {Math.round(fb.left).toLocaleString()}m left
+              </span>
+              {isLinked && (
+                <button
+                  type="button"
+                  title="Remove this manually-added fabric"
+                  onClick={() => onSetFabricLink("")}
+                  style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: "0 2px" }}
+                >×</button>
+              )}
+            </div>
+          );
+        })}
+        <div style={{ width: 150, marginLeft: "auto" }}>
+          <TitleFabricPicker
+            fabrics={allFabrics}
+            currentTitle={listItem.name || ""}
+            onPick={(fabricKey) => onSetFabricLink(fabricKey)}
+          />
+        </div>
       </div>
       {pushStatus && (
         <div style={{
