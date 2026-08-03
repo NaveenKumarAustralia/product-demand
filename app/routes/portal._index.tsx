@@ -5783,6 +5783,10 @@ type StyleCostLookup = {
   // Cells use this to render the value in bold and skip the right-
   // click breakdown popover (there's no fabric breakdown to show).
   manualPriceForTitle: (title: string | null | undefined) => number;
+  // Resolves the row's fabric and returns the meters it takes to make one
+  // piece (from Product Information / the fabric's per-style override) plus
+  // that fabric's on-hand stock — for the collection's fabric-meters summary.
+  metersInfoForTitle: (title: string | null | undefined, styleId?: string) => { fabricKey: string; fabricName: string; metersPerPiece: number; stockMeters: number } | null;
 };
 function buildStyleCostLookup(
   productInfo: ProductInfo,
@@ -5803,7 +5807,7 @@ function buildStyleCostLookup(
   // Group every fabric stock entry by lowercase name so we can
   // disambiguate same-named fabrics (e.g. multiple "Black"s) using
   // each entry's per-style meters override from the Products popup.
-  type FabricCandidate = { costPerMeter: number; styleMeters?: Record<string, number>; sheetName: string; fabricType?: string; name: string };
+  type FabricCandidate = { costPerMeter: number; styleMeters?: Record<string, number>; sheetName: string; fabricType?: string; name: string; stockMeters: number };
   const candidatesByName = new Map<string, FabricCandidate[]>();
   // Flat list of every fabric stock entry — used by the fabric
   // picker on the cost cells AND by titleFabricOverrides lookup.
@@ -5820,7 +5824,7 @@ function buildStyleCostLookup(
     const nameLower = entry.name.trim().toLowerCase();
     if (!nameLower) continue;
     const costed = isFilled(entry.costPerMeter);
-    const cand: FabricCandidate = { costPerMeter: costed ? entry.costPerMeter! : 0, styleMeters: entry.styleMeters, sheetName: entry.sheetName, fabricType: entry.fabricType, name: nameLower };
+    const cand: FabricCandidate = { costPerMeter: costed ? entry.costPerMeter! : 0, styleMeters: entry.styleMeters, sheetName: entry.sheetName, fabricType: entry.fabricType, name: nameLower, stockMeters: Number(entry.meters) || 0 };
     // Only COSTED fabrics take part in automatic title matching — a fabric
     // with no Cost per Meter can't produce a cost, so it must never silently
     // win the auto-match. But it DOES go into allFabrics / fabricByKey so it's
@@ -6036,6 +6040,25 @@ function buildStyleCostLookup(
     },
     allFabrics: () => allFabrics.map((f) => ({ key: f.key, sheetName: f.sheetName, fabricName: f.name, costPerMeter: f.costPerMeter, fabricType: f.fabricType })),
     manualPriceForTitle: manualPriceFor,
+    metersInfoForTitle: (title, styleId) => {
+      const haystack = (title ?? "").trim().toLowerCase();
+      if (!haystack) return null;
+      const style = styleId ? findStyleById(styleId) : findStyle(haystack);
+      if (!style) return null;
+      // Same fabric resolution as the cost engine: a title fabric override
+      // wins; otherwise the auto-match (which stays null for ambiguous names).
+      let fab: (FabricCandidate & { key?: string }) | null = null;
+      const overrideKey = fabricOverridesByTitle[haystack];
+      if (overrideKey && fabricByKey.has(overrideKey)) fab = fabricByKey.get(overrideKey)!;
+      else {
+        const m = findFabricForStyle(style, haystack);
+        if (m.kind === "ok") fab = m.fabric;
+      }
+      if (!fab) return null;
+      const overrideMeters = fab.styleMeters?.[style.id];
+      const metersPerPiece = isFilled(overrideMeters) ? overrideMeters! : (style.averageMeters ?? 0);
+      return { fabricKey: fab.key ?? fabricKeyFor(fab.sheetName, fab.name), fabricName: fab.name, metersPerPiece, stockMeters: fab.stockMeters };
+    },
     blockerForTitle: (title) => {
       const haystack = (title ?? "").trim().toLowerCase();
       if (!haystack) return { styleName: null, missing: null, detail: null };
@@ -13632,9 +13655,12 @@ function CollectionSpreadsheetPage({
   // shoot"). Empty string = no filter on that column; both apply together.
   const [statusFilter, setStatusFilter] = useState("");
   const [sampleFilter, setSampleFilter] = useState("");
+  // Fabric status filter: "" = all, "in_stock", "on_order".
+  const [fabricFilter, setFabricFilter] = useState("");
   const rowMatchesFilters = (row: Record<string, string>) =>
     (!statusFilter || (row.status ?? "") === statusFilter)
-    && (!sampleFilter || (row.sample ?? "") === sampleFilter);
+    && (!sampleFilter || (row.sample ?? "") === sampleFilter)
+    && (!fabricFilter || (row.fabricStatus ?? "") === fabricFilter);
   const [loaded, setLoaded] = useState(false);
   const [nameDraft, setNameDraft] = useState(listItem.name);
   const [editingName, setEditingName] = useState(false);
@@ -13714,6 +13740,24 @@ function CollectionSpreadsheetPage({
     [productInfo, fabricStockIndex],
   );
   const allFabrics = useMemo(() => styleCostLookup.allFabrics(), [styleCostLookup]);
+  // Fabric-meters summary for the header: for each row, resolve its fabric →
+  // meters-per-piece (× qty = used) and the fabric's on-hand stock (counted
+  // once per fabric). Updates live as quantities and fabric picks change.
+  const fabricMeters = useMemo(() => {
+    let used = 0;
+    const stockByFabric = new Map<string, number>();
+    for (const r of rows) {
+      const name = (r.name ?? r.title ?? "").trim();
+      if (!name) continue;
+      const info = styleCostLookup.metersInfoForTitle(name, (r.styleOverrideId ?? "").trim() || undefined);
+      if (!info) continue;
+      used += info.metersPerPiece * sumCollectionRowQuantity(r);
+      if (!stockByFabric.has(info.fabricKey)) stockByFabric.set(info.fabricKey, info.stockMeters);
+    }
+    let onHand = 0;
+    for (const m of stockByFabric.values()) onHand += m;
+    return { onHand, used, remaining: onHand - used, hasData: stockByFabric.size > 0 || used > 0 };
+  }, [rows, styleCostLookup]);
   // Right-click cost breakdown popup for the Price ₹ cells (same UX as the
   // packing list / restock pages). The extra `fabrics`/`onPickFabric` fields
   // give the menu a "Pick a different fabric" footer so a wrong auto-matched
@@ -14185,11 +14229,24 @@ function CollectionSpreadsheetPage({
               </h2>
             )}
             <div style={s.productInfoMeta}>
-              {statusFilter || sampleFilter
+              {statusFilter || sampleFilter || fabricFilter
                 ? `${rows.filter(rowMatchesFilters).length} of ${rows.length} row${rows.length !== 1 ? "s" : ""}`
                 : `${rows.length} row${rows.length !== 1 ? "s" : ""}`}
               {selectedRowIdxs.size > 0 ? ` · ${selectedRowIdxs.size} selected` : ""}
             </div>
+            {fabricMeters.hasData && (
+              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+                <span title="Fabric on hand across the fabrics this collection uses" style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 9px" }}>
+                  {Math.round(fabricMeters.onHand).toLocaleString()}m in stock
+                </span>
+                <span title="Meters used by the quantities entered (meters per piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 9px" }}>
+                  {Math.round(fabricMeters.used).toLocaleString()}m used
+                </span>
+                <span title="On hand minus used" style={{ fontSize: 12, fontWeight: 700, background: fabricMeters.remaining < 0 ? "#fee2e2" : "#e0f2fe", color: fabricMeters.remaining < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 9px" }}>
+                  {Math.round(fabricMeters.remaining).toLocaleString()}m left
+                </span>
+              </div>
+            )}
           </div>
         </div>
         <div style={s.productInfoActions}>
@@ -14219,6 +14276,19 @@ function CollectionSpreadsheetPage({
               {localSampleOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
+            Fabric
+            <select
+              value={fabricFilter}
+              onChange={(e) => setFabricFilter(e.target.value)}
+              style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: fabricFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
+              title="Filter rows by fabric status"
+            >
+              <option value="">All fabric</option>
+              <option value="in_stock">In stock</option>
+              <option value="on_order">On order</option>
             </select>
           </label>
           {otherCollections.length > 0 && selectedRowIdxs.size > 0 && (
@@ -14597,6 +14667,18 @@ function CollectionSpreadsheetPage({
                                 onResetToAutomatic={() => resetPriceToAutomatic(rIdx, rowName, overrideId)}
                                 onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
                                 onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
+                              />
+                            </Td>
+                          );
+                        }
+                        if (col.id === "fabric") {
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionFabricCell
+                                value={value}
+                                status={row.fabricStatus ?? ""}
+                                onCommit={(v) => updateCell(rIdx, "fabric", v)}
+                                onStatusChange={(st) => updateCell(rIdx, "fabricStatus", st)}
                               />
                             </Td>
                           );
@@ -16265,6 +16347,28 @@ function CollectionDuplicateFromCell({
 // share it without prop-drilling. Cleared if the user navigates away
 // from the page (since the JS module is reloaded).
 let copiedCollectionImage: CollectionImageEntry | null = null;
+
+// Fabric cell = swatch image + a per-row fabric status (In stock / On order).
+function CollectionFabricCell({ value, status, onCommit, onStatusChange }: { value: string; status: string; onCommit: (v: string) => void; onStatusChange: (status: string) => void }) {
+  const bg = status === "in_stock" ? "#dcfce7" : status === "on_order" ? "#fef3c7" : "#f3f4f6";
+  const color = status === "in_stock" ? "#166534" : status === "on_order" ? "#92400e" : "#6b7280";
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, width: "100%" }}>
+      <CollectionImageCell value={value} onCommit={onCommit} />
+      <select
+        value={status}
+        onChange={(e) => onStatusChange(e.target.value)}
+        onClick={(e) => e.stopPropagation()}
+        title="Fabric status for this row"
+        style={{ width: "100%", fontSize: 11, fontWeight: 700, padding: "3px 4px", border: "1px solid #e5e7eb", borderRadius: 5, background: bg, color, cursor: "pointer", outline: "none", textAlign: "center" }}
+      >
+        <option value="">— fabric status —</option>
+        <option value="in_stock">In stock</option>
+        <option value="on_order">On order</option>
+      </select>
+    </div>
+  );
+}
 
 function CollectionImageCell({
   value,
