@@ -23452,7 +23452,7 @@ function TitleFabricPicker({
   currentTitle,
   onPick,
 }: {
-  fabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
+  fabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string; stockMeters?: number }>;
   currentTitle: string;
   onPick: (fabricKey: string) => void;
 }) {
@@ -23537,10 +23537,18 @@ function TitleFabricPicker({
                         can read "On Order" even for in-stock fabrics. */}
                     <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 8 }}>{f.fabricType || f.sheetName}</span>
                   </span>
-                  <span style={{ fontSize: 11, fontFamily: "monospace", color: f.costPerMeter > 0 ? "#6b7280" : "#b45309" }}>
-                    {f.costPerMeter > 0
-                      ? `₹${f.costPerMeter.toLocaleString(undefined, { maximumFractionDigits: 2 })}/m`
-                      : "no cost set"}
+                  <span style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                    {/* Stock on hand for THIS entry — so you can pick the one
+                        that actually holds the meters (some same-name entries
+                        read 0). */}
+                    <span style={{ fontSize: 11, fontWeight: 700, borderRadius: 5, padding: "2px 7px", background: (f.stockMeters ?? 0) > 0 ? "#dcfce7" : "#f3f4f6", color: (f.stockMeters ?? 0) > 0 ? "#166534" : "#9ca3af" }}>
+                      {Math.round(f.stockMeters ?? 0).toLocaleString()}m
+                    </span>
+                    <span style={{ fontSize: 11, fontFamily: "monospace", color: f.costPerMeter > 0 ? "#6b7280" : "#b45309" }}>
+                      {f.costPerMeter > 0
+                        ? `₹${f.costPerMeter.toLocaleString(undefined, { maximumFractionDigits: 2 })}/m`
+                        : "no cost set"}
+                    </span>
                   </span>
                 </button>
               ))}
