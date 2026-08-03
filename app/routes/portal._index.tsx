@@ -55,6 +55,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     PORTAL_ACTIVE_USERS_KEY,
     PORTAL_NAV_ORDER_KEY,
     COLLECTION_HIDDEN_KEY,
+    COLLECTION_FABRIC_STATUS_KEY,
   ];
   const needsOrders = isRestockPage || page === "packing";
   const needsPackingLists = page === "packing" || packingId !== null;
@@ -328,14 +329,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           (Array.isArray(settingsMap.get(COLLECTION_HIDDEN_KEY)) ? settingsMap.get(COLLECTION_HIDDEN_KEY) as unknown[] : [])
             .map((v) => Number(v)).filter((n) => Number.isFinite(n)),
         );
+        const fabricStatusRaw = settingsMap.get(COLLECTION_FABRIC_STATUS_KEY);
+        const fabricStatusMap = (fabricStatusRaw && typeof fabricStatusRaw === "object" && !Array.isArray(fabricStatusRaw)) ? fabricStatusRaw as Record<string, string> : {};
         return rows.map((r) => ({
           id: r.id, name: r.name, sortOrder: r.sortOrder,
           hasThumbnail: Boolean(r.hasThumbnail),
           rowCount: Number(r.rowCount),
           createdAt: r.createdAt, updatedAt: r.updatedAt,
           hidden: hiddenIds.has(r.id),
+          fabricStatus: String(fabricStatusMap[String(r.id)] ?? ""),
         }));
-      }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean }>)
+      }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string }>)
     : [];
   // Photo shoots: slim tab list (id/name/sortOrder/rowCount). The active
   // shoot's full rows are fetched on demand via ps_get_shoot. Loaded for
@@ -3131,6 +3135,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
     return null;
   }
+  if (intent === "set_collection_fabric_status") {
+    // Per-collection fabric status (in_stock / on_order), stored as a
+    // { [collectionId]: status } object in a portal setting. Empty clears it.
+    const id = Number(form.get("collectionId"));
+    const status = String(form.get("status") ?? "").trim();
+    if (!id) return null;
+    const existing = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_FABRIC_STATUS_KEY }, select: { value: true } });
+    const map: Record<string, string> = (existing?.value && typeof existing.value === "object" && !Array.isArray(existing.value)) ? { ...(existing.value as Record<string, string>) } : {};
+    if (status === "in_stock" || status === "on_order") map[String(id)] = status; else delete map[String(id)];
+    await prisma.portalSetting.upsert({
+      where: { key: COLLECTION_FABRIC_STATUS_KEY },
+      create: { key: COLLECTION_FABRIC_STATUS_KEY, value: map },
+      update: { value: map },
+    });
+    return null;
+  }
   if (intent === "reorder_collections") {
     const ids = JSON.parse(String(form.get("collectionIds") ?? "[]")) as number[];
     await Promise.all(ids.map((id, index) => prisma.collection.update({ where: { id }, data: { sortOrder: index } })));
@@ -4541,6 +4561,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // sees the new items prop.
   if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
+  if (intent === "set_collection_fabric_status") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths" || intent === "update_photoshoot_column_widths" || intent === "update_jj_column_widths") return false;
   // Photo shoot row edits keep their own local state; the slim shoot list
   // (loader) only needs refreshing on add/rename/delete, not row edits.
@@ -4861,6 +4882,9 @@ const COLLECTION_SETTINGS_KEY = "collections-settings-v1";
 // Hidden collections: a JSON array of collection ids the user has hidden.
 // We hide (never delete) so no collection is ever destroyed.
 const COLLECTION_HIDDEN_KEY = "collections-hidden-v1";
+// Per-collection fabric status ("in_stock" | "on_order"), keyed by collection
+// id, stored as a JSON object. Set on the tile; used by the tiles filter.
+const COLLECTION_FABRIC_STATUS_KEY = "collections-fabric-status-v1";
 // Chip catalogs for the Collections Status + Sample columns. Reuses
 // the same shape as RestockOption so the dropdown UI can be reused.
 type CollectionChipOption = { value: string; label: string; bg: string; color: string };
@@ -12100,6 +12124,7 @@ type CollectionListItem = {
   createdAt: Date | string;
   updatedAt: Date | string;
   hidden?: boolean;
+  fabricStatus?: string;
 };
 
 // Cell types — drives the input rendered in CollectionCell:
@@ -13015,6 +13040,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const [addOpen, setAddOpen] = useState(false);
   const [addName, setAddName] = useState("");
   const [showHidden, setShowHidden] = useState(false);
+  // Tiles filter by fabric status: "" = all, "in_stock", "on_order".
+  const [fabricStatusFilter, setFabricStatusFilter] = useState("");
 
   useEffect(() => {
     setCollections(initialCollections.filter((c) => !deletedRef.current.has(c.id)));
@@ -13049,6 +13076,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const handleUnhide = (id: number) => {
     setCollections((prev) => prev.map((c) => c.id === id ? { ...c, hidden: false } : c));
     fetcher.submit({ intent: "set_collection_hidden", collectionId: String(id), hidden: "false" }, { method: "post" });
+  };
+  const handleSetFabricStatus = (id: number, status: string) => {
+    setCollections((prev) => prev.map((c) => c.id === id ? { ...c, fabricStatus: status } : c));
+    fetcher.submit({ intent: "set_collection_fabric_status", collectionId: String(id), status }, { method: "post" });
   };
 
   const handleRename = (id: number, name: string) => {
@@ -13117,6 +13148,19 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           </div>
         </div>
         <div style={s.productInfoActions}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
+            Fabric
+            <select
+              value={fabricStatusFilter}
+              onChange={(e) => setFabricStatusFilter(e.target.value)}
+              style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: fabricStatusFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
+              title="Show collections by fabric status"
+            >
+              <option value="">All</option>
+              <option value="in_stock">In stock</option>
+              <option value="on_order">On order</option>
+            </select>
+          </label>
           {isAdmin && (
             <>
               <button
@@ -13209,8 +13253,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
 
       <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
         {/* When "Show hidden" is on, show ONLY the hidden collections;
-            otherwise only the visible ones. */}
-        {collections.filter((c) => showHidden ? c.hidden : !c.hidden).map((c) => (
+            otherwise only the visible ones. Also filter by fabric status. */}
+        {collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter)).map((c) => (
           <CollectionCard
             key={c.id}
             collection={c}
@@ -13222,6 +13266,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             onUnhide={c.hidden ? () => handleUnhide(c.id) : undefined}
             hidden={Boolean(c.hidden)}
             actionVerb="Hide"
+            fabricStatus={c.fabricStatus ?? ""}
+            onSetFabricStatus={(st) => handleSetFabricStatus(c.id, st)}
             onSetCover={(file) => handleSetCover(c.id, file)}
             onDragStart={(e) => { setDragId(c.id); e.dataTransfer.effectAllowed = "move"; }}
             onDragOver={(e) => { if (!dragId) return; e.preventDefault(); setDragOverId(c.id); }}
@@ -13230,9 +13276,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             onDragEnd={() => { setDragId(null); setDragOverId(null); }}
           />
         ))}
-        {collections.filter((c) => showHidden ? c.hidden : !c.hidden).length === 0 && (
+        {collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter)).length === 0 && (
           <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-            {showHidden ? "No hidden collections." : "No collections yet. Click Add Collection to create your first one."}
+            {fabricStatusFilter ? "No collections with this fabric status." : showHidden ? "No hidden collections." : "No collections yet. Click Add Collection to create your first one."}
           </div>
         )}
       </div>
@@ -13440,6 +13486,8 @@ function CollectionCard({
   onUnhide,
   hidden = false,
   actionVerb = "Delete",
+  fabricStatus,
+  onSetFabricStatus,
   onSetCover,
   onDragStart,
   onDragOver,
@@ -13462,6 +13510,9 @@ function CollectionCard({
   onUnhide?: () => void;
   hidden?: boolean;
   actionVerb?: string;
+  // Per-collection fabric status (Collections tiles only).
+  fabricStatus?: string;
+  onSetFabricStatus?: (status: string) => void;
   onSetCover: (file: File) => void;
   onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
@@ -13585,6 +13636,34 @@ function CollectionCard({
         <span style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
           {collection.rowCount} {countNoun}{collection.rowCount !== 1 ? "s" : ""}
         </span>
+        {onSetFabricStatus && (
+          <div
+            style={{ marginTop: 8, display: "flex", gap: 6, justifyContent: "center" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {([
+              { key: "in_stock", label: "In stock", on: "#065f46", onBg: "#d1fae5", onBorder: "#10b981" },
+              { key: "on_order", label: "On order", on: "#92400e", onBg: "#fef3c7", onBorder: "#f59e0b" },
+            ] as const).map((opt) => {
+              const active = (fabricStatus ?? "") === opt.key;
+              return (
+                <button
+                  key={opt.key}
+                  type="button"
+                  title={active ? `Clear "${opt.label}"` : `Mark fabric ${opt.label}`}
+                  onClick={(e) => { e.stopPropagation(); onSetFabricStatus(active ? "" : opt.key); }}
+                  style={{
+                    padding: "3px 10px", borderRadius: 999, cursor: "pointer",
+                    fontSize: 11, fontWeight: 700, lineHeight: 1.2,
+                    border: `1px solid ${active ? opt.onBorder : "#e5e7eb"}`,
+                    background: active ? opt.onBg : "#fff",
+                    color: active ? opt.on : "#9ca3af",
+                  }}
+                >{opt.label}</button>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -13655,12 +13734,9 @@ function CollectionSpreadsheetPage({
   // shoot"). Empty string = no filter on that column; both apply together.
   const [statusFilter, setStatusFilter] = useState("");
   const [sampleFilter, setSampleFilter] = useState("");
-  // Fabric status filter: "" = all, "in_stock", "on_order".
-  const [fabricFilter, setFabricFilter] = useState("");
   const rowMatchesFilters = (row: Record<string, string>) =>
     (!statusFilter || (row.status ?? "") === statusFilter)
-    && (!sampleFilter || (row.sample ?? "") === sampleFilter)
-    && (!fabricFilter || (row.fabricStatus ?? "") === fabricFilter);
+    && (!sampleFilter || (row.sample ?? "") === sampleFilter);
   const [loaded, setLoaded] = useState(false);
   const [nameDraft, setNameDraft] = useState(listItem.name);
   const [editingName, setEditingName] = useState(false);
@@ -14229,7 +14305,7 @@ function CollectionSpreadsheetPage({
               </h2>
             )}
             <div style={s.productInfoMeta}>
-              {statusFilter || sampleFilter || fabricFilter
+              {statusFilter || sampleFilter
                 ? `${rows.filter(rowMatchesFilters).length} of ${rows.length} row${rows.length !== 1 ? "s" : ""}`
                 : `${rows.length} row${rows.length !== 1 ? "s" : ""}`}
               {selectedRowIdxs.size > 0 ? ` · ${selectedRowIdxs.size} selected` : ""}
@@ -14276,19 +14352,6 @@ function CollectionSpreadsheetPage({
               {localSampleOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
-            </select>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
-            Fabric
-            <select
-              value={fabricFilter}
-              onChange={(e) => setFabricFilter(e.target.value)}
-              style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: fabricFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
-              title="Filter rows by fabric status"
-            >
-              <option value="">All fabric</option>
-              <option value="in_stock">In stock</option>
-              <option value="on_order">On order</option>
             </select>
           </label>
           {otherCollections.length > 0 && selectedRowIdxs.size > 0 && (
@@ -14667,18 +14730,6 @@ function CollectionSpreadsheetPage({
                                 onResetToAutomatic={() => resetPriceToAutomatic(rIdx, rowName, overrideId)}
                                 onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
                                 onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
-                              />
-                            </Td>
-                          );
-                        }
-                        if (col.id === "fabric") {
-                          return (
-                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
-                              <CollectionFabricCell
-                                value={value}
-                                status={row.fabricStatus ?? ""}
-                                onCommit={(v) => updateCell(rIdx, "fabric", v)}
-                                onStatusChange={(st) => updateCell(rIdx, "fabricStatus", st)}
                               />
                             </Td>
                           );
@@ -16347,28 +16398,6 @@ function CollectionDuplicateFromCell({
 // share it without prop-drilling. Cleared if the user navigates away
 // from the page (since the JS module is reloaded).
 let copiedCollectionImage: CollectionImageEntry | null = null;
-
-// Fabric cell = swatch image + a per-row fabric status (In stock / On order).
-function CollectionFabricCell({ value, status, onCommit, onStatusChange }: { value: string; status: string; onCommit: (v: string) => void; onStatusChange: (status: string) => void }) {
-  const bg = status === "in_stock" ? "#dcfce7" : status === "on_order" ? "#fef3c7" : "#f3f4f6";
-  const color = status === "in_stock" ? "#166534" : status === "on_order" ? "#92400e" : "#6b7280";
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, width: "100%" }}>
-      <CollectionImageCell value={value} onCommit={onCommit} />
-      <select
-        value={status}
-        onChange={(e) => onStatusChange(e.target.value)}
-        onClick={(e) => e.stopPropagation()}
-        title="Fabric status for this row"
-        style={{ width: "100%", fontSize: 11, fontWeight: 700, padding: "3px 4px", border: "1px solid #e5e7eb", borderRadius: 5, background: bg, color, cursor: "pointer", outline: "none", textAlign: "center" }}
-      >
-        <option value="">— fabric status —</option>
-        <option value="in_stock">In stock</option>
-        <option value="on_order">On order</option>
-      </select>
-    </div>
-  );
-}
 
 function CollectionImageCell({
   value,
