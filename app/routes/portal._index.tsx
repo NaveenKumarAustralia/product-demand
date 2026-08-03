@@ -336,18 +336,25 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         const orderStatusRaw = settingsMap.get(COLLECTION_ORDER_STATUS_KEY);
         const orderStatusMap = (orderStatusRaw && typeof orderStatusRaw === "object" && !Array.isArray(orderStatusRaw)) ? orderStatusRaw as Record<string, string> : {};
         const fabricLinkRaw = settingsMap.get(COLLECTION_FABRIC_LINK_KEY);
-        const fabricLinkMap = (fabricLinkRaw && typeof fabricLinkRaw === "object" && !Array.isArray(fabricLinkRaw)) ? fabricLinkRaw as Record<string, string> : {};
-        return rows.map((r) => ({
-          id: r.id, name: r.name, sortOrder: r.sortOrder,
-          hasThumbnail: Boolean(r.hasThumbnail),
-          rowCount: Number(r.rowCount),
-          createdAt: r.createdAt, updatedAt: r.updatedAt,
-          hidden: hiddenIds.has(r.id),
-          fabricStatus: String(fabricStatusMap[String(r.id)] ?? ""),
-          orderStatus: String(orderStatusMap[String(r.id)] ?? ""),
-          fabricLink: String(fabricLinkMap[String(r.id)] ?? ""),
-        }));
-      }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string; orderStatus: string; fabricLink: string }>)
+        const fabricLinkMap = (fabricLinkRaw && typeof fabricLinkRaw === "object" && !Array.isArray(fabricLinkRaw)) ? fabricLinkRaw as Record<string, unknown> : {};
+        return rows.map((r) => {
+          // Per-collection fabric pins: { [fabricNameLower]: fabricKey } — which
+          // exact stock entry each fabric name is pinned to. Older data stored a
+          // single string key; ignore that shape (it can't map to a name).
+          const rawLink = fabricLinkMap[String(r.id)];
+          const fabricLinks = (rawLink && typeof rawLink === "object" && !Array.isArray(rawLink)) ? rawLink as Record<string, string> : {};
+          return {
+            id: r.id, name: r.name, sortOrder: r.sortOrder,
+            hasThumbnail: Boolean(r.hasThumbnail),
+            rowCount: Number(r.rowCount),
+            createdAt: r.createdAt, updatedAt: r.updatedAt,
+            hidden: hiddenIds.has(r.id),
+            fabricStatus: String(fabricStatusMap[String(r.id)] ?? ""),
+            orderStatus: String(orderStatusMap[String(r.id)] ?? ""),
+            fabricLinks,
+          };
+        });
+      }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string; orderStatus: string; fabricLinks: Record<string, string> }>)
     : [];
   // Photo shoots: slim tab list (id/name/sortOrder/rowCount). The active
   // shoot's full rows are fetched on demand via ps_get_shoot. Loaded for
@@ -3176,14 +3183,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
   if (intent === "set_collection_fabric_link") {
-    // Per-collection link to a specific fabric-in-stock entry (fabricKey).
-    // Empty clears it (back to auto per-row matching for the meters).
+    // Pin a fabric NAME to a specific fabric-in-stock entry (fabricKey) for this
+    // collection, so the in-stock meters read that exact entry. Stored as
+    // { [collectionId]: { [fabricNameLower]: fabricKey } }. Empty key clears the
+    // pin for that name (back to the auto-matched entry).
     const id = Number(form.get("collectionId"));
+    const fabricName = String(form.get("fabricName") ?? "").trim().toLowerCase();
     const fabricKey = String(form.get("fabricKey") ?? "").trim();
-    if (!id) return null;
+    if (!id || !fabricName) return null;
     const existing = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_FABRIC_LINK_KEY }, select: { value: true } });
-    const map: Record<string, string> = (existing?.value && typeof existing.value === "object" && !Array.isArray(existing.value)) ? { ...(existing.value as Record<string, string>) } : {};
-    if (fabricKey) map[String(id)] = fabricKey; else delete map[String(id)];
+    const map: Record<string, Record<string, string>> = (existing?.value && typeof existing.value === "object" && !Array.isArray(existing.value)) ? { ...(existing.value as Record<string, Record<string, string>>) } : {};
+    const prev = map[String(id)] as unknown;
+    const forCollection: Record<string, string> = (prev && typeof prev === "object" && !Array.isArray(prev)) ? { ...(prev as Record<string, string>) } : {};
+    if (fabricKey) forCollection[fabricName] = fabricKey; else delete forCollection[fabricName];
+    if (Object.keys(forCollection).length) map[String(id)] = forCollection; else delete map[String(id)];
     await prisma.portalSetting.upsert({
       where: { key: COLLECTION_FABRIC_LINK_KEY },
       create: { key: COLLECTION_FABRIC_LINK_KEY, value: map },
@@ -12186,8 +12199,11 @@ type CollectionListItem = {
   hidden?: boolean;
   fabricStatus?: string;
   orderStatus?: string;
-  fabricLink?: string;
+  // Per-fabric pins: fabricNameLower → the exact fabric-in-stock entry key.
+  fabricLinks?: Record<string, string>;
 };
+// Stable empty pins object so the fabric-breakdown memo's deps don't churn.
+const EMPTY_FABRIC_LINKS: Record<string, string> = {};
 
 // Cell types — drives the input rendered in CollectionCell:
 //   text / number / date — plain inputs
@@ -13147,9 +13163,15 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     setCollections((prev) => prev.map((c) => c.id === id ? { ...c, orderStatus: status } : c));
     fetcher.submit({ intent: "set_collection_order_status", collectionId: String(id), status }, { method: "post" });
   };
-  const handleSetFabricLink = (id: number, fabricKey: string) => {
-    setCollections((prev) => prev.map((c) => c.id === id ? { ...c, fabricLink: fabricKey } : c));
-    fetcher.submit({ intent: "set_collection_fabric_link", collectionId: String(id), fabricKey }, { method: "post" });
+  const handleSetFabricLink = (id: number, fabricName: string, fabricKey: string) => {
+    const nameKey = fabricName.trim().toLowerCase();
+    setCollections((prev) => prev.map((c) => {
+      if (c.id !== id) return c;
+      const next = { ...(c.fabricLinks ?? {}) };
+      if (fabricKey) next[nameKey] = fabricKey; else delete next[nameKey];
+      return { ...c, fabricLinks: next };
+    }));
+    fetcher.submit({ intent: "set_collection_fabric_link", collectionId: String(id), fabricName, fabricKey }, { method: "post" });
   };
 
   const handleRename = (id: number, name: string) => {
@@ -13204,7 +13226,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         etaByProductId={etaByProductId}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
-        onSetFabricLink={(fabricKey) => handleSetFabricLink(selectedCollection.id, fabricKey)}
+        onSetFabricLink={(fabricName, fabricKey) => handleSetFabricLink(selectedCollection.id, fabricName, fabricKey)}
       />
     );
   }
@@ -13807,7 +13829,7 @@ function CollectionSpreadsheetPage({
   etaByProductId: Record<string, string>;
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
-  onSetFabricLink: (fabricKey: string) => void;
+  onSetFabricLink: (fabricName: string, fabricKey: string) => void;
 }) {
   // Thread message counts keyed by "<entityType>:<entityId>:<entityKey>:<field>".
   // Populated by a fetcher on mount + after row saves so the 💬 badges
@@ -13921,41 +13943,46 @@ function CollectionSpreadsheetPage({
   // Fabric-meters summary for the header: for each row, resolve its fabric →
   // meters-per-piece (× qty = used) and the fabric's on-hand stock (counted
   // once per fabric). Updates live as quantities and fabric picks change.
-  // The fabric explicitly wired to this collection (if any). A collection can
-  // use several fabrics, so this is only a fallback to force-show one that the
-  // rows don't auto-resolve to.
-  const linkedFabricKey = (listItem.fabricLink ?? "").trim();
-  const linkedFabric = useMemo(
-    () => (linkedFabricKey ? allFabrics.find((f) => f.key === linkedFabricKey) ?? null : null),
-    [allFabrics, linkedFabricKey],
-  );
+  // Per-fabric pins: fabricNameLower → the exact fabric-in-stock entry key the
+  // user chose for that fabric. The in-stock meters then read THAT entry only,
+  // not a guess or a sum across same-name rows.
+  const fabricLinks = listItem.fabricLinks ?? EMPTY_FABRIC_LINKS;
   // Per-fabric meters. Each row's product name resolves to a fabric; group the
-  // rows by that fabric and, for each, show in-stock (summed across every
-  // same-name stock entry), used (meters/piece × qty), and what's left.
+  // rows by that fabric and, for each, show in-stock (from the pinned entry, or
+  // the auto-matched one), used (meters/piece × qty), and what's left.
   const fabricBreakdown = useMemo(() => {
     const usedByName = new Map<string, number>();
+    const autoStockByName = new Map<string, number>();
     for (const r of rows) {
       const name = (r.name ?? r.title ?? "").trim();
       if (!name) continue;
       const info = styleCostLookup.metersInfoForTitle(name, (r.styleOverrideId ?? "").trim() || undefined);
       if (!info) continue;
       usedByName.set(info.fabricName, (usedByName.get(info.fabricName) ?? 0) + info.metersPerPiece * sumCollectionRowQuantity(r));
+      if (!autoStockByName.has(info.fabricName)) autoStockByName.set(info.fabricName, info.stockMeters);
     }
-    // Force-show a manually-linked fabric even if no rows resolved to it yet.
-    if (linkedFabric && !usedByName.has(linkedFabric.fabricName)) usedByName.set(linkedFabric.fabricName, 0);
+    // Force-show any pinned fabric, even if no rows resolved to it yet.
+    for (const pinnedName of Object.keys(fabricLinks)) {
+      if (!usedByName.has(pinnedName)) usedByName.set(pinnedName, 0);
+    }
     const entries = Array.from(usedByName.entries())
-      // Only show fabrics actually being used (meters consumed), plus one the
-      // user explicitly picked — so 0-used fabrics that a blank/placeholder row
+      // Only show fabrics actually being used (meters consumed), plus any the
+      // user explicitly pinned — so 0-used fabrics that a blank/placeholder row
       // happens to resolve to don't clutter the bar.
-      .filter(([name, used]) => used > 0 || (linkedFabric && linkedFabric.fabricName === name))
+      .filter(([name, used]) => used > 0 || Boolean(fabricLinks[name]))
       .map(([name, used]) => {
-        const f = allFabrics.find((af) => af.fabricName === name);
-        const inStock = styleCostLookup.stockMetersForName(name);
-        return { name, fabricType: f?.fabricType, inStock, used, left: inStock - used };
+        // In-stock: the pinned entry's exact on-hand meters if pinned; else the
+        // fabric the rows auto-matched to.
+        const pinnedKey = fabricLinks[name];
+        const pinned = pinnedKey ? allFabrics.find((af) => af.key === pinnedKey) ?? null : null;
+        const auto = allFabrics.find((af) => af.fabricName === name) ?? null;
+        const inStock = pinned ? (pinned.stockMeters ?? 0) : (autoStockByName.get(name) ?? 0);
+        const fabricType = pinned?.fabricType ?? auto?.fabricType;
+        return { name, fabricType, inStock, used, left: inStock - used, pinned: Boolean(pinned) };
       });
     entries.sort((a, b) => b.used - a.used);
     return entries;
-  }, [rows, styleCostLookup, allFabrics, linkedFabric]);
+  }, [rows, styleCostLookup, allFabrics, fabricLinks]);
   // Right-click cost breakdown popup for the Price ₹ cells (same UX as the
   // packing list / restock pages). The extra `fabrics`/`onPickFabric` fields
   // give the menu a "Pick a different fabric" footer so a wrong auto-matched
@@ -14553,45 +14580,48 @@ function CollectionSpreadsheetPage({
       </div>
       {/* Fabric bar: one entry per fabric the collection uses (detected from the
           product names in the rows), each with in stock / used / left. In-stock
-          meters are summed from the Fabric in stock page across every same-name
-          entry. The picker force-adds a fabric the rows don't resolve to. */}
+          comes from the exact fabric-in-stock entry you pin with the picker;
+          until pinned it shows the auto-matched entry (📌 = pinned). */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0, padding: "10px 14px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 10 }}>
         <span style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>Fabric</span>
         {fabricBreakdown.length === 0 && (
           <span style={{ fontSize: 12, color: "#9ca3af" }}>No fabric detected from the product names yet.</span>
         )}
-        {fabricBreakdown.map((fb) => {
-          const isLinked = Boolean(linkedFabric && linkedFabric.fabricName === fb.name);
-          return (
-            <div key={fb.name} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 8px 4px 10px", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8 }}>
-              <span style={{ fontSize: 12, fontWeight: 700, color: "#111827", textTransform: "capitalize" }}>
-                {fb.name}{fb.fabricType ? <span style={{ fontWeight: 500, color: "#6b7280" }}> · {fb.fabricType}</span> : null}
-              </span>
-              <span title="On-hand meters (summed from the Fabric in stock page)" style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 8px" }}>
-                {Math.round(fb.inStock).toLocaleString()}m in stock
-              </span>
-              <span title="Meters used by the quantities on this collection's rows (meters/piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 8px" }}>
-                {Math.round(fb.used).toLocaleString()}m used
-              </span>
-              <span title="In stock minus used" style={{ fontSize: 12, fontWeight: 700, background: fb.left < 0 ? "#fee2e2" : "#e0f2fe", color: fb.left < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 8px" }}>
-                {Math.round(fb.left).toLocaleString()}m left
-              </span>
-              {isLinked && (
-                <button
-                  type="button"
-                  title="Remove this manually-added fabric"
-                  onClick={() => onSetFabricLink("")}
-                  style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: "0 2px" }}
-                >×</button>
-              )}
-            </div>
-          );
-        })}
+        {fabricBreakdown.map((fb) => (
+          <div key={fb.name} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 8px 4px 10px", background: "#fff", border: `1px solid ${fb.pinned ? "#c7d2fe" : "#e5e7eb"}`, borderRadius: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#111827", textTransform: "capitalize" }}>
+              {fb.pinned ? <span title="Pinned to a specific fabric-in-stock entry" style={{ marginRight: 3 }}>📌</span> : null}
+              {fb.name}{fb.fabricType ? <span style={{ fontWeight: 500, color: "#6b7280" }}> · {fb.fabricType}</span> : null}
+            </span>
+            <span title={fb.pinned ? "On-hand meters from the pinned Fabric in stock entry" : "On-hand meters from the auto-matched fabric — use Pick fabric to choose the exact entry"} style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 8px" }}>
+              {Math.round(fb.inStock).toLocaleString()}m in stock
+            </span>
+            <span title="Meters used by the quantities on this collection's rows (meters/piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 8px" }}>
+              {Math.round(fb.used).toLocaleString()}m used
+            </span>
+            <span title="In stock minus used" style={{ fontSize: 12, fontWeight: 700, background: fb.left < 0 ? "#fee2e2" : "#e0f2fe", color: fb.left < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 8px" }}>
+              {Math.round(fb.left).toLocaleString()}m left
+            </span>
+            {fb.pinned && (
+              <button
+                type="button"
+                title="Unpin — go back to the auto-matched fabric"
+                onClick={() => onSetFabricLink(fb.name, "")}
+                style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: "0 2px" }}
+              >×</button>
+            )}
+          </div>
+        ))}
         <div style={{ width: 150, marginLeft: "auto" }}>
           <TitleFabricPicker
             fabrics={allFabrics}
             currentTitle={listItem.name || ""}
-            onPick={(fabricKey) => onSetFabricLink(fabricKey)}
+            onPick={(fabricKey) => {
+              // Pin the picked entry to ITS fabric name, so that fabric's
+              // in-stock meters read this exact entry.
+              const picked = allFabrics.find((f) => f.key === fabricKey);
+              if (picked) onSetFabricLink(picked.fabricName, fabricKey);
+            }}
           />
         </div>
       </div>
