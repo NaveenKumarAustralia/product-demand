@@ -15435,10 +15435,78 @@ function CollectionCellInner({
   if (columnId === "productType") {
     return <CollectionProductTypeCell value={value} onCommit={onCommit} />;
   }
+  if (columnId === "tags") {
+    return <CollectionTagsCell value={value} onCommit={onCommit} />;
+  }
   // Description + SEO are handled as special popup cells in renderCol (rich-text
   // editor / combined page-title+meta-description). They never reach here.
   return (
     <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+  );
+}
+
+// Tags cell — chips + a type-ahead that pulls existing Shopify tags and lets
+// you create new ones. Stored as a comma-separated string (Shopify's format).
+function CollectionTagsCell({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+  const tags = useMemo(() => value.split(",").map((s) => s.trim()).filter(Boolean), [value]);
+  const [input, setInput] = useState("");
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const fetcher = useFetcher<{ tags?: string[] }>();
+  const loadedRef = useRef(false);
+  const load = () => { if (!loadedRef.current) { loadedRef.current = true; fetcher.load("/api/shopify-product-meta?kind=tags"); } };
+  const all = fetcher.data?.tags ?? [];
+  const has = (t: string) => tags.some((x) => x.toLowerCase() === t.toLowerCase());
+  const q = input.trim().toLowerCase();
+  const matches = (q ? all.filter((t) => t.toLowerCase().includes(q)) : all).filter((t) => !has(t)).slice(0, 30);
+  const exactExists = q.length > 0 && (all.some((t) => t.toLowerCase() === q) || has(q));
+  const commit = (next: string[]) => onCommit(next.join(", "));
+  const add = (tag: string) => { const t = tag.trim(); if (!t || has(t)) { setInput(""); return; } commit([...tags, t]); setInput(""); };
+  const remove = (t: string) => commit(tags.filter((x) => x !== t));
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (!wrapRef.current?.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+  return (
+    <div ref={wrapRef} style={{ position: "relative", width: "100%", padding: "3px 4px" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+        {tags.map((t) => (
+          <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#eef2ff", color: "#3730a3", borderRadius: 999, padding: "2px 8px", fontSize: 12, fontWeight: 600 }}>
+            {t}
+            <button type="button" title="Remove tag" onClick={() => remove(t)} style={{ border: "none", background: "transparent", color: "#6366f1", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>×</button>
+          </span>
+        ))}
+        <input
+          value={input}
+          onFocus={() => { load(); setOpen(true); }}
+          onChange={(e) => { setInput(e.target.value); setOpen(true); }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === ",") { e.preventDefault(); if (input.trim()) add(input); }
+            else if (e.key === "Backspace" && !input && tags.length) remove(tags[tags.length - 1]);
+          }}
+          placeholder={tags.length ? "" : "Add tag…"
+          }
+          style={{ flex: 1, minWidth: 70, border: "none", outline: "none", fontSize: 12, fontFamily: "inherit", background: "transparent", padding: "2px 0" }}
+        />
+      </div>
+      {open && (matches.length > 0 || (q && !exactExists)) && (
+        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 40, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, marginTop: 2, maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.12)" }}>
+          {q && !exactExists && (
+            <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => add(input)} style={{ display: "block", width: "100%", textAlign: "left", border: "none", borderBottom: "1px solid #f3f4f6", background: "transparent", padding: "8px 12px", fontSize: 13, cursor: "pointer", color: "#0d9488", fontWeight: 600 }}>
+              + Create “{input.trim()}”
+            </button>
+          )}
+          {matches.map((t) => (
+            <button key={t} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => add(t)} style={{ display: "block", width: "100%", textAlign: "left", border: "none", borderBottom: "1px solid #f3f4f6", background: "transparent", padding: "8px 12px", fontSize: 13, cursor: "pointer", color: "#111827" }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f9fafb"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+            >{t}</button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
