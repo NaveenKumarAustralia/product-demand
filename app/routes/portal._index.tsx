@@ -15298,8 +15298,12 @@ function CollectionCellInner({
   if (columnId === "modelPicture") {
     return <CollectionMultiImageCell value={value} onCommit={onCommit} productInfo={productInfo} collectionId={collectionId} rowName={rowName} onPickStyleName={(name) => updateCell(rowIndex, "name", name)} />;
   }
+  // Fabric + mani-pic columns use the SAME image manager as Picture — so they
+  // get Dropbox search (auto-filled by the product title), upload from computer,
+  // and paste. No onPickStyleName: picking a fabric/mani image must never rename
+  // the product.
   if (columnId === "fabric" || columnId === "maniPicsTaken") {
-    return <CollectionImageCell value={value} onCommit={onCommit} />;
+    return <CollectionMultiImageCell value={value} onCommit={onCommit} productInfo={productInfo} collectionId={collectionId} rowName={rowName} />;
   }
   // Release column: big bold maroon text. Click to edit.
   if (type === "release") {
@@ -16492,12 +16496,12 @@ function CollectionDuplicateFromCell({
 
   return (
     <>
-      <div style={{ display: "flex", gap: 4, alignItems: "stretch" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch", width: "100%" }}>
         <button
           type="button"
           onClick={() => setOpen(true)}
           style={{
-            flex: 1, textAlign: "left",
+            width: "100%", textAlign: "left",
             background: "transparent", border: "1px dashed #d1d5db",
             borderRadius: 5, padding: "5px 8px", fontSize: 12,
             color: value ? "#111827" : "#6b7280",
@@ -16507,14 +16511,17 @@ function CollectionDuplicateFromCell({
         >
           {value || "+ Duplicate from…"}
         </button>
+        {/* Auto-pick button sits at the bottom-right of the cell. */}
         {!value && (styleHint || currentName.trim()) && (
-          <button
-            type="button"
-            onClick={autoPick}
-            disabled={autoPicking || isFetching}
-            title={`Auto-pick the latest ${styleHint || "same-style"} product from Shopify`}
-            style={{ flexShrink: 0, background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 8px", fontSize: 12, fontWeight: 600, cursor: autoPicking || isFetching ? "wait" : "pointer" }}
-          >{autoPicking || isFetching ? "…" : "⚡ Auto"}</button>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={autoPick}
+              disabled={autoPicking || isFetching}
+              title={`Auto-pick the latest ${styleHint || "same-style"} product from Shopify`}
+              style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: autoPicking || isFetching ? "wait" : "pointer" }}
+            >{autoPicking || isFetching ? "…" : "⚡ Auto"}</button>
+          </div>
         )}
       </div>
       {open && typeof document !== "undefined" && createPortal(
