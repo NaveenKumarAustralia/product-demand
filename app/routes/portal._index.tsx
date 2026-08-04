@@ -5870,7 +5870,9 @@ type StyleCostLookup = {
   // Resolves the row's fabric and returns the meters it takes to make one
   // piece (from Product Information / the fabric's per-style override) plus
   // that fabric's on-hand stock — for the collection's fabric-meters summary.
-  metersInfoForTitle: (title: string | null | undefined, styleId?: string, pinnedByName?: Record<string, string>) => { fabricKey: string; fabricName: string; metersPerPiece: number; stockMeters: number } | null;
+  metersDiagForTitle: (title: string | null | undefined, styleId?: string, pinnedByName?: Record<string, string>) =>
+    | { ok: true; fabricKey: string; fabricName: string; metersPerPiece: number; stockMeters: number }
+    | { ok: false; reason: "no-name" | "no-style" | "no-fabric" | "no-meters"; fabricName?: string };
   // Total on-hand meters for a fabric NAME, summed across every stock entry
   // that shares that name (across tabs). A single matched entry can read 0 when
   // the on-hand meters live on a different same-name row — this sees them all.
@@ -6135,14 +6137,15 @@ function buildStyleCostLookup(
       return sum;
     },
     manualPriceForTitle: manualPriceFor,
-    metersInfoForTitle: (title, styleId, pinnedByName) => {
+    metersDiagForTitle: (title, styleId, pinnedByName) => {
       const haystack = (title ?? "").trim().toLowerCase();
-      if (!haystack) return null;
+      if (!haystack) return { ok: false, reason: "no-name" };
       const style = styleId ? findStyleById(styleId) : findStyle(haystack);
-      if (!style) return null;
-      // Fabric resolution order: a per-title override wins; then the collection
-      // pin for this fabric name (breaks the "ambiguous fabric" case — e.g.
-      // several "Indigo Thread" entries — using the one pinned for the whole
+      if (!style) return { ok: false, reason: "no-style" };
+      // Fabric resolution order (identical to the price/cost engine): a per-title
+      // override (the fabric picked on the Price ₹ cell) wins; then the
+      // collection pin for this fabric name (breaks the "ambiguous fabric" case —
+      // e.g. several "Indigo Thread" entries — using the one pinned for the whole
       // collection); then the unambiguous auto-match.
       let fab: (FabricCandidate & { key?: string }) | null = null;
       const overrideKey = fabricOverridesByTitle[haystack];
@@ -6154,10 +6157,11 @@ function buildStyleCostLookup(
         if (pinKey && fabricByKey.has(pinKey)) fab = fabricByKey.get(pinKey)!;
         else if (m.kind === "ok") fab = m.fabric;
       }
-      if (!fab) return null;
+      if (!fab) return { ok: false, reason: "no-fabric" };
       const overrideMeters = fab.styleMeters?.[style.id];
       const metersPerPiece = isFilled(overrideMeters) ? overrideMeters! : (style.averageMeters ?? 0);
-      return { fabricKey: fab.key ?? fabricKeyFor(fab.sheetName, fab.name), fabricName: fab.name, metersPerPiece, stockMeters: fab.stockMeters };
+      if (!(metersPerPiece > 0)) return { ok: false, reason: "no-meters", fabricName: fab.name };
+      return { ok: true, fabricKey: fab.key ?? fabricKeyFor(fab.sheetName, fab.name), fabricName: fab.name, metersPerPiece, stockMeters: fab.stockMeters };
     },
     blockerForTitle: (title) => {
       const haystack = (title ?? "").trim().toLowerCase();
@@ -13961,20 +13965,22 @@ function CollectionSpreadsheetPage({
     // set. These silently contribute 0, which is why "used" can read low; we
     // surface the count so the total can be trusted (or the gap fixed).
     const unmeasured: string[] = [];
+    const reasonLabel: Record<string, string> = {
+      "no-name": "no name",
+      "no-style": "style not found in Product Information",
+      "no-fabric": "fabric not picked / ambiguous",
+      "no-meters": "no meters set for this style (add average meters, or the fabric's per-style meters)",
+    };
     for (const r of rows) {
       const name = (r.name ?? r.title ?? "").trim();
       const qty = sumCollectionRowQuantity(r);
-      if (!name) {
-        if (qty > 0) unmeasured.push("(no name)");
+      const diag = styleCostLookup.metersDiagForTitle(name || undefined, (r.styleOverrideId ?? "").trim() || undefined, fabricLinks);
+      if (!diag.ok) {
+        if (qty > 0) unmeasured.push(`${name || "(no name)"} — ${reasonLabel[diag.reason] ?? diag.reason}`);
         continue;
       }
-      const info = styleCostLookup.metersInfoForTitle(name, (r.styleOverrideId ?? "").trim() || undefined, fabricLinks);
-      if (!info || info.metersPerPiece <= 0) {
-        if (qty > 0) unmeasured.push(name);
-        continue;
-      }
-      usedByName.set(info.fabricName, (usedByName.get(info.fabricName) ?? 0) + info.metersPerPiece * qty);
-      if (!autoStockByName.has(info.fabricName)) autoStockByName.set(info.fabricName, info.stockMeters);
+      usedByName.set(diag.fabricName, (usedByName.get(diag.fabricName) ?? 0) + diag.metersPerPiece * qty);
+      if (!autoStockByName.has(diag.fabricName)) autoStockByName.set(diag.fabricName, diag.stockMeters);
     }
     // Force-show any pinned fabric, even if no rows resolved to it yet.
     for (const pinnedName of Object.keys(fabricLinks)) {
