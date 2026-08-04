@@ -13951,12 +13951,24 @@ function CollectionSpreadsheetPage({
   const fabricBreakdown = useMemo(() => {
     const usedByName = new Map<string, number>();
     const autoStockByName = new Map<string, number>();
+    // Rows that HAVE quantities but couldn't be turned into meters — either the
+    // Name didn't match a style/fabric, or the style has no meters-per-piece
+    // set. These silently contribute 0, which is why "used" can read low; we
+    // surface the count so the total can be trusted (or the gap fixed).
+    const unmeasured: string[] = [];
     for (const r of rows) {
       const name = (r.name ?? r.title ?? "").trim();
-      if (!name) continue;
+      const qty = sumCollectionRowQuantity(r);
+      if (!name) {
+        if (qty > 0) unmeasured.push("(no name)");
+        continue;
+      }
       const info = styleCostLookup.metersInfoForTitle(name, (r.styleOverrideId ?? "").trim() || undefined);
-      if (!info) continue;
-      usedByName.set(info.fabricName, (usedByName.get(info.fabricName) ?? 0) + info.metersPerPiece * sumCollectionRowQuantity(r));
+      if (!info || info.metersPerPiece <= 0) {
+        if (qty > 0) unmeasured.push(name);
+        continue;
+      }
+      usedByName.set(info.fabricName, (usedByName.get(info.fabricName) ?? 0) + info.metersPerPiece * qty);
       if (!autoStockByName.has(info.fabricName)) autoStockByName.set(info.fabricName, info.stockMeters);
     }
     // Force-show any pinned fabric, even if no rows resolved to it yet.
@@ -13979,7 +13991,7 @@ function CollectionSpreadsheetPage({
         return { name, fabricType, inStock, used, left: inStock - used, pinned: Boolean(pinned) };
       });
     entries.sort((a, b) => b.used - a.used);
-    return entries;
+    return { entries, unmeasured };
   }, [rows, styleCostLookup, allFabrics, fabricLinks]);
   // Right-click cost breakdown popup for the Price ₹ cells (same UX as the
   // packing list / restock pages). The extra `fabrics`/`onPickFabric` fields
@@ -14976,10 +14988,10 @@ function CollectionSpreadsheetPage({
           the rows, right above the Add-row button. */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0, padding: "10px 14px", marginTop: 8, background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 10 }}>
         <span style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>Fabric</span>
-        {fabricBreakdown.length === 0 && (
+        {fabricBreakdown.entries.length === 0 && (
           <span style={{ fontSize: 12, color: "#9ca3af" }}>No fabric detected from the product names yet.</span>
         )}
-        {fabricBreakdown.map((fb) => (
+        {fabricBreakdown.entries.map((fb) => (
           <div key={fb.name} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 8px 4px 10px", background: "#fff", border: `1px solid ${fb.pinned ? "#c7d2fe" : "#e5e7eb"}`, borderRadius: 8 }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: "#111827", textTransform: "capitalize" }}>
               {fb.pinned ? <span title="Pinned to a specific fabric-in-stock entry" style={{ marginRight: 3 }}>📌</span> : null}
@@ -15004,6 +15016,14 @@ function CollectionSpreadsheetPage({
             )}
           </div>
         ))}
+        {fabricBreakdown.unmeasured.length > 0 && (
+          <span
+            title={`These rows have quantities but no meters were counted (no style/fabric match, or the style has no meters set in Product Information):\n\n${fabricBreakdown.unmeasured.join("\n")}`}
+            style={{ fontSize: 12, fontWeight: 700, background: "#fee2e2", color: "#991b1b", borderRadius: 6, padding: "3px 8px", cursor: "help" }}
+          >
+            ⚠ {fabricBreakdown.unmeasured.length} not counted
+          </span>
+        )}
         <div style={{ width: 150, marginLeft: "auto" }}>
           <TitleFabricPicker
             fabrics={allFabrics}
