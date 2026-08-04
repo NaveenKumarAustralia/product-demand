@@ -14576,53 +14576,6 @@ function CollectionSpreadsheetPage({
           </button>
         </div>
       </div>
-      {/* Fabric bar: one entry per fabric the collection uses (detected from the
-          product names in the rows), each with in stock / used / left. In-stock
-          comes from the exact fabric-in-stock entry you pin with the picker;
-          until pinned it shows the auto-matched entry (📌 = pinned). */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0, padding: "10px 14px", background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 10 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>Fabric</span>
-        {fabricBreakdown.length === 0 && (
-          <span style={{ fontSize: 12, color: "#9ca3af" }}>No fabric detected from the product names yet.</span>
-        )}
-        {fabricBreakdown.map((fb) => (
-          <div key={fb.name} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 8px 4px 10px", background: "#fff", border: `1px solid ${fb.pinned ? "#c7d2fe" : "#e5e7eb"}`, borderRadius: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 700, color: "#111827", textTransform: "capitalize" }}>
-              {fb.pinned ? <span title="Pinned to a specific fabric-in-stock entry" style={{ marginRight: 3 }}>📌</span> : null}
-              {fb.name}{fb.fabricType ? <span style={{ fontWeight: 500, color: "#6b7280" }}> · {fb.fabricType}</span> : null}
-            </span>
-            <span title={fb.pinned ? "On-hand meters from the pinned Fabric in stock entry" : "On-hand meters from the auto-matched fabric — use Pick fabric to choose the exact entry"} style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 8px" }}>
-              {Math.round(fb.inStock).toLocaleString()}m in stock
-            </span>
-            <span title="Meters used by the quantities on this collection's rows (meters/piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 8px" }}>
-              {Math.round(fb.used).toLocaleString()}m used
-            </span>
-            <span title="In stock minus used" style={{ fontSize: 12, fontWeight: 700, background: fb.left < 0 ? "#fee2e2" : "#e0f2fe", color: fb.left < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 8px" }}>
-              {Math.round(fb.left).toLocaleString()}m left
-            </span>
-            {fb.pinned && (
-              <button
-                type="button"
-                title="Unpin — go back to the auto-matched fabric"
-                onClick={() => onSetFabricLink(fb.name, "")}
-                style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: "0 2px" }}
-              >×</button>
-            )}
-          </div>
-        ))}
-        <div style={{ width: 150, marginLeft: "auto" }}>
-          <TitleFabricPicker
-            fabrics={allFabrics}
-            currentTitle={listItem.name || ""}
-            onPick={(fabricKey) => {
-              // Pin the picked entry to ITS fabric name, so that fabric's
-              // in-stock meters read this exact entry.
-              const picked = allFabrics.find((f) => f.key === fabricKey);
-              if (picked) onSetFabricLink(picked.fabricName, fabricKey);
-            }}
-          />
-        </div>
-      </div>
       {pushStatus && (
         <div style={{
           margin: "0 0 0 4px",
@@ -15015,6 +14968,54 @@ function CollectionSpreadsheetPage({
           </table>
           );
         })()}
+      </div>
+      {/* Fabric bar: one entry per fabric the collection uses (detected from the
+          product names in the rows), each with in stock / used / left. In-stock
+          comes from the exact fabric-in-stock entry you pin with the picker;
+          until pinned it shows the auto-matched entry (📌 = pinned). Sits under
+          the rows, right above the Add-row button. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0, padding: "10px 14px", marginTop: 8, background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 10 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>Fabric</span>
+        {fabricBreakdown.length === 0 && (
+          <span style={{ fontSize: 12, color: "#9ca3af" }}>No fabric detected from the product names yet.</span>
+        )}
+        {fabricBreakdown.map((fb) => (
+          <div key={fb.name} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 8px 4px 10px", background: "#fff", border: `1px solid ${fb.pinned ? "#c7d2fe" : "#e5e7eb"}`, borderRadius: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#111827", textTransform: "capitalize" }}>
+              {fb.pinned ? <span title="Pinned to a specific fabric-in-stock entry" style={{ marginRight: 3 }}>📌</span> : null}
+              {fb.name}{fb.fabricType ? <span style={{ fontWeight: 500, color: "#6b7280" }}> · {fb.fabricType}</span> : null}
+            </span>
+            <span title={fb.pinned ? "On-hand meters from the pinned Fabric in stock entry" : "On-hand meters from the auto-matched fabric — use Pick fabric to choose the exact entry"} style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 8px" }}>
+              {Math.round(fb.inStock).toLocaleString()}m in stock
+            </span>
+            <span title="Meters used by the quantities on this collection's rows (meters/piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 8px" }}>
+              {Math.round(fb.used).toLocaleString()}m used
+            </span>
+            <span title="In stock minus used" style={{ fontSize: 12, fontWeight: 700, background: fb.left < 0 ? "#fee2e2" : "#e0f2fe", color: fb.left < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 8px" }}>
+              {Math.round(fb.left).toLocaleString()}m left
+            </span>
+            {fb.pinned && (
+              <button
+                type="button"
+                title="Unpin — go back to the auto-matched fabric"
+                onClick={() => onSetFabricLink(fb.name, "")}
+                style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: "0 2px" }}
+              >×</button>
+            )}
+          </div>
+        ))}
+        <div style={{ width: 150, marginLeft: "auto" }}>
+          <TitleFabricPicker
+            fabrics={allFabrics}
+            currentTitle={listItem.name || ""}
+            onPick={(fabricKey) => {
+              // Pin the picked entry to ITS fabric name, so that fabric's
+              // in-stock meters read this exact entry.
+              const picked = allFabrics.find((f) => f.key === fabricKey);
+              if (picked) onSetFabricLink(picked.fabricName, fabricKey);
+            }}
+          />
+        </div>
       </div>
       {/* Footer Add-row button — matches the packing list pattern
           for consistency: small button sitting just below the table
