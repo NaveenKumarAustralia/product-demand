@@ -5870,7 +5870,7 @@ type StyleCostLookup = {
   // Resolves the row's fabric and returns the meters it takes to make one
   // piece (from Product Information / the fabric's per-style override) plus
   // that fabric's on-hand stock — for the collection's fabric-meters summary.
-  metersInfoForTitle: (title: string | null | undefined, styleId?: string) => { fabricKey: string; fabricName: string; metersPerPiece: number; stockMeters: number } | null;
+  metersInfoForTitle: (title: string | null | undefined, styleId?: string, pinnedByName?: Record<string, string>) => { fabricKey: string; fabricName: string; metersPerPiece: number; stockMeters: number } | null;
   // Total on-hand meters for a fabric NAME, summed across every stock entry
   // that shares that name (across tabs). A single matched entry can read 0 when
   // the on-hand meters live on a different same-name row — this sees them all.
@@ -6135,19 +6135,24 @@ function buildStyleCostLookup(
       return sum;
     },
     manualPriceForTitle: manualPriceFor,
-    metersInfoForTitle: (title, styleId) => {
+    metersInfoForTitle: (title, styleId, pinnedByName) => {
       const haystack = (title ?? "").trim().toLowerCase();
       if (!haystack) return null;
       const style = styleId ? findStyleById(styleId) : findStyle(haystack);
       if (!style) return null;
-      // Same fabric resolution as the cost engine: a title fabric override
-      // wins; otherwise the auto-match (which stays null for ambiguous names).
+      // Fabric resolution order: a per-title override wins; then the collection
+      // pin for this fabric name (breaks the "ambiguous fabric" case — e.g.
+      // several "Indigo Thread" entries — using the one pinned for the whole
+      // collection); then the unambiguous auto-match.
       let fab: (FabricCandidate & { key?: string }) | null = null;
       const overrideKey = fabricOverridesByTitle[haystack];
       if (overrideKey && fabricByKey.has(overrideKey)) fab = fabricByKey.get(overrideKey)!;
       else {
         const m = findFabricForStyle(style, haystack);
-        if (m.kind === "ok") fab = m.fabric;
+        const matchedName = m.kind === "no-match" ? null : m.fabricName;
+        const pinKey = matchedName && pinnedByName ? pinnedByName[matchedName] : undefined;
+        if (pinKey && fabricByKey.has(pinKey)) fab = fabricByKey.get(pinKey)!;
+        else if (m.kind === "ok") fab = m.fabric;
       }
       if (!fab) return null;
       const overrideMeters = fab.styleMeters?.[style.id];
@@ -13963,7 +13968,7 @@ function CollectionSpreadsheetPage({
         if (qty > 0) unmeasured.push("(no name)");
         continue;
       }
-      const info = styleCostLookup.metersInfoForTitle(name, (r.styleOverrideId ?? "").trim() || undefined);
+      const info = styleCostLookup.metersInfoForTitle(name, (r.styleOverrideId ?? "").trim() || undefined, fabricLinks);
       if (!info || info.metersPerPiece <= 0) {
         if (qty > 0) unmeasured.push(name);
         continue;
