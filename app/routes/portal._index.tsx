@@ -12295,7 +12295,7 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
 // Columns whose value is now set automatically at Shopify-create, so they no
 // longer need to show on the sheet (the data still lives on the row; it's just
 // hidden and/or auto-filled).
-const COLLECTION_HIDDEN_COLUMN_IDS = new Set<string>(["compareAtPrice", "countryOfOrigin", "categories"]);
+const COLLECTION_HIDDEN_COLUMN_IDS = new Set<string>(["compareAtPrice", "countryOfOrigin", "categories", "seoDescription"]);
 
 // Hover help for each Collections column — surfaced as an ⓘ on the header.
 const COLLECTION_COLUMN_HELP: Record<string, string> = {
@@ -12323,7 +12323,7 @@ const COLLECTION_COLUMN_HELP: Record<string, string> = {
   modelHeightSize: "Model height and size (text).",
   createdBy: "Who created / last updated this row.",
   link: "Read-only storefront link, once the product exists in Shopify.",
-  description: "Product description → Shopify description.",
+  description: "Product description → Shopify. Click the cell to edit in a pop-up with bold/italic, bullet lists, links and alignment.",
   categories: "Product category (also used for SEO) → custom metafield.",
   productType: "Shopify product type.",
   tags: "Comma-separated Shopify tags.",
@@ -12332,7 +12332,7 @@ const COLLECTION_COLUMN_HELP: Record<string, string> = {
   compareAtPrice: "Shopify 'compare at' (strike-through / sale) price.",
   complProducts: "Tick when complementary products are done.",
   colour: "Colour → custom metafield (also used for SEO).",
-  seoTitle: "SEO title → Shopify.",
+  seoTitle: "SEO page title + meta description → Shopify. Click the cell to edit both in a pop-up (with a live search-result preview).",
   seoDescription: "SEO description → Shopify.",
   schedules: "Tick when scheduled activation is set.",
   reviews: "Tick when reviews are done.",
@@ -14239,6 +14239,16 @@ function CollectionSpreadsheetPage({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collectionSettings.sampleReceivedChipValue, listItem.id, autoPriceRupees]);
+  // Patch several fields on one row in a single save — used by the combined SEO
+  // cell (page title + meta description) so both persist together.
+  const updateRowFields = useCallback((rowIdx: number, fields: Record<string, string>) => {
+    setRows((prev) => {
+      const next = prev.map((r, i) => i === rowIdx ? { ...r, ...fields } : r);
+      persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id]);
 
   // Expand "+K" Generate click into per-variant SKU and barcode lines,
   // one line per size that has qty > 0 on this row. Free Size mode
@@ -14836,6 +14846,33 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
+                        // Description: rich-text popup editor (bold/italic/lists/
+                        // links/alignment). Cell shows a short plain-text preview.
+                        if (col.id === "description") {
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionDescriptionCell
+                                value={row.description ?? ""}
+                                productName={row.name ?? row.title ?? ""}
+                                onCommit={(v) => updateCell(rIdx, "description", v)}
+                              />
+                            </Td>
+                          );
+                        }
+                        // Combined SEO cell (page title + meta description) in one
+                        // popup; the seoDescription column is hidden. Cell shows a
+                        // short preview of the title.
+                        if (col.id === "seoTitle") {
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionSeoCell
+                                title={row.seoTitle ?? ""}
+                                description={row.seoDescription ?? ""}
+                                onCommit={(t, d) => updateRowFields(rIdx, { seoTitle: t, seoDescription: d })}
+                              />
+                            </Td>
+                          );
+                        }
                         if (col.id === "priceRupees" && !linked) {
                           const rowName = (row.name ?? row.title ?? "").trim();
                           const overrideId = (row.styleOverrideId ?? "").trim();
@@ -15398,19 +15435,8 @@ function CollectionCellInner({
   if (columnId === "productType") {
     return <CollectionProductTypeCell value={value} onCommit={onCommit} />;
   }
-  if (columnId === "description" || columnId === "seoTitle" || columnId === "seoDescription") {
-    return (
-      <CollectionAiTextCell
-        value={value}
-        draft={draft}
-        setDraft={setDraft}
-        onCommit={onCommit}
-        kind={columnId === "seoTitle" ? "seoTitle" : columnId === "seoDescription" ? "seoDescription" : "description"}
-        productName={rowName ?? ""}
-        productInfo={productInfo}
-      />
-    );
-  }
+  // Description + SEO are handled as special popup cells in renderCol (rich-text
+  // editor / combined page-title+meta-description). They never reach here.
   return (
     <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
   );
@@ -15433,54 +15459,160 @@ function CollectionProductTypeCell({ value, onCommit }: { value: string; onCommi
   );
 }
 
-// A text cell with a ✨ "Generate with AI" button (Description / SEO). Calls
-// /api/ai-generate with the row's product name + its style's product type, and
-// uses whatever is already in the cell as the source to rewrite/improve.
-function CollectionAiTextCell({
-  value, draft, setDraft, onCommit, kind, productName, productInfo,
-}: {
-  value: string;
-  draft: string;
-  setDraft: (next: string) => void;
-  onCommit: (next: string) => void;
-  kind: "description" | "seoTitle" | "seoDescription";
-  productName: string;
-  productInfo?: ProductInfo;
-}) {
-  const fetcher = useFetcher<{ ok?: boolean; text?: string; error?: string }>();
-  const generating = fetcher.state !== "idle";
-  const productType = useMemo(() => {
-    if (!productInfo || !productName.trim()) return "";
-    const styleName = extractStyleFromName(productName, productInfo);
-    if (!styleName) return "";
-    for (const cat of productInfo.categories ?? []) for (const st of cat.styles ?? []) if (st.name === styleName) return st.productType ?? "";
-    return "";
-  }, [productInfo, productName]);
+// Strip HTML → plain text, for the short cell preview of a rich-text value.
+function stripHtmlToText(html: string): string {
+  return (html || "")
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/<\/(p|div|li|h[1-6])>/gi, " ")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ").trim();
+}
+
+// Rich-text editor popup (contentEditable + a small toolbar). Used by the
+// Description cell — bold / italic / underline, bullet + numbered lists, links,
+// and text alignment. Stores HTML (Shopify's body_html).
+function CollectionRichTextModal({ title, initialHtml, onSave, onClose }: { title: string; initialHtml: string; onSave: (html: string) => void; onClose: () => void }) {
+  const editorRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (fetcher.state === "idle" && fetcher.data?.ok && fetcher.data.text) {
-      setDraft(fetcher.data.text);
-      onCommit(fetcher.data.text);
-    }
+    if (editorRef.current) editorRef.current.innerHTML = initialHtml || "";
+    editorRef.current?.focus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetcher.state, fetcher.data]);
-  const generate = () => {
-    if (!productName.trim() || generating) return;
-    fetcher.submit({ kind, productName, productType, source: draft }, { method: "post", action: "/api/ai-generate" });
+  }, []);
+  const exec = (cmd: string, arg?: string) => { document.execCommand(cmd, false, arg); editorRef.current?.focus(); };
+  const addLink = () => {
+    const url = window.prompt("Link URL:", "https://")?.trim();
+    if (url) exec("createLink", url);
   };
+  const save = () => { onSave(editorRef.current?.innerHTML ?? ""); onClose(); };
+  const btnStyle: React.CSSProperties = { minWidth: 30, height: 30, border: "1px solid #e5e7eb", background: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 14, color: "#374151", display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "0 8px" };
+  const Btn = ({ label, cmd, arg, title: t }: { label: React.ReactNode; cmd?: string; arg?: string; title: string }) => (
+    <button type="button" title={t} onMouseDown={(e) => e.preventDefault()} onClick={cmd ? () => exec(cmd, arg) : addLink} style={btnStyle}>{label}</button>
+  );
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
+      <div style={{ background: "#fff", borderRadius: 12, width: 720, maxWidth: "100%", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>{title}</div>
+          <button type="button" onClick={onClose} style={{ border: "none", background: "transparent", fontSize: 20, color: "#9ca3af", cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: "10px 18px", borderBottom: "1px solid #f3f4f6" }}>
+          <Btn label={<b>B</b>} cmd="bold" title="Bold" />
+          <Btn label={<i>I</i>} cmd="italic" title="Italic" />
+          <Btn label={<u>U</u>} cmd="underline" title="Underline" />
+          <span style={{ width: 1, background: "#e5e7eb", margin: "0 4px" }} />
+          <Btn label="• List" cmd="insertUnorderedList" title="Bulleted list" />
+          <Btn label="1. List" cmd="insertOrderedList" title="Numbered list" />
+          <span style={{ width: 1, background: "#e5e7eb", margin: "0 4px" }} />
+          <Btn label="🔗" title="Insert link" />
+          <Btn label="⇤" cmd="justifyLeft" title="Align left" />
+          <Btn label="↔" cmd="justifyCenter" title="Align centre" />
+          <Btn label="⇥" cmd="justifyRight" title="Align right" />
+          <span style={{ width: 1, background: "#e5e7eb", margin: "0 4px" }} />
+          <Btn label="Clear" cmd="removeFormat" title="Clear formatting" />
+        </div>
+        <div
+          ref={editorRef}
+          contentEditable
+          suppressContentEditableWarning
+          style={{ flex: 1, overflowY: "auto", padding: "16px 18px", fontSize: 15, lineHeight: 1.6, color: "#111827", outline: "none", minHeight: 240 }}
+        />
+        <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+          <button type="button" onClick={save} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Save</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+const COLLECTION_POPUP_CELL_STYLE: React.CSSProperties = { width: "100%", minHeight: 44, padding: "4px 6px", cursor: "pointer", fontSize: 12, color: "#374151", display: "block", overflow: "hidden" };
+
+// Description cell — shows a short plain-text preview; click opens the rich-text
+// editor. Stores HTML.
+function CollectionDescriptionCell({ value, productName, onCommit }: { value: string; productName: string; onCommit: (html: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const preview = stripHtmlToText(value);
   return (
-    <div style={{ position: "relative", width: "100%" }}>
-      <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); generate(); }}
-        disabled={generating || !productName.trim()}
-        title={!productName.trim() ? "Add a Name first" : generating ? "Generating…" : "Generate with AI"}
-        style={{ position: "absolute", top: 2, right: 2, zIndex: 2, background: generating ? "#e5e7eb" : "#111827", color: "#fff", border: "none", borderRadius: 4, fontSize: 11, padding: "2px 6px", cursor: generating || !productName.trim() ? "default" : "pointer", opacity: !productName.trim() ? 0.4 : 1 }}
-      >{generating ? "…" : "✨ AI"}</button>
-      {fetcher.data?.ok === false && (
-        <span title={fetcher.data.error} style={{ position: "absolute", bottom: 2, right: 4, color: "#b45309", fontSize: 11, cursor: "help" }}>⚠</span>
+    <>
+      <div style={COLLECTION_POPUP_CELL_STYLE} onClick={() => setOpen(true)} title="Click to edit description">
+        {preview
+          ? <span>{preview.length > 90 ? preview.slice(0, 90) + "…" : preview}</span>
+          : <span style={{ color: "#9ca3af" }}>+ Add description</span>}
+      </div>
+      {open && (
+        <CollectionRichTextModal
+          title={`Description${productName ? ` — ${productName}` : ""}`}
+          initialHtml={value}
+          onSave={onCommit}
+          onClose={() => setOpen(false)}
+        />
       )}
-    </div>
+    </>
+  );
+}
+
+// Combined SEO cell — page title + meta description in one popup (mirrors the
+// Shopify "Search engine listing" editor). Cell shows a short preview.
+function CollectionSeoCell({ title, description, onCommit }: { title: string; description: string; onCommit: (title: string, description: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [t, setT] = useState(title);
+  const [d, setD] = useState(description);
+  useEffect(() => { if (open) { setT(title); setD(description); } }, [open, title, description]);
+  const save = () => { onCommit(t.trim(), d.trim()); setOpen(false); };
+  return (
+    <>
+      <div style={COLLECTION_POPUP_CELL_STYLE} onClick={() => setOpen(true)} title="Click to edit the SEO page title + meta description">
+        {(title || description)
+          ? (
+            <span style={{ display: "block" }}>
+              <span style={{ fontWeight: 600, color: "#111827", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title || "(no title)"}</span>
+              {description ? <span style={{ color: "#9ca3af", fontSize: 11, display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{description}</span> : null}
+            </span>
+          )
+          : <span style={{ color: "#9ca3af" }}>+ Add SEO</span>}
+      </div>
+      {open && typeof document !== "undefined" && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={() => setOpen(false)}>
+          <div style={{ background: "#fff", borderRadius: 12, width: 640, maxWidth: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb", fontWeight: 700, fontSize: 15 }}>Search engine listing</div>
+            <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 16 }}>
+              {/* Live preview, like Shopify's. */}
+              <div style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 18, color: "#1a0dab", lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t || "Page title"}</div>
+                <div style={{ fontSize: 13, color: "#4d5156", marginTop: 4 }}>{d || "Meta description shows here."}</div>
+              </div>
+              <label style={{ display: "block" }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Page title</span>
+                <input
+                  autoFocus
+                  value={t}
+                  onChange={(e) => setT(e.target.value)}
+                  style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "9px 12px", fontSize: 14, boxSizing: "border-box", marginTop: 6 }}
+                />
+                <span style={{ fontSize: 12, color: t.length > 70 ? "#b45309" : "#9ca3af" }}>{t.length} of 70 characters used</span>
+              </label>
+              <label style={{ display: "block" }}>
+                <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Meta description</span>
+                <textarea
+                  value={d}
+                  onChange={(e) => setD(e.target.value)}
+                  rows={4}
+                  style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "9px 12px", fontSize: 14, boxSizing: "border-box", marginTop: 6, resize: "vertical", fontFamily: "inherit" }}
+                />
+                <span style={{ fontSize: 12, color: d.length > 160 ? "#b45309" : "#9ca3af" }}>{d.length} of 160 characters used</span>
+              </label>
+            </div>
+            <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" onClick={() => setOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+              <button type="button" onClick={save} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Save</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
