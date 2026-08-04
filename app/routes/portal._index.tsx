@@ -15464,7 +15464,7 @@ function CollectionCellInner({
   // and paste. No onPickStyleName: picking a fabric/mani image must never rename
   // the product.
   if (columnId === "fabric" || columnId === "maniPicsTaken") {
-    return <CollectionMultiImageCell value={value} onCommit={onCommit} productInfo={productInfo} collectionId={collectionId} rowName={rowName} />;
+    return <CollectionMultiImageCell value={value} onCommit={onCommit} productInfo={productInfo} collectionId={collectionId} rowName={rowName} singleImage={columnId === "fabric"} />;
   }
   // Release column: big bold maroon text. Click to edit.
   if (type === "release") {
@@ -16408,11 +16408,13 @@ function DropboxImagePicker({
   );
 }
 
-function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName, onPickStyleName }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string; onPickStyleName?: (styleName: string) => void }) {
+function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName, onPickStyleName, singleImage = false }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string; onPickStyleName?: (styleName: string) => void; singleImage?: boolean }) {
   const images = useMemo(() => parseMultiImageValue(value), [value]);
   const [open, setOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
+  const [hover, setHover] = useState(false);
+  const [copyFlash, setCopyFlash] = useState(false);
   const commit = (next: CollectionImageEntry[]) => onCommit(serializeMultiImageValue(next));
 
   const addFiles = async (files: FileList | File[] | null | undefined) => {
@@ -16422,9 +16424,24 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
     setBusy(true);
     try {
       const dataUrls = await Promise.all(arr.map((f) => compressImageToDataUrl(f)));
-      commit([...images, ...dataUrls.map((d): CollectionImageEntry => ({ thumb: d }))]);
+      const added = dataUrls.map((d): CollectionImageEntry => ({ thumb: d }));
+      // Single-image cells (fabric) replace; multi cells append.
+      commit(singleImage ? added.slice(-1) : [...images, ...added]);
     } finally { setBusy(false); }
   };
+
+  // Copy the cell's (first) image into the session clipboard; paste drops it
+  // into another image cell — same convenience the old fabric cell had.
+  const copyImage = () => {
+    if (!images[0]) return;
+    copiedCollectionImage = images[0];
+    setCopyFlash(true);
+    window.setTimeout(() => setCopyFlash(false), 900);
+  };
+  const pasteEntry = (entry: CollectionImageEntry) => {
+    commit(singleImage ? [entry] : [...images, entry]);
+  };
+  const pasteFromMemory = () => { if (copiedCollectionImage) { pasteEntry(copiedCollectionImage); return true; } return false; };
 
   // Cell-level (in the row): show only the first image filling the
   // cell. Click anywhere on the cell to open the full manager modal.
@@ -16432,7 +16449,19 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
   return (
     <>
       <div
+        tabIndex={0}
         onClick={() => setOpen(true)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        onPaste={(event) => {
+          const file = Array.from(event.clipboardData.files).find((f) => f.type.startsWith("image/"));
+          if (file) { event.preventDefault(); void addFiles([file]); return; }
+          if (pasteFromMemory()) event.preventDefault();
+        }}
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "c" && images[0]) { event.preventDefault(); copyImage(); }
+          if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "v") { if (pasteFromMemory()) event.preventDefault(); }
+        }}
         style={{
           position: "relative",
           width: "100%",
@@ -16442,7 +16471,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
           height: 172,
           borderRadius: 4,
           border: images.length === 0 ? "1px dashed #d1d5db" : "1px solid #d1d5db",
-          background: "#f9fafb", overflow: "hidden", cursor: "pointer",
+          background: "#f9fafb", overflow: "hidden", cursor: "pointer", outline: "none",
           color: "#6b7280", fontSize: 12, fontWeight: 500,
         }}
         title={images.length > 0 ? `Open image manager (${images.length} image${images.length === 1 ? "" : "s"})` : "Add images"}
@@ -16457,10 +16486,28 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
                 fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
               }}>+{images.length - 1}</span>
             )}
+            {/* Copy on hover — same as the old fabric cell. */}
+            {(hover || copyFlash) && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); copyImage(); }}
+                title="Copy this image (then paste into another image cell)"
+                style={{ position: "absolute", top: 6, left: 6, background: copyFlash ? "#0d9488" : "rgba(17,24,39,0.8)", color: "#fff", border: "none", borderRadius: 4, fontSize: 11, fontWeight: 700, padding: "3px 8px", cursor: "pointer" }}
+              >{copyFlash ? "Copied" : "Copy"}</button>
+            )}
           </>
         ) : (
-          <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            + Add images
+          <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6 }}>
+            <span>+ Add images</span>
+            {/* Paste into an empty cell from the session clipboard. */}
+            {hover && copiedCollectionImage && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); pasteFromMemory(); }}
+                title="Paste the copied image here"
+                style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 4, fontSize: 11, fontWeight: 700, padding: "3px 8px", cursor: "pointer" }}
+              >Paste</button>
+            )}
           </div>
         )}
       </div>
