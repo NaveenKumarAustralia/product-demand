@@ -12405,6 +12405,7 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "ml", label: "M/L", type: "number", width: 50 },
   { id: "lxl", label: "L/XL", type: "number", width: 50 },
   { id: "totalOrdered", label: "TOTAL Ordered", type: "readonly", width: 100 },
+  { id: "allocation", label: "Allocate", width: 160 },
   { id: "status", label: "STATUS", type: "chip", width: 130 },
   { id: "sample", label: "Sample", type: "chip", width: 130 },
   { id: "sampleReceived", label: "Sample RECEIVED", type: "date", width: 120 },
@@ -12452,6 +12453,7 @@ const COLLECTION_COLUMN_HELP: Record<string, string> = {
   barcode: "Auto-generated per size from the SKU base (2785XS, 2785S…).",
   freeSize: "Quantity when the product has no size options (a single variant).",
   totalOrdered: "Read-only: the sum of all size quantities on this row.",
+  allocation: "Split this row's ordered quantities across destinations (AUS / USA / Factory …). Click to open the per-size allocation grid; the cell shows how much is going where and how many are left to place.",
   status: "Production status (Under consideration, etc.).",
   sample: "Sample status.",
   sampleReceived: "Date the sample arrived — auto-fills when the Sample chip flips to received.",
@@ -12587,6 +12589,7 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
     else cols.splice(idx + 1, 0, col);
   };
   insertAfter("sku", { id: "barcode", label: "Barcode", width: 100 });
+  insertAfter("totalOrdered", { id: "allocation", label: "Allocate", width: 160 });
   insertAfter("price", { id: "priceRupees", label: "Price ₹", type: "number", width: 90 });
   insertAfter("priceRupees", { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 });
   // Factory Notes was added later as the leftmost column. Drop it in
@@ -14378,8 +14381,9 @@ function CollectionSpreadsheetPage({
           }
         }
         // If this row is already a Shopify product, mark it as needing an
-        // update push (an info column changed after creation).
-        if ((patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
+        // update push (an info column changed after creation). Allocation is
+        // internal (not pushed to Shopify) so it doesn't set the flag.
+        if (colId !== "allocation" && (patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
         return patched;
       });
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
@@ -15036,6 +15040,20 @@ function CollectionSpreadsheetPage({
                                 value={row.description ?? ""}
                                 productName={row.name ?? row.title ?? ""}
                                 onCommit={(v) => updateCell(rIdx, "description", v)}
+                              />
+                            </Td>
+                          );
+                        }
+                        // Allocation cell: split the row's ordered quantities across
+                        // destinations (AUS / USA / Factory …) via a per-size popup.
+                        if (col.id === "allocation") {
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionAllocationCell
+                                value={row.allocation ?? ""}
+                                row={row}
+                                productName={row.name ?? row.title ?? ""}
+                                onCommit={(v) => updateCell(rIdx, "allocation", v)}
                               />
                             </Td>
                           );
@@ -15874,6 +15892,175 @@ function CollectionSeoCell({ title, description, onCommit }: { title: string; de
         document.body,
       )}
     </>
+  );
+}
+
+// ─── Collection row allocation ───────────────────────────────────────────────
+// Split a row's ordered quantities across destinations (AUS / USA / Factory …).
+// Stored as JSON on row.allocation: { dests: string[], cells: { "<dest>::<sizeColId>": qty } }.
+const ALLOC_DEFAULT_DESTS = ["AUS", "USA", "Factory"];
+type RowAllocation = { dests: string[]; cells: Record<string, number> };
+function parseRowAllocation(value: string): RowAllocation {
+  try {
+    const o = JSON.parse(value || "{}");
+    const dests = Array.isArray(o.dests) && o.dests.length ? o.dests.map((d: unknown) => String(d)).filter(Boolean) : [...ALLOC_DEFAULT_DESTS];
+    const cells: Record<string, number> = {};
+    if (o.cells && typeof o.cells === "object") for (const k of Object.keys(o.cells)) { const n = Number(o.cells[k]); if (Number.isFinite(n) && n > 0) cells[k] = n; }
+    return { dests, cells };
+  } catch { return { dests: [...ALLOC_DEFAULT_DESTS], cells: {} }; }
+}
+// Ordered sizes on a row (only sizes with qty > 0), Free Size folded to one row.
+function orderedSizesForRow(row: Record<string, string>): Array<{ colId: string; label: string; ordered: number }> {
+  const out: Array<{ colId: string; label: string; ordered: number }> = [];
+  const fs = Number(row.freeSize) || 0;
+  if (fs > 0) out.push({ colId: "freeSize", label: "Free Size", ordered: fs });
+  for (const [colId, label] of COLLECTION_SIZE_COLUMN_LABELS) {
+    const q = Number(row[colId]) || 0;
+    if (q > 0) out.push({ colId, label, ordered: q });
+  }
+  return out;
+}
+
+function CollectionAllocationCell({ value, row, productName, onCommit }: { value: string; row: Record<string, string>; productName: string; onCommit: (v: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const sizes = useMemo(() => orderedSizesForRow(row), [row]);
+  const totalOrdered = sizes.reduce((s, sz) => s + sz.ordered, 0);
+  const parsed = useMemo(() => parseRowAllocation(value), [value]);
+
+  // Compact preview: per-destination totals + how many are left to place.
+  const perDest = parsed.dests
+    .map((d) => ({ d, qty: sizes.reduce((s, sz) => s + (parsed.cells[`${d}::${sz.colId}`] || 0), 0) }))
+    .filter((x) => x.qty > 0);
+  const allocated = perDest.reduce((s, x) => s + x.qty, 0);
+  const left = totalOrdered - allocated;
+
+  return (
+    <>
+      <div style={{ width: "100%", minHeight: 40, padding: "4px 6px", cursor: totalOrdered > 0 ? "pointer" : "default", fontSize: 12 }} onClick={() => { if (totalOrdered > 0) setOpen(true); }} title={totalOrdered > 0 ? "Click to allocate to destinations" : "Add quantities first"}>
+        {totalOrdered === 0 ? (
+          <span style={{ color: "#9ca3af" }}>—</span>
+        ) : allocated === 0 ? (
+          <span style={{ color: "#0d9488", fontWeight: 700 }}>+ Allocate</span>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+            {perDest.map((x) => (
+              <span key={x.d} style={{ background: "#eef2ff", color: "#3730a3", borderRadius: 6, padding: "2px 7px", fontWeight: 700, fontSize: 11 }}>{x.d} {x.qty}</span>
+            ))}
+            <span style={{ fontWeight: 700, fontSize: 11, borderRadius: 6, padding: "2px 7px", background: left === 0 ? "#dcfce7" : left < 0 ? "#fee2e2" : "#fef3c7", color: left === 0 ? "#166534" : left < 0 ? "#991b1b" : "#92400e" }}>
+              {left === 0 ? "all placed" : left < 0 ? `${-left} over` : `${left} left`}
+            </span>
+          </div>
+        )}
+      </div>
+      {open && typeof document !== "undefined" && createPortal(
+        <CollectionAllocationModal value={value} sizes={sizes} totalOrdered={totalOrdered} productName={productName} onSave={(v) => { onCommit(v); setOpen(false); }} onClose={() => setOpen(false)} />,
+        document.body,
+      )}
+    </>
+  );
+}
+
+function CollectionAllocationModal({ value, sizes, totalOrdered, productName, onSave, onClose }: { value: string; sizes: Array<{ colId: string; label: string; ordered: number }>; totalOrdered: number; productName: string; onSave: (v: string) => void; onClose: () => void }) {
+  const init = useMemo(() => parseRowAllocation(value), [value]);
+  const [dests, setDests] = useState<string[]>(init.dests);
+  const [cells, setCells] = useState<Record<string, number>>(init.cells);
+  const key = (d: string, colId: string) => `${d}::${colId}`;
+  const setCell = (d: string, colId: string, n: number) => setCells((prev) => {
+    const next = { ...prev };
+    if (n > 0) next[key(d, colId)] = n; else delete next[key(d, colId)];
+    return next;
+  });
+  const allocatedForSize = (colId: string) => dests.reduce((s, d) => s + (cells[key(d, colId)] || 0), 0);
+  const totalForDest = (d: string) => sizes.reduce((s, sz) => s + (cells[key(d, sz.colId)] || 0), 0);
+  const grandAllocated = dests.reduce((s, d) => s + totalForDest(d), 0);
+  const grandLeft = totalOrdered - grandAllocated;
+  const addDest = () => {
+    const name = window.prompt("Destination name (e.g. AUS, USA, Factory, NZ):", "")?.trim();
+    if (!name) return;
+    if (dests.some((d) => d.toLowerCase() === name.toLowerCase())) return;
+    setDests((prev) => [...prev, name]);
+  };
+  const removeDest = (d: string) => {
+    setDests((prev) => prev.filter((x) => x !== d));
+    setCells((prev) => { const next = { ...prev }; for (const k of Object.keys(next)) if (k.startsWith(`${d}::`)) delete next[k]; return next; });
+  };
+  const save = () => onSave(JSON.stringify({ dests, cells }));
+  const numStyle: React.CSSProperties = { width: 56, border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 6px", fontSize: 13, textAlign: "center", boxSizing: "border-box" };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
+      <div style={{ background: "#fff", borderRadius: 12, maxWidth: "95vw", maxHeight: "88vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, position: "sticky", top: 0, background: "#fff", zIndex: 1 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>Allocate — {productName || "product"}</div>
+            <div style={{ fontSize: 12, color: "#6b7280" }}>{totalOrdered} ordered · {grandAllocated} placed · <span style={{ color: grandLeft === 0 ? "#166534" : grandLeft < 0 ? "#991b1b" : "#92400e", fontWeight: 700 }}>{grandLeft === 0 ? "all placed" : grandLeft < 0 ? `${-grandLeft} over` : `${grandLeft} left`}</span></div>
+          </div>
+          <button type="button" onClick={onClose} style={{ border: "none", background: "transparent", fontSize: 20, color: "#9ca3af", cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ padding: 18, overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", padding: "6px 10px", color: "#6b7280", fontWeight: 700, position: "sticky", left: 0, background: "#fff" }}>Size</th>
+                <th style={{ padding: "6px 10px", color: "#6b7280", fontWeight: 700 }}>Ordered</th>
+                {dests.map((d) => (
+                  <th key={d} style={{ padding: "6px 10px", color: "#374151", fontWeight: 700, whiteSpace: "nowrap" }}>
+                    {d}
+                    {dests.length > 1 && (
+                      <button type="button" title={`Remove ${d}`} onClick={() => removeDest(d)} style={{ marginLeft: 6, border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 13 }}>×</button>
+                    )}
+                  </th>
+                ))}
+                <th style={{ padding: "6px 10px" }}>
+                  <button type="button" onClick={addDest} title="Add a destination" style={{ border: "1px dashed #cbd5e1", background: "transparent", color: "#0d9488", borderRadius: 6, padding: "4px 8px", fontSize: 12, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>+ Dest</button>
+                </th>
+                <th style={{ padding: "6px 10px", color: "#6b7280", fontWeight: 700 }}>Left</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sizes.map((sz) => {
+                const alloc = allocatedForSize(sz.colId);
+                const rowLeft = sz.ordered - alloc;
+                return (
+                  <tr key={sz.colId} style={{ borderTop: "1px solid #f3f4f6" }}>
+                    <td style={{ padding: "6px 10px", fontWeight: 700, color: "#111827", position: "sticky", left: 0, background: "#fff" }}>{sz.label}</td>
+                    <td style={{ padding: "6px 10px", textAlign: "center", color: "#6b7280" }}>{sz.ordered}</td>
+                    {dests.map((d) => (
+                      <td key={d} style={{ padding: "4px 10px", textAlign: "center" }}>
+                        <input
+                          type="number"
+                          className="no-number-arrows"
+                          value={cells[key(d, sz.colId)] ?? ""}
+                          onChange={(e) => setCell(d, sz.colId, Number(e.target.value) || 0)}
+                          style={numStyle}
+                        />
+                      </td>
+                    ))}
+                    <td />
+                    <td style={{ padding: "6px 10px", textAlign: "center", fontWeight: 700, color: rowLeft === 0 ? "#166534" : rowLeft < 0 ? "#991b1b" : "#92400e" }}>{rowLeft}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr style={{ borderTop: "2px solid #e5e7eb" }}>
+                <td style={{ padding: "6px 10px", fontWeight: 700, position: "sticky", left: 0, background: "#fff" }}>Total</td>
+                <td style={{ padding: "6px 10px", textAlign: "center", fontWeight: 700 }}>{totalOrdered}</td>
+                {dests.map((d) => (
+                  <td key={d} style={{ padding: "6px 10px", textAlign: "center", fontWeight: 700, color: "#3730a3" }}>{totalForDest(d)}</td>
+                ))}
+                <td />
+                <td style={{ padding: "6px 10px", textAlign: "center", fontWeight: 700, color: grandLeft === 0 ? "#166534" : grandLeft < 0 ? "#991b1b" : "#92400e" }}>{grandLeft}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 8, position: "sticky", bottom: 0, background: "#fff" }}>
+          <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+          <button type="button" onClick={save} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Save</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
