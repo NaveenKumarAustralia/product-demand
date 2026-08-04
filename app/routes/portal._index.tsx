@@ -6720,20 +6720,13 @@ function buildFabricStockIndex(sheets: Array<{ gid: string; kind: string; name: 
     const isOrder = !isStock && (sheet.kind === "order" || sheet.kind === "wide-order");
     if (!isStock && !isOrder) continue;
     const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
-    // The real "Meters in Stock" column MUST win over "Cut Pieces". On the
-    // combined On Order tab both columns are padded on, and "Cut Pieces" is
-    // padded BEFORE "Meters in Stock" — so a single tolerant regex matched Cut
-    // Pieces first and read its (empty) value, making on-order-tab fabrics that
-    // DO have in-stock meters (e.g. Nila 60x60 = 100m) read 0. So look for the
-    // proper stock column first, and only fall back to Cut Pieces when there's
-    // no stock column at all (some imported sheets put the quantity there).
-    let metersIdx: number;
-    if (isStock) {
-      metersIdx = sheet.headers.findIndex((h) => /meters?\s*in\s*stock|in\s*stock|meters?\s*available|^meters?$/i.test(h));
-      if (metersIdx < 0) metersIdx = sheet.headers.findIndex((h) => /^cut\s*pieces?$/i.test(h));
-    } else {
-      metersIdx = sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered/i.test(h));
-    }
+    // Read only the real stock column ("Meters in Stock" / "In Stock" / etc.).
+    // NEVER read "Cut Pieces" — it's just an informational note, not stock, and
+    // matching it made on-order-tab fabrics (where Cut Pieces is padded before
+    // Meters in Stock) read 0 instead of their real on-hand meters.
+    const metersIdx = isStock
+      ? sheet.headers.findIndex((h) => /meters?\s*in\s*stock|in\s*stock|meters?\s*available|^meters?$/i.test(h))
+      : sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered/i.test(h));
     const costIdx = isStock
       ? sheet.headers.findIndex((h) => /cost\s*per\s*meter|price\s*per\s*meter|^price$/i.test(h))
       : -1;
