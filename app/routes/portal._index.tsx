@@ -13947,62 +13947,37 @@ function CollectionSpreadsheetPage({
     [productInfo, fabricStockIndex],
   );
   const allFabrics = useMemo(() => styleCostLookup.allFabrics(), [styleCostLookup]);
-  // Fabric-meters summary for the header: for each row, resolve its fabric →
-  // meters-per-piece (× qty = used) and the fabric's on-hand stock (counted
-  // once per fabric). Updates live as quantities and fabric picks change.
-  // Per-fabric pins: fabricNameLower → the exact fabric-in-stock entry key the
-  // user chose for that fabric. The in-stock meters then read THAT entry only,
-  // not a guess or a sum across same-name rows.
+  // Fabrics the user has ATTACHED to this collection: fabricNameLower → the
+  // exact fabric-in-stock entry key. The bar starts empty; the user searches and
+  // attaches the correct fabric(s). Nothing is auto-detected. Each attached
+  // fabric shows its real on-hand stock (from that entry), the meters used by
+  // the rows whose Name contains that fabric, and what's left.
   const fabricLinks = listItem.fabricLinks ?? EMPTY_FABRIC_LINKS;
-  // Per-fabric meters. Each row's product name resolves to a fabric; group the
-  // rows by that fabric and, for each, show in-stock (from the pinned entry, or
-  // the auto-matched one), used (meters/piece × qty), and what's left.
   const fabricBreakdown = useMemo(() => {
+    const attachedNames = Object.keys(fabricLinks);
+    if (attachedNames.length === 0) return { entries: [] as Array<{ name: string; fabricType?: string; inStock: number; used: number; left: number }> };
+    // Sum meters used per attached fabric: for each row with quantities, resolve
+    // it against the attached fabrics (metersDiag uses the attachment to pick the
+    // exact entry, so ambiguous names like "Indigo Thread" resolve). Rows whose
+    // fabric isn't attached simply don't count toward any bar entry.
     const usedByName = new Map<string, number>();
-    const autoStockByName = new Map<string, number>();
-    // Rows that HAVE quantities but couldn't be turned into meters — either the
-    // Name didn't match a style/fabric, or the style has no meters-per-piece
-    // set. These silently contribute 0, which is why "used" can read low; we
-    // surface the count so the total can be trusted (or the gap fixed).
-    const unmeasured: string[] = [];
-    const reasonLabel: Record<string, string> = {
-      "no-name": "no name",
-      "no-style": "style not found in Product Information",
-      "no-fabric": "fabric not picked / ambiguous",
-      "no-meters": "no meters set for this style (add average meters, or the fabric's per-style meters)",
-    };
     for (const r of rows) {
       const name = (r.name ?? r.title ?? "").trim();
       const qty = sumCollectionRowQuantity(r);
-      const diag = styleCostLookup.metersDiagForTitle(name || undefined, (r.styleOverrideId ?? "").trim() || undefined, fabricLinks);
-      if (!diag.ok) {
-        if (qty > 0) unmeasured.push(`${name || "(no name)"} — ${reasonLabel[diag.reason] ?? diag.reason}`);
-        continue;
+      if (!name || qty <= 0) continue;
+      const diag = styleCostLookup.metersDiagForTitle(name, (r.styleOverrideId ?? "").trim() || undefined, fabricLinks);
+      if (diag.ok && fabricLinks[diag.fabricName]) {
+        usedByName.set(diag.fabricName, (usedByName.get(diag.fabricName) ?? 0) + diag.metersPerPiece * qty);
       }
-      usedByName.set(diag.fabricName, (usedByName.get(diag.fabricName) ?? 0) + diag.metersPerPiece * qty);
-      if (!autoStockByName.has(diag.fabricName)) autoStockByName.set(diag.fabricName, diag.stockMeters);
     }
-    // Force-show any pinned fabric, even if no rows resolved to it yet.
-    for (const pinnedName of Object.keys(fabricLinks)) {
-      if (!usedByName.has(pinnedName)) usedByName.set(pinnedName, 0);
-    }
-    const entries = Array.from(usedByName.entries())
-      // Only show fabrics actually being used (meters consumed), plus any the
-      // user explicitly pinned — so 0-used fabrics that a blank/placeholder row
-      // happens to resolve to don't clutter the bar.
-      .filter(([name, used]) => used > 0 || Boolean(fabricLinks[name]))
-      .map(([name, used]) => {
-        // In-stock: the pinned entry's exact on-hand meters if pinned; else the
-        // fabric the rows auto-matched to.
-        const pinnedKey = fabricLinks[name];
-        const pinned = pinnedKey ? allFabrics.find((af) => af.key === pinnedKey) ?? null : null;
-        const auto = allFabrics.find((af) => af.fabricName === name) ?? null;
-        const inStock = pinned ? (pinned.stockMeters ?? 0) : (autoStockByName.get(name) ?? 0);
-        const fabricType = pinned?.fabricType ?? auto?.fabricType;
-        return { name, fabricType, inStock, used, left: inStock - used, pinned: Boolean(pinned) };
-      });
+    const entries = attachedNames.map((name) => {
+      const fab = allFabrics.find((f) => f.key === fabricLinks[name]);
+      const inStock = fab?.stockMeters ?? 0;
+      const used = usedByName.get(name) ?? 0;
+      return { name, fabricType: fab?.fabricType, inStock, used, left: inStock - used };
+    });
     entries.sort((a, b) => b.used - a.used);
-    return { entries, unmeasured };
+    return { entries };
   }, [rows, styleCostLookup, allFabrics, fabricLinks]);
   // Right-click cost breakdown popup for the Price ₹ cells (same UX as the
   // packing list / restock pages). The extra `fabrics`/`onPickFabric` fields
@@ -14992,56 +14967,44 @@ function CollectionSpreadsheetPage({
           );
         })()}
       </div>
-      {/* Fabric bar: one entry per fabric the collection uses (detected from the
-          product names in the rows), each with in stock / used / left. In-stock
-          comes from the exact fabric-in-stock entry you pin with the picker;
-          until pinned it shows the auto-matched entry (📌 = pinned). Sits under
-          the rows, right above the Add-row button. */}
+      {/* Fabric bar: the fabric(s) attached to this collection. Starts empty —
+          search + attach the correct fabric with "+ Pick fabric" (you can add
+          several). Each shows its real on-hand stock, the meters used by the
+          rows whose Name contains that fabric, and what's left. × removes it.
+          Sits under the rows, right above the Add-row button. */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flexShrink: 0, padding: "10px 14px", marginTop: 8, background: "#f8fafc", border: "1px solid #e5e7eb", borderRadius: 10 }}>
         <span style={{ fontSize: 12, fontWeight: 700, color: "#374151" }}>Fabric</span>
         {fabricBreakdown.entries.length === 0 && (
-          <span style={{ fontSize: 12, color: "#9ca3af" }}>No fabric detected from the product names yet.</span>
+          <span style={{ fontSize: 12, color: "#9ca3af" }}>None attached — search and add a fabric →</span>
         )}
         {fabricBreakdown.entries.map((fb) => (
-          <div key={fb.name} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 8px 4px 10px", background: "#fff", border: `1px solid ${fb.pinned ? "#c7d2fe" : "#e5e7eb"}`, borderRadius: 8 }}>
+          <div key={fb.name} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "4px 8px 4px 10px", background: "#fff", border: "1px solid #c7d2fe", borderRadius: 8 }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: "#111827", textTransform: "capitalize" }}>
-              {fb.pinned ? <span title="Pinned to a specific fabric-in-stock entry" style={{ marginRight: 3 }}>📌</span> : null}
               {fb.name}{fb.fabricType ? <span style={{ fontWeight: 500, color: "#6b7280" }}> · {fb.fabricType}</span> : null}
             </span>
-            <span title={fb.pinned ? "On-hand meters from the pinned Fabric in stock entry" : "On-hand meters from the auto-matched fabric — use Pick fabric to choose the exact entry"} style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 8px" }}>
+            <span title="On-hand meters from the attached Fabric in stock entry" style={{ fontSize: 12, fontWeight: 700, background: "#dcfce7", color: "#166534", borderRadius: 6, padding: "3px 8px" }}>
               {Math.round(fb.inStock).toLocaleString()}m in stock
             </span>
-            <span title="Meters used by the quantities on this collection's rows (meters/piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 8px" }}>
+            <span title="Meters used by the quantities on rows whose Name contains this fabric (meters/piece × qty)" style={{ fontSize: 12, fontWeight: 700, background: "#fef3c7", color: "#92400e", borderRadius: 6, padding: "3px 8px" }}>
               {Math.round(fb.used).toLocaleString()}m used
             </span>
             <span title="In stock minus used" style={{ fontSize: 12, fontWeight: 700, background: fb.left < 0 ? "#fee2e2" : "#e0f2fe", color: fb.left < 0 ? "#991b1b" : "#075985", borderRadius: 6, padding: "3px 8px" }}>
               {Math.round(fb.left).toLocaleString()}m left
             </span>
-            {fb.pinned && (
-              <button
-                type="button"
-                title="Unpin — go back to the auto-matched fabric"
-                onClick={() => onSetFabricLink(fb.name, "")}
-                style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: "0 2px" }}
-              >×</button>
-            )}
+            <button
+              type="button"
+              title="Remove this fabric from the collection"
+              onClick={() => onSetFabricLink(fb.name, "")}
+              style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: "0 2px" }}
+            >×</button>
           </div>
         ))}
-        {fabricBreakdown.unmeasured.length > 0 && (
-          <span
-            title={`These rows have quantities but no meters were counted (no style/fabric match, or the style has no meters set in Product Information):\n\n${fabricBreakdown.unmeasured.join("\n")}`}
-            style={{ fontSize: 12, fontWeight: 700, background: "#fee2e2", color: "#991b1b", borderRadius: 6, padding: "3px 8px", cursor: "help" }}
-          >
-            ⚠ {fabricBreakdown.unmeasured.length} not counted
-          </span>
-        )}
         <div style={{ width: 150, marginLeft: "auto" }}>
           <TitleFabricPicker
             fabrics={allFabrics}
             currentTitle={listItem.name || ""}
             onPick={(fabricKey) => {
-              // Pin the picked entry to ITS fabric name, so that fabric's
-              // in-stock meters read this exact entry.
+              // Attach the picked entry under its fabric name.
               const picked = allFabrics.find((f) => f.key === fabricKey);
               if (picked) onSetFabricLink(picked.fabricName, fabricKey);
             }}
