@@ -4218,6 +4218,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, results });
   }
 
+  if (intent === "update_collection_row_in_shopify") {
+    // Push info edits for an already-linked row to its Shopify product (safe
+    // fields only — no variants/inventory). Clears the row's dirty flag.
+    const id = Number(form.get("collectionId"));
+    const idx = Number(form.get("rowIndex"));
+    if (!id) return jsonResponse({ ok: false, error: "no_collection" });
+    const collection = await prisma.collection.findUnique({ where: { id } }).catch(() => null);
+    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+    const rows = normalizeCollectionRows(collection.rows);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= rows.length) return jsonResponse({ ok: false, error: "bad_index" });
+    const row = rows[idx];
+    if (!(row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return jsonResponse({ ok: false, error: "not_linked" });
+    const res = await updateShopifyProductFromRow(session.shop, session.accessToken, row);
+    if (!res.ok) return jsonResponse({ ok: false, error: (res.errors ?? []).join("; ") || "update_failed" });
+    rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "" };
+    await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+    return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId }] });
+  }
+
   if (intent === "update_fabric_cell") {
     return withFabricSheetsLock(async () => {
     const gid = String(form.get("gid") ?? "");
@@ -7869,6 +7890,9 @@ const COL_ROW_SHOPIFY_PRODUCT_ID = "__shopifyProductId";
 const COL_ROW_SHOPIFY_HANDLE = "__shopifyHandle";
 const COL_ROW_SHOPIFY_CREATED_AT = "__shopifyCreatedAt";
 const COL_ROW_SHOPIFY_STATUS = "__shopifyStatus";
+// Set to "1" whenever a linked row's info is edited after creation, so the
+// Shopify cell shows an "Update in Shopify" button. Cleared once pushed.
+const COL_ROW_SHOPIFY_DIRTY = "__shopifyDirty";
 
 // Maps collection size column ids to display labels for variant names.
 // Note: "freeSize" is intentionally NOT here — when the row has Free Size
@@ -8209,6 +8233,56 @@ async function createShopifyProductFromRow(
     return { ok: false, errors: userErrors.map((e: { message?: string }) => e.message || "Unknown error") };
   }
   const product = json?.data?.productSet?.product;
+  if (!product?.id) return { ok: false, errors: ["Shopify returned no product"] };
+  return { ok: true, productId: String(product.id), handle: String(product.handle ?? "") };
+}
+
+// Push edits to an EXISTING linked product. Uses productUpdate for the safe
+// info fields only (title, description, product type, tags, SEO, colour +
+// categories metafields) — it deliberately does NOT touch variants or
+// inventory (those come from the packing list). Used by the "Update in Shopify"
+// button that appears once a linked row's info is edited.
+async function updateShopifyProductFromRow(
+  shop: string,
+  accessToken: string,
+  row: Record<string, string>,
+): Promise<CollectionPushResult> {
+  const productId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+  if (!productId) return { ok: false, errors: ["Row isn't linked to a Shopify product"] };
+  const input: Record<string, unknown> = { id: productId };
+  const title = (row.name || row.title || "").trim();
+  if (title) input.title = title;
+  // descriptionHtml is always set (empty clears it) so edits — including
+  // deletions — sync.
+  input.descriptionHtml = (row.description ?? "").trim();
+  const productType = (row.productType ?? "").trim();
+  if (productType) input.productType = productType;
+  const tagsRaw = (row.tags ?? "").trim();
+  input.tags = tagsRaw ? tagsRaw.split(/\s*,\s*/).filter(Boolean) : [];
+  const seoTitle = (row.seoTitle ?? "").trim();
+  const seoDesc = (row.seoDescription ?? "").trim();
+  if (seoTitle || seoDesc) {
+    input.seo = { ...(seoTitle ? { title: seoTitle } : {}), ...(seoDesc ? { description: seoDesc } : {}) };
+  }
+  const colour = (row.colour ?? "").trim();
+  const categories = (row.categories ?? "").trim() || deriveCategoryFromProductType(productType);
+  const metafields: Array<{ namespace: string; key: string; type: string; value: string }> = [];
+  if (colour) metafields.push({ namespace: "custom", key: "colour", type: "single_line_text_field", value: colour });
+  if (categories) metafields.push({ namespace: "custom", key: "categories", type: "single_line_text_field", value: categories });
+  if (metafields.length) input.metafields = metafields;
+
+  const json = await shopifyGraphql<any>(shop, accessToken, `
+    mutation UpdateCollectionRowProduct($input: ProductInput!) {
+      productUpdate(input: $input) {
+        product { id handle status }
+        userErrors { field message }
+      }
+    }
+  `, { input });
+
+  const userErrors = json?.data?.productUpdate?.userErrors ?? [];
+  if (userErrors.length) return { ok: false, errors: userErrors.map((e: { message?: string }) => e.message || "Unknown error") };
+  const product = json?.data?.productUpdate?.product;
   if (!product?.id) return { ok: false, errors: ["Shopify returned no product"] };
   return { ok: true, productId: String(product.id), handle: String(product.handle ?? "") };
 }
@@ -13854,6 +13928,8 @@ function CollectionSpreadsheetPage({
   const fetcher = useFetcher();
   const loadFetcher = useFetcher<{ collection: CollectionFullType | null }>();
   const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
+  // "Update in Shopify" for already-linked rows whose info was edited.
+  const updateShopifyFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; productId?: string }>; error?: string }>();
   // Move/combine: selected row indices + a fetcher for the move action.
   const moveFetcher = useFetcher<{ ok?: boolean; moved?: number; targetId?: number; deletedSource?: boolean; error?: string }>();
   const sendShootFetcher = useFetcher<{ ok?: boolean; shootId?: number; added?: number; error?: string }>();
@@ -14232,6 +14308,9 @@ function CollectionSpreadsheetPage({
             patched.barcode = gen.barcode;
           }
         }
+        // If this row is already a Shopify product, mark it as needing an
+        // update push (an info column changed after creation).
+        if ((patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
         return patched;
       });
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
@@ -14243,7 +14322,12 @@ function CollectionSpreadsheetPage({
   // cell (page title + meta description) so both persist together.
   const updateRowFields = useCallback((rowIdx: number, fields: Record<string, string>) => {
     setRows((prev) => {
-      const next = prev.map((r, i) => i === rowIdx ? { ...r, ...fields } : r);
+      const next = prev.map((r, i) => {
+        if (i !== rowIdx) return r;
+        const patched = { ...r, ...fields };
+        if ((patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
+        return patched;
+      });
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
       return next;
     });
@@ -14347,6 +14431,34 @@ function CollectionSpreadsheetPage({
     fd.set("status", "DRAFT");
     pushFetcher.submit(fd, { method: "post" });
   };
+  // Push info edits for an already-linked row to its Shopify product.
+  const updateRowInShopify = (idx: number) => {
+    const row = rows[idx];
+    if (!(row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
+    setPushStatus(null);
+    const fd = new FormData();
+    fd.set("intent", "update_collection_row_in_shopify");
+    fd.set("collectionId", String(listItem.id));
+    fd.set("rowIndex", String(idx));
+    updateShopifyFetcher.submit(fd, { method: "post" });
+  };
+  const isUpdatingShopify = updateShopifyFetcher.state !== "idle";
+  useEffect(() => {
+    const data = updateShopifyFetcher.data;
+    if (!data) return;
+    if (data.ok && data.results) {
+      setRows((prev) => {
+        const next = [...prev];
+        for (const r of data.results!) {
+          if (r.ok && next[r.index]) next[r.index] = { ...next[r.index], [COL_ROW_SHOPIFY_DIRTY]: "" };
+        }
+        return next;
+      });
+      setPushStatus({ msg: "Shopify product updated", tone: "ok" });
+    } else if (data.error) {
+      setPushStatus({ msg: `Update failed — ${data.error}`, tone: "err" });
+    }
+  }, [updateShopifyFetcher.data]);
   useEffect(() => {
     const data = pushFetcher.data;
     if (!data || !data.ok || !data.results) return;
@@ -14966,10 +15078,22 @@ function CollectionSpreadsheetPage({
                           </Td>
                         );
                       };
+                      const shopifyDirty = (row[COL_ROW_SHOPIFY_DIRTY] ?? "") === "1";
                       const shopifyCell = (
                         <Td key="__shopify" rowIndex={rIdx} colIndex={-1} center>
                           {linked ? (
-                            <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
+                            <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
+                              <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
+                              {shopifyDirty && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateRowInShopify(rIdx)}
+                                  disabled={isUpdatingShopify}
+                                  style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer" }}
+                                  title="You edited this row after it was created — push the changes (title, description, type, tags, SEO) to Shopify"
+                                >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
+                              )}
+                            </div>
                           ) : (
                             <button
                               type="button"
