@@ -40,6 +40,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     PACKING_COLUMN_WIDTHS_KEY,
     PHOTOSHOOT_COLUMN_WIDTHS_KEY,
     JJ_COLUMN_WIDTHS_KEY,
+    JJ_TABS_KEY,
     TABLE_HEADER_LABELS_KEY,
     TABLE_CUSTOM_COLUMNS_KEY,
     TABLE_CUSTOM_CELLS_KEY,
@@ -858,6 +859,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     photoShoots,
     photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
     jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
+    jjTabs: normalizeJJTabs(wrap(JJ_TABS_KEY)?.value),
     fabricStockIndex,
   };
   } catch (error) {
@@ -1581,11 +1583,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "jj_add_order") {
     if (!currentUser?.admin) return { jjError: "Admins only" };
     const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    // poNumber carries the order's tab id so new rows land in the active tab.
+    const tab = String(form.get("tab") ?? "").trim();
     await prisma.supplierOrder.create({
       data: {
         shop: session?.shop ?? "",
         supplier: "JJ",
         productId: "",
+        poNumber: tab || null,
         productTitle: String(form.get("name") ?? "").trim() || "New product",
         status: "open",
         supplierStatus: "on_order",
@@ -1593,6 +1598,54 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       },
     });
     return { jjAdded: true };
+  }
+
+  // ─── JJ Restock — save the tab list (create / rename / reorder). Admin only.
+  if (intent === "jj_set_tabs") {
+    if (!currentUser?.admin) return { jjError: "Admins only" };
+    let tabs: JJTab[] = [];
+    try { tabs = normalizeJJTabs(JSON.parse(String(form.get("tabs") ?? "[]"))); } catch { tabs = JJ_DEFAULT_TABS; }
+    await prisma.portalSetting.upsert({
+      where: { key: JJ_TABS_KEY },
+      create: { key: JJ_TABS_KEY, value: { tabs } },
+      update: { value: { tabs } },
+    });
+    return { jjTabsSaved: true };
+  }
+
+  // ─── JJ Restock — delete a tab: reassign its orders to the first remaining
+  // tab, then save the trimmed list. Admin only.
+  if (intent === "jj_delete_tab") {
+    if (!currentUser?.admin) return { jjError: "Admins only" };
+    const tabId = String(form.get("tabId") ?? "").trim();
+    const existing = await prisma.portalSetting.findUnique({ where: { key: JJ_TABS_KEY }, select: { value: true } });
+    const tabs = normalizeJJTabs(existing?.value);
+    if (tabs.length <= 1) return { jjError: "Can't delete the last tab" };
+    const remaining = tabs.filter((t) => t.id !== tabId);
+    const fallback = remaining[0].id;
+    // Reassign orders on the deleted tab (poNumber === tabId, or empty when it
+    // was the first tab) to the fallback tab.
+    const wasFirst = tabs[0].id === tabId;
+    await prisma.supplierOrder.updateMany({
+      where: { supplier: "JJ", OR: [{ poNumber: tabId }, ...(wasFirst ? [{ poNumber: null }, { poNumber: "" }] : [])] },
+      data: { poNumber: fallback },
+    });
+    await prisma.portalSetting.upsert({
+      where: { key: JJ_TABS_KEY },
+      create: { key: JJ_TABS_KEY, value: { tabs: remaining } },
+      update: { value: { tabs: remaining } },
+    });
+    return { jjTabsSaved: true };
+  }
+
+  // ─── JJ Restock — move selected orders into a tab. Admin only.
+  if (intent === "jj_move_orders_to_tab") {
+    if (!currentUser?.admin) return { jjError: "Admins only" };
+    const tab = String(form.get("tab") ?? "").trim();
+    const ids = String(form.get("orderIds") ?? "").split(",").map((s) => Number(s)).filter((n) => Number.isFinite(n));
+    if (!tab || !ids.length) return null;
+    await prisma.supplierOrder.updateMany({ where: { supplier: "JJ", id: { in: ids } }, data: { poNumber: tab } });
+    return { jjTabsSaved: true };
   }
 
   // ─── JJ Restock — delete a product row (admin only).
@@ -4947,6 +5000,20 @@ const COLUMN_WIDTHS_KEY = "supplier-portal-column-widths-v1";
 const PACKING_COLUMN_WIDTHS_KEY = "supplier-portal-packing-column-widths-v1";
 const PHOTOSHOOT_COLUMN_WIDTHS_KEY = "supplier-portal-photoshoot-column-widths-v1";
 const JJ_COLUMN_WIDTHS_KEY = "supplier-portal-jj-column-widths-v1";
+// JJ order tabs: an ordered list of { id, name } so the supplier can have
+// several order sheets (e.g. one per date). Each JJ SupplierOrder's poNumber
+// holds its tab id; orders with an empty poNumber fall back to the first tab.
+const JJ_TABS_KEY = "supplier-portal-jj-tabs-v1";
+type JJTab = { id: string; name: string };
+const JJ_DEFAULT_TABS: JJTab[] = [{ id: "main", name: "Order 1" }];
+function normalizeJJTabs(value: unknown): JJTab[] {
+  const arr = value && typeof value === "object" && Array.isArray((value as { tabs?: unknown }).tabs)
+    ? (value as { tabs: unknown[] }).tabs : Array.isArray(value) ? value : [];
+  const tabs = arr
+    .map((t) => (t && typeof t === "object") ? { id: String((t as JJTab).id ?? "").trim(), name: String((t as JJTab).name ?? "").trim() } : null)
+    .filter((t): t is JJTab => Boolean(t && t.id && t.name));
+  return tabs.length ? tabs : JJ_DEFAULT_TABS;
+}
 const TABLE_HEADER_LABELS_KEY = "production-portal-table-header-labels-v1";
 const TABLE_CUSTOM_COLUMNS_KEY = "production-portal-table-custom-columns-v1";
 const TABLE_CUSTOM_CELLS_KEY = "production-portal-table-custom-cells-v1";
@@ -8776,6 +8843,7 @@ export default function PortalDashboard() {
     photoShoots,
     photoShootColumnWidths,
     jjColumnWidths,
+    jjTabs,
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
   // Both the Karma East ("restock") and JJ ("jj-restock") pages render the
@@ -9435,6 +9503,7 @@ export default function PortalDashboard() {
             canLoadInventory={Boolean((currentUser?.canLoadInventory || currentUser?.admin) && !jjSupplierOnly)}
             isAdmin={Boolean(currentUser?.admin)}
             savedColumnWidths={jjColumnWidths}
+            tabs={jjTabs}
           />
         ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -24279,20 +24348,62 @@ function JJOrderRow({
 }
 
 function JJRestockPanel({
-  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths,
+  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, tabs,
 }: {
   orders: Order[]; sizes: string[]; thbPerAudCachedRate: number | null; fxBahtBuffer: number;
-  restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>;
+  restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>; tabs: JJTab[];
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
   const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
   const rowFetcher = useFetcher<{ jjError?: string }>();
   const widthsFetcher = useFetcher();
+  const tabFetcher = useFetcher();
   const loading = loadFetcher.state !== "idle";
   // Which order (if any) is picking a Shopify product to link to.
   const [linkingOrderId, setLinkingOrderId] = useState<number | null>(null);
-  const addOrder = () => rowFetcher.submit({ intent: "jj_add_order" }, { method: "post" });
+  // ─── Order tabs ─────────────────────────────────────────────────────────
+  const tabList = tabs.length ? tabs : JJ_DEFAULT_TABS;
+  const firstTabId = tabList[0].id;
+  const [activeTabId, setActiveTabId] = useState(firstTabId);
+  // If the active tab disappears (deleted), fall back to the first.
+  useEffect(() => { if (!tabList.some((t) => t.id === activeTabId)) setActiveTabId(firstTabId); }, [tabList, activeTabId, firstTabId]);
+  // An order belongs to a tab by its poNumber; empty poNumber → the first tab.
+  const tabOf = (o: Order) => ((o as { poNumber?: string | null }).poNumber ?? "").trim() || firstTabId;
+  const ordersInActiveTab = useMemo(() => orders.filter((o) => tabOf(o) === activeTabId), [orders, activeTabId, firstTabId]);
+  const countByTab = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const o of orders) m.set(tabOf(o), (m.get(tabOf(o)) ?? 0) + 1);
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orders, firstTabId]);
+  const saveTabs = (next: JJTab[]) => tabFetcher.submit({ intent: "jj_set_tabs", tabs: JSON.stringify(next) }, { method: "post" });
+  const addTab = () => {
+    const name = window.prompt("Name this order tab (e.g. a date):", "")?.trim();
+    if (!name) return;
+    const id = `t_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+    saveTabs([...tabList, { id, name }]);
+    setActiveTabId(id);
+  };
+  const renameTab = (id: string) => {
+    const cur = tabList.find((t) => t.id === id);
+    const name = window.prompt("Rename order tab:", cur?.name ?? "")?.trim();
+    if (!name) return;
+    saveTabs(tabList.map((t) => t.id === id ? { ...t, name } : t));
+  };
+  const deleteTab = (id: string) => {
+    if (tabList.length <= 1) { window.alert("You need at least one order tab."); return; }
+    const cnt = countByTab.get(id) ?? 0;
+    if (!window.confirm(cnt > 0 ? `Delete this tab? Its ${cnt} order(s) will move to “${tabList.find((t) => t.id !== id)?.name}”.` : "Delete this empty tab?")) return;
+    tabFetcher.submit({ intent: "jj_delete_tab", tabId: id }, { method: "post" });
+  };
+  const moveSelectedToTab = (tabId: string) => {
+    const ids = ordersInActiveTab.filter((o) => selected.has(o.id)).map((o) => o.id);
+    if (!ids.length) return;
+    tabFetcher.submit({ intent: "jj_move_orders_to_tab", tab: tabId, orderIds: ids.join(",") }, { method: "post" });
+    setSelected(new Set());
+  };
+  const addOrder = () => rowFetcher.submit({ intent: "jj_add_order", tab: activeTabId }, { method: "post" });
   const deleteOrder = (orderId: number) => {
     if (!window.confirm("Delete this product row? This can't be undone.")) return;
     rowFetcher.submit({ intent: "jj_delete_order", orderId: String(orderId) }, { method: "post" });
@@ -24358,11 +24469,11 @@ function JJRestockPanel({
 
   const term = search.trim().toLowerCase();
   const visible = (term
-    ? orders.filter((o) =>
+    ? ordersInActiveTab.filter((o) =>
         (o.productTitle ?? "").toLowerCase().includes(term)
         || ((o as { styleCode?: string | null }).styleCode ?? "").toLowerCase().includes(term)
         || ((o as { colourCode?: string | null }).colourCode ?? "").toLowerCase().includes(term))
-    : orders) as Order[];
+    : ordersInActiveTab) as Order[];
 
   const toggle = (id: number) => setSelected((prev) => {
     const next = new Set(prev);
@@ -24385,6 +24496,37 @@ function JJRestockPanel({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 10 }}>
+      {/* Order tabs — one sheet of orders per tab (e.g. a date). */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", borderBottom: "2px solid #e5e7eb", paddingBottom: 0 }}>
+        {tabList.map((t) => {
+          const active = t.id === activeTabId;
+          return (
+            <div
+              key={t.id}
+              onClick={() => setActiveTabId(t.id)}
+              onDoubleClick={() => isAdmin && renameTab(t.id)}
+              title={isAdmin ? "Click to open · double-click to rename" : undefined}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                padding: "8px 14px", fontSize: 13, fontWeight: 700, borderRadius: "8px 8px 0 0",
+                border: "1px solid #e5e7eb", borderBottom: active ? "2px solid #fff" : "1px solid #e5e7eb",
+                marginBottom: -2,
+                background: active ? "#fff" : "#f3f4f6",
+                color: active ? "#0f766e" : "#6b7280",
+              }}
+            >
+              {t.name}
+              <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", background: active ? "#ecfdf5" : "#e5e7eb", borderRadius: 999, padding: "1px 7px" }}>{countByTab.get(t.id) ?? 0}</span>
+              {isAdmin && active && tabList.length > 1 && (
+                <button type="button" onClick={(e) => { e.stopPropagation(); deleteTab(t.id); }} title="Delete this tab" style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
+              )}
+            </div>
+          );
+        })}
+        {isAdmin && (
+          <button type="button" onClick={addTab} title="Add a new order tab" style={{ border: "1px dashed #cbd5e1", background: "transparent", color: "#0f766e", borderRadius: "8px 8px 0 0", padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", marginBottom: -2 }}>+ New order</button>
+        )}
+      </div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <input
           placeholder="Search JJ products…"
@@ -24392,6 +24534,17 @@ function JJRestockPanel({
           onChange={(e) => setSearch(e.target.value)}
           style={s.jjSearchInput}
         />
+        {isAdmin && selectedCount > 0 && tabList.length > 1 && (
+          <select
+            value=""
+            onChange={(e) => { if (e.target.value) moveSelectedToTab(e.target.value); e.currentTarget.value = ""; }}
+            style={{ fontSize: 12, fontWeight: 600, padding: "6px 8px", border: "1px solid #0d9488", borderRadius: 6, background: "#0d9488", color: "#fff", cursor: "pointer" }}
+            title="Move the selected orders to another tab"
+          >
+            <option value="">Move {selectedCount} to tab…</option>
+            {tabList.filter((t) => t.id !== activeTabId).map((t) => <option key={t.id} value={t.id} style={{ color: "#111827", background: "#fff" }}>{t.name}</option>)}
+          </select>
+        )}
         {canLoadInventory && (
           <button
             type="button"
