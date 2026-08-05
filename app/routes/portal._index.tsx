@@ -16462,7 +16462,7 @@ function CollectionReleaseCell({ value, onCommit }: { value: string; onCommit: (
 //     the full bytes stored in CollectionImage and fetched lazily.
 // parseMultiImageValue normalises everything to { thumb, key? } so
 // downstream code can render uniformly.
-type CollectionImageEntry = { thumb: string; key?: string };
+type CollectionImageEntry = { thumb: string; key?: string; alt?: string };
 function parseMultiImageValue(value: string): CollectionImageEntry[] {
   const v = value?.trim() ?? "";
   if (!v) return [];
@@ -16474,7 +16474,7 @@ function parseMultiImageValue(value: string): CollectionImageEntry[] {
         .map((x): CollectionImageEntry | null => {
           if (typeof x === "string" && x) return { thumb: x };
           if (x && typeof x === "object" && typeof x.thumb === "string" && x.thumb) {
-            return { thumb: x.thumb, key: typeof x.key === "string" ? x.key : undefined };
+            return { thumb: x.thumb, key: typeof x.key === "string" ? x.key : undefined, alt: typeof x.alt === "string" ? x.alt : undefined };
           }
           return null;
         })
@@ -16486,7 +16486,17 @@ function parseMultiImageValue(value: string): CollectionImageEntry[] {
 }
 function serializeMultiImageValue(images: CollectionImageEntry[]): string {
   if (images.length === 0) return "";
-  return JSON.stringify(images.map((i) => i.key ? { thumb: i.thumb, key: i.key } : i.thumb));
+  // Always object form when there's a key or alt to preserve; else keep the
+  // compact string form for plain thumbs.
+  return JSON.stringify(images.map((i) => {
+    if (i.key || i.alt) {
+      const o: { thumb: string; key?: string; alt?: string } = { thumb: i.thumb };
+      if (i.key) o.key = i.key;
+      if (i.alt) o.alt = i.alt;
+      return o;
+    }
+    return i.thumb;
+  }));
 }
 // Dropbox image picker for a collection row. Opens pre-searched by the row's
 // product name (auto-find); the user ticks images and adds them. Selected
@@ -16712,6 +16722,75 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
   );
 }
 
+// Resolve an image entry to a base64 data URL (for the AI vision endpoint).
+// Uses the thumb directly when it's already a data URL; otherwise fetches the
+// full/same-origin image and reads it as a data URL.
+async function collectionImageToDataUrl(entry: CollectionImageEntry): Promise<string | null> {
+  if (entry.thumb?.startsWith("data:")) return entry.thumb;
+  const src = entry.key ? `/portal/collection-image/${entry.key}` : entry.thumb;
+  if (!src) return null;
+  try {
+    const r = await fetch(src);
+    if (!r.ok) return null;
+    const blob = await r.blob();
+    return await new Promise<string | null>((resolve) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(typeof fr.result === "string" ? fr.result : null);
+      fr.onerror = () => resolve(null);
+      fr.readAsDataURL(blob);
+    });
+  } catch { return null; }
+}
+
+// Per-image ALT TEXT editor: an AI (vision) generate/regenerate button + an
+// editable field. Alt text is stored on the image entry and pushed to Shopify
+// as the image's alt on create.
+function CollectionImageAltEditor({ entry, productName, onChange }: { entry: CollectionImageEntry; productName?: string; onChange: (alt: string) => void }) {
+  const [alt, setAlt] = useState(entry.alt ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { setAlt(entry.alt ?? ""); }, [entry.alt]);
+  const generate = async () => {
+    if (busy) return;
+    setBusy(true); setErr(null);
+    try {
+      const dataUrl = await collectionImageToDataUrl(entry);
+      if (!dataUrl) { setErr("Couldn't read image"); return; }
+      const fd = new FormData();
+      fd.set("image", dataUrl);
+      fd.set("productName", productName ?? "");
+      const res = await fetch("/api/ai-alt-text", { method: "post", body: fd });
+      const json = await res.json() as { ok?: boolean; text?: string; error?: string };
+      if (json.ok && json.text) { setAlt(json.text); onChange(json.text); }
+      else setErr(json.error || "AI failed");
+    } catch (e) { setErr((e as Error).message || "AI failed"); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.3 }}>Alt text</span>
+        <button
+          type="button"
+          onClick={generate}
+          disabled={busy}
+          title="Generate alt text from this image with AI"
+          style={{ border: "none", borderRadius: 5, cursor: busy ? "wait" : "pointer", fontSize: 10, fontWeight: 700, color: "#fff", background: busy ? "#9ca3af" : "#111827", padding: "2px 7px" }}
+        >{busy ? "…" : (alt ? "✨ Redo" : "✨ AI")}</button>
+      </div>
+      <textarea
+        value={alt}
+        onChange={(e) => setAlt(e.target.value)}
+        onBlur={() => { if (alt !== (entry.alt ?? "")) onChange(alt); }}
+        placeholder="Describe this image…"
+        rows={2}
+        style={{ width: "100%", boxSizing: "border-box", border: "1px solid #e5e7eb", borderRadius: 5, padding: "4px 6px", fontSize: 11, resize: "vertical", fontFamily: "inherit", color: "#374151" }}
+      />
+      {err && <span style={{ fontSize: 10, color: "#b45309" }}>{err}</span>}
+    </div>
+  );
+}
+
 // Image manager modal: drag-drop to reorder, position badges, remove,
 // add more. Saves immediately via onCommit on every change so the user
 // can close at any time without losing edits.
@@ -16819,8 +16898,8 @@ function CollectionImageManagerModal({
               // use the thumb URL directly.
               const fullSrc = entry.key ? `/portal/collection-image/${entry.key}` : entry.thumb;
               return (
+              <div key={`${idx}-${entry.thumb.slice(0, 24)}`} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <div
-                key={`${idx}-${entry.thumb.slice(0, 24)}`}
                 draggable
                 onDragStart={onDragStart(idx)}
                 onDragOver={onDragOver(idx)}
@@ -16862,6 +16941,13 @@ function CollectionImageManagerModal({
                     title="Move later"
                   >▶</button>
                 </div>
+              </div>
+              {/* Per-image ALT TEXT — AI-generated (from the image), editable, regenerate. */}
+              <CollectionImageAltEditor
+                entry={entry}
+                productName={rowName}
+                onChange={(alt) => onCommit(images.map((im, i) => i === idx ? { ...im, alt } : im))}
+              />
               </div>
               );
             })}
