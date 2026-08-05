@@ -22989,7 +22989,7 @@ function RestockSplitModal({
   };
   return createPortal(
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
-      <div style={{ background: "#fff", borderRadius: 12, width: 460, maxWidth: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+      <div style={{ background: "#fff", borderRadius: 12, width: 620, maxWidth: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb" }}>
           <div style={{ fontWeight: 700, fontSize: 15 }}>Split to a destination</div>
           <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{productTitle}</div>
@@ -23002,28 +23002,47 @@ function RestockSplitModal({
               {destChoices.map((o) => <option key={o.value} value={o.value}>{o.label || o.value}</option>)}
             </select>
           </label>
-          <div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "6px 12px", alignItems: "center", fontSize: 12, color: "#6b7280", fontWeight: 700, marginBottom: 4 }}>
-              <span>Size</span><span style={{ textAlign: "center" }}>Available</span><span style={{ textAlign: "center" }}>Send</span>
+          {orderedSizes.length === 0 ? (
+            <div style={{ fontSize: 13, color: "#9ca3af", padding: "8px 0" }}>No quantities on this order to split.</div>
+          ) : (
+            // Sizes run horizontally (one column per size) to match the sheet.
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr>
+                    <th style={{ padding: "2px 10px 4px 0" }} />
+                    {orderedSizes.map((sz) => (
+                      <th key={sz} style={{ padding: "2px 6px 4px", textAlign: "center", fontSize: 12, fontWeight: 700, color: "#111827", minWidth: 52 }}>{sz}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ fontSize: 12, fontWeight: 700, color: "#6b7280", padding: "3px 10px 3px 0", whiteSpace: "nowrap" }}>Available</td>
+                    {orderedSizes.map((sz) => (
+                      <td key={sz} style={{ textAlign: "center", color: "#6b7280", padding: "3px 6px" }}>{available[sz] ?? 0}</td>
+                    ))}
+                  </tr>
+                  <tr>
+                    <td style={{ fontSize: 12, fontWeight: 700, color: "#374151", padding: "3px 10px 3px 0", whiteSpace: "nowrap" }}>Send</td>
+                    {orderedSizes.map((sz) => (
+                      <td key={sz} style={{ padding: "3px 6px", textAlign: "center" }}>
+                        <input
+                          type="number"
+                          className="no-number-arrows"
+                          min={0}
+                          max={available[sz] ?? 0}
+                          value={qtys[sz] ?? ""}
+                          onChange={(e) => setQtys((p) => ({ ...p, [sz]: e.target.value }))}
+                          style={{ width: 48, border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 4px", fontSize: 14, textAlign: "center", boxSizing: "border-box" }}
+                        />
+                      </td>
+                    ))}
+                  </tr>
+                </tbody>
+              </table>
             </div>
-            {orderedSizes.length === 0 ? (
-              <div style={{ fontSize: 13, color: "#9ca3af", padding: "8px 0" }}>No quantities on this order to split.</div>
-            ) : orderedSizes.map((sz) => (
-              <div key={sz} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "6px 12px", alignItems: "center", padding: "4px 0", borderTop: "1px solid #f3f4f6" }}>
-                <span style={{ fontWeight: 700, color: "#111827" }}>{sz}</span>
-                <span style={{ textAlign: "center", color: "#6b7280" }}>{available[sz] ?? 0}</span>
-                <input
-                  type="number"
-                  className="no-number-arrows"
-                  min={0}
-                  max={available[sz] ?? 0}
-                  value={qtys[sz] ?? ""}
-                  onChange={(e) => setQtys((p) => ({ ...p, [sz]: e.target.value }))}
-                  style={{ width: 64, border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 6px", fontSize: 14, textAlign: "center", boxSizing: "border-box" }}
-                />
-              </div>
-            ))}
-          </div>
+          )}
           <div style={{ fontSize: 13, color: "#374151" }}>
             Sending <strong>{totalMove}</strong> of {totalAvail} — <strong>{totalAvail - totalMove}</strong> will stay on this order.
           </div>
