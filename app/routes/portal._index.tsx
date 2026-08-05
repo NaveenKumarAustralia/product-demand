@@ -15039,6 +15039,7 @@ function CollectionSpreadsheetPage({
                               <CollectionDescriptionCell
                                 value={row.description ?? ""}
                                 productName={row.name ?? row.title ?? ""}
+                                productType={row.productType ?? ""}
                                 onCommit={(v) => updateCell(rIdx, "description", v)}
                               />
                             </Td>
@@ -15748,10 +15749,27 @@ function stripHtmlToText(html: string): string {
     .replace(/\s+/g, " ").trim();
 }
 
+// Convert AI plain text (paragraphs, with optional "- " / "• " bullet lines)
+// into the HTML the rich-text editor stores.
+function aiTextToHtml(t: string): string {
+  const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const blocks = (t || "").trim().split(/\n\n+/).filter(Boolean);
+  return blocks.map((block) => {
+    const lines = block.split(/\n/).map((l) => l.trim()).filter(Boolean);
+    const isList = lines.length > 1 && lines.every((l) => /^([-*•]|\d+[.)])\s+/.test(l));
+    if (isList) {
+      const ordered = /^\d+[.)]\s+/.test(lines[0]);
+      const items = lines.map((l) => `<li>${esc(l.replace(/^([-*•]|\d+[.)])\s+/, ""))}</li>`).join("");
+      return ordered ? `<ol>${items}</ol>` : `<ul>${items}</ul>`;
+    }
+    return `<p>${esc(block).replace(/\n/g, "<br>")}</p>`;
+  }).join("");
+}
+
 // Rich-text editor popup (contentEditable + a small toolbar). Used by the
 // Description cell — bold / italic / underline, bullet + numbered lists, links,
 // and text alignment. Stores HTML (Shopify's body_html).
-function CollectionRichTextModal({ title, initialHtml, onSave, onClose }: { title: string; initialHtml: string; onSave: (html: string) => void; onClose: () => void }) {
+function CollectionRichTextModal({ title, initialHtml, onSave, onClose, aiProductName, aiProductType }: { title: string; initialHtml: string; onSave: (html: string) => void; onClose: () => void; aiProductName?: string; aiProductType?: string }) {
   const editorRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (editorRef.current) editorRef.current.innerHTML = initialHtml || "";
@@ -15763,6 +15781,22 @@ function CollectionRichTextModal({ title, initialHtml, onSave, onClose }: { titl
     const url = window.prompt("Link URL:", "https://")?.trim();
     if (url) exec("createLink", url);
   };
+  // AI: rewrite/generate a description from the product name (+ type) using
+  // whatever is currently in the editor as the source to improve.
+  const aiFetcher = useFetcher<{ ok?: boolean; text?: string; error?: string }>();
+  const generating = aiFetcher.state !== "idle";
+  const canAI = Boolean(aiProductName && aiProductName.trim());
+  const runAI = () => {
+    if (!canAI || generating) return;
+    const source = editorRef.current ? stripHtmlToText(editorRef.current.innerHTML) : "";
+    aiFetcher.submit({ kind: "description", productName: aiProductName ?? "", productType: aiProductType ?? "", source }, { method: "post", action: "/api/ai-generate" });
+  };
+  useEffect(() => {
+    if (aiFetcher.state === "idle" && aiFetcher.data?.ok && aiFetcher.data.text && editorRef.current) {
+      editorRef.current.innerHTML = aiTextToHtml(aiFetcher.data.text);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiFetcher.state, aiFetcher.data]);
   const save = () => { onSave(editorRef.current?.innerHTML ?? ""); onClose(); };
   const btnStyle: React.CSSProperties = { minWidth: 30, height: 30, border: "1px solid #e5e7eb", background: "#fff", borderRadius: 6, cursor: "pointer", fontSize: 14, color: "#374151", display: "inline-flex", alignItems: "center", justifyContent: "center", padding: "0 8px" };
   const Btn = ({ label, cmd, arg, title: t }: { label: React.ReactNode; cmd?: string; arg?: string; title: string }) => (
@@ -15789,7 +15823,21 @@ function CollectionRichTextModal({ title, initialHtml, onSave, onClose }: { titl
           <Btn label="⇥" cmd="justifyRight" title="Align right" />
           <span style={{ width: 1, background: "#e5e7eb", margin: "0 4px" }} />
           <Btn label="Clear" cmd="removeFormat" title="Clear formatting" />
+          {/* AI generate/rewrite — sits in the corner of the toolbar. */}
+          {canAI && (
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={runAI}
+              disabled={generating}
+              title={generating ? "Generating…" : "Generate / rewrite the description with AI"}
+              style={{ marginLeft: "auto", height: 30, border: "none", borderRadius: 6, cursor: generating ? "wait" : "pointer", fontSize: 13, fontWeight: 700, color: "#fff", background: generating ? "#9ca3af" : "#111827", padding: "0 12px", display: "inline-flex", alignItems: "center", gap: 4 }}
+            >{generating ? "…" : "✨ AI"}</button>
+          )}
         </div>
+        {aiFetcher.data?.ok === false && aiFetcher.data.error && (
+          <div style={{ padding: "6px 18px", fontSize: 12, color: "#b45309", background: "#fffbeb" }}>{aiFetcher.data.error}</div>
+        )}
         <div
           ref={editorRef}
           contentEditable
@@ -15810,7 +15858,7 @@ const COLLECTION_POPUP_CELL_STYLE: React.CSSProperties = { width: "100%", minHei
 
 // Description cell — shows a short plain-text preview; click opens the rich-text
 // editor. Stores HTML.
-function CollectionDescriptionCell({ value, productName, onCommit }: { value: string; productName: string; onCommit: (html: string) => void }) {
+function CollectionDescriptionCell({ value, productName, productType, onCommit }: { value: string; productName: string; productType?: string; onCommit: (html: string) => void }) {
   const [open, setOpen] = useState(false);
   const preview = stripHtmlToText(value);
   return (
@@ -15826,6 +15874,8 @@ function CollectionDescriptionCell({ value, productName, onCommit }: { value: st
           initialHtml={value}
           onSave={onCommit}
           onClose={() => setOpen(false)}
+          aiProductName={productName}
+          aiProductType={productType}
         />
       )}
     </>
