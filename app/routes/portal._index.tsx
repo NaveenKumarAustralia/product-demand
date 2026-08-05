@@ -4250,6 +4250,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
       const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush, productInfo: productInfoForPush ?? undefined });
       if (res.ok && res.productId) {
+        // Push the row's model pictures (with per-image alt text) to the new
+        // product. Best-effort: the product is already created, so image
+        // failures are logged but don't fail the whole push.
+        try {
+          const imgs = parseMultiImageValue(row.modelPicture ?? "");
+          if (imgs.length) {
+            const imgErrors = await pushRowImagesToShopify(session.shop, session.accessToken, res.productId, imgs);
+            if (imgErrors.length) console.warn(`[collection push] row ${idx} image errors:`, imgErrors);
+          }
+        } catch (e) {
+          console.warn(`[collection push] row ${idx} images failed:`, e);
+        }
         rows[idx] = {
           ...row,
           [COL_ROW_SHOPIFY_PRODUCT_ID]: res.productId,
@@ -8352,6 +8364,76 @@ async function updateShopifyProductFromRow(
   const product = json?.data?.productUpdate?.product;
   if (!product?.id) return { ok: false, errors: ["Shopify returned no product"] };
   return { ok: true, productId: String(product.id), handle: String(product.handle ?? "") };
+}
+
+// Upload local image bytes to Shopify via a staged upload; returns the
+// resourceUrl to use as productCreateMedia originalSource (or null on failure).
+async function stageUploadShopifyImage(shop: string, accessToken: string, filename: string, mime: string, bytes: Buffer): Promise<string | null> {
+  const staged = await shopifyGraphql<any>(shop, accessToken, `
+    mutation StageUpload($input: [StagedUploadInput!]!) {
+      stagedUploadsCreate(input: $input) {
+        stagedTargets { url resourceUrl parameters { name value } }
+        userErrors { field message }
+      }
+    }
+  `, { input: [{ filename, mimeType: mime, httpMethod: "POST", resource: "IMAGE", fileSize: String(bytes.length) }] });
+  const target = staged?.data?.stagedUploadsCreate?.stagedTargets?.[0];
+  if (!target?.url || !target?.resourceUrl) return null;
+  try {
+    const fd = new FormData();
+    for (const p of (target.parameters ?? []) as Array<{ name: string; value: string }>) fd.append(p.name, p.value);
+    fd.append("file", new Blob([new Uint8Array(bytes)], { type: mime }), filename);
+    const up = await fetch(String(target.url), { method: "POST", body: fd });
+    if (!up.ok) return null;
+    return String(target.resourceUrl);
+  } catch { return null; }
+}
+
+// Push a collection row's images to its Shopify product, with per-image alt
+// text. Local images (stored in CollectionImage by key, or inline data URLs)
+// go through a staged upload; public http(s) URLs are attached directly.
+// Best-effort: returns a list of error strings (the product already exists).
+async function pushRowImagesToShopify(shop: string, accessToken: string, productId: string, images: CollectionImageEntry[]): Promise<string[]> {
+  const errors: string[] = [];
+  if (!images.length) return errors;
+  const media: Array<{ originalSource: string; mediaContentType: string; alt?: string }> = [];
+  for (let i = 0; i < images.length; i++) {
+    const entry = images[i];
+    let bytes: Buffer | null = null;
+    let mime = "image/jpeg";
+    if (entry.key) {
+      const rows = await prisma.$queryRawUnsafe<Array<{ mimeType: string; bytes: Buffer }>>(
+        `SELECT "mimeType","bytes" FROM "CollectionImage" WHERE "key"=$1 LIMIT 1`, entry.key,
+      ).catch(() => [] as Array<{ mimeType: string; bytes: Buffer }>);
+      if (rows?.[0]?.bytes) { bytes = Buffer.from(rows[0].bytes); mime = rows[0].mimeType || mime; }
+    }
+    if (!bytes && entry.thumb?.startsWith("data:")) {
+      const m = entry.thumb.match(/^data:([^;]+);base64,(.+)$/s);
+      if (m) { mime = m[1]; bytes = Buffer.from(m[2], "base64"); }
+    }
+    if (!bytes && /^https?:\/\//i.test(entry.thumb || "")) {
+      // Public URL — Shopify can fetch it directly.
+      media.push({ originalSource: entry.thumb, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
+      continue;
+    }
+    if (!bytes) continue;
+    const ext = mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : mime.includes("gif") ? "gif" : "jpg";
+    const resourceUrl = await stageUploadShopifyImage(shop, accessToken, `image-${i + 1}.${ext}`, mime, bytes);
+    if (!resourceUrl) { errors.push(`image ${i + 1}: upload failed`); continue; }
+    media.push({ originalSource: resourceUrl, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
+  }
+  if (!media.length) return errors;
+  const json = await shopifyGraphql<any>(shop, accessToken, `
+    mutation AddProductMedia($productId: ID!, $media: [CreateMediaInput!]!) {
+      productCreateMedia(productId: $productId, media: $media) {
+        media { id }
+        mediaUserErrors { field message }
+      }
+    }
+  `, { productId, media });
+  const errs = json?.data?.productCreateMedia?.mediaUserErrors ?? [];
+  for (const e of errs) errors.push(e.message || "media error");
+  return errors;
 }
 
 // ─── Google Sheet bulk import ───────────────────────────────────
