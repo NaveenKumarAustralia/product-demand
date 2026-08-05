@@ -9309,6 +9309,21 @@ export default function PortalDashboard() {
     document.addEventListener("show-cost-breakdown", handler);
     return () => document.removeEventListener("show-cost-breakdown", handler);
   }, []);
+  const [imageLightbox, setImageLightbox] = useState<{ url: string; alt: string } | null>(null);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { url: string; alt?: string };
+      if (detail?.url) setImageLightbox({ url: detail.url, alt: detail.alt ?? "" });
+    };
+    document.addEventListener("show-image-lightbox", handler);
+    return () => document.removeEventListener("show-image-lightbox", handler);
+  }, []);
+  useEffect(() => {
+    if (!imageLightbox) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setImageLightbox(null); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [imageLightbox]);
   useEffect(() => {
     const handleUndoKey = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.key.toLowerCase() !== "z") return;
@@ -9960,6 +9975,26 @@ export default function PortalDashboard() {
           </div>
         )}
       </main>
+      {imageLightbox && typeof document !== "undefined" && createPortal(
+        <div
+          onClick={() => setImageLightbox(null)}
+          style={{ position: "fixed", inset: 0, zIndex: 2147483647, background: "rgba(0,0,0,0.82)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, cursor: "zoom-out" }}
+        >
+          <img
+            src={imageLightbox.url}
+            alt={imageLightbox.alt}
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: "94vw", maxHeight: "94vh", objectFit: "contain", borderRadius: 8, boxShadow: "0 12px 48px rgba(0,0,0,0.5)", cursor: "default" }}
+          />
+          <button
+            type="button"
+            onClick={() => setImageLightbox(null)}
+            aria-label="Close"
+            style={{ position: "fixed", top: 18, right: 22, width: 40, height: 40, borderRadius: 20, border: "none", background: "rgba(255,255,255,0.9)", color: "#111", fontSize: 22, lineHeight: 1, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" }}
+          >×</button>
+        </div>,
+        document.body,
+      )}
       {historyMenu && typeof document !== "undefined" && (
         <CellHistoryMenu
           x={historyMenu.x}
@@ -25056,7 +25091,15 @@ function JJOrderRow({
       </td>
       <td style={{ ...s.td, ...frozenTd(1) }}>
         <div style={s.imageCell}>
-          {order.productImageUrl ? <img src={order.productImageUrl} alt="" style={s.thumb} /> : <div style={s.noImg}>—</div>}
+          {order.productImageUrl ? (
+            <img
+              src={order.productImageUrl}
+              alt={order.productTitle ?? ""}
+              style={{ ...s.thumb, cursor: "zoom-in" }}
+              title="Click to enlarge"
+              onClick={() => document.dispatchEvent(new CustomEvent("show-image-lightbox", { detail: { url: order.productImageUrl, alt: order.productTitle ?? "" } }))}
+            />
+          ) : <div style={s.noImg}>—</div>}
         </div>
       </td>
       <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(2) }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} productName={order.productTitle} /></td>
