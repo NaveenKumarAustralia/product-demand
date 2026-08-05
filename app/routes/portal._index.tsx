@@ -2077,6 +2077,81 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "split_order_to_destination") {
+    // Split part of an order off to a destination: create a duplicate order
+    // (same product, chosen destination) with the entered per-size quantities,
+    // and deduct those quantities from this (source) order's lines.
+    const destination = String(form.get("destination") ?? "").trim().slice(0, 64);
+    let moveQtys: Record<string, number> = {};
+    try { moveQtys = normalizeQtys(JSON.parse(String(form.get("qtys") ?? "{}"))); } catch { moveQtys = {}; }
+    const order = await prisma.supplierOrder.findUnique({ where: { id: orderId }, include: { lines: { orderBy: { id: "asc" } } } });
+    if (!order) return null;
+
+    // Available per size + the line to copy variant metadata from.
+    const firstLineBySize = new Map<string, (typeof order.lines)[number]>();
+    const availBySize = new Map<string, number>();
+    for (const l of order.lines) {
+      if (!firstLineBySize.has(l.variantTitle)) firstLineBySize.set(l.variantTitle, l);
+      availBySize.set(l.variantTitle, (availBySize.get(l.variantTitle) ?? 0) + l.qtyOrdered);
+    }
+
+    const linesToCreate: Array<{ variantId: string; variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number; costPrice: number | null }> = [];
+    const deductions: Array<{ size: string; qty: number }> = [];
+    for (const [size, rawQty] of Object.entries(moveQtys)) {
+      const want = Math.max(0, Math.floor(Number(rawQty) || 0));
+      if (want <= 0) continue;
+      const move = Math.min(want, availBySize.get(size) ?? 0);
+      if (move <= 0) continue;
+      const src = firstLineBySize.get(size);
+      linesToCreate.push({
+        variantId: src?.variantId ?? `${orderId}:${size}`,
+        variantTitle: size,
+        sku: src?.sku ?? null,
+        barcode: src?.barcode ?? null,
+        qtyOrdered: move,
+        costPrice: src?.costPrice ?? null,
+      });
+      deductions.push({ size, qty: move });
+    }
+    if (!linesToCreate.length) return jsonResponse({ ok: false, error: "Nothing to split" });
+
+    await prisma.$transaction(async (tx) => {
+      await tx.supplierOrder.create({
+        data: {
+          shop: order.shop,
+          poNumber: order.poNumber,
+          supplier: order.supplier,
+          productId: order.productId,
+          productTitle: order.productTitle,
+          productType: order.productType,
+          status: "open",
+          supplierStatus: order.supplierStatus,
+          priority: order.priority,
+          productImageUrl: order.productImageUrl,
+          eta: order.eta,
+          destination: destination || order.destination,
+          // Reuse the source createdAt so the split sits next to the original.
+          createdAt: order.createdAt,
+          totalQty: linesToCreate.reduce((s, l) => s + l.qtyOrdered, 0),
+          lines: { create: linesToCreate },
+        },
+      });
+      // Deduct moved quantities from the source's lines (across duplicate
+      // lines for a size if there are any).
+      for (const d of deductions) {
+        let remaining = d.qty;
+        for (const l of order.lines.filter((x) => x.variantTitle === d.size)) {
+          if (remaining <= 0) break;
+          const take = Math.min(remaining, l.qtyOrdered);
+          if (take > 0) { await tx.orderLine.update({ where: { id: l.id }, data: { qtyOrdered: l.qtyOrdered - take } }); remaining -= take; }
+        }
+      }
+      const srcLines = await tx.orderLine.findMany({ where: { orderId }, select: { qtyOrdered: true } });
+      await tx.supplierOrder.update({ where: { id: orderId }, data: { totalQty: srcLines.reduce((s, l) => s + l.qtyOrdered, 0) } });
+    });
+    return jsonResponse({ ok: true });
+  }
+
   if (intent === "create_restock_order_from_portal") {
     let product: ShopifySearchProduct;
     let qtys: Record<string, number>;
@@ -22886,6 +22961,83 @@ function AddRestockOrderRow({
   );
 }
 
+// Split-to-destination popup for a restock order: enter how many of each size
+// to send to a destination; on submit the parent creates a duplicate order for
+// that destination and deducts these quantities from the source order.
+function RestockSplitModal({
+  productTitle, sizes, available, destinationOptions, currentDestination, onClose, onSubmit,
+}: {
+  productTitle: string;
+  sizes: string[];
+  available: Record<string, number>;
+  destinationOptions: RestockOption[];
+  currentDestination?: string;
+  onClose: () => void;
+  onSubmit: (destination: string, qtys: Record<string, number>) => void;
+}) {
+  const orderedSizes = sizes.filter((s) => (available[s] ?? 0) > 0);
+  const [destination, setDestination] = useState("");
+  const [qtys, setQtys] = useState<Record<string, string>>({});
+  const capped = (size: string) => Math.min(Math.max(0, Math.floor(Number(qtys[size]) || 0)), available[size] ?? 0);
+  const totalMove = orderedSizes.reduce((sum, sz) => sum + capped(sz), 0);
+  const totalAvail = orderedSizes.reduce((sum, sz) => sum + (available[sz] ?? 0), 0);
+  const destChoices = destinationOptions.filter((o) => o.value);
+  const submit = () => {
+    const out: Record<string, number> = {};
+    for (const sz of orderedSizes) { const q = capped(sz); if (q > 0) out[sz] = q; }
+    if (destination && Object.keys(out).length) onSubmit(destination, out);
+  };
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={onClose}>
+      <div style={{ background: "#fff", borderRadius: 12, width: 460, maxWidth: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb" }}>
+          <div style={{ fontWeight: 700, fontSize: 15 }}>Split to a destination</div>
+          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{productTitle}</div>
+        </div>
+        <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Send to</span>
+            <select value={destination} onChange={(e) => setDestination(e.target.value)} style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 10px", fontSize: 14 }}>
+              <option value="">Choose destination…</option>
+              {destChoices.map((o) => <option key={o.value} value={o.value}>{o.label || o.value}</option>)}
+            </select>
+          </label>
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "6px 12px", alignItems: "center", fontSize: 12, color: "#6b7280", fontWeight: 700, marginBottom: 4 }}>
+              <span>Size</span><span style={{ textAlign: "center" }}>Available</span><span style={{ textAlign: "center" }}>Send</span>
+            </div>
+            {orderedSizes.length === 0 ? (
+              <div style={{ fontSize: 13, color: "#9ca3af", padding: "8px 0" }}>No quantities on this order to split.</div>
+            ) : orderedSizes.map((sz) => (
+              <div key={sz} style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "6px 12px", alignItems: "center", padding: "4px 0", borderTop: "1px solid #f3f4f6" }}>
+                <span style={{ fontWeight: 700, color: "#111827" }}>{sz}</span>
+                <span style={{ textAlign: "center", color: "#6b7280" }}>{available[sz] ?? 0}</span>
+                <input
+                  type="number"
+                  className="no-number-arrows"
+                  min={0}
+                  max={available[sz] ?? 0}
+                  value={qtys[sz] ?? ""}
+                  onChange={(e) => setQtys((p) => ({ ...p, [sz]: e.target.value }))}
+                  style={{ width: 64, border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 6px", fontSize: 14, textAlign: "center", boxSizing: "border-box" }}
+                />
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 13, color: "#374151" }}>
+            Sending <strong>{totalMove}</strong> of {totalAvail} — <strong>{totalAvail - totalMove}</strong> will stay on this order.
+          </div>
+        </div>
+        <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+          <button type="button" onClick={submit} disabled={!destination || totalMove <= 0} style={{ background: (!destination || totalMove <= 0) ? "#9ca3af" : "#0d9488", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: (!destination || totalMove <= 0) ? "default" : "pointer" }}>Split off {totalMove > 0 ? totalMove : ""}</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function OrderRow({
   order,
   rowIndex,
@@ -22937,6 +23089,7 @@ function OrderRow({
   const inventoryFetcher = useFetcher<{ variantsBySize?: Record<string, number>; total?: number }>();
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [splitOpen, setSplitOpen] = useState(false);
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
     return acc;
@@ -23013,9 +23166,24 @@ function OrderRow({
     <>
       <tr id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(destinationStamp ? { background: destinationStamp.rowBg } : {}) }}>
         <RowNumberCell rowNumber={rowIndex} actions={[
+          { label: "Split to destination…", onClick: () => setSplitOpen(true) },
           { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
+        {splitOpen && (
+          <RestockSplitModal
+            productTitle={order.productTitle}
+            sizes={sizes}
+            available={qtyBySize}
+            destinationOptions={restockSettings.destinationOptions}
+            currentDestination={destinationLocal}
+            onClose={() => setSplitOpen(false)}
+            onSubmit={(destination, qtys) => {
+              fetcher.submit({ intent: "split_order_to_destination", orderId: String(order.id), destination, qtys: JSON.stringify(qtys) }, { method: "post" });
+              setSplitOpen(false);
+            }}
+          />
+        )}
         {/* Factory notes */}
         <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={{ ...destinationRowBg, height: 1, padding: 0, verticalAlign: "top" }}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
