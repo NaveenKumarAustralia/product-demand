@@ -15068,6 +15068,8 @@ function CollectionSpreadsheetPage({
                               <CollectionSeoCell
                                 title={row.seoTitle ?? ""}
                                 description={row.seoDescription ?? ""}
+                                productName={row.name ?? row.title ?? ""}
+                                productType={row.productType ?? ""}
                                 onCommit={(t, d) => updateRowFields(rIdx, { seoTitle: t, seoDescription: d })}
                               />
                             </Td>
@@ -15884,12 +15886,21 @@ function CollectionDescriptionCell({ value, productName, productType, onCommit }
 
 // Combined SEO cell — page title + meta description in one popup (mirrors the
 // Shopify "Search engine listing" editor). Cell shows a short preview.
-function CollectionSeoCell({ title, description, onCommit }: { title: string; description: string; onCommit: (title: string, description: string) => void }) {
+function CollectionSeoCell({ title, description, onCommit, productName, productType }: { title: string; description: string; onCommit: (title: string, description: string) => void; productName?: string; productType?: string }) {
   const [open, setOpen] = useState(false);
   const [t, setT] = useState(title);
   const [d, setD] = useState(description);
   useEffect(() => { if (open) { setT(title); setD(description); } }, [open, title, description]);
   const save = () => { onCommit(t.trim(), d.trim()); setOpen(false); };
+  // AI: separate generators for the page title and the meta description.
+  const canAI = Boolean(productName && productName.trim());
+  const aiTitleFetcher = useFetcher<{ ok?: boolean; text?: string; error?: string }>();
+  const aiDescFetcher = useFetcher<{ ok?: boolean; text?: string; error?: string }>();
+  const genTitle = () => { if (canAI && aiTitleFetcher.state === "idle") aiTitleFetcher.submit({ kind: "seoTitle", productName: productName ?? "", productType: productType ?? "", source: t }, { method: "post", action: "/api/ai-generate" }); };
+  const genDesc = () => { if (canAI && aiDescFetcher.state === "idle") aiDescFetcher.submit({ kind: "seoDescription", productName: productName ?? "", productType: productType ?? "", source: d }, { method: "post", action: "/api/ai-generate" }); };
+  useEffect(() => { if (aiTitleFetcher.state === "idle" && aiTitleFetcher.data?.ok && aiTitleFetcher.data.text) setT(aiTitleFetcher.data.text.trim()); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [aiTitleFetcher.state, aiTitleFetcher.data]);
+  useEffect(() => { if (aiDescFetcher.state === "idle" && aiDescFetcher.data?.ok && aiDescFetcher.data.text) setD(aiDescFetcher.data.text.trim()); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [aiDescFetcher.state, aiDescFetcher.data]);
+  const aiBtnStyle = (busy: boolean): React.CSSProperties => ({ border: "none", borderRadius: 6, cursor: busy ? "wait" : "pointer", fontSize: 12, fontWeight: 700, color: "#fff", background: busy ? "#9ca3af" : "#111827", padding: "3px 10px" });
   return (
     <>
       <div style={COLLECTION_POPUP_CELL_STYLE} onClick={() => setOpen(true)} title="Click to edit the SEO page title + meta description">
@@ -15913,7 +15924,10 @@ function CollectionSeoCell({ title, description, onCommit }: { title: string; de
                 <div style={{ fontSize: 13, color: "#4d5156", marginTop: 4 }}>{d || "Meta description shows here."}</div>
               </div>
               <label style={{ display: "block" }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Page title</span>
+                <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Page title</span>
+                  {canAI && <button type="button" onClick={genTitle} disabled={aiTitleFetcher.state !== "idle"} title="Generate the page title with AI" style={aiBtnStyle(aiTitleFetcher.state !== "idle")}>{aiTitleFetcher.state !== "idle" ? "…" : "✨ AI"}</button>}
+                </span>
                 <input
                   autoFocus
                   value={t}
@@ -15923,7 +15937,10 @@ function CollectionSeoCell({ title, description, onCommit }: { title: string; de
                 <span style={{ fontSize: 12, color: t.length > 70 ? "#b45309" : "#9ca3af" }}>{t.length} of 70 characters used</span>
               </label>
               <label style={{ display: "block" }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Meta description</span>
+                <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: "#374151" }}>Meta description</span>
+                  {canAI && <button type="button" onClick={genDesc} disabled={aiDescFetcher.state !== "idle"} title="Generate the meta description with AI" style={aiBtnStyle(aiDescFetcher.state !== "idle")}>{aiDescFetcher.state !== "idle" ? "…" : "✨ AI"}</button>}
+                </span>
                 <textarea
                   value={d}
                   onChange={(e) => setD(e.target.value)}
@@ -15931,6 +15948,9 @@ function CollectionSeoCell({ title, description, onCommit }: { title: string; de
                   style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "9px 12px", fontSize: 14, boxSizing: "border-box", marginTop: 6, resize: "vertical", fontFamily: "inherit" }}
                 />
                 <span style={{ fontSize: 12, color: d.length > 160 ? "#b45309" : "#9ca3af" }}>{d.length} of 160 characters used</span>
+                {(aiTitleFetcher.data?.ok === false || aiDescFetcher.data?.ok === false) && (
+                  <span style={{ display: "block", fontSize: 12, color: "#b45309", marginTop: 4 }}>{aiTitleFetcher.data?.error || aiDescFetcher.data?.error}</span>
+                )}
               </label>
             </div>
             <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 8 }}>
