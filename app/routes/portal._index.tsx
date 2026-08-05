@@ -3382,17 +3382,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       select: { id: true, name: true, rows: true, columns: true, createdAt: true, updatedAt: true },
     }).catch(() => null);
     if (!collection) return jsonResponse({ collection: null });
-    // Migrate any inline base64 images out to the CollectionImage table so this
-    // response stays small — otherwise a heavy collection ships tens of MB of
-    // base64 and hangs the browser. Inserts run in parallel batches so this
-    // completes well within the request timeout; after the first load the rows
-    // are already slim and this is a no-op.
+    // Chunked image migration: move inline base64 images out to the
+    // CollectionImage table a batch at a time so a heavy collection never ships
+    // tens of MB (which hangs the browser) and no single request times out.
+    // While images remain, return a tiny {migrating, remaining} response — the
+    // client re-requests to advance the next batch, then gets the slim rows.
     try {
       const rows = normalizeCollectionRows(collection.rows);
-      if (await offloadInlineCollectionImages(id, rows)) {
-        await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
-        return jsonResponse({ collection: { ...collection, rows } });
-      }
+      const { changed, remaining } = await offloadInlineCollectionImages(id, rows, 40);
+      if (changed) await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+      if (remaining > 0) return jsonResponse({ collection: null, migrating: true, remaining });
+      if (changed) return jsonResponse({ collection: { ...collection, rows } });
     } catch (e) {
       console.warn("[get_collection_full] image offload failed:", e);
     }
@@ -8740,13 +8740,15 @@ const COLLECTION_IMAGE_COLUMN_IDS = ["modelPicture", "fabric", "maniPicsTaken"];
 // Move any inline base64 image data out of the rows into the CollectionImage
 // table (referenced by key), so the rows JSON stays small and get_collection_full
 // returns quickly. Mutates `rows` in place; returns true if anything changed.
-async function offloadInlineCollectionImages(collectionId: number, rows: Array<Record<string, string>>): Promise<boolean> {
-  // Gather all inline images that need offloading first, then insert them in
-  // bounded parallel batches — sequential inserts on a heavy collection were
-  // slow enough to time the request out.
+async function offloadInlineCollectionImages(
+  collectionId: number,
+  rows: Array<Record<string, string>>,
+  cap = Infinity,
+): Promise<{ changed: boolean; remaining: number }> {
+  // Gather all inline images that need offloading (in row/column/position order).
   const pending: Array<{ entry: CollectionImageEntry; buf: Buffer; mime: string; row: Record<string, string>; colId: string; entries: CollectionImageEntry[] }> = [];
-  const touchedCells = new Map<string, { row: Record<string, string>; colId: string; entries: CollectionImageEntry[] }>();
-  for (const row of rows) {
+  for (let ri = 0; ri < rows.length; ri++) {
+    const row = rows[ri];
     for (const colId of COLLECTION_IMAGE_COLUMN_IDS) {
       const val = row[colId];
       if (!val || !val.includes("data:")) continue;
@@ -8754,31 +8756,31 @@ async function offloadInlineCollectionImages(collectionId: number, rows: Array<R
       for (const e of entries) {
         if (!e.key && typeof e.thumb === "string" && e.thumb.startsWith("data:")) {
           const m = e.thumb.match(/^data:([^;]+);base64,(.+)$/s);
-          if (m) {
-            pending.push({ entry: e, buf: Buffer.from(m[2], "base64"), mime: m[1], row, colId, entries });
-            touchedCells.set(`${colId}:${rows.indexOf(row)}`, { row, colId, entries });
-          }
+          if (m) pending.push({ entry: e, buf: Buffer.from(m[2], "base64"), mime: m[1], row, colId, entries });
         }
       }
     }
   }
-  if (!pending.length) return false;
+  if (!pending.length) return { changed: false, remaining: 0 };
+  // Migrate at most `cap` this call — bounded so the request never times out.
+  const slice = pending.slice(0, cap === Infinity ? pending.length : cap);
+  const touchedCells = new Map<CollectionImageEntry[], { row: Record<string, string>; colId: string; entries: CollectionImageEntry[] }>();
   const BATCH = 20;
-  for (let i = 0; i < pending.length; i += BATCH) {
-    const slice = pending.slice(i, i + BATCH);
-    await Promise.all(slice.map(async (p) => {
+  for (let i = 0; i < slice.length; i += BATCH) {
+    const chunk = slice.slice(i, i + BATCH);
+    await Promise.all(chunk.map(async (p) => {
       try {
         const key = await persistFullCollectionImage(collectionId, p.buf, p.mime);
         p.entry.key = key;
         p.entry.thumb = ""; // served on demand from /portal/collection-image/<key>
+        touchedCells.set(p.entries, { row: p.row, colId: p.colId, entries: p.entries });
       } catch { /* leave inline on failure */ }
     }));
   }
-  // Re-serialize every cell that had at least one image offloaded.
   for (const { row, colId, entries } of touchedCells.values()) {
     row[colId] = serializeMultiImageValue(entries);
   }
-  return true;
+  return { changed: touchedCells.size > 0, remaining: Math.max(0, pending.length - slice.length) };
 }
 
 async function persistFullCollectionImage(
@@ -14343,7 +14345,10 @@ function CollectionSpreadsheetPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listItem.id]);
   const fetcher = useFetcher();
-  const loadFetcher = useFetcher<{ collection: CollectionFullType | null }>();
+  const loadFetcher = useFetcher<{ collection: CollectionFullType | null; migrating?: boolean; remaining?: number }>();
+  // While a heavy collection's images are being migrated out (chunked), this
+  // holds how many images are left so the page can show progress.
+  const [migratingRemaining, setMigratingRemaining] = useState<number | null>(null);
   const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
   // "Update in Shopify" for already-linked rows whose info was edited.
   const updateShopifyFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; productId?: string }>; error?: string }>();
@@ -14400,15 +14405,24 @@ function CollectionSpreadsheetPage({
   useEffect(() => {
     setSelectedRowIdxs(new Set());
     setLoaded(false);
+    setMigratingRemaining(null);
     loadAttemptRef.current = 0;
     loadFullRows();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listItem.id]);
-  // Auto-retry a failed/empty load a few times (handles deploy restarts and
-  // transient timeouts) so it doesn't hang on "Loading…" forever.
+  // Chunked image migration: while the server reports images still to move,
+  // advance the next batch immediately (this keeps each response tiny so the
+  // page never hangs). Also auto-retry a genuinely failed/empty load a few
+  // times (deploy restarts / transient timeouts).
   useEffect(() => {
     if (loaded || loadFetcher.state !== "idle" || loadAttemptRef.current === 0) return;
     const data = loadFetcher.data;
+    if (data?.migrating) {
+      setMigratingRemaining(data.remaining ?? 0);
+      loadAttemptRef.current = 0; // migration progress isn't a failure — don't burn retries
+      const t = setTimeout(loadFullRows, 250);
+      return () => clearTimeout(t);
+    }
     const ok = data && data.collection && data.collection.id === listItem.id;
     if (ok || loadAttemptRef.current >= 5) return;
     const t = setTimeout(loadFullRows, 1500);
@@ -14447,6 +14461,7 @@ function CollectionSpreadsheetPage({
       setRows(loadedRows.length === 0
         ? Array.from({ length: 10 }, () => ({ __rowKey: `r_${Math.random().toString(36).slice(2, 9)}` } as Record<string, string>))
         : loadedRows);
+      setMigratingRemaining(null);
       setLoaded(true);
     }
   }, [loadFetcher.data, listItem.id]);
@@ -15162,14 +15177,19 @@ function CollectionSpreadsheetPage({
       <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 230px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
         {!loaded ? (
           <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>
-            {loadFetcher.state !== "idle" ? (
+            {migratingRemaining !== null ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "center" }}>
+                <span style={{ fontWeight: 600, color: "#0e7490" }}>Optimising images…</span>
+                <span>{migratingRemaining} image{migratingRemaining === 1 ? "" : "s"} left — this only happens once for this collection.</span>
+              </div>
+            ) : loadFetcher.state !== "idle" ? (
               "Loading…"
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "center" }}>
                 <span>Couldn't load the rows — the connection may have dropped.</span>
                 <button
                   type="button"
-                  onClick={() => { loadAttemptRef.current = 0; loadFullRows(); }}
+                  onClick={() => { loadAttemptRef.current = 0; setMigratingRemaining(null); loadFullRows(); }}
                   style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
                 >Retry</button>
               </div>
