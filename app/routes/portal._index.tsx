@@ -14040,14 +14040,35 @@ function CollectionSpreadsheetPage({
     });
   };
 
-  useEffect(() => {
-    setSelectedRowIdxs(new Set());
+  // Load the full rows. Wrapped so we can retry — the payload can be large
+  // (rows carry image data), so a slow network or a server restart (deploy)
+  // can drop the fetch and otherwise leave the sheet stuck on "Loading…".
+  const loadAttemptRef = useRef(0);
+  const loadFullRows = useCallback(() => {
+    loadAttemptRef.current += 1;
     loadFetcher.submit(
       { intent: "get_collection_full", collectionId: String(listItem.id) },
       { method: "post" },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listItem.id]);
+  useEffect(() => {
+    setSelectedRowIdxs(new Set());
+    setLoaded(false);
+    loadAttemptRef.current = 0;
+    loadFullRows();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id]);
+  // Auto-retry a failed/empty load a few times (handles deploy restarts and
+  // transient timeouts) so it doesn't hang on "Loading…" forever.
+  useEffect(() => {
+    if (loaded || loadFetcher.state !== "idle" || loadAttemptRef.current === 0) return;
+    const data = loadFetcher.data;
+    const ok = data && data.collection && data.collection.id === listItem.id;
+    if (ok || loadAttemptRef.current >= 5) return;
+    const t = setTimeout(loadFullRows, 1500);
+    return () => clearTimeout(t);
+  }, [loaded, loadFetcher.state, loadFetcher.data, listItem.id, loadFullRows]);
 
   // The thread drawer mutates the cell text on the server when the
   // user edits / deletes the original note. The Collection's local
@@ -14783,7 +14804,20 @@ function CollectionSpreadsheetPage({
 
       <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 230px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
         {!loaded ? (
-          <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
+          <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>
+            {loadFetcher.state !== "idle" ? (
+              "Loading…"
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "center" }}>
+                <span>Couldn't load the rows — the connection may have dropped.</span>
+                <button
+                  type="button"
+                  onClick={() => { loadAttemptRef.current = 0; loadFullRows(); }}
+                  style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+                >Retry</button>
+              </div>
+            )}
+          </div>
         ) : (() => {
           // Freeze every column up to and including "name" so they
           // stay visible while the user scrolls right — same pattern
