@@ -17001,7 +17001,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
       >
         {images.length > 0 ? (
           <>
-            <img src={images[0].thumb || (images[0].key ? `/portal/collection-image/${images[0].key}` : "")} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
+            <img src={images[0].thumb || (images[0].key ? `/portal/collection-image/${images[0].key}` : "")} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
             {images.length > 1 && (
               <span style={{
                 position: "absolute", bottom: 6, right: 6,
@@ -17252,7 +17252,7 @@ function CollectionImageManagerModal({
                 }}
                 title={`Position ${idx + 1} — drag to reorder`}
               >
-                <img src={fullSrc} alt={`pos ${idx + 1}`} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />
+                <img src={fullSrc} alt={`pos ${idx + 1}`} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />
                 <span style={{
                   position: "absolute", top: 6, left: 6,
                   background: "rgba(17,24,39,0.9)", color: "#fff",
