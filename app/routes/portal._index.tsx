@@ -3404,17 +3404,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // load) and in bounded parallel batches so it can't time the request out.
   if (intent === "migrate_collection_images") {
     const id = Number(form.get("collectionId"));
-    if (!id) return jsonResponse({ ok: false });
+    if (!id) return jsonResponse({ ok: false, remaining: 0 });
     const collection = await prisma.collection.findUnique({ where: { id }, select: { rows: true } }).catch(() => null);
-    if (!collection) return jsonResponse({ ok: false });
+    if (!collection) return jsonResponse({ ok: false, remaining: 0 });
     try {
       const rows = normalizeCollectionRows(collection.rows);
-      const changed = await offloadInlineCollectionImages(id, rows);
+      const { changed, remaining } = await offloadInlineCollectionImages(id, rows, 40);
       if (changed) await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
-      return jsonResponse({ ok: true, changed });
+      return jsonResponse({ ok: true, changed, remaining });
     } catch (e) {
       console.warn("[migrate_collection_images] failed:", e);
-      return jsonResponse({ ok: false });
+      return jsonResponse({ ok: false, remaining: 0 });
     }
   }
   if (intent === "update_collection") {
