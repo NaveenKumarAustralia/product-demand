@@ -375,19 +375,50 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // date of the packing list (shipment) it's in, so the ETA column can show the
   // shipment date automatically (overriding a manual one once it's shipping).
   const collectionEtaByProductId: Record<string, string> = {};
+  // Which shipment(s) each collection product is in, and whether the whole
+  // order or only part of it is shipping — surfaced in the ETA cell.
+  const collectionShipmentByProductId: Record<string, { label: string; partial: boolean }> = {};
   if (page === "collections") {
     try {
       const lines = await prisma.packingListLine.findMany({
         where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } },
-        select: { productId: true, packingList: { select: { expectedLeaveFactoryDate: true, shipmentDate: true } } },
+        select: { productId: true, qtys: true, packingList: { select: { id: true, title: true, invoiceNumber: true, expectedLeaveFactoryDate: true, shipmentDate: true } } },
       });
+      // productId → per-packing-list shipped qty + label.
+      const byProduct = new Map<string, Map<number, { qty: number; label: string }>>();
       for (const line of lines) {
         if (!line.productId) continue;
         const d = line.packingList.expectedLeaveFactoryDate ?? line.packingList.shipmentDate;
-        if (!d) continue;
-        const iso = d.toISOString();
-        const existing = collectionEtaByProductId[line.productId];
-        if (!existing || iso > existing) collectionEtaByProductId[line.productId] = iso; // keep the latest
+        if (d) {
+          const iso = d.toISOString();
+          const existing = collectionEtaByProductId[line.productId];
+          if (!existing || iso > existing) collectionEtaByProductId[line.productId] = iso; // keep the latest
+        }
+        const shipQty = Object.values(normalizeQtys(line.qtys)).reduce((s, n) => s + (Number(n) || 0), 0);
+        const listId = line.packingList.id;
+        const label = (line.packingList.invoiceNumber || line.packingList.title || `Shipment ${listId}`).trim();
+        let m = byProduct.get(line.productId);
+        if (!m) { m = new Map(); byProduct.set(line.productId, m); }
+        const cur = m.get(listId) ?? { qty: 0, label };
+        cur.qty += shipQty;
+        m.set(listId, cur);
+      }
+      // Ordered total per product (summed across its restock orders — splitting
+      // preserves the total) to decide partial vs whole.
+      const orderedByProduct = new Map<string, number>();
+      try {
+        const orders = await prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true } });
+        for (const o of orders) if (o.productId) orderedByProduct.set(o.productId, (orderedByProduct.get(o.productId) ?? 0) + (o.totalQty ?? 0));
+      } catch { /* ordered totals optional */ }
+      for (const [pid, lists] of byProduct) {
+        const entries = Array.from(lists.values());
+        const shipped = entries.reduce((s, e) => s + e.qty, 0);
+        const ordered = orderedByProduct.get(pid) ?? 0;
+        if (entries.length > 1) {
+          collectionShipmentByProductId[pid] = { label: `${entries.length} shipments`, partial: true };
+        } else {
+          collectionShipmentByProductId[pid] = { label: entries[0].label, partial: ordered > 0 ? shipped < ordered : false };
+        }
       }
     } catch (e) {
       console.warn("[collection eta] lookup failed:", e);
@@ -856,6 +887,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     visionBoardData,
     collections,
     collectionEtaByProductId,
+    collectionShipmentByProductId,
     photoShoots,
     photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
     jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
@@ -9055,6 +9087,7 @@ export default function PortalDashboard() {
     visionBoardData,
     collections,
     collectionEtaByProductId,
+    collectionShipmentByProductId,
     photoShoots,
     photoShootColumnWidths,
     jjColumnWidths,
@@ -9697,6 +9730,7 @@ export default function PortalDashboard() {
                 users={users}
                 photoShoots={photoShoots}
                 etaByProductId={collectionEtaByProductId}
+                shipmentByProductId={collectionShipmentByProductId}
               />
             </div>
           </div>
@@ -13470,7 +13504,7 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   );
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string> }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }> }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -13595,6 +13629,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         allCollections={collections}
         photoShoots={photoShoots}
         etaByProductId={etaByProductId}
+        shipmentByProductId={shipmentByProductId}
         onBack={closeCollection}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
         onSetFabricLink={(fabricName, fabricKey) => handleSetFabricLink(selectedCollection.id, fabricName, fabricKey)}
@@ -14185,6 +14220,7 @@ function CollectionSpreadsheetPage({
   allCollections,
   photoShoots,
   etaByProductId,
+  shipmentByProductId,
   onBack,
   onLocalNameChange,
   onSetFabricLink,
@@ -14200,6 +14236,7 @@ function CollectionSpreadsheetPage({
   allCollections: CollectionListItem[];
   photoShoots: PhotoShootListItem[];
   etaByProductId: Record<string, string>;
+  shipmentByProductId: Record<string, { label: string; partial: boolean }>;
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
   onSetFabricLink: (fabricName: string, fabricKey: string) => void;
@@ -15274,11 +15311,13 @@ function CollectionSpreadsheetPage({
                         }
                         if (col.id === "eta") {
                           const shipmentEta = linkedProductId ? (etaByProductId[linkedProductId] ?? null) : null;
+                          const shipment = linkedProductId ? (shipmentByProductId[linkedProductId] ?? null) : null;
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
                               <CollectionEtaCell
                                 value={value}
                                 shipmentEta={shipmentEta}
+                                shipment={shipment}
                                 onCommit={(v) => updateCell(rIdx, "eta", v)}
                               />
                             </Td>
@@ -16571,12 +16610,21 @@ function CollectionDateCell({ value, onCommit }: { value: string; onCommit: (nex
 // ETA cell: if the row's linked product is in a packing list (shipment), show
 // that shipment's estimated-arrival date (read-only) — it overrides any manual
 // ETA. Otherwise it's a normal editable date cell.
-function CollectionEtaCell({ value, shipmentEta, onCommit }: { value: string; shipmentEta: string | null; onCommit: (next: string) => void }) {
-  if (shipmentEta) {
+function CollectionEtaCell({ value, shipmentEta, shipment, onCommit }: { value: string; shipmentEta: string | null; shipment?: { label: string; partial: boolean } | null; onCommit: (next: string) => void }) {
+  // When the product is in a shipment, show which one + partial/whole and the
+  // shipment ETA (read-only, overrides a manual ETA).
+  if (shipmentEta || shipment) {
     return (
-      <div title="From the linked packing list (shipment) — this overrides a manual ETA" style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, padding: "1px 2px", cursor: "help" }}>
-        <span style={{ fontSize: 14, fontWeight: 600, color: "#0e7490" }}>{formatPortalDate(shipmentEta)}</span>
-        <span style={{ fontSize: 9, color: "#0891b2", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>shipment</span>
+      <div title="From the linked packing list (shipment) — this overrides a manual ETA" style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "2px", cursor: "help" }}>
+        {shipmentEta && <span style={{ fontSize: 14, fontWeight: 600, color: "#0e7490" }}>{formatPortalDate(shipmentEta)}</span>}
+        {shipment ? (
+          <>
+            <span style={{ fontSize: 10, fontWeight: 700, color: "#0369a1", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={shipment.label}>{shipment.label}</span>
+            <span style={{ fontSize: 9, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.3, borderRadius: 4, padding: "1px 6px", background: shipment.partial ? "#fef3c7" : "#dcfce7", color: shipment.partial ? "#92400e" : "#166534" }}>{shipment.partial ? "Partial" : "Whole"}</span>
+          </>
+        ) : (
+          <span style={{ fontSize: 9, color: "#0891b2", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>shipment</span>
+        )}
       </div>
     );
   }
