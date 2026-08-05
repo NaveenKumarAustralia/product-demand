@@ -8191,6 +8191,13 @@ function sumCollectionRowQuantity(row: Record<string, string>): number {
   return n;
 }
 
+// A row counts as EMPTY (safe to delete) only when it has no Shopify product
+// link and every user column (non-reserved) is blank.
+function isCollectionRowEmpty(row: Record<string, string>): boolean {
+  if ((row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return false;
+  return Object.entries(row).every(([k, v]) => k.startsWith("__") || !String(v ?? "").trim());
+}
+
 // Recover the numeric base from a SKU cell so SKUs/barcodes can be
 // auto-regenerated. Matches a bare number ("2785"), "K2785", or an already-
 // generated "K2785XS" — but NOT a custom SKU, so manual entries aren't
@@ -14744,6 +14751,21 @@ function CollectionSpreadsheetPage({
     );
   };
 
+  // Delete every empty row (no content, no Shopify product) — for cleaning up
+  // stray blank rows that accumulated.
+  const removeEmptyRows = () => {
+    const emptyCount = rows.filter(isCollectionRowEmpty).length;
+    if (!emptyCount) return;
+    if (!window.confirm(`Remove ${emptyCount} empty row${emptyCount === 1 ? "" : "s"}?\n\nRows with any content — or a Shopify product — are kept.`)) return;
+    setRows((prev) => {
+      const next = prev.filter((r) => !isCollectionRowEmpty(r));
+      persistRows(next, prev, "Undo remove empty rows");
+      return next;
+    });
+    setRenderLimit(ROW_RENDER_STEP);
+    setSelectedRowIdxs(new Set());
+  };
+
   // Stable updateCell so per-row CollectionCells can be React.memo'd
   // — without useCallback, the parent re-creates the function every
   // render, defeating memo.
@@ -15152,6 +15174,18 @@ function CollectionSpreadsheetPage({
               e.target.value = "";
             }}
           />
+          {loaded && (() => {
+            const emptyCount = rows.filter(isCollectionRowEmpty).length;
+            if (emptyCount === 0) return null;
+            return (
+              <button
+                type="button"
+                onClick={removeEmptyRows}
+                style={{ background: "transparent", color: "#b91c1c", border: "1px solid #fca5a5", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+                title="Delete rows that have no content and no Shopify product"
+              >Remove {emptyCount} empty row{emptyCount === 1 ? "" : "s"}</button>
+            );
+          })()}
           <button
             type="button"
             onClick={pushAllUnsynced}
