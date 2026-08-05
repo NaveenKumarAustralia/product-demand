@@ -23767,10 +23767,15 @@ function RestockOptionChipDropdown({
   const [editLabel, setEditLabel] = useState("");
   const [editBg, setEditBg] = useState("#f3f4f6");
   const [editColor, setEditColor] = useState("#374151");
+  // Keep a local copy of the chip options so an added/edited chip shows
+  // instantly — the restock loader revalidation that would otherwise bring it
+  // back is heavy and flaky, which made new chips look like they didn't save.
+  const [localOptions, setLocalOptions] = useState(options);
+  useEffect(() => { setLocalOptions(options); }, [options]);
   const current = controlled
     ? value
     : (cellFetcher.formData ? String(cellFetcher.formData.get("value")) : value);
-  const option = options.find((item) => item.value === current);
+  const option = localOptions.find((item) => item.value === current);
 
   const updateRect = () => {
     if (buttonRef.current) setRect(buttonRef.current.getBoundingClientRect());
@@ -23831,15 +23836,18 @@ function RestockOptionChipDropdown({
     const nextLabel = editLabel.trim();
     if (!nextLabel) return;
     if (editingChip) {
-      const nextOptions = options.map((item) => (
+      const nextOptions = localOptions.map((item) => (
         item.value === editingChip.value ? { ...item, label: nextLabel, bg: editBg, color: editColor } : item
       ));
+      setLocalOptions(nextOptions);       // show the recolour/rename immediately
       saveSettingsOptions(nextOptions);
     } else {
       const valueSeed = slugForOption(nextLabel) || `chip_${Date.now()}`;
-      const taken = new Set(options.map((item) => item.value));
+      const taken = new Set(localOptions.map((item) => item.value));
       const nextValue = taken.has(valueSeed) ? `${valueSeed}_${Date.now()}` : valueSeed;
-      saveSettingsOptions([...options, { value: nextValue, label: nextLabel, bg: editBg, color: editColor }]);
+      const nextOptions = [...localOptions, { value: nextValue, label: nextLabel, bg: editBg, color: editColor }];
+      setLocalOptions(nextOptions);       // show the new chip immediately
+      saveSettingsOptions(nextOptions);
       selectValue(nextValue);
       setOpen(false);
     }
@@ -23869,7 +23877,7 @@ function RestockOptionChipDropdown({
           <span>{emptyLabel}</span>
         </button>
       )}
-      {options.map((item) => {
+      {localOptions.map((item) => {
         const selected = item.value === current;
         return (
           <div key={item.value} style={s.fabricChipMenuItem}>
