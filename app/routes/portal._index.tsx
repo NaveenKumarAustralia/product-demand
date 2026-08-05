@@ -3381,6 +3381,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       where: { id },
       select: { id: true, name: true, rows: true, columns: true, createdAt: true, updatedAt: true },
     }).catch(() => null);
+    if (!collection) return jsonResponse({ collection: null });
+    // Migrate any inline base64 images out to the CollectionImage table so this
+    // response stays small — otherwise a heavy collection ships tens of MB of
+    // base64 and hangs the browser. Inserts run in parallel batches so this
+    // completes well within the request timeout; after the first load the rows
+    // are already slim and this is a no-op.
+    try {
+      const rows = normalizeCollectionRows(collection.rows);
+      if (await offloadInlineCollectionImages(id, rows)) {
+        await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+        return jsonResponse({ collection: { ...collection, rows } });
+      }
+    } catch (e) {
+      console.warn("[get_collection_full] image offload failed:", e);
+    }
     return jsonResponse({ collection });
   }
 
@@ -14436,18 +14451,8 @@ function CollectionSpreadsheetPage({
     }
   }, [loadFetcher.data, listItem.id]);
 
-  // After the rows load, migrate any inline images out to the CollectionImage
-  // table in the BACKGROUND (once per collection) so the NEXT open is fast. This
-  // never blocks the current load.
-  const migrateFetcher = useFetcher();
-  const migratedRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (loaded && migratedRef.current !== listItem.id) {
-      migratedRef.current = listItem.id;
-      migrateFetcher.submit({ intent: "migrate_collection_images", collectionId: String(listItem.id), noRevalidate: "1" }, { method: "post" });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, listItem.id]);
+  // (Image migration happens on the server in get_collection_full — it returns
+  // slim rows so this response never hangs the browser.)
 
   // Price ₹ auto-fill — same lookup the restock + packing list pages
   // use: row.name resolves via Product Information styles + Fabric in
