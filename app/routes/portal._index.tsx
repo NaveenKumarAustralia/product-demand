@@ -9688,6 +9688,7 @@ export default function PortalDashboard() {
               <CollectionsPanel
                 collections={collections}
                 collectionSettings={collectionSettings}
+                restockSettings={restockSettings}
                 productInfo={productInfo}
                 fabricStockIndex={fabricStockIndex}
                 inrPerAudCachedRate={inrPerAudCachedRate}
@@ -13469,7 +13470,7 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   );
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string> }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string> }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -13585,6 +13586,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
       <CollectionSpreadsheetPage
         listItem={selectedCollection}
         collectionSettings={collectionSettings}
+        restockSettings={restockSettings}
         productInfo={productInfo}
         fabricStockIndex={fabricStockIndex}
         inrPerAudCachedRate={inrPerAudCachedRate}
@@ -14174,6 +14176,7 @@ function collectionColWidth(col: { label: string; width?: number }): number {
 function CollectionSpreadsheetPage({
   listItem,
   collectionSettings,
+  restockSettings,
   productInfo,
   fabricStockIndex,
   inrPerAudCachedRate,
@@ -14188,6 +14191,7 @@ function CollectionSpreadsheetPage({
 }: {
   listItem: CollectionListItem;
   collectionSettings: CollectionSettings;
+  restockSettings: RestockSettings;
   productInfo: ProductInfo;
   fabricStockIndex: FabricStockEntry[];
   inrPerAudCachedRate: number | null;
@@ -14474,19 +14478,29 @@ function CollectionSpreadsheetPage({
     return () => window.removeEventListener("keydown", handler, true);
   }, [listItem.id, loaded, fetcher]);
 
-  // Local copy of chip option lists so edits show immediately. Seeded
-  // from collectionSettings; saves go via update_collection_settings.
-  const [localStatusOptions, setLocalStatusOptions] = useState(collectionSettings.statusOptions);
+  // STATUS chips are SHARED with the existing-product restock sheet — one
+  // source of truth (restockSettings.statusOptions), so adding/editing a chip
+  // in either place shows in both, with the same colours. SAMPLE chips stay in
+  // collectionSettings (collections-only).
+  const [localStatusOptions, setLocalStatusOptions] = useState<CollectionChipOption[]>(restockSettings.statusOptions);
   const [localSampleOptions, setLocalSampleOptions] = useState(collectionSettings.sampleOptions);
-  useEffect(() => { setLocalStatusOptions(collectionSettings.statusOptions); }, [collectionSettings.statusOptions]);
+  useEffect(() => { setLocalStatusOptions(restockSettings.statusOptions); }, [restockSettings.statusOptions]);
   useEffect(() => { setLocalSampleOptions(collectionSettings.sampleOptions); }, [collectionSettings.sampleOptions]);
   const settingsFetcher = useFetcher();
   const saveChipOptions = (which: "statusOptions" | "sampleOptions", next: CollectionChipOption[]) => {
-    if (which === "statusOptions") setLocalStatusOptions(next);
-    else setLocalSampleOptions(next);
+    if (which === "statusOptions") {
+      setLocalStatusOptions(next);
+      // Write to the shared restock settings so both sheets update.
+      settingsFetcher.submit(
+        { intent: "update_restock_settings", value: JSON.stringify({ ...restockSettings, statusOptions: next }) },
+        { method: "post" },
+      );
+      return;
+    }
+    setLocalSampleOptions(next);
     const payload: CollectionSettings = {
-      statusOptions: which === "statusOptions" ? next : localStatusOptions,
-      sampleOptions: which === "sampleOptions" ? next : localSampleOptions,
+      statusOptions: collectionSettings.statusOptions,
+      sampleOptions: next,
       sampleReceivedChipValue: collectionSettings.sampleReceivedChipValue,
     };
     settingsFetcher.submit(
