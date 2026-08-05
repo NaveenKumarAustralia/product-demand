@@ -3381,20 +3381,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       where: { id },
       select: { id: true, name: true, rows: true, columns: true, createdAt: true, updatedAt: true },
     }).catch(() => null);
-    if (!collection) return jsonResponse({ collection: null });
-    // Migrate any inline base64 images in the rows out to CollectionImage so the
-    // rows (and this response) stay small. First load of a heavy collection
-    // pays for this once; every load after is fast.
+    return jsonResponse({ collection });
+  }
+
+  // Migrate a collection's inline base64 images out to the CollectionImage table
+  // (referenced by key) so future loads are small. Run explicitly (not on every
+  // load) and in bounded parallel batches so it can't time the request out.
+  if (intent === "migrate_collection_images") {
+    const id = Number(form.get("collectionId"));
+    if (!id) return jsonResponse({ ok: false });
+    const collection = await prisma.collection.findUnique({ where: { id }, select: { rows: true } }).catch(() => null);
+    if (!collection) return jsonResponse({ ok: false });
     try {
       const rows = normalizeCollectionRows(collection.rows);
-      if (await offloadInlineCollectionImages(id, rows)) {
-        await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
-        return jsonResponse({ collection: { ...collection, rows } });
-      }
+      const changed = await offloadInlineCollectionImages(id, rows);
+      if (changed) await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+      return jsonResponse({ ok: true, changed });
     } catch (e) {
-      console.warn("[get_collection_full] image offload failed:", e);
+      console.warn("[migrate_collection_images] failed:", e);
+      return jsonResponse({ ok: false });
     }
-    return jsonResponse({ collection });
   }
   if (intent === "update_collection") {
     const id = Number(form.get("collectionId"));
@@ -8720,31 +8726,44 @@ const COLLECTION_IMAGE_COLUMN_IDS = ["modelPicture", "fabric", "maniPicsTaken"];
 // table (referenced by key), so the rows JSON stays small and get_collection_full
 // returns quickly. Mutates `rows` in place; returns true if anything changed.
 async function offloadInlineCollectionImages(collectionId: number, rows: Array<Record<string, string>>): Promise<boolean> {
-  let changed = false;
+  // Gather all inline images that need offloading first, then insert them in
+  // bounded parallel batches — sequential inserts on a heavy collection were
+  // slow enough to time the request out.
+  const pending: Array<{ entry: CollectionImageEntry; buf: Buffer; mime: string; row: Record<string, string>; colId: string; entries: CollectionImageEntry[] }> = [];
+  const touchedCells = new Map<string, { row: Record<string, string>; colId: string; entries: CollectionImageEntry[] }>();
   for (const row of rows) {
     for (const colId of COLLECTION_IMAGE_COLUMN_IDS) {
       const val = row[colId];
       if (!val || !val.includes("data:")) continue;
       const entries = parseMultiImageValue(val);
-      let cellChanged = false;
       for (const e of entries) {
         if (!e.key && typeof e.thumb === "string" && e.thumb.startsWith("data:")) {
           const m = e.thumb.match(/^data:([^;]+);base64,(.+)$/s);
           if (m) {
-            try {
-              const key = await persistFullCollectionImage(collectionId, Buffer.from(m[2], "base64"), m[1]);
-              e.key = key;
-              e.thumb = ""; // served on demand from /portal/collection-image/<key>
-              cellChanged = true;
-              changed = true;
-            } catch { /* leave inline on failure */ }
+            pending.push({ entry: e, buf: Buffer.from(m[2], "base64"), mime: m[1], row, colId, entries });
+            touchedCells.set(`${colId}:${rows.indexOf(row)}`, { row, colId, entries });
           }
         }
       }
-      if (cellChanged) row[colId] = serializeMultiImageValue(entries);
     }
   }
-  return changed;
+  if (!pending.length) return false;
+  const BATCH = 20;
+  for (let i = 0; i < pending.length; i += BATCH) {
+    const slice = pending.slice(i, i + BATCH);
+    await Promise.all(slice.map(async (p) => {
+      try {
+        const key = await persistFullCollectionImage(collectionId, p.buf, p.mime);
+        p.entry.key = key;
+        p.entry.thumb = ""; // served on demand from /portal/collection-image/<key>
+      } catch { /* leave inline on failure */ }
+    }));
+  }
+  // Re-serialize every cell that had at least one image offloaded.
+  for (const { row, colId, entries } of touchedCells.values()) {
+    row[colId] = serializeMultiImageValue(entries);
+  }
+  return true;
 }
 
 async function persistFullCollectionImage(
@@ -14416,6 +14435,19 @@ function CollectionSpreadsheetPage({
       setLoaded(true);
     }
   }, [loadFetcher.data, listItem.id]);
+
+  // After the rows load, migrate any inline images out to the CollectionImage
+  // table in the BACKGROUND (once per collection) so the NEXT open is fast. This
+  // never blocks the current load.
+  const migrateFetcher = useFetcher();
+  const migratedRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (loaded && migratedRef.current !== listItem.id) {
+      migratedRef.current = listItem.id;
+      migrateFetcher.submit({ intent: "migrate_collection_images", collectionId: String(listItem.id), noRevalidate: "1" }, { method: "post" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, listItem.id]);
 
   // Price ₹ auto-fill — same lookup the restock + packing list pages
   // use: row.name resolves via Product Information styles + Fabric in
