@@ -14349,6 +14349,11 @@ function CollectionSpreadsheetPage({
   // While a heavy collection's images are being migrated out (chunked), this
   // holds how many images are left so the page can show progress.
   const [migratingRemaining, setMigratingRemaining] = useState<number | null>(null);
+  // Only render a window of rows at a time — a collection with hundreds of rows
+  // would otherwise mount thousands of cell components at once and freeze the
+  // page. "Show more" reveals the next batch.
+  const ROW_RENDER_STEP = 60;
+  const [renderLimit, setRenderLimit] = useState(ROW_RENDER_STEP);
   const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
   // "Update in Shopify" for already-linked rows whose info was edited.
   const updateShopifyFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; productId?: string }>; error?: string }>();
@@ -14406,6 +14411,7 @@ function CollectionSpreadsheetPage({
     setSelectedRowIdxs(new Set());
     setLoaded(false);
     setMigratingRemaining(null);
+    setRenderLimit(ROW_RENDER_STEP);
     loadAttemptRef.current = 0;
     loadFullRows();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -15285,6 +15291,9 @@ function CollectionSpreadsheetPage({
                 // target the right entry in the unfiltered rows array.
                 .map((row, rIdx) => ({ row, rIdx }))
                 .filter(({ row }) => rowMatchesFilters(row))
+                // Only render the first `renderLimit` rows so a huge collection
+                // doesn't freeze the page mounting them all at once.
+                .slice(0, renderLimit)
                 .map(({ row, rIdx }) => {
                 const linkedProductId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
                 const linked = Boolean(linkedProductId);
@@ -15612,6 +15621,28 @@ function CollectionSpreadsheetPage({
                   </td>
                 </tr>
               )}
+              {(() => {
+                const shownCount = Math.min(renderLimit, rows.filter(rowMatchesFilters).length);
+                const totalCount = rows.filter(rowMatchesFilters).length;
+                if (totalCount <= renderLimit) return null;
+                return (
+                  <tr>
+                    <td colSpan={frozenCols.length + restCols.length + 2} style={{ ...s.td, padding: "14px 8px", textAlign: "center", background: "#f8fafc" }}>
+                      <span style={{ fontSize: 13, color: "#6b7280", marginRight: 12 }}>Showing {shownCount} of {totalCount} rows</span>
+                      <button
+                        type="button"
+                        onClick={() => setRenderLimit((n) => n + ROW_RENDER_STEP)}
+                        style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 6, padding: "7px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", marginRight: 8 }}
+                      >Show {Math.min(ROW_RENDER_STEP, totalCount - renderLimit)} more</button>
+                      <button
+                        type="button"
+                        onClick={() => setRenderLimit(totalCount)}
+                        style={{ background: "transparent", color: "#0d9488", border: "1px solid #0d9488", borderRadius: 6, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+                      >Show all</button>
+                    </td>
+                  </tr>
+                );
+              })()}
             </tbody>
           </table>
           );
