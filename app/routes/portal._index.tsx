@@ -327,8 +327,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     : { boards: [] as Array<{ id: number; name: string; sortOrder: number }>, activeBoardId: null as number | null, items: [] as Array<{ id: number; name: string; sortOrder: number; status: string; imageCount: number; hasThumbnail: boolean; updatedAt: Date }> };
   // Collections listing — slim projection (no rows JSON, no thumbnail bytes).
   // The drawer fetches the full collection (rows + columns) on open.
-  const collections = page === "collections"
-    ? await prisma.$queryRawUnsafe<Array<{
+  const collectionsPromise = page === "collections"
+    ? prisma.$queryRawUnsafe<Array<{
         id: number; name: string; sortOrder: number;
         hasThumbnail: boolean; rowCount: number;
         createdAt: Date; updatedAt: Date;
@@ -368,12 +368,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           };
         });
       }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string; orderStatus: string; fabricLinks: Record<string, string> }>)
-    : [];
+    : Promise.resolve([] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string; orderStatus: string; fabricLinks: Record<string, string> }>);
   // Photo shoots: slim tab list (id/name/sortOrder/rowCount). The active
   // shoot's full rows are fetched on demand via ps_get_shoot. Loaded for
   // both pages so the collection "Send to photo shoot" picker has the list.
-  const photoShoots = (page === "photoshoot" || page === "collections")
-    ? await prisma.$queryRawUnsafe<Array<{ id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date; updatedAt: Date }>>(`
+  const photoShootsPromise = (page === "photoshoot" || page === "collections")
+    ? prisma.$queryRawUnsafe<Array<{ id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date; updatedAt: Date }>>(`
         SELECT id, name, "sortOrder",
           CASE WHEN jsonb_typeof(rows) = 'array' THEN jsonb_array_length(rows) ELSE 0 END AS "rowCount",
           (thumbnail IS NOT NULL) AS "hasThumbnail",
@@ -382,60 +382,65 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         ORDER BY "sortOrder" ASC, "createdAt" ASC
       `).then((rows) => rows.map((r) => ({ id: r.id, name: r.name, sortOrder: r.sortOrder, rowCount: Number(r.rowCount), hasThumbnail: Boolean(r.hasThumbnail), createdAt: r.createdAt, updatedAt: r.updatedAt })))
         .catch(() => [] as Array<{ id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date; updatedAt: Date }>)
-    : [];
+    : Promise.resolve([] as Array<{ id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date; updatedAt: Date }>);
   // Collections ETA source: map each Shopify product to the estimated-arrival
   // date of the packing list (shipment) it's in, so the ETA column can show the
   // shipment date automatically (overriding a manual one once it's shipping).
-  const collectionEtaByProductId: Record<string, string> = {};
-  // Which shipment(s) each collection product is in, and whether the whole
-  // order or only part of it is shipping — surfaced in the ETA cell.
-  const collectionShipmentByProductId: Record<string, { label: string; partial: boolean }> = {};
-  if (page === "collections") {
-    try {
-      const lines = await prisma.packingListLine.findMany({
-        where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } },
-        select: { productId: true, qtys: true, packingList: { select: { id: true, title: true, invoiceNumber: true, expectedLeaveFactoryDate: true, shipmentDate: true } } },
-      });
-      // productId → per-packing-list shipped qty + label.
-      const byProduct = new Map<string, Map<number, { qty: number; label: string }>>();
-      for (const line of lines) {
-        if (!line.productId) continue;
-        const d = line.packingList.expectedLeaveFactoryDate ?? line.packingList.shipmentDate;
-        if (d) {
-          const iso = d.toISOString();
-          const existing = collectionEtaByProductId[line.productId];
-          if (!existing || iso > existing) collectionEtaByProductId[line.productId] = iso; // keep the latest
-        }
-        const shipQty = Object.values(normalizeQtys(line.qtys)).reduce((s, n) => s + (Number(n) || 0), 0);
-        const listId = line.packingList.id;
-        const label = (line.packingList.invoiceNumber || line.packingList.title || `Shipment ${listId}`).trim();
-        let m = byProduct.get(line.productId);
-        if (!m) { m = new Map(); byProduct.set(line.productId, m); }
-        const cur = m.get(listId) ?? { qty: 0, label };
-        cur.qty += shipQty;
-        m.set(listId, cur);
-      }
-      // Ordered total per product (summed across its restock orders — splitting
-      // preserves the total) to decide partial vs whole.
-      const orderedByProduct = new Map<string, number>();
-      try {
-        const orders = await prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true } });
-        for (const o of orders) if (o.productId) orderedByProduct.set(o.productId, (orderedByProduct.get(o.productId) ?? 0) + (o.totalQty ?? 0));
-      } catch { /* ordered totals optional */ }
-      for (const [pid, lists] of byProduct) {
-        const entries = Array.from(lists.values());
-        const shipped = entries.reduce((s, e) => s + e.qty, 0);
-        const ordered = orderedByProduct.get(pid) ?? 0;
-        if (entries.length > 1) {
-          collectionShipmentByProductId[pid] = { label: `${entries.length} shipments`, partial: true };
-        } else {
-          collectionShipmentByProductId[pid] = { label: entries[0].label, partial: ordered > 0 ? shipped < ordered : false };
-        }
-      }
-    } catch (e) {
-      console.warn("[collection eta] lookup failed:", e);
-    }
-  }
+  // Collections shipment/ETA per product — computed from packing-list lines +
+  // ordered totals. Both queries run in parallel, and the whole thing runs in
+  // parallel with the collections + photo-shoot list queries below.
+  const shipmentDataPromise: Promise<{ eta: Record<string, string>; shipment: Record<string, { label: string; partial: boolean }> }> =
+    page === "collections"
+      ? (async () => {
+          const eta: Record<string, string> = {};
+          const shipment: Record<string, { label: string; partial: boolean }> = {};
+          try {
+            const [lines, orders] = await Promise.all([
+              prisma.packingListLine.findMany({
+                where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } },
+                select: { productId: true, qtys: true, packingList: { select: { id: true, title: true, invoiceNumber: true, expectedLeaveFactoryDate: true, shipmentDate: true } } },
+              }),
+              prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true } }).catch(() => [] as Array<{ productId: string; totalQty: number }>),
+            ]);
+            const byProduct = new Map<string, Map<number, { qty: number; label: string }>>();
+            for (const line of lines) {
+              if (!line.productId) continue;
+              const d = line.packingList.expectedLeaveFactoryDate ?? line.packingList.shipmentDate;
+              if (d) {
+                const iso = d.toISOString();
+                const existing = eta[line.productId];
+                if (!existing || iso > existing) eta[line.productId] = iso;
+              }
+              const shipQty = Object.values(normalizeQtys(line.qtys)).reduce((s, n) => s + (Number(n) || 0), 0);
+              const listId = line.packingList.id;
+              const label = (line.packingList.invoiceNumber || line.packingList.title || `Shipment ${listId}`).trim();
+              let m = byProduct.get(line.productId);
+              if (!m) { m = new Map(); byProduct.set(line.productId, m); }
+              const cur = m.get(listId) ?? { qty: 0, label };
+              cur.qty += shipQty;
+              m.set(listId, cur);
+            }
+            const orderedByProduct = new Map<string, number>();
+            for (const o of orders) if (o.productId) orderedByProduct.set(o.productId, (orderedByProduct.get(o.productId) ?? 0) + (o.totalQty ?? 0));
+            for (const [pid, lists] of byProduct) {
+              const entries = Array.from(lists.values());
+              const shipped = entries.reduce((s, e) => s + e.qty, 0);
+              const ordered = orderedByProduct.get(pid) ?? 0;
+              shipment[pid] = entries.length > 1
+                ? { label: `${entries.length} shipments`, partial: true }
+                : { label: entries[0].label, partial: ordered > 0 ? shipped < ordered : false };
+            }
+          } catch (e) {
+            console.warn("[collection eta] lookup failed:", e);
+          }
+          return { eta, shipment };
+        })()
+      : Promise.resolve({ eta: {}, shipment: {} });
+
+  // Run the three collections-page queries together instead of one-after-another.
+  const [collections, photoShoots, shipmentData] = await Promise.all([collectionsPromise, photoShootsPromise, shipmentDataPromise]);
+  const collectionEtaByProductId = shipmentData.eta;
+  const collectionShipmentByProductId = shipmentData.shipment;
   // activityLogs is fetched in the initial Promise.all above (parallel).
   const users = normalizePortalUsers(usersSetting?.value);
   const customColumns = normalizeTableCustomColumns(customColumnsSetting?.value);
