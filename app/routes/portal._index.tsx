@@ -4337,12 +4337,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         } catch (e) {
           console.warn(`[collection push] row ${idx} images failed:`, e);
         }
+        // Seed the existing-product restock sheet with this order (once), so its
+        // quantities can be split to destinations there.
+        let restockOrderId = (row[COL_ROW_RESTOCK_ORDER_ID] ?? "").trim();
+        if (!restockOrderId) {
+          try {
+            const rid = await seedRestockOrderFromCollectionRow(session.shop, session.accessToken, res.productId, row);
+            if (rid) restockOrderId = String(rid);
+          } catch (e) {
+            console.warn(`[collection push] row ${idx} restock seed failed:`, e);
+          }
+        }
         rows[idx] = {
           ...row,
           [COL_ROW_SHOPIFY_PRODUCT_ID]: res.productId,
           [COL_ROW_SHOPIFY_HANDLE]: res.handle ?? "",
           [COL_ROW_SHOPIFY_CREATED_AT]: now,
           [COL_ROW_SHOPIFY_STATUS]: statusOpt,
+          ...(restockOrderId ? { [COL_ROW_RESTOCK_ORDER_ID]: restockOrderId } : {}),
           // The person who created the product in Shopify — replaces any
           // manually-typed "Created by" once the product actually exists.
           ...(currentUser?.name ? { createdBy: currentUser.name } : {}),
@@ -8047,6 +8059,9 @@ const COL_ROW_SHOPIFY_STATUS = "__shopifyStatus";
 // Set to "1" whenever a linked row's info is edited after creation, so the
 // Shopify cell shows an "Update in Shopify" button. Cleared once pushed.
 const COL_ROW_SHOPIFY_DIRTY = "__shopifyDirty";
+// Id of the existing-product restock order auto-created when the product is
+// created in Shopify — so we don't seed it twice.
+const COL_ROW_RESTOCK_ORDER_ID = "__restockOrderId";
 
 // Maps collection size column ids to display labels for variant names.
 // Note: "freeSize" is intentionally NOT here — when the row has Free Size
@@ -8509,6 +8524,49 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
   const errs = json?.data?.productCreateMedia?.mediaUserErrors ?? [];
   for (const e of errs) errors.push(e.message || "media error");
   return errors;
+}
+
+// When a collection product is created in Shopify, seed an order on the
+// existing-product restock sheet with the row's ordered quantities (destination
+// blank = held at factory). Staff then split it to destinations there.
+// Returns the new SupplierOrder id, or null if there was nothing to seed.
+async function seedRestockOrderFromCollectionRow(shop: string, accessToken: string, productId: string, row: Record<string, string>): Promise<number | null> {
+  const orderedSizes: Array<{ label: string; qty: number }> = [];
+  const fs = Number(row.freeSize) || 0;
+  if (fs > 0) orderedSizes.push({ label: "Free Size", qty: fs });
+  for (const [colId, label] of COLLECTION_SIZE_COLUMN_LABELS) {
+    const q = Number(row[colId]) || 0;
+    if (q > 0) orderedSizes.push({ label, qty: q });
+  }
+  if (!orderedSizes.length) return null;
+  // Match each size to the real Shopify variant (id/sku/barcode) so the order
+  // links up for loading/splitting; fall back to a synthetic id if unmatched.
+  const variants = await getShopifyVariantCodes(shop, accessToken, productId).catch(() => [] as ShopifyVariantCode[]);
+  const byTitle = new Map(variants.map((v) => [normalizeVariantSizeLabel(v.title), v]));
+  const lines = orderedSizes.map(({ label, qty }) => {
+    const v = byTitle.get(normalizeVariantSizeLabel(label)) ?? null;
+    return { variantId: v?.id ?? `col:${label}`, variantTitle: v?.title ?? label, sku: v?.sku ?? null, barcode: v?.barcode ?? null, qtyOrdered: qty };
+  });
+  const total = lines.reduce((s, l) => s + l.qtyOrdered, 0);
+  const imgs = parseMultiImageValue(row.modelPicture ?? "");
+  const firstUrl = imgs.find((i) => /^https?:\/\//i.test(i.thumb));
+  const created = await prisma.supplierOrder.create({
+    data: {
+      shop: shop || "",
+      supplier: "Karma East",
+      productId,
+      productTitle: (row.name || row.title || "").trim() || "Product",
+      status: "open",
+      // Carry over the collection row's status onto the restock order.
+      supplierStatus: (row.status ?? "").trim() || "on_order",
+      productImageUrl: firstUrl ? firstUrl.thumb : null,
+      destination: null,
+      totalQty: total,
+      lines: { create: lines },
+    },
+    select: { id: true },
+  });
+  return created.id;
 }
 
 // ─── Google Sheet bulk import ───────────────────────────────────
