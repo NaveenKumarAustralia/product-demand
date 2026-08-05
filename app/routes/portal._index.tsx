@@ -47,6 +47,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     TABLE_ROW_HEIGHTS_KEY,
     FABRIC_CUSTOM_SHEETS_KEY,
     FABRIC_MANUAL_SHEETS_KEY,
+    FABRIC_CELL_OVERRIDES_KEY,
+    FABRIC_CUSTOM_ROWS_KEY,
+    FABRIC_DELETED_ROWS_KEY,
+    FABRIC_DELETED_SHEETS_KEY,
     RESTOCK_SETTINGS_KEY,
     COLLECTION_SETTINGS_KEY,
     UNIVERSAL_SETTINGS_KEY,
@@ -59,6 +63,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     COLLECTION_FABRIC_STATUS_KEY,
     COLLECTION_ORDER_STATUS_KEY,
     COLLECTION_FABRIC_LINK_KEY,
+    INR_AUD_CACHE_KEY,
   ];
   const needsOrders = isRestockPage || page === "packing";
   const needsPackingLists = page === "packing" || packingId !== null;
@@ -107,7 +112,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
   }
 
-  const [settingsRows, allOrders, packingLists] = await retryAsync(() => Promise.all([
+  type ActivityLogRow = { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date };
+  const activityLogsSince = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  const [settingsRows, allOrders, packingLists, activityLogs] = await retryAsync(() => Promise.all([
       prisma.portalSetting.findMany({ where: { key: { in: SETTING_KEYS } }, select: { key: true, value: true } }),
       needsOrders
         ? prisma.supplierOrder.findMany({
@@ -124,6 +131,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             include: { lines: { orderBy: [{ sortOrder: "asc" }, { id: "asc" }] } },
           })
         : (Promise.resolve([]) as ReturnType<typeof prisma.packingList.findMany<{ include: { lines: true } }>>),
+      // Activity logs run in parallel with the base data instead of as a
+      // separate sequential query (it was blocking the restock page load).
+      needsActivityLogs
+        ? prisma.activityLog.findMany({ where: { createdAt: { gte: activityLogsSince } }, orderBy: { createdAt: "desc" }, take: 1000 }).catch(() => [] as ActivityLogRow[])
+        : Promise.resolve([] as ActivityLogRow[]),
     ]),
     "portal base data",
   );
@@ -424,14 +436,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       console.warn("[collection eta] lookup failed:", e);
     }
   }
-  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-  const activityLogs = needsActivityLogs
-    ? await prisma.activityLog.findMany({
-        where: { createdAt: { gte: ninetyDaysAgo } },
-        orderBy: { createdAt: "desc" },
-        take: 1000,
-      }).catch(() => [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[])
-    : [] as { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date }[];
+  // activityLogs is fetched in the initial Promise.all above (parallel).
   const users = normalizePortalUsers(usersSetting?.value);
   const customColumns = normalizeTableCustomColumns(customColumnsSetting?.value);
   const customCells = normalizeTableCustomCells(customCellsSetting?.value);
@@ -737,30 +742,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // fabric-cost lookups on the Collections detail table read from them. Without
   // this the picker is empty ("No fabrics match").
   const needsFabricSheets = page === "fabric" || isRestockPage || page === "packing" || page === "collections";
-  const fabricCellOverridesSetting = needsFabricSheets
-    ? await prisma.portalSetting.findUnique({
-        where: { key: FABRIC_CELL_OVERRIDES_KEY },
-        select: { value: true },
-      })
-    : null;
-  const fabricCustomRowsSetting = needsFabricSheets
-    ? await prisma.portalSetting.findUnique({
-        where: { key: FABRIC_CUSTOM_ROWS_KEY },
-        select: { value: true },
-      })
-    : null;
-  const fabricDeletedRowsSetting = needsFabricSheets
-    ? await prisma.portalSetting.findUnique({
-        where: { key: FABRIC_DELETED_ROWS_KEY },
-        select: { value: true },
-      })
-    : null;
-  const fabricDeletedSheetsSetting = needsFabricSheets
-    ? await prisma.portalSetting.findUnique({
-        where: { key: FABRIC_DELETED_SHEETS_KEY },
-        select: { value: true },
-      })
-    : null;
+  // These come from the single batched settings query above (no extra round-
+  // trips) — they were 4 sequential DB fetches, a big chunk of the restock/
+  // packing/collections page load.
+  const fabricCellOverridesSetting = needsFabricSheets ? wrap(FABRIC_CELL_OVERRIDES_KEY) : null;
+  const fabricCustomRowsSetting = needsFabricSheets ? wrap(FABRIC_CUSTOM_ROWS_KEY) : null;
+  const fabricDeletedRowsSetting = needsFabricSheets ? wrap(FABRIC_DELETED_ROWS_KEY) : null;
+  const fabricDeletedSheetsSetting = needsFabricSheets ? wrap(FABRIC_DELETED_SHEETS_KEY) : null;
   const inrToAudRate = page === "fabric" ? await getInrToAudRate() : null;
   const manualFabricSheets = needsFabricSheets
     ? await getManualFabricSheets({
@@ -823,6 +811,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return ai - bi;
   });
 
+  // FX rate: use the batched cache value when it's still fresh (no extra
+  // round-trip); only fetch live when stale/missing (rare).
+  let inrPerAudCachedRate: number | null = null;
+  if (isRestockPage || page === "packing" || page === "collections") {
+    const cachedFx = wrap(INR_AUD_CACHE_KEY)?.value as CachedFxRate | undefined;
+    const fresh = cachedFx && typeof cachedFx.inrPerAud === "number" && cachedFx.inrPerAud > 0 && cachedFx.fetchedAt
+      && (Date.now() - new Date(cachedFx.fetchedAt).getTime()) < FX_CACHE_TTL_MS;
+    inrPerAudCachedRate = fresh ? cachedFx!.inrPerAud : await getCachedInrPerAud();
+  }
+
   const rawNavOrder = Array.isArray(navOrderSetting?.value) ? navOrderSetting.value as string[] : DEFAULT_NAV_ORDER;
   const navOrder = DEFAULT_NAV_ORDER.map((id) => id as NavItemId)
     .sort((a, b) => {
@@ -848,7 +846,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     openPackingLists,
     restockTotalsAll,
     restockTotalsFiltered,
-    inrPerAudCachedRate: (isRestockPage || page === "packing" || page === "collections") ? await getCachedInrPerAud() : null,
+    inrPerAudCachedRate,
     fxRupeeBuffer: FX_RUPEE_BUFFER,
     thbPerAudCachedRate: page === "jj-restock" ? await getCachedThbPerAud() : null,
     fxBahtBuffer: FX_BAHT_BUFFER,
