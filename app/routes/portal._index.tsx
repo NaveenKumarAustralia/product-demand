@@ -22978,6 +22978,9 @@ function RestockSplitModal({
   const orderedSizes = sizes.filter((s) => (available[s] ?? 0) > 0);
   const [destination, setDestination] = useState("");
   const [qtys, setQtys] = useState<Record<string, string>>({});
+  // Refs to the per-size Send inputs so arrow keys / Enter move between them.
+  const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
+  const focusInput = (i: number) => { const el = inputRefs.current[i]; if (el) { el.focus(); el.select(); } };
   const capped = (size: string) => Math.min(Math.max(0, Math.floor(Number(qtys[size]) || 0)), available[size] ?? 0);
   const totalMove = orderedSizes.reduce((sum, sz) => sum + capped(sz), 0);
   const totalAvail = orderedSizes.reduce((sum, sz) => sum + (available[sz] ?? 0), 0);
@@ -23025,15 +23028,21 @@ function RestockSplitModal({
                   </tr>
                   <tr>
                     <td style={{ fontSize: 12, fontWeight: 700, color: "#374151", padding: "3px 10px 3px 0", whiteSpace: "nowrap" }}>Send</td>
-                    {orderedSizes.map((sz) => (
+                    {orderedSizes.map((sz, i) => (
                       <td key={sz} style={{ padding: "3px 6px", textAlign: "center" }}>
                         <input
-                          type="number"
-                          className="no-number-arrows"
-                          min={0}
-                          max={available[sz] ?? 0}
+                          ref={(el) => { inputRefs.current[i] = el; }}
+                          type="text"
+                          inputMode="numeric"
                           value={qtys[sz] ?? ""}
-                          onChange={(e) => setQtys((p) => ({ ...p, [sz]: e.target.value }))}
+                          onChange={(e) => setQtys((p) => ({ ...p, [sz]: e.target.value.replace(/[^0-9]/g, "") }))}
+                          onKeyDown={(e) => {
+                            const el = e.currentTarget;
+                            const atStart = (el.selectionStart ?? 0) === 0 && (el.selectionEnd ?? 0) === 0;
+                            const atEnd = (el.selectionStart ?? 0) === el.value.length;
+                            if ((e.key === "ArrowRight" && atEnd) || e.key === "Enter") { e.preventDefault(); focusInput(i + 1); }
+                            else if (e.key === "ArrowLeft" && atStart) { e.preventDefault(); focusInput(i - 1); }
+                          }}
                           style={{ width: 48, border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 4px", fontSize: 14, textAlign: "center", boxSizing: "border-box" }}
                         />
                       </td>
