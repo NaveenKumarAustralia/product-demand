@@ -3375,7 +3375,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "get_collection_full") {
     const id = Number(form.get("collectionId"));
     if (!id) return jsonResponse({ collection: null });
-    const collection = await prisma.collection.findUnique({ where: { id } }).catch(() => null);
+    // Don't fetch the cover-image bytes (thumbnail) — the detail view never uses
+    // them, and they bloat this response.
+    const collection = await prisma.collection.findUnique({
+      where: { id },
+      select: { id: true, name: true, rows: true, columns: true, createdAt: true, updatedAt: true },
+    }).catch(() => null);
+    if (!collection) return jsonResponse({ collection: null });
+    // Migrate any inline base64 images in the rows out to CollectionImage so the
+    // rows (and this response) stay small. First load of a heavy collection
+    // pays for this once; every load after is fast.
+    try {
+      const rows = normalizeCollectionRows(collection.rows);
+      if (await offloadInlineCollectionImages(id, rows)) {
+        await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+        return jsonResponse({ collection: { ...collection, rows } });
+      }
+    } catch (e) {
+      console.warn("[get_collection_full] image offload failed:", e);
+    }
     return jsonResponse({ collection });
   }
   if (intent === "update_collection") {
@@ -8694,6 +8712,39 @@ async function compressBufferToThumbDataUrl(buf: Buffer): Promise<string> {
     console.warn("[image] sharp compress failed, falling back to original:", e);
     return `data:image/png;base64,${buf.toString("base64")}`;
   }
+}
+
+// Collection cells that hold images (multi-image manager format).
+const COLLECTION_IMAGE_COLUMN_IDS = ["modelPicture", "fabric", "maniPicsTaken"];
+// Move any inline base64 image data out of the rows into the CollectionImage
+// table (referenced by key), so the rows JSON stays small and get_collection_full
+// returns quickly. Mutates `rows` in place; returns true if anything changed.
+async function offloadInlineCollectionImages(collectionId: number, rows: Array<Record<string, string>>): Promise<boolean> {
+  let changed = false;
+  for (const row of rows) {
+    for (const colId of COLLECTION_IMAGE_COLUMN_IDS) {
+      const val = row[colId];
+      if (!val || !val.includes("data:")) continue;
+      const entries = parseMultiImageValue(val);
+      let cellChanged = false;
+      for (const e of entries) {
+        if (!e.key && typeof e.thumb === "string" && e.thumb.startsWith("data:")) {
+          const m = e.thumb.match(/^data:([^;]+);base64,(.+)$/s);
+          if (m) {
+            try {
+              const key = await persistFullCollectionImage(collectionId, Buffer.from(m[2], "base64"), m[1]);
+              e.key = key;
+              e.thumb = ""; // served on demand from /portal/collection-image/<key>
+              cellChanged = true;
+              changed = true;
+            } catch { /* leave inline on failure */ }
+          }
+        }
+      }
+      if (cellChanged) row[colId] = serializeMultiImageValue(entries);
+    }
+  }
+  return changed;
 }
 
 async function persistFullCollectionImage(
@@ -16753,8 +16804,12 @@ function parseMultiImageValue(value: string): CollectionImageEntry[] {
       return arr
         .map((x): CollectionImageEntry | null => {
           if (typeof x === "string" && x) return { thumb: x };
-          if (x && typeof x === "object" && typeof x.thumb === "string" && x.thumb) {
-            return { thumb: x.thumb, key: typeof x.key === "string" ? x.key : undefined, alt: typeof x.alt === "string" ? x.alt : undefined };
+          if (x && typeof x === "object") {
+            const thumb = typeof x.thumb === "string" ? x.thumb : "";
+            const key = typeof x.key === "string" ? x.key : undefined;
+            // Keep entries that have EITHER an inline thumb OR a key (key-only
+            // entries are served on demand from /portal/collection-image/<key>).
+            if (thumb || key) return { thumb, key, alt: typeof x.alt === "string" ? x.alt : undefined };
           }
           return null;
         })
@@ -16770,7 +16825,8 @@ function serializeMultiImageValue(images: CollectionImageEntry[]): string {
   // compact string form for plain thumbs.
   return JSON.stringify(images.map((i) => {
     if (i.key || i.alt) {
-      const o: { thumb: string; key?: string; alt?: string } = { thumb: i.thumb };
+      const o: { thumb?: string; key?: string; alt?: string } = {};
+      if (i.thumb) o.thumb = i.thumb;   // omit empty thumb (key-only entries)
       if (i.key) o.key = i.key;
       if (i.alt) o.alt = i.alt;
       return o;
@@ -16945,7 +17001,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
       >
         {images.length > 0 ? (
           <>
-            <img src={images[0].thumb} alt="" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
+            <img src={images[0].thumb || (images[0].key ? `/portal/collection-image/${images[0].key}` : "")} alt="" loading="lazy" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
             {images.length > 1 && (
               <span style={{
                 position: "absolute", bottom: 6, right: 6,
