@@ -4485,10 +4485,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         } catch (e) {
           console.warn(`[collection push] row ${idx} images failed:`, e);
         }
-        // Seed the existing-product restock sheet with this order (once), so its
-        // quantities can be split to destinations there.
+        // Order-first (JJ New Products) flow: this row came from a JJ order.
+        // Link that existing order to the new product (set productId + backfill
+        // variant ids/SKU/barcode) instead of seeding a fresh restock order —
+        // the quantity stays owned by the JJ order.
         let restockOrderId = (row[COL_ROW_RESTOCK_ORDER_ID] ?? "").trim();
-        if (!restockOrderId) {
+        const jjOrderId = (row[COL_ROW_JJ_ORDER_ID] ?? "").trim();
+        if (jjOrderId) {
+          try {
+            await linkJJOrderToCreatedProduct(session.shop, session.accessToken, Number(jjOrderId), res.productId);
+          } catch (e) {
+            console.warn(`[collection push] row ${idx} JJ link failed:`, e);
+          }
+        } else if (!restockOrderId) {
+          // Seed the existing-product restock sheet with this order (once), so its
+          // quantities can be split to destinations there.
           try {
             const rid = await seedRestockOrderFromCollectionRow(session.shop, session.accessToken, res.productId, row);
             if (rid) restockOrderId = String(rid);
@@ -8684,6 +8695,31 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
   const errs = json?.data?.productCreateMedia?.mediaUserErrors ?? [];
   for (const e of errs) errors.push(e.message || "media error");
   return errors;
+}
+
+// Order-first (JJ New Products): when a sheet row that came from a JJ order is
+// created in Shopify, link that existing JJ order to the new product instead of
+// seeding a new order. Sets productId (+ image if given) and backfills each
+// ordered line's variantId / SKU / barcode by matching Shopify variants to the
+// line's size. Mirrors the `jj_link_shopify` action.
+async function linkJJOrderToCreatedProduct(shop: string, accessToken: string, orderId: number, productId: string, imageUrl = ""): Promise<void> {
+  if (!orderId || !productId) return;
+  const order = await prisma.supplierOrder.findUnique({ where: { id: orderId }, include: { lines: true } });
+  if (!order || order.supplier !== "JJ") return;
+  const codes = await getShopifyVariantCodes(shop, accessToken, productId).catch(() => [] as ShopifyVariantCode[]);
+  await prisma.supplierOrder.update({
+    where: { id: orderId },
+    data: { productId, ...(imageUrl ? { productImageUrl: imageUrl } : {}) },
+  });
+  for (const line of order.lines) {
+    const wanted = normalizeVariantSizeLabel(line.variantTitle ?? "");
+    const match = codes.find((c) => normalizeVariantSizeLabel(c.title) === wanted);
+    if (!match) continue;
+    await prisma.orderLine.update({
+      where: { id: line.id },
+      data: { variantId: match.id, sku: match.sku ?? line.sku, barcode: match.barcode ?? line.barcode },
+    });
+  }
 }
 
 // When a collection product is created in Shopify, seed an order on the
