@@ -1750,6 +1750,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { jjLinked: id };
   }
 
+  // Live Shopify on-hand inventory per variant for one product. Used by the
+  // restock "Split to destination" popup so you can see current stock per size
+  // while deciding how much to move. Returns [] if no session / not linked.
+  if (intent === "get_product_stock") {
+    const productId = String(form.get("productId") ?? "").trim();
+    if (!productId) return jsonResponse({ ok: false, stock: [] });
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop) return jsonResponse({ ok: false, stock: [] });
+    const variants = await getShopifyInventoryVariants(session.shop, productId).catch(() => [] as ShopifyInventoryVariantInfo[]);
+    const stock = variants.map((v) => ({ id: v.id, title: v.title, sku: v.sku, availableInventory: v.availableInventory ?? 0 }));
+    return jsonResponse({ ok: true, stock });
+  }
+
   // ─── JJ Restock — backfill barcodes (and any missing SKUs) from Shopify
   // for every ordered line. Lines placed before the order block started
   // sending barcodes have none; this fills them in. Only ever fills blanks —
@@ -23473,9 +23486,10 @@ function AddRestockOrderRow({
 // to send to a destination; on submit the parent creates a duplicate order for
 // that destination and deducts these quantities from the source order.
 function RestockSplitModal({
-  productTitle, sizes, available, destinationOptions, currentDestination, onClose, onSubmit,
+  productTitle, productId, sizes, available, destinationOptions, currentDestination, onClose, onSubmit,
 }: {
   productTitle: string;
+  productId?: string;
   sizes: string[];
   available: Record<string, number>;
   destinationOptions: RestockOption[];
@@ -23484,6 +23498,20 @@ function RestockSplitModal({
   onSubmit: (destination: string, qtys: Record<string, number>) => void;
 }) {
   const orderedSizes = sizes.filter((s) => (available[s] ?? 0) > 0);
+  // Live Shopify on-hand stock per size, fetched when the popup opens, so you
+  // can weigh how much to move against what's actually in stock.
+  const stockFetcher = useFetcher<{ ok?: boolean; stock?: ShopifyVariantInfo[] }>();
+  useEffect(() => {
+    if (productId) stockFetcher.submit({ intent: "get_product_stock", productId }, { method: "post" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productId]);
+  const stockList = stockFetcher.data?.stock ?? null;
+  const stockLoading = Boolean(productId) && stockFetcher.state !== "idle" && !stockList;
+  const stockForSize = (sz: string): number | null => {
+    if (!stockList) return null;
+    const v = matchingVariantForSize(stockList, sz);
+    return v ? (v.availableInventory ?? 0) : null;
+  };
   const [destination, setDestination] = useState("");
   const [qtys, setQtys] = useState<Record<string, string>>({});
   // Refs to the per-size Send inputs so arrow keys / Enter move between them.
@@ -23534,6 +23562,19 @@ function RestockSplitModal({
                       <td key={sz} style={{ textAlign: "center", color: "#6b7280", padding: "3px 6px" }}>{available[sz] ?? 0}</td>
                     ))}
                   </tr>
+                  {productId && (
+                    <tr>
+                      <td style={{ fontSize: 12, fontWeight: 700, color: "#6b7280", padding: "3px 10px 3px 0", whiteSpace: "nowrap" }} title="Current on-hand inventory in Shopify">In stock</td>
+                      {orderedSizes.map((sz) => {
+                        const st = stockForSize(sz);
+                        return (
+                          <td key={sz} style={{ textAlign: "center", padding: "3px 6px", fontWeight: 600, color: stockLoading ? "#9ca3af" : st == null ? "#9ca3af" : st <= 0 ? "#dc2626" : "#059669" }}>
+                            {stockLoading ? "…" : st == null ? "—" : st}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  )}
                   <tr>
                     <td style={{ fontSize: 12, fontWeight: 700, color: "#374151", padding: "3px 10px 3px 0", whiteSpace: "nowrap" }}>Send</td>
                     {orderedSizes.map((sz, i) => (
@@ -23709,6 +23750,7 @@ function OrderRow({
         {splitOpen && (
           <RestockSplitModal
             productTitle={order.productTitle}
+            productId={order.productId}
             sizes={sizes}
             available={qtyBySize}
             destinationOptions={restockSettings.destinationOptions}
