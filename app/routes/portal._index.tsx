@@ -3294,6 +3294,65 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await prisma.collection.create({ data: { name, kind, sortOrder: existing, thumbnail } });
     return null;
   }
+  // Order-first "new product" flow: copy a (new/unlinked) JJ order row into the
+  // JJ New Products inbox sheet, carrying its name + per-size quantities and a
+  // back-link (__jjOrderId). Re-sending the same order updates its existing
+  // sheet row rather than duplicating. When that sheet row is later created in
+  // Shopify, the linked JJ order gets its productId (see create flow).
+  if (intent === "jj_send_to_new_products") {
+    const orderId = Number(form.get("orderId"));
+    if (!orderId) return jsonResponse({ ok: false, error: "bad_order" });
+    const order = await prisma.supplierOrder.findUnique({
+      where: { id: orderId },
+      include: { lines: { orderBy: { id: "asc" } } },
+    });
+    if (!order) return jsonResponse({ ok: false, error: "order_not_found" });
+
+    // Find (or create) the single JJ New Products inbox sheet.
+    let inbox = await prisma.collection.findFirst({ where: { kind: "jj-new" }, orderBy: { sortOrder: "asc" } });
+    if (!inbox) {
+      const count = await prisma.collection.count();
+      inbox = await prisma.collection.create({
+        data: { name: "JJ New Products", kind: "jj-new", sortOrder: count, columns: DEFAULT_COLLECTION_COLUMNS as unknown as object, rows: [] as unknown as object },
+      });
+    }
+
+    // Map each ordered size to its Collections size column id.
+    const sizeToColId = new Map<string, string>();
+    for (const [colId, label] of COLLECTION_SIZE_COLUMN_LABELS) sizeToColId.set(label.toUpperCase(), colId);
+    const sizeAliases: Record<string, string> = { XXL: "2XL", XXXL: "3XL", "S-M": "S/M", "M-L": "M/L", "L-XL": "L/XL" };
+    const colIdForSize = (size: string): string | null => {
+      const key = (size ?? "").trim().toUpperCase();
+      return sizeToColId.get(key) ?? sizeToColId.get(sizeAliases[key] ?? "") ?? null;
+    };
+
+    const qtyByColId: Record<string, string> = {};
+    for (const line of order.lines) {
+      const qty = line.qtyOrdered || 0;
+      if (qty <= 0) continue;
+      const colId = colIdForSize(line.variantTitle);
+      if (colId) qtyByColId[colId] = String((Number(qtyByColId[colId] ?? 0) || 0) + qty);
+    }
+
+    const rows = normalizeCollectionRows(inbox.rows);
+    const existingIdx = rows.findIndex((r) => String(r[COL_ROW_JJ_ORDER_ID] ?? "").trim() === String(orderId));
+    const rowData: Record<string, string> = {
+      name: order.productTitle || "New product",
+      ...qtyByColId,
+      [COL_ROW_JJ_ORDER_ID]: String(orderId),
+    };
+    if (existingIdx >= 0) {
+      // Re-sync: keep any details already filled in, refresh name + quantities.
+      const prev = rows[existingIdx];
+      // Clear old size cells so removed sizes don't linger.
+      for (const [colId] of COLLECTION_SIZE_COLUMN_LABELS) delete (prev as Record<string, string>)[colId];
+      rows[existingIdx] = { ...prev, ...rowData };
+    } else {
+      rows.push(rowData);
+    }
+    await prisma.collection.update({ where: { id: inbox.id }, data: { rows: rows as unknown as object, updatedAt: new Date() } });
+    return jsonResponse({ ok: true, sentTo: "jj-new", collectionId: inbox.id, updated: existingIdx >= 0 });
+  }
   if (intent === "rename_collection") {
     const id = Number(form.get("collectionId"));
     const name = String(form.get("name") ?? "").trim();
@@ -8152,6 +8211,10 @@ const COL_ROW_SHOPIFY_DIRTY = "__shopifyDirty";
 // Id of the existing-product restock order auto-created when the product is
 // created in Shopify — so we don't seed it twice.
 const COL_ROW_RESTOCK_ORDER_ID = "__restockOrderId";
+// Id of the JJ order this new-product row came from (order-first flow). Set when
+// a JJ order row is "sent to new products"; on Shopify create we link that order
+// (set its productId) instead of seeding a fresh restock order.
+const COL_ROW_JJ_ORDER_ID = "__jjOrderId";
 
 // Maps collection size column ids to display labels for variant names.
 // Note: "freeSize" is intentionally NOT here — when the row has Free Size
@@ -25069,11 +25132,11 @@ const JJ_FROZEN_COLUMN_COUNT = 4;
 
 function JJOrderRow({
   order, sizes, rowIndex, frozenOffsets, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
-  isAdmin, onAddRow, onDelete, onLink,
+  isAdmin, onAddRow, onDelete, onLink, onSendToNewProducts,
 }: {
   order: Order; sizes: string[]; rowIndex: number; frozenOffsets: number[]; thbPerAudCachedRate: number | null; restockSettings: RestockSettings;
   canLoadInventory: boolean; selected: boolean; onToggle: () => void; onLoad: () => void; loading: boolean;
-  isAdmin: boolean; onAddRow: () => void; onDelete: () => void; onLink: () => void;
+  isAdmin: boolean; onAddRow: () => void; onDelete: () => void; onLink: () => void; onSendToNewProducts: () => void;
 }) {
   // Right-click menu on the first column (admin only): add / delete rows.
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
@@ -25114,6 +25177,9 @@ function JJOrderRow({
         {rowMenu && typeof document !== "undefined" && createPortal(
           <div style={{ position: "fixed", left: rowMenu.x, top: rowMenu.y, zIndex: 2147483647, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.16)", padding: 4, minWidth: 150 }} onMouseDown={(e) => e.stopPropagation()}>
             <button type="button" onClick={() => { setRowMenu(null); onAddRow(); }} style={s.contextMenuButton}>+ Add product row</button>
+            {!linked && (
+              <button type="button" onClick={() => { setRowMenu(null); onSendToNewProducts(); }} style={s.contextMenuButton}>Send to New Products →</button>
+            )}
             <button type="button" onClick={() => { setRowMenu(null); onDelete(); }} style={{ ...s.contextMenuButton, color: "#dc2626" }}>Delete this row</button>
           </div>,
           document.body,
@@ -25258,6 +25324,16 @@ function JJRestockPanel({
     setSelected(new Set());
   };
   const addOrder = () => rowFetcher.submit({ intent: "jj_add_order", tab: activeTabId }, { method: "post" });
+  const sendFetcher = useFetcher<{ ok?: boolean; sentTo?: string; updated?: boolean }>();
+  const sendToNewProducts = (orderId: number) => sendFetcher.submit({ intent: "jj_send_to_new_products", orderId: String(orderId) }, { method: "post" });
+  useEffect(() => {
+    const d = sendFetcher.data;
+    if (d?.sentTo === "jj-new") {
+      if (typeof window !== "undefined" && window.confirm(`${d.updated ? "Updated in" : "Sent to"} JJ New Products. Open that page now?`)) {
+        window.location.href = "/portal?page=jj-new-products";
+      }
+    }
+  }, [sendFetcher.data]);
   const deleteOrder = (orderId: number) => {
     if (!window.confirm("Delete this product row? This can't be undone.")) return;
     rowFetcher.submit({ intent: "jj_delete_order", orderId: String(orderId) }, { method: "post" });
@@ -25487,6 +25563,7 @@ function JJRestockPanel({
                 onAddRow={addOrder}
                 onDelete={() => deleteOrder(order.id)}
                 onLink={() => setLinkingOrderId(order.id)}
+                onSendToNewProducts={() => sendToNewProducts(order.id)}
               />
             ))}
             {visible.length === 0 && (
