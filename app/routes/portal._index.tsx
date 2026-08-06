@@ -101,6 +101,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "colourCode" TEXT`);
       await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "styleCode" TEXT`);
       await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "costBaht" DOUBLE PRECISION`);
+      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "skuBase" TEXT`);
+      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "barcodeBase" TEXT`);
     } catch (e) {
       console.warn("[jj-restock] column ensure failed:", e);
     }
@@ -1614,12 +1616,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (field === "colourCode") data.colourCode = raw || null;
     else if (field === "styleCode") data.styleCode = raw || null;
     else if (field === "name") data.productTitle = raw || "New product";
+    else if (field === "skuBase") data.skuBase = raw || null;
+    else if (field === "barcodeBase") data.barcodeBase = raw || null;
     else if (field === "costBaht") {
       const n = Number(raw);
       data.costBaht = raw && Number.isFinite(n) && n > 0 ? n : null;
     } else return null;
     try {
       await prisma.supplierOrder.update({ where: { id: orderId }, data });
+      // Two-way sync: mirror base SKU/barcode onto the linked JJ New Products
+      // sheet row (if this order was already sent there).
+      if (field === "skuBase" || field === "barcodeBase") {
+        const o = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { skuBase: true, barcodeBase: true } });
+        if (o) await propagateJJCodesToSheet(orderId, o.skuBase ?? "", o.barcodeBase ?? "");
+      }
     } catch (e) {
       console.warn("[jj_update_order_field] failed:", e);
     }
@@ -3336,9 +3346,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     const rows = normalizeCollectionRows(inbox.rows);
     const existingIdx = rows.findIndex((r) => String(r[COL_ROW_JJ_ORDER_ID] ?? "").trim() === String(orderId));
+    const skuBase = ((order as { skuBase?: string | null }).skuBase ?? "").trim();
+    const barcodeBase = ((order as { barcodeBase?: string | null }).barcodeBase ?? "").trim();
     const rowData: Record<string, string> = {
       name: order.productTitle || "New product",
       ...qtyByColId,
+      ...(skuBase ? { sku: skuBase } : {}),
+      ...(barcodeBase ? { barcode: barcodeBase } : {}),
       [COL_ROW_JJ_ORDER_ID]: String(orderId),
     };
     if (existingIdx >= 0) {
@@ -3558,6 +3572,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               fromName: currentUser?.name ?? null,
               productTitle: row.name || row.title || null,
             });
+          }
+          // Two-way sync (sheet → order): when a row linked to a JJ order has its
+          // SKU/Barcode edited, mirror the base back onto that order. Only sync
+          // single-line values so a per-size (+K) expansion doesn't overwrite the
+          // order's clean base.
+          const jjOid = Number(String(row[COL_ROW_JJ_ORDER_ID] ?? "").trim());
+          if (jjOid) {
+            const skuNow = (row.sku ?? "").trim();
+            const barNow = (row.barcode ?? "").trim();
+            const skuPrev = (prev.sku ?? "").trim();
+            const barPrev = (prev.barcode ?? "").trim();
+            const data: Record<string, unknown> = {};
+            if (skuNow !== skuPrev && !skuNow.includes("\n")) data.skuBase = skuNow || null;
+            if (barNow !== barPrev && !barNow.includes("\n")) data.barcodeBase = barNow || null;
+            if (Object.keys(data).length) await prisma.supplierOrder.update({ where: { id: jjOid }, data }).catch(() => {});
           }
         }
       } catch (e) {
@@ -8695,6 +8724,26 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
   const errs = json?.data?.productCreateMedia?.mediaUserErrors ?? [];
   for (const e of errs) errors.push(e.message || "media error");
   return errors;
+}
+
+// Two-way SKU/barcode sync (order → sheet): write the JJ order's base SKU /
+// barcode onto its linked JJ New Products sheet row(s). No-op if the order was
+// never sent to the sheet. Only touches single-line (base) values on the sheet
+// so a per-size (+K expanded) cell isn't clobbered by a base edit unless the
+// base actually changed.
+async function propagateJJCodesToSheet(orderId: number, skuBase: string, barcodeBase: string): Promise<void> {
+  if (!orderId) return;
+  const cols = await prisma.collection.findMany({ where: { kind: "jj-new" }, select: { id: true, rows: true } }).catch(() => [] as Array<{ id: number; rows: unknown }>);
+  for (const c of cols) {
+    const rows = normalizeCollectionRows(c.rows);
+    let changed = false;
+    for (const r of rows) {
+      if (String(r[COL_ROW_JJ_ORDER_ID] ?? "").trim() !== String(orderId)) continue;
+      if ((r.sku ?? "") !== skuBase) { r.sku = skuBase; changed = true; }
+      if ((r.barcode ?? "") !== barcodeBase) { r.barcode = barcodeBase; changed = true; }
+    }
+    if (changed) await prisma.collection.update({ where: { id: c.id }, data: { rows: rows as unknown as object, updatedAt: new Date() } });
+  }
 }
 
 // Order-first (JJ New Products): when a sheet row that came from a JJ order is
@@ -25238,7 +25287,17 @@ function JJOrderRow({
       <td style={{ ...s.td, ...frozenTd(3) }}>
         {linked
           ? <span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span>
-          : <JJFieldCell orderId={order.id} field="name" value={order.productTitle ?? ""} placeholder="Product name" />}
+          : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <JJFieldCell orderId={order.id} field="name" value={order.productTitle ?? ""} placeholder="Product name" />
+              {/* New products only: base SKU + Barcode, synced to the JJ New
+                  Products sheet. Blank until typed here or on the sheet. */}
+              <div style={{ display: "flex", gap: 4 }}>
+                <JJFieldCell orderId={order.id} field="skuBase" value={(order as { skuBase?: string | null }).skuBase ?? ""} placeholder="SKU" />
+                <JJFieldCell orderId={order.id} field="barcodeBase" value={(order as { barcodeBase?: string | null }).barcodeBase ?? ""} placeholder="Barcode" />
+              </div>
+            </div>
+          )}
       </td>
       {sizes.map((sz, sizeIdx) => {
         const line = lineForSize(sz);

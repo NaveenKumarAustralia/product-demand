@@ -48,6 +48,11 @@ model SupplierOrder {
   colourCode      String?
   styleCode       String?
   costBaht        Float?
+  // Base SKU / barcode typed at order time for NEW products (order-first JJ New
+  // Products flow). Mirrored to the linked JJ New Products sheet row; the sheet
+  // expands them per size on Shopify create. Null for existing/linked products.
+  skuBase         String?
+  barcodeBase     String?
   notes           String?
   totalQty        Int       @default(0)
   createdAt    DateTime    @default(now())
