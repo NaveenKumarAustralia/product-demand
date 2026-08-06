@@ -238,6 +238,7 @@ model VisionBoardV2Item {
 model Collection {
   id        Int      @id @default(autoincrement())
   name      String   @default("Untitled collection")
+  kind      String   @default("collection")
   sortOrder Int      @default(0)
   thumbnail String?
   columns   Json     @default("[]")

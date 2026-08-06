@@ -20,6 +20,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // vendor. `restockVendor` is null for every non-restock page.
   const isRestockPage = page === "restock" || page === "jj-restock";
   const restockVendor = page === "jj-restock" ? "JJ" : page === "restock" ? "Karma East" : null;
+  // The Collections spreadsheet engine backs two pages: the regular
+  // "collections" page and "jj-new-products" (new products in the JJ order
+  // flow). They share all machinery; only the Collection.kind they list differs.
+  const isCollectionsPage = page === "collections" || page === "jj-new-products";
+  const collectionKind = page === "jj-new-products" ? "jj-new" : "collection";
   const selectedProductGroup = normalizeProductGroup(
     url.searchParams.get("productGroup") ?? url.searchParams.get("productType") ?? "",
   );
@@ -327,7 +332,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     : { boards: [] as Array<{ id: number; name: string; sortOrder: number }>, activeBoardId: null as number | null, items: [] as Array<{ id: number; name: string; sortOrder: number; status: string; imageCount: number; hasThumbnail: boolean; updatedAt: Date }> };
   // Collections listing — slim projection (no rows JSON, no thumbnail bytes).
   // The drawer fetches the full collection (rows + columns) on open.
-  const collectionsPromise = page === "collections"
+  if (isCollectionsPage) {
+    // Safe on a stale DB that hasn't run the migration yet; no-op once present.
+    try {
+      await prisma.$executeRawUnsafe(`ALTER TABLE "Collection" ADD COLUMN IF NOT EXISTS "kind" TEXT NOT NULL DEFAULT 'collection'`);
+    } catch (e) {
+      console.warn("[collection kind] column ensure failed:", e);
+    }
+  }
+  const collectionsPromise = isCollectionsPage
     ? prisma.$queryRawUnsafe<Array<{
         id: number; name: string; sortOrder: number;
         hasThumbnail: boolean; rowCount: number;
@@ -338,6 +351,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           CASE WHEN jsonb_typeof(rows) = 'array' THEN jsonb_array_length(rows) ELSE 0 END AS "rowCount",
           "createdAt", "updatedAt"
         FROM "Collection"
+        WHERE "kind" = '${collectionKind}'
         ORDER BY "sortOrder" ASC, "createdAt" ASC
       `).then((rows) => {
         const hiddenIds = new Set(
@@ -372,7 +386,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Photo shoots: slim tab list (id/name/sortOrder/rowCount). The active
   // shoot's full rows are fetched on demand via ps_get_shoot. Loaded for
   // both pages so the collection "Send to photo shoot" picker has the list.
-  const photoShootsPromise = (page === "photoshoot" || page === "collections")
+  const photoShootsPromise = (page === "photoshoot" || isCollectionsPage)
     ? prisma.$queryRawUnsafe<Array<{ id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date; updatedAt: Date }>>(`
         SELECT id, name, "sortOrder",
           CASE WHEN jsonb_typeof(rows) = 'array' THEN jsonb_array_length(rows) ELSE 0 END AS "rowCount",
@@ -390,7 +404,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // ordered totals. Both queries run in parallel, and the whole thing runs in
   // parallel with the collections + photo-shoot list queries below.
   const shipmentDataPromise: Promise<{ eta: Record<string, string>; shipment: Record<string, { label: string; partial: boolean }> }> =
-    page === "collections"
+    isCollectionsPage
       ? (async () => {
           const eta: Record<string, string> = {};
           const shipment: Record<string, { label: string; partial: boolean }> = {};
@@ -746,7 +760,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Collections needs the fabric sheets too — the "Pick a fabric" picker and
   // fabric-cost lookups on the Collections detail table read from them. Without
   // this the picker is empty ("No fabrics match").
-  const needsFabricSheets = page === "fabric" || isRestockPage || page === "packing" || page === "collections";
+  const needsFabricSheets = page === "fabric" || isRestockPage || page === "packing" || isCollectionsPage;
   // These come from the single batched settings query above (no extra round-
   // trips) — they were 4 sequential DB fetches, a big chunk of the restock/
   // packing/collections page load.
@@ -765,7 +779,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         deletedSheetsValue: fabricDeletedSheetsSetting?.value,
       })
     : [];
-  const fabricStockIndex: FabricStockEntry[] = (isRestockPage || page === "packing" || page === "collections")
+  const fabricStockIndex: FabricStockEntry[] = (isRestockPage || page === "packing" || isCollectionsPage)
     ? buildFabricStockIndex(combinedFabricSheetsForIndex(manualFabricSheets))
     : [];
   if (page === "fabric") {
@@ -819,7 +833,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // FX rate: use the batched cache value when it's still fresh (no extra
   // round-trip); only fetch live when stale/missing (rare).
   let inrPerAudCachedRate: number | null = null;
-  if (isRestockPage || page === "packing" || page === "collections") {
+  if (isRestockPage || page === "packing" || isCollectionsPage) {
     const cachedFx = wrap(INR_AUD_CACHE_KEY)?.value as CachedFxRate | undefined;
     const fresh = cachedFx && typeof cachedFx.inrPerAud === "number" && cachedFx.inrPerAud > 0 && cachedFx.fetchedAt
       && (Date.now() - new Date(cachedFx.fetchedAt).getTime()) < FX_CACHE_TTL_MS;
@@ -3273,10 +3287,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // ─── Collections ─────────────────────────────────────────────────────────────
   if (intent === "add_collection") {
     const name = String(form.get("name") ?? "").trim() || "Untitled collection";
+    const kind = String(form.get("kind") ?? "").trim() === "jj-new" ? "jj-new" : "collection";
     const existing = await prisma.collection.count();
     const initialThumb = form.get("thumbnail");
     const thumbnail = typeof initialThumb === "string" && initialThumb.length > 0 ? initialThumb : null;
-    await prisma.collection.create({ data: { name, sortOrder: existing, thumbnail } });
+    await prisma.collection.create({ data: { name, kind, sortOrder: existing, thumbnail } });
     return null;
   }
   if (intent === "rename_collection") {
@@ -5604,6 +5619,7 @@ const FABRIC_TOTAL_EXCLUDED_NAMES = new Set([
 const ALL_NAV_ITEMS = [
   { id: "restock", label: "Existing Products Restock", href: "/portal" },
   { id: "jj-restock", label: "JJ Order", href: "/portal?page=jj-restock" },
+  { id: "jj-new-products", label: "JJ New Products", href: "/portal?page=jj-new-products" },
   { id: "fabric", label: "Fabric in stock", href: "/portal?page=fabric" },
   { id: "packing", label: "Packing Lists", href: "/portal?page=packing" },
   { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
@@ -5613,7 +5629,7 @@ const ALL_NAV_ITEMS = [
   { id: "dropbox", label: "Dropbox", href: "/portal?page=dropbox" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -9408,6 +9424,7 @@ export default function PortalDashboard() {
     : page === "samples" ? "Samples"
     : page === "visionboard" ? "Vision Board"
     : page === "collections" ? "Collections"
+    : page === "jj-new-products" ? "JJ New Products"
     : page === "dropbox" ? "Dropbox"
     : page === "photoshoot" ? "Photo Shoots"
     : page === "newproduct" ? "New Product Orders"
@@ -9824,13 +9841,15 @@ export default function PortalDashboard() {
             activeBoardId={visionBoardData.activeBoardId}
             items={visionBoardData.items}
           />
-        ) : page === "collections" ? (
+        ) : (page === "collections" || page === "jj-new-products") ? (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
             {/* The Collections/Photo Shoot toggle is rendered INSIDE the panel
                 (landing) and the detail page, so the fabric-meters summary can
                 sit beside it when a collection is open. */}
             <div style={{ flex: 1, minHeight: 0 }}>
               <CollectionsPanel
+                collectionKind={page === "jj-new-products" ? "jj-new" : "collection"}
+                hidePhotoShootToggle={page === "jj-new-products"}
                 collections={collections}
                 collectionSettings={collectionSettings}
                 restockSettings={restockSettings}
@@ -13636,7 +13655,7 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   );
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }> }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -13675,7 +13694,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
 
   const submitAdd = () => {
     const name = addName.trim() || "Untitled collection";
-    fetcher.submit({ intent: "add_collection", name }, { method: "post" });
+    fetcher.submit({ intent: "add_collection", name, kind: collectionKind }, { method: "post" });
     setAddOpen(false);
     setAddName("");
   };
@@ -13763,6 +13782,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         etaByProductId={etaByProductId}
         shipmentByProductId={shipmentByProductId}
         onBack={closeCollection}
+        hidePhotoShootToggle={hidePhotoShootToggle}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
         onSetFabricLink={(fabricName, fabricKey) => handleSetFabricLink(selectedCollection.id, fabricName, fabricKey)}
       />
@@ -13771,7 +13791,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
-      <CollectionsPhotoShootToggle active="collections" />
+      {!hidePhotoShootToggle && <CollectionsPhotoShootToggle active="collections" />}
       <div style={{ ...s.productInfoPage, flex: 1, minHeight: 0 }}>
       <div style={s.productInfoToolbar}>
         <div style={s.productInfoToolbarLeft}>
@@ -14356,6 +14376,7 @@ function CollectionSpreadsheetPage({
   onBack,
   onLocalNameChange,
   onSetFabricLink,
+  hidePhotoShootToggle = false,
 }: {
   listItem: CollectionListItem;
   collectionSettings: CollectionSettings;
@@ -14372,6 +14393,7 @@ function CollectionSpreadsheetPage({
   onBack: () => void;
   onLocalNameChange: (name: string) => void;
   onSetFabricLink: (fabricName: string, fabricKey: string) => void;
+  hidePhotoShootToggle?: boolean;
 }) {
   // Thread message counts keyed by "<entityType>:<entityId>:<entityKey>:<field>".
   // Populated by a fetcher on mount + after row saves so the 💬 badges
@@ -15079,9 +15101,11 @@ function CollectionSpreadsheetPage({
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
       {/* Top row: the Collections / Photo Shoot menu. */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", flexShrink: 0 }}>
-        <CollectionsPhotoShootToggle active="collections" />
-      </div>
+      {!hidePhotoShootToggle && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", flexShrink: 0 }}>
+          <CollectionsPhotoShootToggle active="collections" />
+        </div>
+      )}
       <div style={{ ...s.productInfoToolbar, flexShrink: 0 }}>
         <div style={s.productInfoToolbarLeft}>
           <button
