@@ -25409,6 +25409,20 @@ function JJOrderRow({
       <td style={{ ...s.td, textAlign: "center", fontWeight: 600 }}>{totalQty}</td>
       <td style={{ ...s.td, textAlign: "center" }}><JJFieldCell orderId={order.id} field="costBaht" numeric value={costBaht != null ? String(costBaht) : ""} placeholder="฿" /></td>
       <td style={{ ...s.td, textAlign: "center", color: "#6b7280" }}>{costAud != null ? `$${costAud.toFixed(2)}` : "—"}</td>
+      {/* Status — same shared chips as the Existing Products Restock sheet
+          (restockSettings.statusOptions). Editable by anyone with JJ access
+          (update_status has no admin gate), so the supplier can update it. */}
+      <td style={{ ...s.td, textAlign: "center" }}>
+        <RestockOptionChipDropdown
+          orderId={order.id}
+          value={order.supplierStatus ?? ""}
+          options={restockSettings.statusOptions}
+          optionKind="statusOptions"
+          restockSettings={restockSettings}
+          updateIntent="update_status"
+          undoLabel="Undo status"
+        />
+      </td>
       {canLoadInventory && (
         <td style={{ ...s.td, textAlign: "center" }}>
           {linked ? (
@@ -25522,6 +25536,7 @@ function JJRestockPanel({
       { id: "totalQty", label: "Total Qty", defaultWidth: 90, center: true },
       { id: "costBaht", label: "Cost (฿)", defaultWidth: 90, center: true },
       { id: "costAud", label: "Cost (A$)", defaultWidth: 90, center: true },
+      { id: "status", label: "Status", defaultWidth: 150, center: true },
     ];
     if (canLoadInventory) cols.push({ id: "load", label: "Load", defaultWidth: JJ_LOAD_COL_WIDTH, center: true });
     return cols;
