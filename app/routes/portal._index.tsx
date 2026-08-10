@@ -25412,7 +25412,7 @@ function JJOrderRow({
         );
       })}
       <td style={{ ...s.td, textAlign: "center", fontWeight: 600 }}>{totalQty}</td>
-      <td style={{ ...s.td, textAlign: "center" }}><JJFieldCell orderId={order.id} field="costBaht" numeric value={costBaht != null ? String(costBaht) : ""} placeholder="฿" /></td>
+      <td style={{ ...s.td, textAlign: "center" }} title="Per-piece cost in baht"><JJFieldCell orderId={order.id} field="costBaht" numeric value={costBaht != null ? String(costBaht) : ""} placeholder="฿/pc" /></td>
       <td style={{ ...s.td, textAlign: "center", color: "#6b7280" }}>{costAud != null ? `$${costAud.toFixed(2)}` : "—"}</td>
       {/* Status — same shared chips as the Existing Products Restock sheet
           (restockSettings.statusOptions). Editable by anyone with JJ access
@@ -25541,8 +25541,8 @@ function JJRestockPanel({
       { id: "name", label: "Name", defaultWidth: 160 },
       ...sizes.map((sz) => ({ id: `size:${sz}`, label: sz, defaultWidth: JJ_SIZE_COL_WIDTH, center: true })),
       { id: "totalQty", label: "Total Qty", defaultWidth: 90, center: true },
-      { id: "costBaht", label: "Cost (฿)", defaultWidth: 90, center: true },
-      { id: "costAud", label: "Cost (A$)", defaultWidth: 90, center: true },
+      { id: "costBaht", label: "Cost (฿/pc)", defaultWidth: 90, center: true },
+      { id: "costAud", label: "Cost (A$/pc)", defaultWidth: 90, center: true },
       { id: "status", label: "Status", defaultWidth: 150, center: true },
     ];
     if (canLoadInventory) cols.push({ id: "load", label: "Load", defaultWidth: JJ_LOAD_COL_WIDTH, center: true });
