@@ -25477,9 +25477,16 @@ function JJRestockPanel({
   // ─── Order tabs ─────────────────────────────────────────────────────────
   const tabList = tabs.length ? tabs : JJ_DEFAULT_TABS;
   const firstTabId = tabList[0].id;
-  const [activeTabId, setActiveTabId] = useState(firstTabId);
-  // If the active tab disappears (deleted), fall back to the first.
-  useEffect(() => { if (!tabList.some((t) => t.id === activeTabId)) setActiveTabId(firstTabId); }, [tabList, activeTabId, firstTabId]);
+  // Hidden tabs are removed from the portal too (supplier can't see them).
+  // Admins can flip "Show hidden" to reveal them (dimmed) for unhiding.
+  const [showHiddenTabs, setShowHiddenTabs] = useState(false);
+  const hiddenCount = tabList.filter((t) => t.hidden).length;
+  const visibleTabs = tabList.filter((t) => (isAdmin && showHiddenTabs) || !t.hidden);
+  const firstVisibleTabId = visibleTabs[0]?.id ?? firstTabId;
+  const [activeTabId, setActiveTabId] = useState(firstVisibleTabId);
+  // If the active tab disappears (deleted) or gets hidden, fall back to the
+  // first visible tab so a supplier never lands on a hidden sheet.
+  useEffect(() => { if (!visibleTabs.some((t) => t.id === activeTabId)) setActiveTabId(firstVisibleTabId); }, [visibleTabs, activeTabId, firstVisibleTabId]);
   // An order belongs to a tab by its poNumber; empty poNumber → the first tab.
   const tabOf = (o: Order) => ((o as { poNumber?: string | null }).poNumber ?? "").trim() || firstTabId;
   const ordersInActiveTab = useMemo(() => orders.filter((o) => tabOf(o) === activeTabId), [orders, activeTabId, firstTabId]);
@@ -25624,7 +25631,7 @@ function JJRestockPanel({
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 10 }}>
       {/* Order tabs — one sheet of orders per tab (e.g. a date). */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", borderBottom: "2px solid #e5e7eb", paddingBottom: 0 }}>
-        {tabList.map((t) => {
+        {visibleTabs.map((t) => {
           const active = t.id === activeTabId;
           const hidden = Boolean(t.hidden);
           return (
@@ -25632,7 +25639,7 @@ function JJRestockPanel({
               key={t.id}
               onClick={() => setActiveTabId(t.id)}
               onDoubleClick={() => isAdmin && renameTab(t.id)}
-              title={hidden ? "Hidden from the Shopify product page" : (isAdmin ? "Click to open · double-click to rename" : undefined)}
+              title={hidden ? "Hidden — not visible to suppliers or on the Shopify product page" : (isAdmin ? "Click to open · double-click to rename" : undefined)}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
                 padding: "8px 14px", fontSize: 13, fontWeight: 700, borderRadius: "8px 8px 0 0",
@@ -25643,11 +25650,11 @@ function JJRestockPanel({
                 ...(hidden ? { opacity: 0.5, fontStyle: "italic" } : {}),
               }}
             >
-              {hidden && <span title="Hidden from Shopify" style={{ fontSize: 11 }}>🚫</span>}
+              {hidden && <span title="Hidden" style={{ fontSize: 11 }}>🚫</span>}
               {t.name}
               <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", background: active ? "#ecfdf5" : "#e5e7eb", borderRadius: 999, padding: "1px 7px" }}>{countByTab.get(t.id) ?? 0}</span>
-              {isAdmin && active && (
-                <button type="button" onClick={(e) => { e.stopPropagation(); toggleHideTab(t.id); }} title={hidden ? "Unhide — show on the Shopify product page" : "Hide from the Shopify product page"} style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}>{hidden ? "👁" : "🙈"}</button>
+              {isAdmin && (active || hidden) && (
+                <button type="button" onClick={(e) => { e.stopPropagation(); toggleHideTab(t.id); }} title={hidden ? "Unhide — show to suppliers + on the Shopify product page" : "Hide everywhere — suppliers + Shopify product page"} style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}>{hidden ? "👁" : "🙈"}</button>
               )}
               {isAdmin && active && tabList.length > 1 && (
                 <button type="button" onClick={(e) => { e.stopPropagation(); deleteTab(t.id); }} title="Delete this tab" style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
@@ -25657,6 +25664,9 @@ function JJRestockPanel({
         })}
         {isAdmin && (
           <button type="button" onClick={addTab} title="Add a new order tab" style={{ border: "1px dashed #cbd5e1", background: "transparent", color: "#0f766e", borderRadius: "8px 8px 0 0", padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", marginBottom: -2 }}>+ New order</button>
+        )}
+        {isAdmin && hiddenCount > 0 && (
+          <button type="button" onClick={() => setShowHiddenTabs((v) => !v)} title="Show or hide the hidden order tabs" style={{ border: "none", background: "transparent", color: "#6b7280", padding: "8px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer", marginBottom: -2 }}>{showHiddenTabs ? `Hide hidden (${hiddenCount})` : `Show hidden (${hiddenCount})`}</button>
         )}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -25674,7 +25684,7 @@ function JJRestockPanel({
             title="Move the selected orders to another tab"
           >
             <option value="">Move {selectedCount} to tab…</option>
-            {tabList.filter((t) => t.id !== activeTabId).map((t) => <option key={t.id} value={t.id} style={{ color: "#111827", background: "#fff" }}>{t.name}</option>)}
+            {visibleTabs.filter((t) => t.id !== activeTabId).map((t) => <option key={t.id} value={t.id} style={{ color: "#111827", background: "#fff" }}>{t.name}</option>)}
           </select>
         )}
         {canLoadInventory && (
