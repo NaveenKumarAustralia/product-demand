@@ -9493,6 +9493,9 @@ export default function PortalDashboard() {
     return () => document.removeEventListener("show-cost-breakdown", handler);
   }, []);
   const [imageLightbox, setImageLightbox] = useState<{ url: string; alt: string } | null>(null);
+  // Active JJ order tab — lifted here so the header totals can show just the
+  // selected tab's numbers (the tab bar itself lives in JJRestockPanel).
+  const [jjActiveTabId, setJjActiveTabId] = useState("");
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { url: string; alt?: string };
@@ -9608,6 +9611,22 @@ export default function PortalDashboard() {
   if (loginBlocked) {
     return <PortalLogin />;
   }
+
+  // JJ header totals scoped to the SELECTED tab (not the whole page). An order
+  // belongs to a tab by poNumber (empty → the first tab), matching JJRestockPanel.
+  const jjFirstTabId = jjTabs[0]?.id ?? "";
+  const jjEffectiveTabId = jjActiveTabId || jjFirstTabId;
+  const jjActiveTabName = (jjTabs as JJTab[]).find((t: JJTab) => t.id === jjEffectiveTabId)?.name ?? "";
+  const jjTabTotals = page === "jj-restock"
+    ? (() => {
+        const inTab = (orders as Order[]).filter((o: Order) => (((o as { poNumber?: string | null }).poNumber ?? "").trim() || jjFirstTabId) === jjEffectiveTabId);
+        return {
+          orderCount: inTab.length,
+          totalQty: inTab.reduce((sum: number, o: Order) => sum + (o.totalQty ?? 0), 0),
+          totalBaht: inTab.reduce((sum: number, o: Order) => sum + (((o as { costBaht?: number | null }).costBaht ?? 0) * (o.totalQty ?? 0)), 0),
+        };
+      })()
+    : null;
 
   const startResize = (columnId: string, event: React.MouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
@@ -9810,8 +9829,10 @@ export default function PortalDashboard() {
                 restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
                 || restockTotalsFiltered.totalQty !== restockTotalsAll.totalQty
               );
-              const totals = showFiltered ? restockTotalsFiltered : restockTotalsAll;
-              const label = showFiltered ? "Filtered" : "Total";
+              // JJ: show only the selected tab's totals (labelled with the tab
+              // name). Karma East restock keeps the all/filtered totals.
+              const totals = page === "jj-restock" && jjTabTotals ? jjTabTotals : (showFiltered ? restockTotalsFiltered : restockTotalsAll);
+              const label = page === "jj-restock" ? (jjActiveTabName || "Tab") : (showFiltered ? "Filtered" : "Total");
               const fmt = (n: number) => n.toLocaleString();
               // JJ page also shows the total order value in baht + AUD.
               const totalAud = page === "jj-restock" ? convertBahtToAud(totals.totalBaht, thbPerAudCachedRate) : null;
@@ -10054,6 +10075,8 @@ export default function PortalDashboard() {
             isAdmin={Boolean(currentUser?.admin)}
             savedColumnWidths={jjColumnWidths}
             tabs={jjTabs}
+            activeTabId={jjActiveTabId}
+            onActiveTabChange={setJjActiveTabId}
           />
         ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -25460,10 +25483,11 @@ function JJOrderRow({
 }
 
 function JJRestockPanel({
-  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, tabs,
+  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, tabs, activeTabId: activeTabIdProp, onActiveTabChange,
 }: {
   orders: Order[]; sizes: string[]; thbPerAudCachedRate: number | null; fxBahtBuffer: number;
   restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>; tabs: JJTab[];
+  activeTabId: string; onActiveTabChange: (id: string) => void;
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
@@ -25483,10 +25507,13 @@ function JJRestockPanel({
   const hiddenCount = tabList.filter((t) => t.hidden).length;
   const visibleTabs = tabList.filter((t) => (isAdmin && showHiddenTabs) || !t.hidden);
   const firstVisibleTabId = visibleTabs[0]?.id ?? firstTabId;
-  const [activeTabId, setActiveTabId] = useState(firstVisibleTabId);
-  // If the active tab disappears (deleted) or gets hidden, fall back to the
-  // first visible tab so a supplier never lands on a hidden sheet.
-  useEffect(() => { if (!visibleTabs.some((t) => t.id === activeTabId)) setActiveTabId(firstVisibleTabId); }, [visibleTabs, activeTabId, firstVisibleTabId]);
+  // Active tab is controlled by the parent so the header can show its totals.
+  const setActiveTabId = onActiveTabChange;
+  const activeTabId = activeTabIdProp || firstVisibleTabId;
+  // Sync the parent to a concrete visible tab: on first mount (prop is "") or
+  // when the active tab is deleted/hidden, so a supplier never lands on a hidden
+  // sheet and the header totals always match a real tab.
+  useEffect(() => { if (!visibleTabs.some((t) => t.id === activeTabIdProp)) setActiveTabId(firstVisibleTabId); }, [visibleTabs, activeTabIdProp, firstVisibleTabId]);
   // An order belongs to a tab by its poNumber; empty poNumber → the first tab.
   const tabOf = (o: Order) => ((o as { poNumber?: string | null }).poNumber ?? "").trim() || firstTabId;
   const ordersInActiveTab = useMemo(() => orders.filter((o) => tabOf(o) === activeTabId), [orders, activeTabId, firstTabId]);
