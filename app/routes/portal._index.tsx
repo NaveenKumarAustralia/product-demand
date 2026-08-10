@@ -869,7 +869,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     restockTotalsFiltered,
     inrPerAudCachedRate,
     fxRupeeBuffer: FX_RUPEE_BUFFER,
-    thbPerAudCachedRate: page === "jj-restock" ? await getCachedThbPerAud() : null,
+    thbPerAudCachedRate: (page === "jj-restock" || page === "jj-new-products") ? await getCachedThbPerAud() : null,
     fxBahtBuffer: FX_BAHT_BUFFER,
     collectionSettings,
     sortBy,
@@ -4486,9 +4486,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     const rows = normalizeCollectionRows(collection.rows);
     const statusOpt = String(form.get("status") ?? "DRAFT").toUpperCase() === "ACTIVE" ? "ACTIVE" : "DRAFT";
-    // Convert row.priceRupees → AUD via the cached live FX rate so
-    // the per-variant inventory cost lands in Shopify's shop currency.
+    // Convert the row's Price cell → AUD via the cached live FX rate so the
+    // per-variant inventory cost lands in Shopify's shop currency. JJ New
+    // Products prices are in Baht (THB); everything else is Rupees (INR).
+    const isJJNewPush = (collection as { kind?: string }).kind === "jj-new";
     const inrPerAudForPush = await getCachedInrPerAud().catch(() => null);
+    const thbPerAudForPush = isJJNewPush ? await getCachedThbPerAud().catch(() => null) : null;
     // Product Information → for the auto product type on each row's style.
     const productInfoForPush = await loadProductInfoForAction().catch(() => null);
 
@@ -4513,7 +4516,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         results.push({ index: idx, ok: true, productId: row[COL_ROW_SHOPIFY_PRODUCT_ID] });
         continue;
       }
-      const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush, productInfo: productInfoForPush ?? undefined });
+      const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush, thbPerAud: thbPerAudForPush, currency: isJJNewPush ? "THB" : "INR", productInfo: productInfoForPush ?? undefined });
       if (res.ok && res.productId) {
         // Push the row's model pictures (with per-image alt text) to the new
         // product. Best-effort: the product is already created, so image
@@ -8448,7 +8451,7 @@ async function createShopifyProductFromRow(
   shop: string,
   accessToken: string,
   row: Record<string, string>,
-  opts: { status: "DRAFT" | "ACTIVE"; inrPerAud?: number | null; productInfo?: ProductInfo } = { status: "DRAFT" },
+  opts: { status: "DRAFT" | "ACTIVE"; inrPerAud?: number | null; thbPerAud?: number | null; currency?: "INR" | "THB"; productInfo?: ProductInfo } = { status: "DRAFT" },
 ): Promise<CollectionPushResult> {
   // Title is required. Name is the title column (Title column was
   // removed in V2). We still fall back to legacy `title` for any rows
@@ -8494,14 +8497,17 @@ async function createShopifyProductFromRow(
   const price = priceRaw ? String(Number(priceRaw) || 0) : "0";
   // Compare-at price is always the RRP price (no separate column needed).
   const compareAt = Number(price) > 0 ? price : null;
-  // Inventory cost: convert Price ₹ to AUD via the cached FX rate
-  // (rate threaded from the push action). Legacy rows that still hold
-  // an AUD value in `row.cost` keep working as a fallback so we don't
-  // wipe pre-existing costs during the migration.
+  // Inventory cost: convert the Price cell to AUD via the cached FX rate
+  // (rate threaded from the push action). JJ New Products prices are in Baht
+  // (THB); everything else is Rupees (INR). Legacy rows that still hold an AUD
+  // value in `row.cost` keep working as a fallback so we don't wipe pre-existing
+  // costs during the migration.
   const priceRupeesRaw = Number((row.priceRupees ?? "").trim()) || 0;
-  const audFromRupees = priceRupeesRaw > 0 ? convertRupeesToAud(priceRupeesRaw, opts.inrPerAud) : null;
+  const audFromPrice = priceRupeesRaw > 0
+    ? (opts.currency === "THB" ? convertBahtToAud(priceRupeesRaw, opts.thbPerAud) : convertRupeesToAud(priceRupeesRaw, opts.inrPerAud))
+    : null;
   const legacyCostRaw = Number((row.cost ?? "").trim()) || 0;
-  const computedCost = audFromRupees ?? (legacyCostRaw > 0 ? legacyCostRaw : null);
+  const computedCost = audFromPrice ?? (legacyCostRaw > 0 ? legacyCostRaw : null);
   const cost = computedCost != null ? String(Math.round(computedCost * 100) / 100) : null;
   const hsCode = (row.hsCode ?? "").trim();
   // Country of origin: default to India (Karma East / Collections products);
@@ -10011,6 +10017,8 @@ export default function PortalDashboard() {
               <CollectionsPanel
                 collectionKind={page === "jj-new-products" ? "jj-new" : "collection"}
                 hidePhotoShootToggle={page === "jj-new-products"}
+                costCurrency={page === "jj-new-products" ? "THB" : "INR"}
+                thbPerAudCachedRate={thbPerAudCachedRate}
                 collections={collections}
                 collectionSettings={collectionSettings}
                 restockSettings={restockSettings}
@@ -13816,7 +13824,7 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   );
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -13944,6 +13952,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         shipmentByProductId={shipmentByProductId}
         onBack={closeCollection}
         hidePhotoShootToggle={hidePhotoShootToggle}
+        costCurrency={costCurrency}
+        thbPerAudCachedRate={thbPerAudCachedRate}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
         onSetFabricLink={(fabricName, fabricKey) => handleSetFabricLink(selectedCollection.id, fabricName, fabricKey)}
       />
@@ -13953,7 +13963,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
       {!hidePhotoShootToggle && <CollectionsPhotoShootToggle active="collections" />}
-      <div style={{ ...s.productInfoPage, flex: 1, minHeight: 0 }}>
+      {/* alignContent:start so the toolbar + card grid hug the top instead of
+          the grid tracks stretching to fill the height when there are only a
+          few collections (which left big empty gaps top and bottom). */}
+      <div style={{ ...s.productInfoPage, flex: 1, minHeight: 0, alignContent: "start" }}>
       <div style={s.productInfoToolbar}>
         <div style={s.productInfoToolbarLeft}>
           <div>
@@ -14538,6 +14551,8 @@ function CollectionSpreadsheetPage({
   onLocalNameChange,
   onSetFabricLink,
   hidePhotoShootToggle = false,
+  costCurrency = "INR",
+  thbPerAudCachedRate = null,
 }: {
   listItem: CollectionListItem;
   collectionSettings: CollectionSettings;
@@ -14555,7 +14570,15 @@ function CollectionSpreadsheetPage({
   onLocalNameChange: (name: string) => void;
   onSetFabricLink: (fabricName: string, fabricKey: string) => void;
   hidePhotoShootToggle?: boolean;
+  // JJ New Products prices are in Baht (฿), not Rupees (₹). Switches the
+  // "Price ₹" column label + the Unit A$ conversion to THB.
+  costCurrency?: "INR" | "THB";
+  thbPerAudCachedRate?: number | null;
 }) {
+  const isThb = costCurrency === "THB";
+  // Show "Price ฿" instead of "Price ₹" on the JJ New Products sheet.
+  const displayCol = <T extends { id: string; label: string }>(col: T): T =>
+    isThb && col.id === "priceRupees" ? { ...col, label: "Price ฿" } : col;
   // Thread message counts keyed by "<entityType>:<entityId>:<entityKey>:<field>".
   // Populated by a fetcher on mount + after row saves so the 💬 badges
   // stay live without forcing a full page reload.
@@ -15523,7 +15546,7 @@ function CollectionSpreadsheetPage({
                     stickyLeft={frozenOffsets[i + 1]}
                     isLastFrozen={i === frozenCols.length - 1}
                   >
-                    <CollectionColumnHeader col={col} />
+                    <CollectionColumnHeader col={displayCol(col)} />
                   </Th>
                 ))}
                 <th style={{ ...s.th, textAlign: "center" }}>Shopify</th>
@@ -15534,7 +15557,7 @@ function CollectionSpreadsheetPage({
                     columnId={col.id}
                     onResizeStart={(e) => startResize(col.id, e)}
                   >
-                    <CollectionColumnHeader col={col} />
+                    <CollectionColumnHeader col={displayCol(col)} />
                   </Th>
                 ))}
               </tr>
@@ -15703,6 +15726,8 @@ function CollectionSpreadsheetPage({
                               <CollectionPriceAudCell
                                 rupees={Number(row.priceRupees ?? "0") || 0}
                                 inrPerAud={inrPerAudCachedRate}
+                                currency={costCurrency}
+                                thbPerAud={thbPerAudCachedRate}
                               />
                             </Td>
                           );
@@ -15737,7 +15762,10 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
-                        if (col.id === "priceRupees" && !linked) {
+                        // JJ New Products (Baht): skip the rupee auto-cost / fabric
+                        // picker cell — cost is a plain manual ฿ value, so fall
+                        // through to the default number input below.
+                        if (col.id === "priceRupees" && !linked && !isThb) {
                           const rowName = (row.name ?? row.title ?? "").trim();
                           const overrideId = (row.styleOverrideId ?? "").trim();
                           const autoValue = autoPriceRupees(rowName, overrideId || undefined);
@@ -16672,12 +16700,18 @@ function CollectionSkuCell({
 // rate. Matches the packing list "Unit A$" cell: 2-decimal AUD on the
 // top line, "₹X.XX/A$" rate subtext underneath in light gray. Gray
 // "—" when the rate hasn't been fetched yet or rupees is empty.
-function CollectionPriceAudCell({ rupees, inrPerAud }: { rupees: number; inrPerAud: number | null }) {
-  const aud = convertRupeesToAud(rupees, inrPerAud);
+function CollectionPriceAudCell({ rupees, inrPerAud, currency = "INR", thbPerAud = null }: { rupees: number; inrPerAud: number | null; currency?: "INR" | "THB"; thbPerAud?: number | null }) {
+  // `rupees` holds the Price cell's raw amount — rupees for Collections, baht
+  // for JJ New Products. Convert with the matching rate.
+  const isThb = currency === "THB";
+  const aud = isThb ? convertBahtToAud(rupees, thbPerAud) : convertRupeesToAud(rupees, inrPerAud);
   if (aud == null) {
     return <div style={{ textAlign: "center", color: "#9ca3af", fontSize: "var(--portal-table-font-size, 14px)", padding: "1px 2px" }}>—</div>;
   }
-  const effectiveRate = inrPerAud != null ? inrPerAud - FX_RUPEE_BUFFER : null;
+  const effectiveRate = isThb
+    ? (thbPerAud != null ? thbPerAud - FX_BAHT_BUFFER : null)
+    : (inrPerAud != null ? inrPerAud - FX_RUPEE_BUFFER : null);
+  const symbol = isThb ? "฿" : "₹";
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, padding: "1px 2px" }}>
       <span style={{ fontSize: "var(--portal-table-font-size, 14px)", fontWeight: 700, color: "var(--portal-table-text-color, #111827)" }}>
@@ -16685,7 +16719,7 @@ function CollectionPriceAudCell({ rupees, inrPerAud }: { rupees: number; inrPerA
       </span>
       {effectiveRate != null && effectiveRate > 0 && (
         <span style={{ fontSize: 10, color: "#9ca3af" }}>
-          ₹{effectiveRate.toFixed(2)}/A$
+          {symbol}{effectiveRate.toFixed(2)}/A$
         </span>
       )}
     </div>
