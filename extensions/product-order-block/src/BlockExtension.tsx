@@ -360,7 +360,13 @@ function ProductOrderBlock() {
     const selectedProductGroup = orderProductGroup === NEW_PRODUCT_GROUP_VALUE
       ? normalizeProductGroup(customProductGroup)
       : normalizeProductGroup(orderProductGroup);
-    if (!isRealProductGroup(selectedProductGroup)) {
+    // JJ orders don't use priority / product group; they MUST pick an order tab.
+    if (isJJ) {
+      if (mode === "new" && !jjTab) {
+        setFormError("Select an order tab for this JJ order");
+        return;
+      }
+    } else if (!isRealProductGroup(selectedProductGroup)) {
       setFormError("Select or create a product group");
       return;
     }
@@ -381,11 +387,11 @@ function ProductOrderBlock() {
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
           shop, productId: productGid, productTitle,
-          productType: selectedProductGroup || undefined,
+          productType: isJJ ? undefined : (selectedProductGroup || undefined),
           productImageUrl: productImageUrl || undefined,
           supplier: productVendor || "Unknown",
           notes: trimmedNotes || undefined,
-          priority: orderPriority || undefined,
+          priority: isJJ ? undefined : (orderPriority || undefined),
           // JJ new orders route to the chosen tab (poNumber = tab id in the
           // portal). Only applies to brand-new orders, not merges.
           poNumber: (isJJ && mode === "new" && jjTab) ? jjTab : undefined,
@@ -473,37 +479,41 @@ function ProductOrderBlock() {
       {formError && <Banner tone="critical">{formError}</Banner>}
 
       <InlineStack gap="base" blockAlignment="end">
-        <Box inlineSize="30%">
-          <Select
-            label={savingPriority ? "Priority saving..." : "Priority"}
-            value={orderPriority}
-            options={[{ value: "", label: "— Priority —" }, ...priorityOptions]}
-            onChange={updatePriority}
-          />
-        </Box>
-        {isJJ && (
-          <Box inlineSize="30%">
+        {isJJ ? (
+          // JJ orders: only the order-tab picker (no priority / product group).
+          <Box inlineSize="50%">
             <Select
-              label="JJ order tab"
+              label="JJ order tab (required)"
               value={jjTab}
               options={[
-                { value: "", label: "Default (first tab)" },
+                { value: "", label: "Select a tab…" },
                 ...jjTabs.map((t) => ({ value: t.id, label: t.name })),
               ]}
               onChange={setJjTab}
             />
           </Box>
+        ) : (
+          <>
+            <Box inlineSize="30%">
+              <Select
+                label={savingPriority ? "Priority saving..." : "Priority"}
+                value={orderPriority}
+                options={[{ value: "", label: "— Priority —" }, ...priorityOptions]}
+                onChange={updatePriority}
+              />
+            </Box>
+            <Box inlineSize="30%">
+              <Select
+                label={savingProductGroup ? "Group saving..." : "Product group"}
+                value={orderProductGroup}
+                options={productGroupOptions(orderProductGroup === NEW_PRODUCT_GROUP_VALUE ? customProductGroup : orderProductGroup)}
+                onChange={updateProductGroup}
+              />
+            </Box>
+          </>
         )}
-        <Box inlineSize="30%">
-          <Select
-            label={savingProductGroup ? "Group saving..." : "Product group"}
-            value={orderProductGroup}
-            options={productGroupOptions(orderProductGroup === NEW_PRODUCT_GROUP_VALUE ? customProductGroup : orderProductGroup)}
-            onChange={updateProductGroup}
-          />
-        </Box>
       </InlineStack>
-      {orderProductGroup === NEW_PRODUCT_GROUP_VALUE && (
+      {!isJJ && orderProductGroup === NEW_PRODUCT_GROUP_VALUE && (
         <TextField
           label="New product group"
           value={customProductGroup}
@@ -512,8 +522,11 @@ function ProductOrderBlock() {
           placeholder="Type new group name"
         />
       )}
-      {!hasProductGroup && (
+      {!isJJ && !hasProductGroup && (
         <Banner tone="warning">Select or create a product group before adding an order.</Banner>
+      )}
+      {isJJ && !jjTab && (
+        <Banner tone="warning">Select an order tab before creating a JJ order.</Banner>
       )}
       <TextField
         label="Notes for supplier portal"
@@ -586,11 +599,11 @@ function ProductOrderBlock() {
       <Divider />
       <InlineStack gap="base">
         {order && (
-          <Button variant="primary" disabled={!hasProductGroup || submitting} onPress={() => handleSubmit("existing")}>
+          <Button variant="primary" disabled={(isJJ ? false : !hasProductGroup) || submitting} onPress={() => handleSubmit("existing")}>
             {submitting ? "Saving..." : "Add to existing order"}
           </Button>
         )}
-        <Button variant={order ? "secondary" : "primary"} disabled={!hasProductGroup || submitting} onPress={() => handleSubmit("new")}>
+        <Button variant={order ? "secondary" : "primary"} disabled={(isJJ ? !jjTab : !hasProductGroup) || submitting} onPress={() => handleSubmit("new")}>
           {submitting ? "Saving..." : "Create new order"}
         </Button>
         <Button href={PORTAL_URL} target="_blank" variant="secondary">Open portal</Button>

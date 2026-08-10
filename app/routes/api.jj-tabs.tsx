@@ -15,15 +15,15 @@ const CORS = {
 const JJ_TABS_KEY = "supplier-portal-jj-tabs-v1";
 const JJ_DEFAULT_TABS = [{ id: "main", name: "Order 1" }];
 
-type JJTab = { id: string; name: string };
+type JJTab = { id: string; name: string; hidden?: boolean };
 
 function normalizeJJTabs(value: unknown): JJTab[] {
   const arr = value && typeof value === "object" && Array.isArray((value as { tabs?: unknown }).tabs)
     ? (value as { tabs: unknown[] }).tabs
     : Array.isArray(value) ? value : [];
   const tabs = arr
-    .map((t) => (t && typeof t === "object")
-      ? { id: String((t as JJTab).id ?? "").trim(), name: String((t as JJTab).name ?? "").trim() }
+    .map((t): JJTab | null => (t && typeof t === "object")
+      ? { id: String((t as JJTab).id ?? "").trim(), name: String((t as JJTab).name ?? "").trim(), hidden: Boolean((t as JJTab).hidden) }
       : null)
     .filter((t): t is JJTab => Boolean(t && t.id && t.name));
   return tabs.length ? tabs : JJ_DEFAULT_TABS;
@@ -56,6 +56,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (!audValid) return Response.json({ error: "Token audience mismatch" }, { status: 401, headers: CORS });
 
   const setting = await prisma.portalSetting.findUnique({ where: { key: JJ_TABS_KEY }, select: { value: true } }).catch(() => null);
-  const tabs = normalizeJJTabs(setting?.value);
+  // Hidden tabs are excluded from the Shopify product-page dropdown.
+  const tabs = normalizeJJTabs(setting?.value)
+    .filter((t) => !t.hidden)
+    .map(({ id, name }) => ({ id, name }));
   return Response.json({ tabs }, { headers: CORS });
 };

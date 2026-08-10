@@ -5307,13 +5307,13 @@ const JJ_COLUMN_WIDTHS_KEY = "supplier-portal-jj-column-widths-v1";
 // several order sheets (e.g. one per date). Each JJ SupplierOrder's poNumber
 // holds its tab id; orders with an empty poNumber fall back to the first tab.
 const JJ_TABS_KEY = "supplier-portal-jj-tabs-v1";
-type JJTab = { id: string; name: string };
+type JJTab = { id: string; name: string; hidden?: boolean };
 const JJ_DEFAULT_TABS: JJTab[] = [{ id: "main", name: "Order 1" }];
 function normalizeJJTabs(value: unknown): JJTab[] {
   const arr = value && typeof value === "object" && Array.isArray((value as { tabs?: unknown }).tabs)
     ? (value as { tabs: unknown[] }).tabs : Array.isArray(value) ? value : [];
   const tabs = arr
-    .map((t) => (t && typeof t === "object") ? { id: String((t as JJTab).id ?? "").trim(), name: String((t as JJTab).name ?? "").trim() } : null)
+    .map((t): JJTab | null => (t && typeof t === "object") ? { id: String((t as JJTab).id ?? "").trim(), name: String((t as JJTab).name ?? "").trim(), hidden: Boolean((t as JJTab).hidden) } : null)
     .filter((t): t is JJTab => Boolean(t && t.id && t.name));
   return tabs.length ? tabs : JJ_DEFAULT_TABS;
 }
@@ -25509,6 +25509,9 @@ function JJRestockPanel({
     if (!window.confirm(cnt > 0 ? `Delete this tab? Its ${cnt} order(s) will move to “${tabList.find((t) => t.id !== id)?.name}”.` : "Delete this empty tab?")) return;
     tabFetcher.submit({ intent: "jj_delete_tab", tabId: id }, { method: "post" });
   };
+  // Hidden tabs stay in the portal (dimmed) but are removed from the Shopify
+  // product-page order dropdown, so finished order sheets don't clutter it.
+  const toggleHideTab = (id: string) => saveTabs(tabList.map((t) => t.id === id ? { ...t, hidden: !t.hidden } : t));
   const moveSelectedToTab = (tabId: string) => {
     const ids = ordersInActiveTab.filter((o) => selected.has(o.id)).map((o) => o.id);
     if (!ids.length) return;
@@ -25623,12 +25626,13 @@ function JJRestockPanel({
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", borderBottom: "2px solid #e5e7eb", paddingBottom: 0 }}>
         {tabList.map((t) => {
           const active = t.id === activeTabId;
+          const hidden = Boolean(t.hidden);
           return (
             <div
               key={t.id}
               onClick={() => setActiveTabId(t.id)}
               onDoubleClick={() => isAdmin && renameTab(t.id)}
-              title={isAdmin ? "Click to open · double-click to rename" : undefined}
+              title={hidden ? "Hidden from the Shopify product page" : (isAdmin ? "Click to open · double-click to rename" : undefined)}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
                 padding: "8px 14px", fontSize: 13, fontWeight: 700, borderRadius: "8px 8px 0 0",
@@ -25636,10 +25640,15 @@ function JJRestockPanel({
                 marginBottom: -2,
                 background: active ? "#fff" : "#f3f4f6",
                 color: active ? "#0f766e" : "#6b7280",
+                ...(hidden ? { opacity: 0.5, fontStyle: "italic" } : {}),
               }}
             >
+              {hidden && <span title="Hidden from Shopify" style={{ fontSize: 11 }}>🚫</span>}
               {t.name}
               <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", background: active ? "#ecfdf5" : "#e5e7eb", borderRadius: 999, padding: "1px 7px" }}>{countByTab.get(t.id) ?? 0}</span>
+              {isAdmin && active && (
+                <button type="button" onClick={(e) => { e.stopPropagation(); toggleHideTab(t.id); }} title={hidden ? "Unhide — show on the Shopify product page" : "Hide from the Shopify product page"} style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}>{hidden ? "👁" : "🙈"}</button>
+              )}
               {isAdmin && active && tabList.length > 1 && (
                 <button type="button" onClick={(e) => { e.stopPropagation(); deleteTab(t.id); }} title="Delete this tab" style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
               )}
