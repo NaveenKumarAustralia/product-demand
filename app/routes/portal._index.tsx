@@ -4800,6 +4800,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     updates.eta = parsedDate;
   }
   if (intent === "update_destination") {
+    // Destination is admin-only to change (suppliers can see it, not edit it).
+    if (!currentUser?.admin) return null;
     // Chip values come from the editable destinationOptions in
     // RestockSettings — the user can add new chips at any time — so we
     // can't whitelist a fixed enum here. Accept any non-empty short
@@ -25337,6 +25339,11 @@ function JJOrderRow({
   // full reload otherwise (mirrors the restock sheet's StatusCell).
   const [statusLocal, setStatusLocal] = useState(order.supplierStatus ?? "");
   useEffect(() => { setStatusLocal(order.supplierStatus ?? ""); }, [order.supplierStatus]);
+  // Destination — admins edit it (optimistic, like status); suppliers see it
+  // read-only. update_destination skips revalidation, hence local state.
+  const [destinationLocal, setDestinationLocal] = useState((order as { destination?: string | null }).destination ?? "");
+  useEffect(() => { setDestinationLocal((order as { destination?: string | null }).destination ?? ""); }, [(order as { destination?: string | null }).destination]);
+  const destinationOpt = restockSettings.destinationOptions.find((o) => o.value === destinationLocal);
   // Sticky style for the frozen block (matches the Td component's treatment).
   const frozenTd = (i: number): React.CSSProperties => i < frozenOffsets.length
     ? {
@@ -25452,6 +25459,30 @@ function JJOrderRow({
           onChange={setStatusLocal}
           controlled
         />
+      </td>
+      {/* Destination — admins edit (chip dropdown); suppliers see it read-only
+          so they know where to ship. */}
+      <td style={{ ...s.td, textAlign: "center" }}>
+        {isAdmin ? (
+          <RestockOptionChipDropdown
+            orderId={order.id}
+            value={destinationLocal}
+            options={restockSettings.destinationOptions}
+            optionKind="destinationOptions"
+            restockSettings={restockSettings}
+            updateIntent="update_destination"
+            undoLabel="Undo destination"
+            emptyLabel="— Destination —"
+            onChange={setDestinationLocal}
+            controlled
+          />
+        ) : destinationLocal ? (
+          <span style={{ display: "inline-block", background: destinationOpt?.bg ?? "#f3f4f6", color: destinationOpt?.color ?? "#374151", borderRadius: 6, padding: "3px 10px", fontSize: 12, fontWeight: 700 }}>
+            {destinationOpt?.label ?? destinationLocal}
+          </span>
+        ) : (
+          <span style={{ color: "#9ca3af", fontSize: 12 }}>—</span>
+        )}
       </td>
       {canLoadInventory && (
         <td style={{ ...s.td, textAlign: "center" }}>
@@ -25581,6 +25612,7 @@ function JJRestockPanel({
       { id: "costBaht", label: "Cost (฿/pc)", defaultWidth: 90, center: true },
       { id: "costAud", label: "Cost (A$/pc)", defaultWidth: 90, center: true },
       { id: "status", label: "Status", defaultWidth: 150, center: true },
+      { id: "destination", label: "Destination", defaultWidth: 150, center: true },
     ];
     if (canLoadInventory) cols.push({ id: "load", label: "Load", defaultWidth: JJ_LOAD_COL_WIDTH, center: true });
     return cols;
