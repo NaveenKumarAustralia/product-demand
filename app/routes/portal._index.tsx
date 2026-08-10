@@ -911,6 +911,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
     jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
     jjTabs: normalizeJJTabs(wrap(JJ_TABS_KEY)?.value),
+    jjIncomingTabId: readJJIncomingTabId(wrap(JJ_TABS_KEY)?.value),
     fabricStockIndex,
   };
   } catch (error) {
@@ -1664,10 +1665,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!currentUser?.admin) return { jjError: "Admins only" };
     let tabs: JJTab[] = [];
     try { tabs = normalizeJJTabs(JSON.parse(String(form.get("tabs") ?? "[]"))); } catch { tabs = JJ_DEFAULT_TABS; }
+    // Preserve the incoming-tab pointer across tab edits (drop it if its tab is gone).
+    const prev = await prisma.portalSetting.findUnique({ where: { key: JJ_TABS_KEY }, select: { value: true } });
+    let incomingTabId = readJJIncomingTabId(prev?.value);
+    if (incomingTabId && !tabs.some((t) => t.id === incomingTabId)) incomingTabId = "";
     await prisma.portalSetting.upsert({
       where: { key: JJ_TABS_KEY },
-      create: { key: JJ_TABS_KEY, value: { tabs } },
-      update: { value: { tabs } },
+      create: { key: JJ_TABS_KEY, value: { tabs, incomingTabId } },
+      update: { value: { tabs, incomingTabId } },
+    });
+    return { jjTabsSaved: true };
+  }
+
+  // ─── JJ Restock — set which tab new (untagged / Shopify-synced) orders land
+  // in. Admin only. Empty string clears it (falls back to the first tab).
+  if (intent === "jj_set_incoming_tab") {
+    if (!currentUser?.admin) return { jjError: "Admins only" };
+    const tabId = String(form.get("tabId") ?? "").trim();
+    const prev = await prisma.portalSetting.findUnique({ where: { key: JJ_TABS_KEY }, select: { value: true } });
+    const tabs = normalizeJJTabs(prev?.value);
+    const incomingTabId = tabs.some((t) => t.id === tabId) ? tabId : "";
+    await prisma.portalSetting.upsert({
+      where: { key: JJ_TABS_KEY },
+      create: { key: JJ_TABS_KEY, value: { tabs, incomingTabId } },
+      update: { value: { tabs, incomingTabId } },
     });
     return { jjTabsSaved: true };
   }
@@ -1689,10 +1710,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       where: { supplier: "JJ", OR: [{ poNumber: tabId }, ...(wasFirst ? [{ poNumber: null }, { poNumber: "" }] : [])] },
       data: { poNumber: fallback },
     });
+    // Drop the incoming-tab pointer if it was the deleted tab.
+    let incomingTabId = readJJIncomingTabId(existing?.value);
+    if (incomingTabId === tabId || !remaining.some((t) => t.id === incomingTabId)) incomingTabId = "";
     await prisma.portalSetting.upsert({
       where: { key: JJ_TABS_KEY },
-      create: { key: JJ_TABS_KEY, value: { tabs: remaining } },
-      update: { value: { tabs: remaining } },
+      create: { key: JJ_TABS_KEY, value: { tabs: remaining, incomingTabId } },
+      update: { value: { tabs: remaining, incomingTabId } },
     });
     return { jjTabsSaved: true };
   }
@@ -5316,6 +5340,16 @@ function normalizeJJTabs(value: unknown): JJTab[] {
     .map((t) => (t && typeof t === "object") ? { id: String((t as JJTab).id ?? "").trim(), name: String((t as JJTab).name ?? "").trim() } : null)
     .filter((t): t is JJTab => Boolean(t && t.id && t.name));
   return tabs.length ? tabs : JJ_DEFAULT_TABS;
+}
+// The JJ tab that untagged (poNumber-less) orders — i.e. everything synced from
+// Shopify — should collect into. Stored alongside the tabs in the JJ_TABS blob.
+// Empty string = fall back to the first tab (legacy behaviour).
+function readJJIncomingTabId(value: unknown): string {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const v = (value as { incomingTabId?: unknown }).incomingTabId;
+    if (typeof v === "string") return v.trim();
+  }
+  return "";
 }
 const TABLE_HEADER_LABELS_KEY = "production-portal-table-header-labels-v1";
 const TABLE_CUSTOM_COLUMNS_KEY = "production-portal-table-custom-columns-v1";
@@ -9372,6 +9406,7 @@ export default function PortalDashboard() {
     photoShootColumnWidths,
     jjColumnWidths,
     jjTabs,
+    jjIncomingTabId,
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
   // Both the Karma East ("restock") and JJ ("jj-restock") pages render the
@@ -10054,6 +10089,7 @@ export default function PortalDashboard() {
             isAdmin={Boolean(currentUser?.admin)}
             savedColumnWidths={jjColumnWidths}
             tabs={jjTabs}
+            incomingTabId={jjIncomingTabId}
           />
         ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -25460,10 +25496,10 @@ function JJOrderRow({
 }
 
 function JJRestockPanel({
-  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, tabs,
+  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, tabs, incomingTabId = "",
 }: {
   orders: Order[]; sizes: string[]; thbPerAudCachedRate: number | null; fxBahtBuffer: number;
-  restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>; tabs: JJTab[];
+  restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>; tabs: JJTab[]; incomingTabId?: string;
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [search, setSearch] = useState("");
@@ -25477,19 +25513,23 @@ function JJRestockPanel({
   // ─── Order tabs ─────────────────────────────────────────────────────────
   const tabList = tabs.length ? tabs : JJ_DEFAULT_TABS;
   const firstTabId = tabList[0].id;
+  // The tab that untagged (Shopify-synced) orders collect into. Falls back to
+  // the first tab if unset or pointing at a deleted tab.
+  const incomingTab = tabList.some((t) => t.id === incomingTabId) ? incomingTabId : firstTabId;
   const [activeTabId, setActiveTabId] = useState(firstTabId);
   // If the active tab disappears (deleted), fall back to the first.
   useEffect(() => { if (!tabList.some((t) => t.id === activeTabId)) setActiveTabId(firstTabId); }, [tabList, activeTabId, firstTabId]);
-  // An order belongs to a tab by its poNumber; empty poNumber → the first tab.
-  const tabOf = (o: Order) => ((o as { poNumber?: string | null }).poNumber ?? "").trim() || firstTabId;
-  const ordersInActiveTab = useMemo(() => orders.filter((o) => tabOf(o) === activeTabId), [orders, activeTabId, firstTabId]);
+  // An order belongs to a tab by its poNumber; empty poNumber → the incoming tab.
+  const tabOf = (o: Order) => ((o as { poNumber?: string | null }).poNumber ?? "").trim() || incomingTab;
+  const ordersInActiveTab = useMemo(() => orders.filter((o) => tabOf(o) === activeTabId), [orders, activeTabId, incomingTab]);
   const countByTab = useMemo(() => {
     const m = new Map<string, number>();
     for (const o of orders) m.set(tabOf(o), (m.get(tabOf(o)) ?? 0) + 1);
     return m;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orders, firstTabId]);
+  }, [orders, incomingTab]);
   const saveTabs = (next: JJTab[]) => tabFetcher.submit({ intent: "jj_set_tabs", tabs: JSON.stringify(next) }, { method: "post" });
+  const setIncomingTab = (id: string) => tabFetcher.submit({ intent: "jj_set_incoming_tab", tabId: id }, { method: "post" });
   const addTab = () => {
     const name = window.prompt("Name this order tab (e.g. a date):", "")?.trim();
     if (!name) return;
@@ -25623,6 +25663,7 @@ function JJRestockPanel({
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", borderBottom: "2px solid #e5e7eb", paddingBottom: 0 }}>
         {tabList.map((t) => {
           const active = t.id === activeTabId;
+          const isIncoming = t.id === incomingTab;
           return (
             <div
               key={t.id}
@@ -25638,6 +25679,15 @@ function JJRestockPanel({
                 color: active ? "#0f766e" : "#6b7280",
               }}
             >
+              {/* ◉ marks the tab that new Shopify orders land in. Admins can
+                  click it (on any tab) to make that tab the incoming one. */}
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); if (isAdmin && !isIncoming) setIncomingTab(t.id); }}
+                title={isIncoming ? "New Shopify orders land here" : (isAdmin ? "Make this the tab new Shopify orders land in" : "New Shopify orders land in the ◉ tab")}
+                style={{ border: "none", background: "transparent", cursor: isAdmin && !isIncoming ? "pointer" : "default", fontSize: 12, lineHeight: 1, padding: 0, color: isIncoming ? "#0d9488" : "#cbd5e1" }}
+                aria-label={isIncoming ? "Incoming tab" : "Set as incoming tab"}
+              >{isIncoming ? "◉" : "○"}</button>
               {t.name}
               <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", background: active ? "#ecfdf5" : "#e5e7eb", borderRadius: 999, padding: "1px 7px" }}>{countByTab.get(t.id) ?? 0}</span>
               {isAdmin && active && tabList.length > 1 && (
