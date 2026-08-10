@@ -175,6 +175,10 @@ function ProductOrderBlock() {
   const [savingProductGroup, setSavingProductGroup] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [notes, setNotes] = useState("");
+  // JJ order tabs — only used when the product's vendor is JJ, to pick which
+  // portal tab a NEW order lands in. Empty = the portal's first tab (default).
+  const [jjTabs, setJjTabs] = useState<Array<{ id: string; name: string }>>([]);
+  const [jjTab, setJjTab] = useState("");
   const [staffNames, setStaffNames] = useState<string[]>([]);
   const [statusOptions, setStatusOptions] = useState(STATUS_OPTIONS);
   const [priorityOptions, setPriorityOptions] = useState(PRIORITY_OPTIONS);
@@ -252,6 +256,19 @@ function ProductOrderBlock() {
             id: v.id, title: v.title, sku: v.sku ?? "", barcode: v.barcode ?? "",
             stockQty: v.inventoryQuantity ?? 0, onOrderQty: 0, qtyOrdered: "",
           })));
+          // Load JJ tabs when this product's vendor is JJ (best-effort).
+          if ((p.vendor ?? "").trim().toLowerCase() === "jj") {
+            try {
+              const token = await auth.idToken();
+              if (token) {
+                const r = await fetch(`${APP_URL}/api/jj-tabs`, { headers: { Authorization: `Bearer ${token}` } });
+                if (r.ok) {
+                  const j = await r.json();
+                  if (Array.isArray(j?.tabs)) setJjTabs(j.tabs);
+                }
+              }
+            } catch { /* tabs optional */ }
+          }
         }
         await refreshOrderStatus(shopDomain, productGid!);
       } catch (e: any) {
@@ -369,6 +386,9 @@ function ProductOrderBlock() {
           supplier: productVendor || "Unknown",
           notes: trimmedNotes || undefined,
           priority: orderPriority || undefined,
+          // JJ new orders route to the chosen tab (poNumber = tab id in the
+          // portal). Only applies to brand-new orders, not merges.
+          poNumber: (isJJ && mode === "new" && jjTab) ? jjTab : undefined,
           existingOrderId: mode === "existing" ? order?.id : undefined,
           lines: orderedLines.map((v) => ({
             variantId: v.id, variantTitle: v.title,
@@ -437,6 +457,7 @@ function ProductOrderBlock() {
     ? normalizeProductGroup(customProductGroup)
     : normalizeProductGroup(orderProductGroup);
   const hasProductGroup = isRealProductGroup(selectedProductGroup);
+  const isJJ = (productVendor || "").trim().toLowerCase() === "jj";
   const tagQuery = currentTagQuery(notes);
   const staffSuggestions = tagQuery == null
     ? []
@@ -460,6 +481,19 @@ function ProductOrderBlock() {
             onChange={updatePriority}
           />
         </Box>
+        {isJJ && (
+          <Box inlineSize="30%">
+            <Select
+              label="JJ order tab"
+              value={jjTab}
+              options={[
+                { value: "", label: "Default (first tab)" },
+                ...jjTabs.map((t) => ({ value: t.id, label: t.name })),
+              ]}
+              onChange={setJjTab}
+            />
+          </Box>
+        )}
         <Box inlineSize="30%">
           <Select
             label={savingProductGroup ? "Group saving..." : "Product group"}
