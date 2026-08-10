@@ -25309,6 +25309,11 @@ function JJOrderRow({
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("scroll", close, true); };
   }, [rowMenu]);
   const linked = Boolean(order.productId);
+  // Optimistic local status so the chip updates the instant it's picked —
+  // update_status skips loader revalidation, so the prop won't refresh until a
+  // full reload otherwise (mirrors the restock sheet's StatusCell).
+  const [statusLocal, setStatusLocal] = useState(order.supplierStatus ?? "");
+  useEffect(() => { setStatusLocal(order.supplierStatus ?? ""); }, [order.supplierStatus]);
   // Sticky style for the frozen block (matches the Td component's treatment).
   const frozenTd = (i: number): React.CSSProperties => i < frozenOffsets.length
     ? {
@@ -25415,12 +25420,14 @@ function JJOrderRow({
       <td style={{ ...s.td, textAlign: "center" }}>
         <RestockOptionChipDropdown
           orderId={order.id}
-          value={order.supplierStatus ?? ""}
+          value={statusLocal}
           options={restockSettings.statusOptions}
           optionKind="statusOptions"
           restockSettings={restockSettings}
           updateIntent="update_status"
           undoLabel="Undo status"
+          onChange={setStatusLocal}
+          controlled
         />
       </td>
       {canLoadInventory && (
