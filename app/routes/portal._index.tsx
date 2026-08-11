@@ -25310,11 +25310,12 @@ const JJ_FROZEN_COLUMN_COUNT = 5;
 
 function JJOrderRow({
   order, sizes, rowIndex, frozenOffsets, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
-  isAdmin, onAddRow, onDelete, onLink, onSendToNewProducts,
+  isAdmin, onAddRow, onDelete, onLink, onSendToNewProducts, onSplit,
 }: {
   order: Order; sizes: string[]; rowIndex: number; frozenOffsets: number[]; thbPerAudCachedRate: number | null; restockSettings: RestockSettings;
   canLoadInventory: boolean; selected: boolean; onToggle: () => void; onLoad: () => void; loading: boolean;
   isAdmin: boolean; onAddRow: () => void; onDelete: () => void; onLink: () => void; onSendToNewProducts: () => void;
+  onSplit: (orderId: number, destination: string, qtys: Record<string, number>) => void;
 }) {
   // Right-click menu on the first column (admin only): add / delete rows.
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
@@ -25354,9 +25355,9 @@ function JJOrderRow({
   const totalQty = lines.reduce((sum, l) => sum + (l.qtyOrdered || 0), 0);
   const costBaht = (order as { costBaht?: number | null }).costBaht ?? null;
   const costAud = costBaht ? convertBahtToAud(costBaht, thbPerAudCachedRate) : null;
-  // Split to destination (same as the restock sheet).
+  // Split to destination (same as the restock sheet). The submit is handled by
+  // the parent so it can update the sheet optimistically.
   const [splitOpen, setSplitOpen] = useState(false);
-  const splitFetcher = useFetcher();
   const qtyBySize = lines.reduce<Record<string, number>>((acc, l) => {
     acc[l.variantTitle] = (acc[l.variantTitle] ?? 0) + (l.qtyOrdered || 0);
     return acc;
@@ -25394,7 +25395,7 @@ function JJOrderRow({
             currentDestination={destinationLocal}
             onClose={() => setSplitOpen(false)}
             onSubmit={(destination, qtys) => {
-              splitFetcher.submit({ intent: "split_order_to_destination", orderId: String(order.id), destination, qtys: JSON.stringify(qtys) }, { method: "post" });
+              onSplit(order.id, destination, qtys);
               setSplitOpen(false);
             }}
           />
@@ -25578,8 +25579,17 @@ function JJRestockPanel({
   // Which order (if any) is picking a Shopify product to link to.
   const [linkingOrderId, setLinkingOrderId] = useState<number | null>(null);
   // Single sheet (no tabs): every JJ order shows here, like the Existing
-  // Products Restock sheet.
-  const addOrder = () => rowFetcher.submit({ intent: "jj_add_order" }, { method: "post" });
+  // Products Restock sheet. Local copy of the orders so add / delete / split
+  // apply INSTANTLY (optimistic); the server + loader revalidation reconcile in
+  // the background and this resyncs to the truth when fresh orders arrive.
+  const [localOrders, setLocalOrders] = useState<Order[]>(orders);
+  useEffect(() => { setLocalOrders(orders); }, [orders]);
+  const tempId = () => -(Date.now() + Math.floor(Math.random() * 1000));
+  const addOrder = () => {
+    const temp = { id: tempId(), productId: "", productTitle: "New product", supplier: "JJ", supplierStatus: "on_order", poNumber: null, destination: null, colourCode: null, styleCode: null, skuBase: null, barcodeBase: null, costBaht: null, productImageUrl: null, createdAt: new Date().toISOString(), totalQty: 0, lines: [] } as unknown as Order;
+    setLocalOrders((prev) => [...prev, temp]);
+    rowFetcher.submit({ intent: "jj_add_order" }, { method: "post" });
+  };
   const sendFetcher = useFetcher<{ ok?: boolean; sentTo?: string; updated?: boolean }>();
   const sendToNewProducts = (orderId: number) => sendFetcher.submit({ intent: "jj_send_to_new_products", orderId: String(orderId) }, { method: "post" });
   useEffect(() => {
@@ -25592,7 +25602,27 @@ function JJRestockPanel({
   }, [sendFetcher.data]);
   const deleteOrder = (orderId: number) => {
     if (!window.confirm("Delete this product row? This can't be undone.")) return;
+    setLocalOrders((prev) => prev.filter((o) => o.id !== orderId));  // optimistic
     rowFetcher.submit({ intent: "jj_delete_order", orderId: String(orderId) }, { method: "post" });
+  };
+  // Split part of an order to a destination — optimistic: deduct the moved qtys
+  // from the source and add the split-off order immediately.
+  const splitOrder = (orderId: number, destination: string, qtys: Record<string, number>) => {
+    type SplitLine = { variantTitle: string; qtyOrdered: number; sku?: string | null; barcode?: string | null; variantId?: string };
+    setLocalOrders((prev) => {
+      const src = prev.find((o) => o.id === orderId) as (Order & { lines?: SplitLine[] }) | undefined;
+      if (!src) return prev;
+      const srcLines: SplitLine[] = src.lines ?? [];
+      const deductedLines = srcLines.map((l: SplitLine) => { const q = qtys[l.variantTitle] ?? 0; return q > 0 ? { ...l, qtyOrdered: Math.max(0, (l.qtyOrdered || 0) - q) } : l; });
+      const deducted = { ...src, lines: deductedLines, totalQty: deductedLines.reduce((s: number, l: SplitLine) => s + (l.qtyOrdered || 0), 0) } as Order;
+      const splitLines: SplitLine[] = Object.entries(qtys).filter(([, q]) => (q || 0) > 0).map(([size, q]) => {
+        const sl = srcLines.find((l: SplitLine) => l.variantTitle === size);
+        return { variantTitle: size, qtyOrdered: q, sku: sl?.sku ?? null, barcode: sl?.barcode ?? null, variantId: sl?.variantId ?? "" };
+      });
+      const tempSplit = { ...src, id: tempId(), destination, lines: splitLines, totalQty: splitLines.reduce((s: number, l: SplitLine) => s + (l.qtyOrdered || 0), 0), createdAt: new Date().toISOString() } as unknown as Order;
+      return prev.map((o) => o.id === orderId ? deducted : o).concat([tempSplit]);
+    });
+    rowFetcher.submit({ intent: "split_order_to_destination", orderId: String(orderId), destination, qtys: JSON.stringify(qtys) }, { method: "post" });
   };
 
   // Column model. Everything up to and including Name is frozen (sticky
@@ -25667,7 +25697,7 @@ function JJRestockPanel({
       || ((o as { barcodeBase?: string | null }).barcodeBase ?? "").toLowerCase().includes(term)
       || lines.some((l) => (l.sku ?? "").toLowerCase().includes(term) || (l.barcode ?? "").toLowerCase().includes(term));
   };
-  const visible = (term ? orders.filter(matchesTerm) : orders) as Order[];
+  const visible = (term ? localOrders.filter(matchesTerm) : localOrders) as Order[];
 
   const toggle = (id: number) => setSelected((prev) => {
     const next = new Set(prev);
@@ -25788,6 +25818,7 @@ function JJRestockPanel({
                 onDelete={() => deleteOrder(order.id)}
                 onLink={() => setLinkingOrderId(order.id)}
                 onSendToNewProducts={() => sendToNewProducts(order.id)}
+                onSplit={splitOrder}
               />
             ))}
             {visible.length === 0 && (
