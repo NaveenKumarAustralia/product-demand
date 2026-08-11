@@ -25354,16 +25354,28 @@ function JJOrderRow({
   const totalQty = lines.reduce((sum, l) => sum + (l.qtyOrdered || 0), 0);
   const costBaht = (order as { costBaht?: number | null }).costBaht ?? null;
   const costAud = costBaht ? convertBahtToAud(costBaht, thbPerAudCachedRate) : null;
+  // Split to destination (same as the restock sheet).
+  const [splitOpen, setSplitOpen] = useState(false);
+  const splitFetcher = useFetcher();
+  const qtyBySize = lines.reduce<Record<string, number>>((acc, l) => {
+    acc[l.variantTitle] = (acc[l.variantTitle] ?? 0) + (l.qtyOrdered || 0);
+    return acc;
+  }, {});
+  // Destination stamp — translucent coloured row + a stamp overlay, same as the
+  // restock sheet.
+  const destinationStamp = destinationStampStyle(destinationLocal, restockSettings.destinationOptions);
+  const destinationRowBg = destinationStamp ? { background: destinationStamp.rowBg } : undefined;
   return (
-    <tr style={s.row}>
+    <tr style={{ ...s.row, ...(destinationStamp ? { background: destinationStamp.rowBg } : {}) }}>
       <td
-        style={{ ...s.td, textAlign: "center", ...frozenTd(0) }}
+        style={{ ...s.td, textAlign: "center", ...frozenTd(0), ...destinationRowBg }}
         onContextMenu={isAdmin ? (e) => { e.preventDefault(); setRowMenu({ x: e.clientX, y: e.clientY }); } : undefined}
-        title={isAdmin ? "Right-click to add / delete rows" : undefined}
+        title={isAdmin ? "Right-click for row actions" : undefined}
       >
         {canLoadInventory ? <input type="checkbox" checked={selected} onChange={onToggle} /> : null}
         {rowMenu && typeof document !== "undefined" && createPortal(
-          <div style={{ position: "fixed", left: rowMenu.x, top: rowMenu.y, zIndex: 2147483647, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.16)", padding: 4, minWidth: 150 }} onMouseDown={(e) => e.stopPropagation()}>
+          <div style={{ position: "fixed", left: rowMenu.x, top: rowMenu.y, zIndex: 2147483647, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.16)", padding: 4, minWidth: 170 }} onMouseDown={(e) => e.stopPropagation()}>
+            <button type="button" onClick={() => { setRowMenu(null); setSplitOpen(true); }} style={s.contextMenuButton}>Split to destination…</button>
             <button type="button" onClick={() => { setRowMenu(null); onAddRow(); }} style={s.contextMenuButton}>+ Add product row</button>
             {!linked && (
               <button type="button" onClick={() => { setRowMenu(null); onSendToNewProducts(); }} style={s.contextMenuButton}>Send to New Products →</button>
@@ -25372,10 +25384,25 @@ function JJOrderRow({
           </div>,
           document.body,
         )}
+        {splitOpen && (
+          <RestockSplitModal
+            productTitle={order.productTitle}
+            productId={order.productId}
+            sizes={sizes}
+            available={qtyBySize}
+            destinationOptions={restockSettings.destinationOptions}
+            currentDestination={destinationLocal}
+            onClose={() => setSplitOpen(false)}
+            onSubmit={(destination, qtys) => {
+              splitFetcher.submit({ intent: "split_order_to_destination", orderId: String(order.id), destination, qtys: JSON.stringify(qtys) }, { method: "post" });
+              setSplitOpen(false);
+            }}
+          />
+        )}
       </td>
       {/* Order Date — when the order was placed (auto), like the restock sheet. */}
-      <td style={{ ...s.td, textAlign: "center", ...frozenTd(1) }}><span style={s.dateText}>{formatPortalDate(order.createdAt)}</span></td>
-      <td style={{ ...s.td, ...frozenTd(2) }}>
+      <td style={{ ...s.td, textAlign: "center", ...frozenTd(1), ...destinationRowBg }}><span style={s.dateText}>{formatPortalDate(order.createdAt)}</span></td>
+      <td style={{ ...s.td, ...frozenTd(2), ...destinationRowBg }}>
         <div style={s.imageCell}>
           {order.productImageUrl ? (
             <img
@@ -25388,8 +25415,8 @@ function JJOrderRow({
           ) : <div style={s.noImg}>—</div>}
         </div>
       </td>
-      <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(3) }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} productName={order.productTitle} /></td>
-      <td style={{ ...s.td, ...frozenTd(4) }}>
+      <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(3), ...destinationRowBg }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} productName={order.productTitle} /></td>
+      <td style={{ ...s.td, ...frozenTd(4), ...destinationRowBg, overflow: "visible" }}>
         {linked
           ? <span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span>
           : (
@@ -25403,6 +25430,36 @@ function JJOrderRow({
               </div>
             </div>
           )}
+        {/* Destination stamp overlay — centred across the frozen columns,
+            pinned to the bottom, same treatment as the restock sheet. */}
+        {destinationStamp && (
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              bottom: 6,
+              left: -((frozenOffsets[4] ?? 0)) / 2,
+              transform: "translateX(-50%)",
+              pointerEvents: "none",
+              color: destinationStamp.stampColor,
+              border: `3px solid ${destinationStamp.stampColor}`,
+              borderRadius: 6,
+              padding: "4px 12px",
+              fontSize: 16,
+              fontWeight: 900,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+              opacity: 0.7,
+              fontFamily: "Georgia, 'Times New Roman', serif",
+              whiteSpace: "nowrap",
+              zIndex: 50,
+              textShadow: "0 0 2px #fff",
+              background: "transparent",
+            }}
+          >
+            {destinationStamp.label}
+          </div>
+        )}
       </td>
       {sizes.map((sz, sizeIdx) => {
         const line = lineForSize(sz);
