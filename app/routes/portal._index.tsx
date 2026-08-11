@@ -9498,6 +9498,9 @@ export default function PortalDashboard() {
   // Active JJ order tab — lifted here so the header totals can show just the
   // selected tab's numbers (the tab bar itself lives in JJRestockPanel).
   const [jjActiveTabId, setJjActiveTabId] = useState("");
+  // JJ search — lifted so it can live in the header (same spot/style as the
+  // Existing Products Restock search).
+  const [jjSearch, setJjSearch] = useState("");
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { url: string; alt?: string };
@@ -9897,6 +9900,18 @@ export default function PortalDashboard() {
                   />
                 </label>
               )}
+              {page === "jj-restock" && (
+                <label style={s.filterLabel}>
+                  Search
+                  <input
+                    type="search"
+                    value={jjSearch}
+                    onChange={(event) => setJjSearch(event.currentTarget.value)}
+                    style={s.searchInput}
+                    placeholder="Product, SKU, barcode"
+                  />
+                </label>
+              )}
               <MessagesMenu messages={messages} />
               <ThreadPanel users={users} currentUser={currentUser} />
               <div style={s.activeUsers} title="Currently active">
@@ -10079,6 +10094,7 @@ export default function PortalDashboard() {
             tabs={jjTabs}
             activeTabId={jjActiveTabId}
             onActiveTabChange={setJjActiveTabId}
+            search={jjSearch}
           />
         ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -25514,14 +25530,13 @@ function JJOrderRow({
 }
 
 function JJRestockPanel({
-  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, tabs, activeTabId: activeTabIdProp, onActiveTabChange,
+  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, tabs, activeTabId: activeTabIdProp, onActiveTabChange, search = "",
 }: {
   orders: Order[]; sizes: string[]; thbPerAudCachedRate: number | null; fxBahtBuffer: number;
   restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>; tabs: JJTab[];
-  activeTabId: string; onActiveTabChange: (id: string) => void;
+  activeTabId: string; onActiveTabChange: (id: string) => void; search?: string;
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [search, setSearch] = useState("");
   const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
   const rowFetcher = useFetcher<{ jjError?: string }>();
   const widthsFetcher = useFetcher();
@@ -25660,12 +25675,20 @@ function JJRestockPanel({
   const jjTableWidth = jjColumns.reduce((sum, c) => sum + widthFor(c.id), 0);
 
   const term = search.trim().toLowerCase();
-  const visible = (term
-    ? ordersInActiveTab.filter((o) =>
-        (o.productTitle ?? "").toLowerCase().includes(term)
-        || ((o as { styleCode?: string | null }).styleCode ?? "").toLowerCase().includes(term)
-        || ((o as { colourCode?: string | null }).colourCode ?? "").toLowerCase().includes(term))
-    : ordersInActiveTab) as Order[];
+  // Search spans ALL visible tabs (hidden tabs stay hidden) and matches name,
+  // style/colour code, and SKU/barcode (base + per-line). No term = active tab.
+  const visibleTabIds = new Set(visibleTabs.map((t) => t.id));
+  const searchableOrders = orders.filter((o) => visibleTabIds.has(tabOf(o)));
+  const matchesTerm = (o: Order) => {
+    const lines = (o.lines ?? []) as Array<{ sku?: string | null; barcode?: string | null }>;
+    return (o.productTitle ?? "").toLowerCase().includes(term)
+      || ((o as { styleCode?: string | null }).styleCode ?? "").toLowerCase().includes(term)
+      || ((o as { colourCode?: string | null }).colourCode ?? "").toLowerCase().includes(term)
+      || ((o as { skuBase?: string | null }).skuBase ?? "").toLowerCase().includes(term)
+      || ((o as { barcodeBase?: string | null }).barcodeBase ?? "").toLowerCase().includes(term)
+      || lines.some((l) => (l.sku ?? "").toLowerCase().includes(term) || (l.barcode ?? "").toLowerCase().includes(term));
+  };
+  const visible = (term ? searchableOrders.filter(matchesTerm) : ordersInActiveTab) as Order[];
 
   const toggle = (id: number) => setSelected((prev) => {
     const next = new Set(prev);
@@ -25729,12 +25752,11 @@ function JJRestockPanel({
         )}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <input
-          placeholder="Search JJ products…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={s.jjSearchInput}
-        />
+        {term && (
+          <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280" }}>
+            {visible.length} match{visible.length === 1 ? "" : "es"} across all tabs
+          </span>
+        )}
         {isAdmin && selectedCount > 0 && tabList.length > 1 && (
           <select
             value=""
