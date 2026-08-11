@@ -1636,6 +1636,29 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  // ─── JJ Restock — set a per-size SKU / barcode on an order line (new products
+  // only; linked products get these from Shopify). Creates a qty-0 line to hold
+  // the code if the size hasn't been ordered yet.
+  if (intent === "jj_set_line_code") {
+    if (!currentUser) return null;
+    const oid = Number(form.get("orderId"));
+    const size = String(form.get("size") ?? "").trim();
+    const field = String(form.get("field") ?? "");
+    const raw = String(form.get("value") ?? "").trim().slice(0, 128);
+    if (!oid || !size || (field !== "sku" && field !== "barcode")) return null;
+    try {
+      const line = await prisma.orderLine.findFirst({ where: { orderId: oid, variantTitle: size }, orderBy: { id: "asc" }, select: { id: true } });
+      if (line) {
+        await prisma.orderLine.update({ where: { id: line.id }, data: { [field]: raw || null } });
+      } else {
+        await prisma.orderLine.create({ data: { orderId: oid, variantId: `${oid}:${size}`, variantTitle: size, qtyOrdered: 0, [field]: raw || null } });
+      }
+    } catch (e) {
+      console.warn("[jj_set_line_code] failed:", e);
+    }
+    return null;
+  }
+
   // ─── JJ Restock — add a blank product row (admin only). Used to place an
   // order for a product that doesn't exist in Shopify yet. No productId, so
   // it shows the "Link to Shopify" action instead of Load until linked.
@@ -3350,22 +3373,36 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     };
 
     const qtyByColId: Record<string, string> = {};
+    const lineByColId = new Map<string, (typeof order.lines)[number]>();
     for (const line of order.lines) {
-      const qty = line.qtyOrdered || 0;
-      if (qty <= 0) continue;
       const colId = colIdForSize(line.variantTitle);
-      if (colId) qtyByColId[colId] = String((Number(qtyByColId[colId] ?? 0) || 0) + qty);
+      if (!colId) continue;
+      if (!lineByColId.has(colId)) lineByColId.set(colId, line);
+      const qty = line.qtyOrdered || 0;
+      if (qty > 0) qtyByColId[colId] = String((Number(qtyByColId[colId] ?? 0) || 0) + qty);
     }
+
+    // Per-size SKU / barcode → the sheet's SKU/Barcode cells as one line per
+    // ordered size, in the sheet's size-column order (so createShopifyProductFromRow
+    // maps them to the right variant). Filled in per variant on the JJ order row.
+    const skuLines: string[] = [];
+    const barcodeLines: string[] = [];
+    for (const [colId] of COLLECTION_SIZE_COLUMN_LABELS) {
+      if (!qtyByColId[colId]) continue;
+      const l = lineByColId.get(colId);
+      skuLines.push((l?.sku ?? "").trim());
+      barcodeLines.push((l?.barcode ?? "").trim());
+    }
+    const skuVal = skuLines.some(Boolean) ? skuLines.join("\n") : "";
+    const barcodeVal = barcodeLines.some(Boolean) ? barcodeLines.join("\n") : "";
 
     const rows = normalizeCollectionRows(inbox.rows);
     const existingIdx = rows.findIndex((r) => String(r[COL_ROW_JJ_ORDER_ID] ?? "").trim() === String(orderId));
-    const skuBase = ((order as { skuBase?: string | null }).skuBase ?? "").trim();
-    const barcodeBase = ((order as { barcodeBase?: string | null }).barcodeBase ?? "").trim();
     const rowData: Record<string, string> = {
       name: order.productTitle || "New product",
       ...qtyByColId,
-      ...(skuBase ? { sku: skuBase } : {}),
-      ...(barcodeBase ? { barcode: barcodeBase } : {}),
+      ...(skuVal ? { sku: skuVal } : {}),
+      ...(barcodeVal ? { barcode: barcodeVal } : {}),
       [COL_ROW_JJ_ORDER_ID]: String(orderId),
     };
     if (existingIdx >= 0) {
@@ -4973,6 +5010,9 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // Status is now a controlled chip (statusLocal) and ETA is an uncontrolled
   // text input — both keep their displayed value without a loader refresh.
   if (intent === "update_status" || intent === "update_eta") return false;
+  // Per-size SKU/barcode edits are one-cell writes; the input keeps its own
+  // value, so no need to re-run the heavy JJ loader.
+  if (intent === "jj_set_line_code") return false;
   // Fabric-in-stock cell edits: each FabricCell keeps its own draft state and
   // the write is already serialized server-side, so a single cell edit never
   // needs the (heavy) fabric-page loader to re-run. Rapid fabric editing was a
@@ -25265,6 +25305,34 @@ function JJFieldCell({ orderId, field, value, numeric, placeholder }: {
   );
 }
 
+// Per-variant SKU / barcode input for NEW (unlinked) JJ products — each size
+// gets its own code, typed here and carried to the JJ New Products sheet on
+// "Send to New Products". Saved to the size's order line via jj_set_line_code.
+function JJSizeCodeInput({ orderId, size, field, value, placeholder, loaded }: {
+  orderId: number; size: string; field: "sku" | "barcode"; value: string; placeholder?: string; loaded?: boolean;
+}) {
+  const fetcher = useFetcher();
+  return (
+    <input
+      type="text"
+      defaultValue={value}
+      placeholder={placeholder}
+      onFocus={(e) => e.currentTarget.select()}
+      onBlur={(e) => {
+        const next = e.currentTarget.value.trim();
+        if (next === (value || "").trim()) return;
+        fetcher.submit({ intent: "jj_set_line_code", orderId: String(orderId), size, field, value: next }, { method: "post" });
+      }}
+      style={{
+        width: "100%", boxSizing: "border-box", fontSize: 10, textAlign: "center",
+        border: "1px solid #d1d5db", borderRadius: 3, padding: "1px 2px",
+        background: loaded ? "rgba(255,255,255,0.15)" : "#fff",
+        color: loaded ? "#fff" : "#111827",
+      }}
+    />
+  );
+}
+
 // Colour Code cell. The cell's fill colour is derived from the colour word in
 // the product name (not the typed number). The input is absolutely positioned
 // to fill the entire cell (rows can be tall, and a plain input won't stretch),
@@ -25420,17 +25488,7 @@ function JJOrderRow({
       <td style={{ ...s.td, ...frozenTd(4), ...destinationRowBg, overflow: "visible" }}>
         {linked
           ? <span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span>
-          : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <JJFieldCell orderId={order.id} field="name" value={order.productTitle ?? ""} placeholder="Product name" />
-              {/* New products only: base SKU + Barcode, synced to the JJ New
-                  Products sheet. Blank until typed here or on the sheet. */}
-              <div style={{ display: "flex", gap: 4 }}>
-                <JJFieldCell orderId={order.id} field="skuBase" value={(order as { skuBase?: string | null }).skuBase ?? ""} placeholder="SKU" />
-                <JJFieldCell orderId={order.id} field="barcodeBase" value={(order as { barcodeBase?: string | null }).barcodeBase ?? ""} placeholder="Barcode" />
-              </div>
-            </div>
-          )}
+          : <JJFieldCell orderId={order.id} field="name" value={order.productTitle ?? ""} placeholder="Product name" />}
         {/* Destination stamp overlay — centred across the frozen columns,
             pinned to the bottom, same treatment as the restock sheet. */}
         {destinationStamp && (
@@ -25479,12 +25537,18 @@ function JJOrderRow({
               <div style={s.jjSizeCell}>
                 <div style={s.jjSizeBlock}>
                   <span style={{ ...s.jjSizeLabel, ...(loaded ? { color: "rgba(255,255,255,0.85)" } : {}) }}>SKU</span>
-                  <span style={{ ...s.jjSizeSku, ...(loaded ? { color: "#fff" } : {}) }}>{line.sku || "—"}</span>
+                  {/* New (unlinked) products: type the SKU per variant. Linked
+                      products keep the Shopify-sourced SKU (read-only). */}
+                  {linked
+                    ? <span style={{ ...s.jjSizeSku, ...(loaded ? { color: "#fff" } : {}) }}>{line.sku || "—"}</span>
+                    : <JJSizeCodeInput orderId={order.id} size={sz} field="sku" value={line.sku ?? ""} placeholder="SKU" loaded={loaded} />}
                 </div>
                 <QtyCell orderId={order.id} size={sz} value={line.qtyOrdered ?? 0} restockSettings={restockSettings} loaded={loaded} />
                 <div style={s.jjSizeBlock}>
                   <span style={{ ...s.jjSizeLabel, ...(loaded ? { color: "rgba(255,255,255,0.85)" } : {}) }}>Barcode</span>
-                  <span style={{ ...s.jjSizeBarcode, ...(loaded ? { color: "#fff" } : {}) }}>{line.barcode || "—"}</span>
+                  {linked
+                    ? <span style={{ ...s.jjSizeBarcode, ...(loaded ? { color: "#fff" } : {}) }}>{line.barcode || "—"}</span>
+                    : <JJSizeCodeInput orderId={order.id} size={sz} field="barcode" value={line.barcode ?? ""} placeholder="Barcode" loaded={loaded} />}
                 </div>
               </div>
             ) : (
