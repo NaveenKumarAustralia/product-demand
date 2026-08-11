@@ -9495,9 +9495,6 @@ export default function PortalDashboard() {
     return () => document.removeEventListener("show-cost-breakdown", handler);
   }, []);
   const [imageLightbox, setImageLightbox] = useState<{ url: string; alt: string } | null>(null);
-  // Active JJ order tab — lifted here so the header totals can show just the
-  // selected tab's numbers (the tab bar itself lives in JJRestockPanel).
-  const [jjActiveTabId, setJjActiveTabId] = useState("");
   // JJ search — lifted so it can live in the header (same spot/style as the
   // Existing Products Restock search).
   const [jjSearch, setJjSearch] = useState("");
@@ -9616,22 +9613,6 @@ export default function PortalDashboard() {
   if (loginBlocked) {
     return <PortalLogin />;
   }
-
-  // JJ header totals scoped to the SELECTED tab (not the whole page). An order
-  // belongs to a tab by poNumber (empty → the first tab), matching JJRestockPanel.
-  const jjFirstTabId = jjTabs[0]?.id ?? "";
-  const jjEffectiveTabId = jjActiveTabId || jjFirstTabId;
-  const jjActiveTabName = (jjTabs as JJTab[]).find((t: JJTab) => t.id === jjEffectiveTabId)?.name ?? "";
-  const jjTabTotals = page === "jj-restock"
-    ? (() => {
-        const inTab = (orders as Order[]).filter((o: Order) => (((o as { poNumber?: string | null }).poNumber ?? "").trim() || jjFirstTabId) === jjEffectiveTabId);
-        return {
-          orderCount: inTab.length,
-          totalQty: inTab.reduce((sum: number, o: Order) => sum + (o.totalQty ?? 0), 0),
-          totalBaht: inTab.reduce((sum: number, o: Order) => sum + (((o as { costBaht?: number | null }).costBaht ?? 0) * (o.totalQty ?? 0)), 0),
-        };
-      })()
-    : null;
 
   const startResize = (columnId: string, event: React.MouseEvent<HTMLSpanElement>) => {
     event.preventDefault();
@@ -9834,10 +9815,8 @@ export default function PortalDashboard() {
                 restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
                 || restockTotalsFiltered.totalQty !== restockTotalsAll.totalQty
               );
-              // JJ: show only the selected tab's totals (labelled with the tab
-              // name). Karma East restock keeps the all/filtered totals.
-              const totals = page === "jj-restock" && jjTabTotals ? jjTabTotals : (showFiltered ? restockTotalsFiltered : restockTotalsAll);
-              const label = page === "jj-restock" ? (jjActiveTabName || "Tab") : (showFiltered ? "Filtered" : "Total");
+              const totals = showFiltered ? restockTotalsFiltered : restockTotalsAll;
+              const label = showFiltered ? "Filtered" : "Total";
               const fmt = (n: number) => n.toLocaleString();
               // JJ page also shows the total order value in baht + AUD.
               const totalAud = page === "jj-restock" ? convertBahtToAud(totals.totalBaht, thbPerAudCachedRate) : null;
@@ -10091,9 +10070,6 @@ export default function PortalDashboard() {
             canLoadInventory={Boolean((currentUser?.canLoadInventory || currentUser?.admin) && !jjSupplierOnly)}
             isAdmin={Boolean(currentUser?.admin)}
             savedColumnWidths={jjColumnWidths}
-            tabs={jjTabs}
-            activeTabId={jjActiveTabId}
-            onActiveTabChange={setJjActiveTabId}
             search={jjSearch}
           />
         ) : !isRestockPage ? (
@@ -25330,7 +25306,7 @@ function JJColourCodeCell({ orderId, value, productName }: { orderId: number; va
 const JJ_SIZE_COL_WIDTH = 132;
 const JJ_LOAD_COL_WIDTH = 84;
 // Columns frozen (sticky-left): select, picture, colour code, name.
-const JJ_FROZEN_COLUMN_COUNT = 4;
+const JJ_FROZEN_COLUMN_COUNT = 5;
 
 function JJOrderRow({
   order, sizes, rowIndex, frozenOffsets, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
@@ -25397,7 +25373,9 @@ function JJOrderRow({
           document.body,
         )}
       </td>
-      <td style={{ ...s.td, ...frozenTd(1) }}>
+      {/* Order Date — when the order was placed (auto), like the restock sheet. */}
+      <td style={{ ...s.td, textAlign: "center", ...frozenTd(1) }}><span style={s.dateText}>{formatPortalDate(order.createdAt)}</span></td>
+      <td style={{ ...s.td, ...frozenTd(2) }}>
         <div style={s.imageCell}>
           {order.productImageUrl ? (
             <img
@@ -25410,8 +25388,8 @@ function JJOrderRow({
           ) : <div style={s.noImg}>—</div>}
         </div>
       </td>
-      <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(2) }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} productName={order.productTitle} /></td>
-      <td style={{ ...s.td, ...frozenTd(3) }}>
+      <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(3) }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} productName={order.productTitle} /></td>
+      <td style={{ ...s.td, ...frozenTd(4) }}>
         {linked
           ? <span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span>
           : (
@@ -25530,75 +25508,21 @@ function JJOrderRow({
 }
 
 function JJRestockPanel({
-  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, tabs, activeTabId: activeTabIdProp, onActiveTabChange, search = "",
+  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, search = "",
 }: {
   orders: Order[]; sizes: string[]; thbPerAudCachedRate: number | null; fxBahtBuffer: number;
-  restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>; tabs: JJTab[];
-  activeTabId: string; onActiveTabChange: (id: string) => void; search?: string;
+  restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>; search?: string;
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
   const rowFetcher = useFetcher<{ jjError?: string }>();
   const widthsFetcher = useFetcher();
-  const tabFetcher = useFetcher();
   const loading = loadFetcher.state !== "idle";
   // Which order (if any) is picking a Shopify product to link to.
   const [linkingOrderId, setLinkingOrderId] = useState<number | null>(null);
-  // ─── Order tabs ─────────────────────────────────────────────────────────
-  const tabList = tabs.length ? tabs : JJ_DEFAULT_TABS;
-  const firstTabId = tabList[0].id;
-  // Hidden tabs are removed from the portal too (supplier can't see them).
-  // Admins can flip "Show hidden" to reveal them (dimmed) for unhiding.
-  const [showHiddenTabs, setShowHiddenTabs] = useState(false);
-  const hiddenCount = tabList.filter((t) => t.hidden).length;
-  const visibleTabs = tabList.filter((t) => (isAdmin && showHiddenTabs) || !t.hidden);
-  const firstVisibleTabId = visibleTabs[0]?.id ?? firstTabId;
-  // Active tab is controlled by the parent so the header can show its totals.
-  const setActiveTabId = onActiveTabChange;
-  const activeTabId = activeTabIdProp || firstVisibleTabId;
-  // Sync the parent to a concrete visible tab: on first mount (prop is "") or
-  // when the active tab is deleted/hidden, so a supplier never lands on a hidden
-  // sheet and the header totals always match a real tab.
-  useEffect(() => { if (!visibleTabs.some((t) => t.id === activeTabIdProp)) setActiveTabId(firstVisibleTabId); }, [visibleTabs, activeTabIdProp, firstVisibleTabId]);
-  // An order belongs to a tab by its poNumber; empty poNumber → the first tab.
-  const tabOf = (o: Order) => ((o as { poNumber?: string | null }).poNumber ?? "").trim() || firstTabId;
-  const ordersInActiveTab = useMemo(() => orders.filter((o) => tabOf(o) === activeTabId), [orders, activeTabId, firstTabId]);
-  const countByTab = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const o of orders) m.set(tabOf(o), (m.get(tabOf(o)) ?? 0) + 1);
-    return m;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orders, firstTabId]);
-  const saveTabs = (next: JJTab[]) => tabFetcher.submit({ intent: "jj_set_tabs", tabs: JSON.stringify(next) }, { method: "post" });
-  const addTab = () => {
-    const name = window.prompt("Name this order tab (e.g. a date):", "")?.trim();
-    if (!name) return;
-    const id = `t_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
-    saveTabs([...tabList, { id, name }]);
-    setActiveTabId(id);
-  };
-  const renameTab = (id: string) => {
-    const cur = tabList.find((t) => t.id === id);
-    const name = window.prompt("Rename order tab:", cur?.name ?? "")?.trim();
-    if (!name) return;
-    saveTabs(tabList.map((t) => t.id === id ? { ...t, name } : t));
-  };
-  const deleteTab = (id: string) => {
-    if (tabList.length <= 1) { window.alert("You need at least one order tab."); return; }
-    const cnt = countByTab.get(id) ?? 0;
-    if (!window.confirm(cnt > 0 ? `Delete this tab? Its ${cnt} order(s) will move to “${tabList.find((t) => t.id !== id)?.name}”.` : "Delete this empty tab?")) return;
-    tabFetcher.submit({ intent: "jj_delete_tab", tabId: id }, { method: "post" });
-  };
-  // Hidden tabs stay in the portal (dimmed) but are removed from the Shopify
-  // product-page order dropdown, so finished order sheets don't clutter it.
-  const toggleHideTab = (id: string) => saveTabs(tabList.map((t) => t.id === id ? { ...t, hidden: !t.hidden } : t));
-  const moveSelectedToTab = (tabId: string) => {
-    const ids = ordersInActiveTab.filter((o) => selected.has(o.id)).map((o) => o.id);
-    if (!ids.length) return;
-    tabFetcher.submit({ intent: "jj_move_orders_to_tab", tab: tabId, orderIds: ids.join(",") }, { method: "post" });
-    setSelected(new Set());
-  };
-  const addOrder = () => rowFetcher.submit({ intent: "jj_add_order", tab: activeTabId }, { method: "post" });
+  // Single sheet (no tabs): every JJ order shows here, like the Existing
+  // Products Restock sheet.
+  const addOrder = () => rowFetcher.submit({ intent: "jj_add_order" }, { method: "post" });
   const sendFetcher = useFetcher<{ ok?: boolean; sentTo?: string; updated?: boolean }>();
   const sendToNewProducts = (orderId: number) => sendFetcher.submit({ intent: "jj_send_to_new_products", orderId: String(orderId) }, { method: "post" });
   useEffect(() => {
@@ -25619,6 +25543,7 @@ function JJRestockPanel({
   const jjColumns = useMemo(() => {
     const cols: Array<{ id: string; label: string; defaultWidth: number; center?: boolean }> = [
       { id: "select", label: "#", defaultWidth: 44, center: true },
+      { id: "orderDate", label: "Order Date", defaultWidth: 100, center: true },
       { id: "picture", label: "Picture", defaultWidth: 90 },
       { id: "colourCode", label: "Colour Code", defaultWidth: 120 },
       { id: "name", label: "Name", defaultWidth: 160 },
@@ -25675,10 +25600,7 @@ function JJRestockPanel({
   const jjTableWidth = jjColumns.reduce((sum, c) => sum + widthFor(c.id), 0);
 
   const term = search.trim().toLowerCase();
-  // Search spans ALL visible tabs (hidden tabs stay hidden) and matches name,
-  // style/colour code, and SKU/barcode (base + per-line). No term = active tab.
-  const visibleTabIds = new Set(visibleTabs.map((t) => t.id));
-  const searchableOrders = orders.filter((o) => visibleTabIds.has(tabOf(o)));
+  // Search matches name, style/colour code, and SKU/barcode (base + per-line).
   const matchesTerm = (o: Order) => {
     const lines = (o.lines ?? []) as Array<{ sku?: string | null; barcode?: string | null }>;
     return (o.productTitle ?? "").toLowerCase().includes(term)
@@ -25688,7 +25610,7 @@ function JJRestockPanel({
       || ((o as { barcodeBase?: string | null }).barcodeBase ?? "").toLowerCase().includes(term)
       || lines.some((l) => (l.sku ?? "").toLowerCase().includes(term) || (l.barcode ?? "").toLowerCase().includes(term));
   };
-  const visible = (term ? searchableOrders.filter(matchesTerm) : ordersInActiveTab) as Order[];
+  const visible = (term ? orders.filter(matchesTerm) : orders) as Order[];
 
   const toggle = (id: number) => setSelected((prev) => {
     const next = new Set(prev);
@@ -25711,62 +25633,14 @@ function JJRestockPanel({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 10 }}>
-      {/* Order tabs — one sheet of orders per tab (e.g. a date). */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", borderBottom: "2px solid #e5e7eb", paddingBottom: 0 }}>
-        {visibleTabs.map((t) => {
-          const active = t.id === activeTabId;
-          const hidden = Boolean(t.hidden);
-          return (
-            <div
-              key={t.id}
-              onClick={() => setActiveTabId(t.id)}
-              onDoubleClick={() => isAdmin && renameTab(t.id)}
-              title={hidden ? "Hidden — not visible to suppliers or on the Shopify product page" : (isAdmin ? "Click to open · double-click to rename" : undefined)}
-              style={{
-                display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
-                padding: "8px 14px", fontSize: 13, fontWeight: 700, borderRadius: "8px 8px 0 0",
-                border: "1px solid #e5e7eb", borderBottom: active ? "2px solid #fff" : "1px solid #e5e7eb",
-                marginBottom: -2,
-                background: active ? "#fff" : "#f3f4f6",
-                color: active ? "#0f766e" : "#6b7280",
-                ...(hidden ? { opacity: 0.5, fontStyle: "italic" } : {}),
-              }}
-            >
-              {hidden && <span title="Hidden" style={{ fontSize: 11 }}>🚫</span>}
-              {t.name}
-              <span style={{ fontSize: 11, fontWeight: 600, color: "#9ca3af", background: active ? "#ecfdf5" : "#e5e7eb", borderRadius: 999, padding: "1px 7px" }}>{countByTab.get(t.id) ?? 0}</span>
-              {isAdmin && (active || hidden) && (
-                <button type="button" onClick={(e) => { e.stopPropagation(); toggleHideTab(t.id); }} title={hidden ? "Unhide — show to suppliers + on the Shopify product page" : "Hide everywhere — suppliers + Shopify product page"} style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}>{hidden ? "👁" : "🙈"}</button>
-              )}
-              {isAdmin && active && tabList.length > 1 && (
-                <button type="button" onClick={(e) => { e.stopPropagation(); deleteTab(t.id); }} title="Delete this tab" style={{ border: "none", background: "transparent", color: "#9ca3af", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
-              )}
-            </div>
-          );
-        })}
-        {isAdmin && (
-          <button type="button" onClick={addTab} title="Add a new order tab" style={{ border: "1px dashed #cbd5e1", background: "transparent", color: "#0f766e", borderRadius: "8px 8px 0 0", padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", marginBottom: -2 }}>+ New order</button>
-        )}
-        {isAdmin && hiddenCount > 0 && (
-          <button type="button" onClick={() => setShowHiddenTabs((v) => !v)} title="Show or hide the hidden order tabs" style={{ border: "none", background: "transparent", color: "#6b7280", padding: "8px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer", marginBottom: -2 }}>{showHiddenTabs ? `Hide hidden (${hiddenCount})` : `Show hidden (${hiddenCount})`}</button>
-        )}
-      </div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        {isAdmin && (
+          <button type="button" onClick={addOrder} title="Add a blank order row" style={{ border: "1px dashed #cbd5e1", background: "transparent", color: "#0f766e", borderRadius: 6, padding: "7px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>+ Add row</button>
+        )}
         {term && (
           <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280" }}>
-            {visible.length} match{visible.length === 1 ? "" : "es"} across all tabs
+            {visible.length} match{visible.length === 1 ? "" : "es"}
           </span>
-        )}
-        {isAdmin && selectedCount > 0 && tabList.length > 1 && (
-          <select
-            value=""
-            onChange={(e) => { if (e.target.value) moveSelectedToTab(e.target.value); e.currentTarget.value = ""; }}
-            style={{ fontSize: 12, fontWeight: 600, padding: "6px 8px", border: "1px solid #0d9488", borderRadius: 6, background: "#0d9488", color: "#fff", cursor: "pointer" }}
-            title="Move the selected orders to another tab"
-          >
-            <option value="">Move {selectedCount} to tab…</option>
-            {visibleTabs.filter((t) => t.id !== activeTabId).map((t) => <option key={t.id} value={t.id} style={{ color: "#111827", background: "#fff" }}>{t.name}</option>)}
-          </select>
         )}
         {canLoadInventory && (
           <button

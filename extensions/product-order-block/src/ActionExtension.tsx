@@ -10,7 +10,6 @@ import {
   Divider,
   TextField,
   NumberField,
-  Select,
   ProgressIndicator,
 } from "@shopify/ui-extensions-react/admin";
 
@@ -50,11 +49,6 @@ function ProductOrderAction() {
   const [eta, setEta] = useState("");
   const [notes, setNotes] = useState("");
   const [variants, setVariants] = useState<Variant[]>([]);
-  // JJ order tabs (loaded from the portal) so JJ orders can pick which tab
-  // they land in. Empty selection = the portal's first tab (default).
-  const [jjTabs, setJjTabs] = useState<Array<{ id: string; name: string }>>([]);
-  const [jjTab, setJjTab] = useState("");
-  const isJJ = supplier.trim().toLowerCase() === "jj";
 
   useEffect(() => {
     if (!productGid) {
@@ -103,20 +97,6 @@ function ProductOrderAction() {
       } finally {
         setLoading(false);
       }
-
-      // Load the JJ order-tab list (best-effort; only used when supplier = JJ).
-      try {
-        const token = await auth.idToken();
-        if (token) {
-          const r = await fetch(`${APP_URL}/api/jj-tabs`, { headers: { Authorization: `Bearer ${token}` } });
-          if (r.ok) {
-            const j = await r.json();
-            if (Array.isArray(j?.tabs)) setJjTabs(j.tabs);
-          }
-        }
-      } catch {
-        /* tabs are optional — ignore */
-      }
     }
 
     init();
@@ -161,9 +141,7 @@ function ProductOrderAction() {
           productId: product!.id,
           productTitle: product!.title,
           supplier: supplier.trim(),
-          // JJ orders route to the chosen tab (poNumber IS the tab id in the
-          // portal); other suppliers keep the free-text PO number.
-          poNumber: isJJ ? (jjTab || undefined) : (poNumber.trim() || undefined),
+          poNumber: poNumber.trim() || undefined,
           eta: eta || undefined,
           notes: notes.trim() || undefined,
           lines: orderedLines.map((v) => ({
@@ -227,23 +205,11 @@ function ProductOrderAction() {
         onChange={setSupplier}
       />
       <InlineStack gap="base">
-        {isJJ ? (
-          <Select
-            label="JJ order tab"
-            value={jjTab}
-            options={[
-              { value: "", label: "Default (first tab)" },
-              ...jjTabs.map((t) => ({ value: t.id, label: t.name })),
-            ]}
-            onChange={setJjTab}
-          />
-        ) : (
-          <TextField
-            label="PO Number"
-            value={poNumber}
-            onChange={setPoNumber}
-          />
-        )}
+        <TextField
+          label="PO Number"
+          value={poNumber}
+          onChange={setPoNumber}
+        />
         <TextField
           label="ETA (YYYY-MM-DD)"
           value={eta}
