@@ -842,6 +842,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     inrPerAudCachedRate = fresh ? cachedFx!.inrPerAud : await getCachedInrPerAud();
   }
 
+  // The JJ New Products inbox collection id — JJ order product images are stored
+  // against it (reusing the collection image storage + Dropbox picker), and it's
+  // where "Send to New Products" lands. Find-or-create once for the JJ page.
+  let jjInboxCollectionId: number | null = null;
+  if (page === "jj-restock") {
+    try {
+      let inbox = await prisma.collection.findFirst({ where: { kind: "jj-new" }, orderBy: { sortOrder: "asc" }, select: { id: true } });
+      if (!inbox) {
+        const count = await prisma.collection.count();
+        inbox = await prisma.collection.create({ data: { name: "JJ New Products", kind: "jj-new", sortOrder: count, columns: DEFAULT_COLLECTION_COLUMNS as unknown as object, rows: [] as unknown as object }, select: { id: true } });
+      }
+      jjInboxCollectionId = inbox.id;
+    } catch (e) {
+      console.warn("[jj inbox] resolve failed:", e);
+    }
+  }
+
   const rawNavOrder = Array.isArray(navOrderSetting?.value) ? navOrderSetting.value as string[] : DEFAULT_NAV_ORDER;
   const navOrder = DEFAULT_NAV_ORDER.map((id) => id as NavItemId)
     .sort((a, b) => {
@@ -910,6 +927,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     photoShoots,
     photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
     jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
+    jjInboxCollectionId,
     jjTabs: normalizeJJTabs(wrap(JJ_TABS_KEY)?.value),
     fabricStockIndex,
   };
@@ -1655,6 +1673,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     } catch (e) {
       console.warn("[jj_set_line_code] failed:", e);
+    }
+    return null;
+  }
+
+  // ─── JJ Restock — set an order's product image (new products; picked from
+  // Dropbox and stored in the collection image table, then carried to the JJ
+  // New Products sheet on send).
+  if (intent === "jj_set_image") {
+    if (!currentUser) return null;
+    const oid = Number(form.get("orderId"));
+    const url = String(form.get("imageUrl") ?? "").trim().slice(0, 2000);
+    if (!oid) return null;
+    try {
+      await prisma.supplierOrder.update({ where: { id: oid }, data: { productImageUrl: url || null } });
+    } catch (e) {
+      console.warn("[jj_set_image] failed:", e);
     }
     return null;
   }
@@ -3396,6 +3430,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const skuVal = skuLines.some(Boolean) ? skuLines.join("\n") : "";
     const barcodeVal = barcodeLines.some(Boolean) ? barcodeLines.join("\n") : "";
 
+    // Product image → the sheet's Picture (modelPicture) column. Images picked
+    // on the JJ row are stored in the collection image table, so we can pass the
+    // key straight through (served on demand); a plain URL becomes a thumb.
+    const imgUrl = (order.productImageUrl ?? "").trim();
+    let modelPicture = "";
+    if (imgUrl) {
+      const keyMatch = imgUrl.match(/\/portal\/collection-image\/(.+)$/);
+      const entry: CollectionImageEntry = keyMatch ? { thumb: "", key: keyMatch[1] } : { thumb: imgUrl };
+      modelPicture = serializeMultiImageValue([entry]);
+    }
+
     const rows = normalizeCollectionRows(inbox.rows);
     const existingIdx = rows.findIndex((r) => String(r[COL_ROW_JJ_ORDER_ID] ?? "").trim() === String(orderId));
     const rowData: Record<string, string> = {
@@ -3403,6 +3448,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       ...qtyByColId,
       ...(skuVal ? { sku: skuVal } : {}),
       ...(barcodeVal ? { barcode: barcodeVal } : {}),
+      ...(modelPicture ? { modelPicture } : {}),
       [COL_ROW_JJ_ORDER_ID]: String(orderId),
     };
     if (existingIdx >= 0) {
@@ -5013,6 +5059,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // Per-size SKU/barcode edits are one-cell writes; the input keeps its own
   // value, so no need to re-run the heavy JJ loader.
   if (intent === "jj_set_line_code") return false;
+  if (intent === "jj_set_image") return false;
   // Fabric-in-stock cell edits: each FabricCell keeps its own draft state and
   // the write is already serialized server-side, so a single cell edit never
   // needs the (heavy) fabric-page loader to re-run. Rapid fabric editing was a
@@ -9413,6 +9460,7 @@ export default function PortalDashboard() {
     photoShoots,
     photoShootColumnWidths,
     jjColumnWidths,
+    jjInboxCollectionId,
     jjTabs,
     fabricStockIndex,
   } = useLoaderData<typeof loader>();
@@ -10111,6 +10159,7 @@ export default function PortalDashboard() {
             isAdmin={Boolean(currentUser?.admin)}
             savedColumnWidths={jjColumnWidths}
             search={jjSearch}
+            inboxCollectionId={jjInboxCollectionId}
           />
         ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
@@ -25333,6 +25382,52 @@ function JJSizeCodeInput({ orderId, size, field, value, placeholder, loaded }: {
   );
 }
 
+// Picture cell. New (unlinked) products can pick an image from Dropbox (same
+// picker as Collections); it's stored in the collection image table and shown
+// here. Linked products keep their Shopify image (read-only, click to enlarge).
+function JJPictureCell({ orderId, productTitle, imageUrl, inboxCollectionId, canEdit }: {
+  orderId: number; productTitle: string; imageUrl: string; inboxCollectionId: number | null; canEdit: boolean;
+}) {
+  const [localUrl, setLocalUrl] = useState(imageUrl);
+  useEffect(() => { setLocalUrl(imageUrl); }, [imageUrl]);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const fetcher = useFetcher();
+  const setImage = (url: string) => {
+    setLocalUrl(url); // optimistic
+    fetcher.submit({ intent: "jj_set_image", orderId: String(orderId), imageUrl: url }, { method: "post" });
+  };
+  const openPicker = () => { if (inboxCollectionId) setPickerOpen(true); };
+  return (
+    <div style={{ ...s.imageCell, position: "relative" }}>
+      {localUrl ? (
+        <img
+          src={localUrl}
+          alt={productTitle}
+          style={{ ...s.thumb, cursor: "zoom-in" }}
+          title="Click to enlarge"
+          onClick={(e) => { e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-image-lightbox", { detail: { url: localUrl, alt: productTitle } })); }}
+        />
+      ) : canEdit ? (
+        <button type="button" onClick={openPicker} title="Add image from Dropbox" style={{ border: "1px dashed #cbd5e1", background: "#f8fafc", color: "#0f766e", borderRadius: 6, padding: "8px 6px", fontSize: 11, fontWeight: 700, cursor: "pointer", width: "100%" }}>+ Image</button>
+      ) : <div style={s.noImg}>—</div>}
+      {canEdit && localUrl && (
+        <button type="button" onClick={openPicker} title="Change image" style={{ position: "absolute", top: 2, right: 2, border: "none", background: "rgba(255,255,255,0.9)", borderRadius: 4, fontSize: 11, lineHeight: 1, padding: "2px 4px", cursor: "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>✎</button>
+      )}
+      {pickerOpen && inboxCollectionId && (
+        <DropboxImagePicker
+          collectionId={inboxCollectionId}
+          initialQuery={productTitle}
+          onClose={() => setPickerOpen(false)}
+          onAdd={(entries) => {
+            const e = entries[0];
+            if (e) setImage(e.key ? `/portal/collection-image/${e.key}` : e.thumb);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 // Colour Code cell. The cell's fill colour is derived from the colour word in
 // the product name (not the typed number). The input is absolutely positioned
 // to fill the entire cell (rows can be tall, and a plain input won't stretch),
@@ -25378,12 +25473,12 @@ const JJ_FROZEN_COLUMN_COUNT = 5;
 
 function JJOrderRow({
   order, sizes, rowIndex, frozenOffsets, thbPerAudCachedRate, restockSettings, canLoadInventory, selected, onToggle, onLoad, loading,
-  isAdmin, onAddRow, onDelete, onLink, onSendToNewProducts, onSplit,
+  isAdmin, onAddRow, onDelete, onLink, onSendToNewProducts, onSplit, inboxCollectionId,
 }: {
   order: Order; sizes: string[]; rowIndex: number; frozenOffsets: number[]; thbPerAudCachedRate: number | null; restockSettings: RestockSettings;
   canLoadInventory: boolean; selected: boolean; onToggle: () => void; onLoad: () => void; loading: boolean;
   isAdmin: boolean; onAddRow: () => void; onDelete: () => void; onLink: () => void; onSendToNewProducts: () => void;
-  onSplit: (orderId: number, destination: string, qtys: Record<string, number>) => void;
+  onSplit: (orderId: number, destination: string, qtys: Record<string, number>) => void; inboxCollectionId: number | null;
 }) {
   // Right-click menu on the first column (admin only): add / delete rows.
   const [rowMenu, setRowMenu] = useState<{ x: number; y: number } | null>(null);
@@ -25472,17 +25567,7 @@ function JJOrderRow({
       {/* Order Date — when the order was placed (auto), like the restock sheet. */}
       <td style={{ ...s.td, textAlign: "center", ...frozenTd(1), ...destinationRowBg }}><span style={s.dateText}>{formatPortalDate(order.createdAt)}</span></td>
       <td style={{ ...s.td, ...frozenTd(2), ...destinationRowBg }}>
-        <div style={s.imageCell}>
-          {order.productImageUrl ? (
-            <img
-              src={order.productImageUrl}
-              alt={order.productTitle ?? ""}
-              style={{ ...s.thumb, cursor: "zoom-in" }}
-              title="Click to enlarge"
-              onClick={(e) => { e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-image-lightbox", { detail: { url: order.productImageUrl, alt: order.productTitle ?? "" } })); }}
-            />
-          ) : <div style={s.noImg}>—</div>}
-        </div>
+        <JJPictureCell orderId={order.id} productTitle={order.productTitle ?? ""} imageUrl={order.productImageUrl ?? ""} inboxCollectionId={inboxCollectionId} canEdit={!linked} />
       </td>
       <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(3), ...destinationRowBg }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} productName={order.productTitle} /></td>
       <td style={{ ...s.td, ...frozenTd(4), ...destinationRowBg, overflow: "visible" }}>
@@ -25630,10 +25715,10 @@ function JJOrderRow({
 }
 
 function JJRestockPanel({
-  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, search = "",
+  orders, sizes, thbPerAudCachedRate, restockSettings, canLoadInventory, isAdmin, savedColumnWidths, search = "", inboxCollectionId = null,
 }: {
   orders: Order[]; sizes: string[]; thbPerAudCachedRate: number | null; fxBahtBuffer: number;
-  restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>; search?: string;
+  restockSettings: RestockSettings; canLoadInventory: boolean; isAdmin: boolean; savedColumnWidths: Record<string, number>; search?: string; inboxCollectionId?: number | null;
 }) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const loadFetcher = useFetcher<{ jjLoaded?: number[]; jjError?: string }>();
@@ -25883,6 +25968,7 @@ function JJRestockPanel({
                 onLink={() => setLinkingOrderId(order.id)}
                 onSendToNewProducts={() => sendToNewProducts(order.id)}
                 onSplit={splitOrder}
+                inboxCollectionId={inboxCollectionId}
               />
             ))}
             {visible.length === 0 && (
