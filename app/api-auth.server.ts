@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "crypto";
+import { createHash, timingSafeEqual } from "crypto";
 
 /**
  * Authorisation for the portal's public API routes.
@@ -33,12 +33,52 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
-/** Length-safe, timing-safe string comparison. */
+/**
+ * Length-safe, timing-safe secret comparison.
+ *
+ * Both sides are trimmed first. Secrets get pasted into hosting dashboards by
+ * hand, and a stray trailing space or newline is invisible in every UI that
+ * shows the value. Worse, the two ends don't fail symmetrically: HTTP strips
+ * trailing whitespace from header values in transit, so padding on the caller's
+ * side quietly disappears while padding on this side does not — producing a
+ * mismatch that looks like a wrong key and reads as a wrong key, but isn't one.
+ *
+ * Trimming costs nothing in strength: whitespace at either end carries no
+ * entropy, and the comparison stays constant-time over the trimmed values.
+ */
 function secretsMatch(provided: string, expected: string): boolean {
-  const a = Buffer.from(provided);
-  const b = Buffer.from(expected);
+  const a = Buffer.from(provided.trim());
+  const b = Buffer.from(expected.trim());
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+/**
+ * A short, irreversible fingerprint of a secret, so a mismatch can be diagnosed
+ * without either side's value ever being printed. Two identical secrets always
+ * produce the same fingerprint; different ones effectively never do.
+ *
+ * Safe to return on a 401: reversing eight hex characters of SHA-256 back to a
+ * 256-bit random key isn't feasible, and it reveals nothing about the value's
+ * content — only whether the two ends agree.
+ */
+function fingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 8);
+}
+
+/**
+ * Describes *how* two secrets differ. Length is the giveaway for the usual
+ * culprit — a trailing space or newline picked up when pasting into a
+ * dashboard — which is invisible in every UI that shows the value.
+ */
+export function describeKeyMismatch(provided: string, expected: string): string {
+  // Reported on the trimmed values, since those are what actually get compared.
+  const a = provided.trim();
+  const b = expected.trim();
+  const detail = a.length === b.length
+    ? `both ${a.length} chars, but different values (sent ${fingerprint(a)}, expected ${fingerprint(b)})`
+    : `sent ${a.length} chars (${fingerprint(a)}), expected ${b.length} chars (${fingerprint(b)})`;
+  return `Invalid API key — ${detail}`;
 }
 
 export function authorizeApiRequest(request: Request, cors: Record<string, string>): Response | null {
@@ -54,7 +94,7 @@ export function authorizeApiRequest(request: Request, cors: Record<string, strin
       return Response.json({ error: "Service auth not configured" }, { status: 401, headers: cors });
     }
     if (!secretsMatch(apiKey, expected)) {
-      return Response.json({ error: "Invalid API key" }, { status: 401, headers: cors });
+      return Response.json({ error: describeKeyMismatch(apiKey, expected) }, { status: 401, headers: cors });
     }
     return null;
   }

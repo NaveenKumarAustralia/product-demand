@@ -1,7 +1,7 @@
 // node --test app/api-auth.server.test.ts
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { authorizeApiRequest } from "./api-auth.server.ts";
+import { authorizeApiRequest, describeKeyMismatch } from "./api-auth.server.ts";
 
 const CORS = { "Access-Control-Allow-Origin": "*" };
 const SECRET = "dashboard-shared-secret";
@@ -28,7 +28,40 @@ test("accepts the dashboard's shared secret", () => {
 test("rejects a wrong shared secret", async () => {
   const res = authorizeApiRequest(request({ "x-api-key": "nope" }), CORS);
   assert.equal(res?.status, 401);
-  assert.equal((await res!.json()).error, "Invalid API key");
+  assert.match((await res!.json()).error, /^Invalid API key/);
+});
+
+test("whitespace pasted around the stored secret still authorises", () => {
+  // The failure this prevents is nasty because it isn't symmetric: HTTP trims
+  // trailing whitespace from header values in transit, so padding on the
+  // caller's side vanishes while padding on this side survives — and the
+  // resulting mismatch is invisible in any UI that displays the value.
+  process.env.DASHBOARD_API_KEY = `  ${SECRET}\n`;
+  assert.equal(authorizeApiRequest(request({ "x-api-key": SECRET }), CORS), null);
+});
+
+test("a mismatch reports lengths and fingerprints, never the secrets", async () => {
+  const res = authorizeApiRequest(request({ "x-api-key": `${SECRET}extra` }), CORS);
+  const { error } = await res!.json();
+
+  assert.match(error, new RegExp(`sent ${SECRET.length + 5} chars`));
+  assert.match(error, new RegExp(`expected ${SECRET.length} chars`));
+  // Neither value may appear in the response.
+  assert.equal(error.includes(SECRET), false);
+});
+
+test("same length but different value is reported as such", async () => {
+  const wrong = "x".repeat(SECRET.length);
+  const res = authorizeApiRequest(request({ "x-api-key": wrong }), CORS);
+  const { error } = await res!.json();
+  assert.match(error, new RegExp(`both ${SECRET.length} chars, but different values`));
+});
+
+test("identical secrets fingerprint identically", () => {
+  // What makes the fingerprints comparable across two separate services.
+  const a = describeKeyMismatch("same-value", "different");
+  const b = describeKeyMismatch("same-value", "different");
+  assert.equal(a, b);
 });
 
 test("an unset DASHBOARD_API_KEY authorises nobody", async () => {
