@@ -76,6 +76,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productId = url.searchParams.get("productId");
   const shop = url.searchParams.get("shop");
 
+  // The product-page block has room for a couple of orders, so 2 stays the
+  // default and its behaviour is unchanged. The analytics dashboard lists them
+  // all and asks for more; capped so a caller can't request the whole table.
+  const requestedLimit = Number(url.searchParams.get("limit"));
+  const take = Number.isInteger(requestedLimit) && requestedLimit > 0
+    ? Math.min(requestedLimit, 50)
+    : 2;
+
   if (!productId || !shop) {
     return Response.json(
       { error: "productId and shop are required" },
@@ -110,7 +118,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           },
         },
         orderBy: { createdAt: "desc" },
-        take: 2,
+        take,
       }),
       prisma.portalSetting.findUnique({
         where: { key: PORTAL_USERS_KEY },
