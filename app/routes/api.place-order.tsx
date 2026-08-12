@@ -45,6 +45,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     productType?: string;
     productImageUrl?: string;
     supplier: string;
+    supplierStatus?: string;
+    destination?: string;
     poNumber?: string;
     eta?: string;
     notes?: string;
@@ -66,7 +68,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return Response.json({ error: "Invalid JSON body" }, { status: 400, headers: CORS });
   }
 
-  const { shop, productId, productTitle, productType, productImageUrl, supplier, poNumber, eta, notes, priority, existingOrderId, lines } = body;
+  const { shop, productId, productTitle, productType, productImageUrl, supplier, supplierStatus, destination, poNumber, eta, notes, priority, existingOrderId, lines } = body;
   const normalizedProductType = normalizeProductGroup(productType);
 
   if (!shop || !productId || !supplier) {
@@ -180,7 +182,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         productType: normalizedProductType || null,
         productImageUrl: productImageUrl || null,
         supplier,
-        supplierStatus: "on_order",
+        // Callers that raise an order from a screen with these controls can set
+        // them up front; the product-page block sends neither and still gets the
+        // on_order default it always had.
+        supplierStatus: supplierStatus || "on_order",
+        destination: destination ? String(destination).trim().slice(0, 64) : null,
         priority: priority || null,
         poNumber: poNumber || null,
         eta: eta ? new Date(eta) : null,
