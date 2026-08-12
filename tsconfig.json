@@ -1,5 +1,10 @@
 {
   "include": ["env.d.ts", "**/*.ts", "**/*.tsx", ".react-router/types/**/*"],
+  // Test files run directly on Node's type stripping (node --test app/x.test.ts),
+  // which requires the .ts extension in the import specifier. tsc rejects that
+  // without allowImportingTsExtensions, and turning that on would affect the
+  // whole app — excluding the tests is the smaller change. They aren't built.
+  "exclude": ["**/*.test.ts"],
   "compilerOptions": {
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "strict": true,
