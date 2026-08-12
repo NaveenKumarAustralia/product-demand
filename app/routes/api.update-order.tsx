@@ -1,11 +1,12 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { syncOrderNoteMessages } from "../portal-messages.server";
+import { authorizeApiRequest } from "../api-auth.server";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Api-Key",
 };
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
@@ -14,15 +15,6 @@ const PRODUCT_GROUP_RENAMES: Record<string, string> = {
 function normalizeProductGroup(value?: string | null) {
   const trimmed = value?.trim() ?? "";
   return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
-}
-
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  try {
-    const [, payloadB64] = token.split(".");
-    return JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf-8"));
-  } catch {
-    return null;
-  }
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -41,25 +33,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return Response.json({ error: "Method not allowed" }, { status: 405, headers: CORS });
   }
 
-  const authHeader = request.headers.get("Authorization") ?? "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-  if (!token) {
-    return Response.json({ error: "Missing token" }, { status: 401, headers: CORS });
-  }
-
-  const payload = decodeJwtPayload(token);
-  if (!payload) {
-    return Response.json({ error: "Invalid token" }, { status: 401, headers: CORS });
-  }
-
-  const clientId = process.env.SHOPIFY_API_KEY;
-  const aud = payload.aud;
-  const audValid = aud === clientId || (Array.isArray(aud) && aud.includes(clientId));
-
-  if (!audValid) {
-    return Response.json({ error: "Token audience mismatch" }, { status: 401, headers: CORS });
-  }
+  // Accepts either a Shopify session token from the embedded app or the
+  // dashboard's shared secret. See api-auth.server.ts.
+  const unauthorized = authorizeApiRequest(request, CORS);
+  if (unauthorized) return unauthorized;
 
   let body: {
     shop: string;
@@ -67,6 +44,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     supplierStatus?: string;
     priority?: string;
     productType?: string;
+    destination?: string;
     eta?: string | null;
     notes?: string;
   };
@@ -77,7 +55,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return Response.json({ error: "Invalid JSON body" }, { status: 400, headers: CORS });
   }
 
-  const { shop, orderId, supplierStatus, priority, productType, eta, notes } = body;
+  const { shop, orderId, supplierStatus, priority, productType, destination, eta, notes } = body;
   const id = Number(orderId);
 
   if (!shop || !Number.isInteger(id)) {
@@ -88,6 +66,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (supplierStatus !== undefined) data.supplierStatus = supplierStatus;
   if (priority !== undefined) data.priority = priority || null;
   if (productType !== undefined) data.productType = normalizeProductGroup(productType) || null;
+  // Trimmed and length-capped to match how the portal's own destination editor
+  // stores it, so a value set from either place looks the same in the table.
+  if (destination !== undefined) data.destination = String(destination).trim().slice(0, 64) || null;
   if (eta !== undefined) data.eta = eta ? new Date(eta) : null;
   if (notes !== undefined) data.notes = notes || null;
 
@@ -113,6 +94,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         supplierStatus: true,
         priority: true,
         productType: true,
+        destination: true,
         eta: true,
         notes: true,
       },

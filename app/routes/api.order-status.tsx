@@ -28,6 +28,13 @@ const DEFAULT_PRIORITY_OPTIONS = [
   { value: "urgent", label: "URGENT" },
   { value: "cancelled", label: "Cancelled" },
 ];
+// Mirrors DEFAULT_DESTINATION_OPTIONS in portal._index.tsx. Callers that let a
+// destination be changed need the same list the portal itself offers.
+const DEFAULT_DESTINATION_OPTIONS = [
+  { value: "keep_at_factory", label: "Keep at factory" },
+  { value: "send_to_au", label: "Send to AUS" },
+  { value: "send_to_usa", label: "Send to USA" },
+];
 
 function normalizeProductGroup(value?: string | null) {
   const trimmed = value?.trim() ?? "";
@@ -64,6 +71,7 @@ function normalizeRestockSettings(value: unknown) {
   return {
     statusOptions: normalizeOptions(settings.statusOptions, DEFAULT_STATUS_OPTIONS),
     priorityOptions: normalizeOptions(settings.priorityOptions, DEFAULT_PRIORITY_OPTIONS),
+    destinationOptions: normalizeOptions(settings.destinationOptions, DEFAULT_DESTINATION_OPTIONS),
   };
 }
 
@@ -109,11 +117,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           status: true,
           supplierStatus: true,
           priority: true,
+          destination: true,
           notes: true,
           lines: {
+            // variantTitle so a caller can label a size without having to hold
+            // its own variant lookup; qtyReceived so "on order" can be told
+            // apart from what has already landed.
             select: {
               variantId: true,
+              variantTitle: true,
               qtyOrdered: true,
+              qtyReceived: true,
             },
           },
         },
@@ -154,6 +168,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               status: latestOrder.status,
               supplierStatus: latestOrder.supplierStatus,
               priority: latestOrder.priority,
+              destination: latestOrder.destination,
               notes: latestOrder.notes,
               lines: formattedOrders.flatMap((order) => order.lines),
             }
@@ -162,6 +177,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         staffNames,
         statusOptions: restockSettings.statusOptions,
         priorityOptions: restockSettings.priorityOptions,
+        destinationOptions: restockSettings.destinationOptions,
       },
       { headers: CORS },
     );
