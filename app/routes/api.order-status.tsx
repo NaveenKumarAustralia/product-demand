@@ -1,11 +1,12 @@
 import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { normalizePortalMessageUsers, PORTAL_USERS_KEY } from "../portal-messages.server";
+import { authorizeApiRequest } from "../api-auth.server";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Api-Key",
 };
 const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
@@ -66,21 +67,6 @@ function normalizeRestockSettings(value: unknown) {
   };
 }
 
-/**
- * Decode the JWT payload (base64url) and return the parsed object.
- * We don't verify the signature here — the shop domain is passed
- * separately and we use it only to scope our own DB query.
- * The idToken audience check ensures the token was issued for this app.
- */
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
-  try {
-    const [, payloadB64] = token.split(".");
-    return JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf-8"));
-  } catch {
-    return null;
-  }
-}
-
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS });
@@ -97,29 +83,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     );
   }
 
-  // Verify the bearer token is a valid Shopify token issued for this app
-  const authHeader = request.headers.get("Authorization") ?? "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-  if (!token) {
-    return Response.json({ error: "Missing token" }, { status: 401, headers: CORS });
-  }
-
-  const payload = decodeJwtPayload(token);
-  if (!payload) {
-    return Response.json({ error: "Invalid token" }, { status: 401, headers: CORS });
-  }
-
-  // Verify audience matches our app client ID
-  const clientId = process.env.SHOPIFY_API_KEY;
-  const aud = payload.aud;
-  const audValid =
-    aud === clientId ||
-    (Array.isArray(aud) && aud.includes(clientId));
-
-  if (!audValid) {
-    return Response.json({ error: "Token audience mismatch" }, { status: 401, headers: CORS });
-  }
+  // Accepts either a Shopify session token from the embedded app or the
+  // dashboard's shared secret. See api-auth.server.ts.
+  const unauthorized = authorizeApiRequest(request, CORS);
+  if (unauthorized) return unauthorized;
 
   try {
     const [orders, usersSetting, restockSettingsSetting] = await Promise.all([
