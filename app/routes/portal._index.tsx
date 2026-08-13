@@ -12287,23 +12287,30 @@ function SampleIterationBlock({
     });
     if (!result.ok) return;
     const promotedIds = new Set(previews.map((p) => p.id));
-    setSavedCount((c) => c + previews.length);
+    const newCount = savedCount + previews.length;
+    setSavedCount(newCount);
     setVersion(Date.now());
     setPendingImages((cur) => {
       cur.filter((p) => promotedIds.has(p.id)).forEach((p) => URL.revokeObjectURL(p.blobUrl));
       return cur.filter((p) => !promotedIds.has(p.id));
     });
+    // Bump the parent's cached iteration so the grid card thumbnail refreshes
+    // immediately (its cache-buster is updatedAt) instead of only after a reload.
+    onLocalUpdate(iteration.id, { updatedAt: new Date(), imageCount: newCount });
   };
 
   const [pendingDeleteIndex, setPendingDeleteIndex] = useState<number | null>(null);
   const doRemoveSavedImage = async (index: number) => {
-    setSavedCount((c) => Math.max(0, c - 1));
+    const nextCount = Math.max(0, savedCount - 1);
+    setSavedCount(nextCount);
     await postPortalAction({
       intent: "update_sample_iteration",
       iterationId: String(iteration.id),
       removeImageIndex: String(index),
     });
     setVersion(Date.now());
+    // Refresh the grid card thumbnail immediately (see addImages).
+    onLocalUpdate(iteration.id, { updatedAt: new Date(), imageCount: nextCount });
   };
   const requestRemoveSavedImage = (index: number) => {
     if (shouldSkipDeleteConfirm()) {
