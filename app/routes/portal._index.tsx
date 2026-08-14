@@ -9969,7 +9969,7 @@ export default function PortalDashboard() {
               title="Search the whole site — every page, including hidden ones"
               style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.25)", background: "rgba(255,255,255,0.12)", color: "inherit", fontSize: 13, ...(page === "search" ? { outline: "2px solid rgba(255,255,255,0.5)" } : {}) }}
             />
-            <span style={{ fontSize: 10, opacity: 0.6, paddingLeft: 2 }}>Searches every page, incl. hidden</span>
+            <span style={{ fontSize: 10, color: "#ffffff", opacity: 0.85, paddingLeft: 2 }}>Searches every page, incl. hidden</span>
           </form>
         )}
         <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), flexShrink: 0, marginTop: 8 }}>Settings</a>
