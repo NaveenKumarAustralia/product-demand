@@ -860,6 +860,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
   }
 
+  // Whole-site search (admin only) — searches every data source, including
+  // pages hidden from the nav.
+  const globalSearchQuery = page === "search" ? (url.searchParams.get("q") ?? "").trim() : "";
+  const globalSearch = (page === "search" && currentUser?.admin && globalSearchQuery.length >= 2)
+    ? await runGlobalSearch(globalSearchQuery)
+    : null;
+
   const rawNavOrder = Array.isArray(navOrderSetting?.value) ? navOrderSetting.value as string[] : DEFAULT_NAV_ORDER;
   const navOrder = DEFAULT_NAV_ORDER.map((id) => id as NavItemId)
     .sort((a, b) => {
@@ -928,6 +935,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     photoShoots,
     photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
     jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
+    globalSearchQuery,
+    globalSearch,
     jjInboxCollectionId,
     jjTabs: normalizeJJTabs(wrap(JJ_TABS_KEY)?.value),
     fabricStockIndex,
@@ -5137,6 +5146,48 @@ async function logActivity(
   } catch {
     // silently ignore if table not yet migrated
   }
+}
+
+// ─── Global (whole-site) search ────────────────────────────────────────────────
+// Searches every data source across the portal — including pages that may be
+// hidden from a given nav — and returns grouped, linkable matches.
+export type GlobalSearchResults = {
+  orders: Array<{ id: number; title: string; supplier: string; linked: boolean }>;
+  collections: Array<{ id: number; name: string; kind: string }>;
+  packing: Array<{ id: number; label: string }>;
+  samples: Array<{ id: number; name: string }>;
+  photoShoots: Array<{ id: number; name: string }>;
+};
+
+async function runGlobalSearch(q: string): Promise<GlobalSearchResults> {
+  const like = { contains: q, mode: "insensitive" as const };
+  const [orders, packing, samples, photoShoots, collectionsRaw] = await Promise.all([
+    prisma.supplierOrder.findMany({
+      where: { status: "open", OR: [{ productTitle: like }, { lines: { some: { OR: [{ sku: like }, { barcode: like }] } } }] },
+      select: { id: true, productTitle: true, supplier: true, productId: true },
+      take: 50, orderBy: { updatedAt: "desc" },
+    }).catch(() => [] as Array<{ id: number; productTitle: string; supplier: string; productId: string }>),
+    prisma.packingList.findMany({
+      where: { hiddenAt: null, OR: [{ invoiceNumber: like }, { title: like }, { lines: { some: { OR: [{ productTitle: like }, { sku: like }] } } }] },
+      select: { id: true, invoiceNumber: true, title: true },
+      take: 30, orderBy: { updatedAt: "desc" },
+    }).catch(() => [] as Array<{ id: number; invoiceNumber: string | null; title: string }>),
+    prisma.sample.findMany({ where: { name: like }, select: { id: true, name: true }, take: 30, orderBy: { updatedAt: "desc" } })
+      .catch(() => [] as Array<{ id: number; name: string }>),
+    prisma.photoShoot.findMany({ where: { name: like }, select: { id: true, name: true }, take: 30 })
+      .catch(() => [] as Array<{ id: number; name: string }>),
+    prisma.$queryRawUnsafe<Array<{ id: number; name: string; kind: string }>>(
+      `SELECT id, name, kind FROM "Collection" WHERE (name ILIKE $1 OR rows::text ILIKE $1) ORDER BY "updatedAt" DESC LIMIT 40`,
+      `%${q}%`,
+    ).catch(() => [] as Array<{ id: number; name: string; kind: string }>),
+  ]);
+  return {
+    orders: orders.map((o) => ({ id: o.id, title: o.productTitle, supplier: o.supplier, linked: Boolean(o.productId) })),
+    packing: packing.map((p) => ({ id: p.id, label: p.invoiceNumber || p.title || `#${p.id}` })),
+    samples: samples.map((s) => ({ id: s.id, name: s.name })),
+    photoShoots: photoShoots.map((p) => ({ id: p.id, name: p.name })),
+    collections: collectionsRaw.map((c) => ({ id: c.id, name: c.name, kind: c.kind })),
+  };
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -9481,6 +9532,8 @@ export default function PortalDashboard() {
     photoShoots,
     photoShootColumnWidths,
     jjColumnWidths,
+    globalSearchQuery,
+    globalSearch,
     jjInboxCollectionId,
     jjTabs,
     fabricStockIndex,
@@ -9706,6 +9759,7 @@ export default function PortalDashboard() {
     : page === "visionboard" ? "Vision Board"
     : page === "collections" ? "Collections"
     : page === "jj-new-products" ? "JJ New Products"
+    : page === "search" ? "Search"
     : page === "dropbox" ? "Dropbox"
     : page === "photoshoot" ? "Photo Shoots"
     : page === "newproduct" ? "New Product Orders"
@@ -9904,6 +9958,20 @@ export default function PortalDashboard() {
             );
           })}
         </nav>
+        {currentUser?.admin && (
+          <form method="get" action="/portal" style={{ flexShrink: 0, marginTop: 8, display: "flex", flexDirection: "column", gap: 3 }}>
+            <input type="hidden" name="page" value="search" />
+            <input
+              type="search"
+              name="q"
+              defaultValue={page === "search" ? globalSearchQuery : ""}
+              placeholder="🔍 Search the whole site"
+              title="Search the whole site — every page, including hidden ones"
+              style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.25)", background: "rgba(255,255,255,0.12)", color: "inherit", fontSize: 13, ...(page === "search" ? { outline: "2px solid rgba(255,255,255,0.5)" } : {}) }}
+            />
+            <span style={{ fontSize: 10, opacity: 0.6, paddingLeft: 2 }}>Searches every page, incl. hidden</span>
+          </form>
+        )}
         <a href="/portal?page=settings" style={{ ...s.navItem, ...(page === "settings" ? s.navItemActive : {}), flexShrink: 0, marginTop: 8 }}>Settings</a>
       </aside>
 
@@ -10169,6 +10237,8 @@ export default function PortalDashboard() {
           </div>
         ) : page === "dropbox" ? (
           <DropboxPanel />
+        ) : page === "search" ? (
+          <GlobalSearchPage query={globalSearchQuery} results={globalSearch} isAdmin={Boolean(currentUser?.admin)} shopDomain={shopDomain} />
         ) : page === "jj-restock" ? (
           <JJRestockPanel
             orders={orders}
@@ -25791,6 +25861,67 @@ function JJOrderRow({
         </td>
       )}
     </tr>
+  );
+}
+
+// Whole-site search results — grouped, each linking to where the match lives.
+function GlobalSearchPage({ query, results, isAdmin }: { query: string; results: GlobalSearchResults | null; isAdmin: boolean; shopDomain: string | null }) {
+  if (!isAdmin) return <div style={s.empty}>Whole‑site search is available to admins.</div>;
+  if (!query || query.trim().length < 2) return <div style={s.empty}>Type at least 2 characters in the search box to search the whole site.</div>;
+  if (!results) return <div style={s.empty}>No results.</div>;
+  const total = results.orders.length + results.collections.length + results.packing.length + results.samples.length + results.photoShoots.length;
+  if (total === 0) return <div style={s.empty}>No matches for “{query}”.</div>;
+
+  const linkStyle: React.CSSProperties = { display: "block", padding: "8px 12px", borderRadius: 8, border: "1px solid #e5e7eb", background: "#fff", color: "#111827", textDecoration: "none", fontSize: 13, marginBottom: 6 };
+  const tag = (text: string, bg: string, color: string) => (
+    <span style={{ fontSize: 10, fontWeight: 700, background: bg, color, borderRadius: 999, padding: "1px 8px", marginLeft: 8, textTransform: "uppercase", letterSpacing: "0.04em" }}>{text}</span>
+  );
+  const Section = ({ title, count, children }: { title: string; count: number; children: React.ReactNode }) =>
+    count === 0 ? null : (
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{title} ({count})</div>
+        {children}
+      </div>
+    );
+
+  return (
+    <div style={{ overflowY: "auto", padding: "4px 2px", maxWidth: 760 }}>
+      <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>{total} result{total === 1 ? "" : "s"} for “<strong style={{ color: "#111827" }}>{query}</strong>” across the whole site.</div>
+
+      <Section title="Orders" count={results.orders.length}>
+        {results.orders.map((o) => {
+          const isJJ = (o.supplier ?? "").trim().toLowerCase() === "jj";
+          const href = isJJ ? "/portal?page=jj-restock" : `/portal?page=restock&q=${encodeURIComponent(o.title)}`;
+          return <a key={`o${o.id}`} href={href} style={linkStyle}>{o.title || `Order #${o.id}`}{tag(isJJ ? "JJ Order" : "Restock", "#eef2ff", "#4338ca")}{!o.linked && tag("new", "#fef3c7", "#92400e")}</a>;
+        })}
+      </Section>
+
+      <Section title="Collections & JJ New Products" count={results.collections.length}>
+        {results.collections.map((c) => {
+          const isJJNew = c.kind === "jj-new";
+          const href = `${isJJNew ? "/portal?page=jj-new-products" : "/portal?page=collections"}&collectionId=${c.id}`;
+          return <a key={`c${c.id}`} href={href} style={linkStyle}>{c.name || `Collection #${c.id}`}{tag(isJJNew ? "JJ New Products" : "Collection", "#ecfdf5", "#047857")}</a>;
+        })}
+      </Section>
+
+      <Section title="Packing lists" count={results.packing.length}>
+        {results.packing.map((p) => (
+          <a key={`p${p.id}`} href={`/portal?page=packing&packingId=${p.id}`} style={linkStyle}>{p.label}{tag("Packing", "#fdf2f8", "#be185d")}</a>
+        ))}
+      </Section>
+
+      <Section title="Samples" count={results.samples.length}>
+        {results.samples.map((sm) => (
+          <a key={`s${sm.id}`} href="/portal?page=samples" style={linkStyle}>{sm.name || `Sample #${sm.id}`}{tag("Sample", "#f0f9ff", "#0369a1")}</a>
+        ))}
+      </Section>
+
+      <Section title="Photo shoots" count={results.photoShoots.length}>
+        {results.photoShoots.map((ps) => (
+          <a key={`ps${ps.id}`} href="/portal?page=photoshoot" style={linkStyle}>{ps.name || `Photo shoot #${ps.id}`}{tag("Photo Shoot", "#faf5ff", "#7e22ce")}</a>
+        ))}
+      </Section>
+    </div>
   );
 }
 
