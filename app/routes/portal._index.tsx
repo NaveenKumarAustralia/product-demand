@@ -25250,9 +25250,19 @@ function QtyCell({ orderId, size, value, restockSettings, loaded }: { orderId: n
   // revert the number you just entered.
   const [draft, setDraft] = useState(value ? String(value) : "");
   const focusedRef = useRef(false);
+  // The value we last saved (as a string). While set, we're waiting for the
+  // loader to reflect our save — until it does, DON'T resync the draft from the
+  // (still-old) prop, otherwise the cell flips back to the old number after a
+  // slow restock revalidation. Cleared once the prop catches up.
+  const submittedRef = useRef<string | null>(null);
   useEffect(() => {
     if (focusedRef.current || fetcher.state !== "idle") return;
-    setDraft(value ? String(value) : "");
+    const incoming = value ? String(value) : "";
+    if (submittedRef.current !== null) {
+      if (incoming === submittedRef.current) { submittedRef.current = null; setDraft(incoming); }
+      return; // prop hasn't caught up to our save yet — keep the typed value
+    }
+    setDraft(incoming);
   }, [value, fetcher.state]);
   const numericCurrent = Number(draft) || 0;
 
@@ -25268,6 +25278,9 @@ function QtyCell({ orderId, size, value, restockSettings, loaded }: { orderId: n
         focusedRef.current = false;
         const next = e.currentTarget.value;
         if (next === (value ? String(value) : "")) return; // unchanged — skip save
+        // Remember what we saved, normalised the same way `incoming` is (0 → "").
+        const savedNum = Number(next) || 0;
+        submittedRef.current = savedNum > 0 ? String(savedNum) : "";
         submitPortalCell(
           fetcher,
           { intent: "update_qty", orderId, size, value: next },
