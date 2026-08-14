@@ -135,6 +135,7 @@ model PackingList {
   notes                    String?
   hiddenAt                 DateTime?
   masterInventoryLoadedAt  DateTime?
+  loadedBy                 String?
   lockedFxRate             Float?
   lockedFxRateAt           DateTime?
   createdAt                DateTime          @default(now())

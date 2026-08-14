@@ -711,6 +711,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     try {
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRate" DOUBLE PRECISION`);
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "lockedFxRateAt" TIMESTAMP(3)`);
+      await prisma.$executeRawUnsafe(`ALTER TABLE "PackingList" ADD COLUMN IF NOT EXISTS "loadedBy" TEXT`);
       await prisma.$executeRawUnsafe(`ALTER TABLE "PackingListLine" ADD COLUMN IF NOT EXISTS "costPushedAt" TIMESTAMP(3)`);
       await prisma.$executeRawUnsafe(`
         CREATE TABLE IF NOT EXISTS "CollectionImage" (
@@ -1612,12 +1613,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     }
 
+    // Attribution: record WHO loaded inventory (and how much), so the packing
+    // list history shows it. Only when goods were actually pushed.
+    if (loadedProductIds.size > 0) {
+      try {
+        await logActivity(currentUser?.name ?? "Unknown", "Loaded to Shopify", "Packing List", {
+          entityId: String(packingId),
+          entityName: packingList.invoiceNumber || packingList.title || `#${packingId}`,
+          field: onlyProductId ? "Inventory (one product)" : "Inventory (all products)",
+          toValue: `${loadedProductIds.size} product${loadedProductIds.size === 1 ? "" : "s"}`,
+        });
+      } catch (e) {
+        console.warn("[load attribution] log failed:", e);
+      }
+    }
+
     // Master button is one-time-use: record when it was pressed so the UI
-    // hides it afterward. Per-product loads don't set this.
+    // hides it afterward, plus who pressed it. Per-product loads don't set this.
     if (intent === "load_packing_inventory" && !packingList.masterInventoryLoadedAt) {
       await prisma.packingList.update({
         where: { id: packingId },
-        data: { masterInventoryLoadedAt: new Date() },
+        data: { masterInventoryLoadedAt: new Date(), loadedBy: currentUser?.name ?? null },
       });
     }
 
