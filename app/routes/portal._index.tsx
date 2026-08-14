@@ -21713,6 +21713,24 @@ function PackingListDetail({
   const visiblePackingLines = normalizedPackingListSearch
     ? packingList.lines.filter((line) => packingLineMatchesSearch(line, normalizedPackingListSearch))
     : packingList.lines;
+  // Box numbers carry down: only the first row of a box writes the number in;
+  // the rows below it inherit that box until a new number appears. Precompute
+  // each line's effective box over the FULL ordered list (so it's correct even
+  // while searching) — shown as a faint placeholder in the otherwise-blank cells.
+  // Local overrides make the inherited numbers update the instant a box is typed
+  // (box edits skip loader revalidation).
+  const [localBoxes, setLocalBoxes] = useState<Record<number, string>>({});
+  const boxOf = (l: PackingListWithLines["lines"][number]) => ((localBoxes[l.id] ?? l.boxNumber) ?? "").trim();
+  const packingInheritedBoxById = (() => {
+    const m = new Map<number, string>();
+    let carried = "";
+    for (const l of packingList.lines) {
+      const explicit = boxOf(l);
+      if (explicit) carried = explicit;
+      m.set(l.id, carried);
+    }
+    return m;
+  })();
   // Effective rupee price for a line — the manual priceRupees if the user
   // typed one, otherwise the auto-derived style cost (same value the row
   // shows on screen). Lists priced via the style-cost lookup rather than
@@ -22168,6 +22186,8 @@ function PackingListDetail({
                 key={line.id}
                 line={line}
                 rowIndex={rowIndex}
+                inheritedBox={packingInheritedBoxById.get(line.id) ?? ""}
+                onBoxCommit={(v) => setLocalBoxes((prev) => ({ ...prev, [line.id]: v }))}
                 updateParams={updateParams}
                 customColumns={customColumns}
                 customCells={customCells}
@@ -22297,6 +22317,8 @@ function PackingListDetail({
 function PackingListLineRow({
   line,
   rowIndex,
+  inheritedBox,
+  onBoxCommit,
   updateParams,
   customColumns,
   customCells,
@@ -22317,6 +22339,8 @@ function PackingListLineRow({
 }: {
   line: PackingListWithLines["lines"][number];
   rowIndex: number;
+  inheritedBox: string;
+  onBoxCommit: (value: string) => void;
   updateParams: (updates: Record<string, string>) => void;
   customColumns: TableCustomColumn[];
   customCells: Record<string, string>;
@@ -22386,7 +22410,7 @@ function PackingListLineRow({
         { label: "Move down", onClick: () => submitPortalCell(fetcher, { intent: "move_packing_line", lineId: line.id, direction: "down" }) },
         { label: "Delete row", danger: true, onClick: () => { if (window.confirm("Delete this packing row?")) submitPortalCell(fetcher, { intent: "delete_packing_line", lineId: line.id }); } },
       ]} heightKey={rowHeightKey} />
-      <PackingTd rowIndex={rowIndex} colIndex={0} stickyLeft={frozenOffsets?.[0]}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} /></PackingTd>
+      <PackingTd rowIndex={rowIndex} colIndex={0} stickyLeft={frozenOffsets?.[0]}><PackingTextInput lineId={line.id} field="boxNumber" value={line.boxNumber ?? ""} placeholder={(line.boxNumber ?? "").trim() ? undefined : inheritedBox} center onCommit={onBoxCommit} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]}><PackingImageCell lineId={line.id} field="productImageUrl" value={line.productImageUrl ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={2} center stickyLeft={frozenOffsets?.[2]}><PackingImageCell lineId={line.id} field="fabricImageData" value={line.fabricImageData ?? ""} /></PackingTd>
       <PackingTd rowIndex={rowIndex} colIndex={3} overflowVisible stickyLeft={frozenOffsets?.[3]} isLastFrozen>
