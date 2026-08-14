@@ -5090,6 +5090,11 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // value in local state so the new name is visible immediately; the
   // expensive loader re-run added ~15s of perceived lag for nothing.
   if (intent === "update_packing_line") return false;
+  // Manual "mark/unmark loaded" — the combined view applies the change
+  // optimistically, so no heavy packing-loader re-run is needed.
+  if (intent === "bulk_set_packing_qty_manual_loaded"
+    || intent === "toggle_packing_qty_manual_loaded"
+    || intent === "toggle_packing_qty_manual_loaded_for_product") return false;
   // Vision Board: only skip revalidation for in-drawer notes/fields saves
   // (they don't affect the card grid). Anything that changes name, image
   // count, ordering or board metadata must refresh the grid so the panel
@@ -21697,7 +21702,11 @@ function PackingListDetail({
   const unlinkedLinesCount = packingList.lines.filter((line) => !line.productId && (line.productTitle ?? "").trim().length > 0).length;
   const [combinedSelectedCells, setCombinedSelectedCells] = useState<Set<string>>(new Set());
   const [combinedAnchorCell, setCombinedAnchorCell] = useState<string | null>(null);
-  const [combinedCellMenu, setCombinedCellMenu] = useState<{ x: number; y: number; cells: { lineId: number; size: string }[] } | null>(null);
+  const [combinedCellMenu, setCombinedCellMenu] = useState<{ x: number; y: number; cells: { lineId: number; size: string }[]; cellKeys: string[] } | null>(null);
+  // Optimistic mark-loaded: cellKey (`${row.key}|${size}`) → loaded?, applied on
+  // top of the loader data so the green "loaded" state flips the instant you
+  // mark/unmark (the save skips the heavy packing revalidation).
+  const [optimisticLoaded, setOptimisticLoaded] = useState<Map<string, boolean>>(new Map());
   useEffect(() => {
     if (!combineView) {
       setCombinedSelectedCells(new Set());
@@ -22172,6 +22181,7 @@ function PackingListDetail({
                   x: event.clientX,
                   y: event.clientY,
                   cells: expandToLineCells(Array.from(cells)),
+                  cellKeys: Array.from(cells),
                 });
               };
               return combinedRows.map((row, rowIndex) => (
@@ -22184,6 +22194,7 @@ function PackingListDetail({
                   shopDomain={shopDomain}
                   packingId={packingList.id}
                   selectedCells={combinedSelectedCells}
+                  optimisticLoaded={optimisticLoaded}
                   onCellClick={handleCellClick}
                   onCellContextMenu={handleCellContextMenu}
                   sizes={packingSizes}
@@ -22296,7 +22307,9 @@ function PackingListDetail({
             style={s.contextMenuButton}
             onClick={() => {
               const cells = combinedCellMenu.cells;
+              const keys = combinedCellMenu.cellKeys;
               setCombinedCellMenu(null);
+              setOptimisticLoaded((prev) => { const next = new Map(prev); keys.forEach((k) => next.set(k, true)); return next; });
               submitPortalCell(bulkLoadedFetcher, {
                 intent: "bulk_set_packing_qty_manual_loaded",
                 packingId: packingList.id,
@@ -22312,7 +22325,9 @@ function PackingListDetail({
             style={s.contextMenuButton}
             onClick={() => {
               const cells = combinedCellMenu.cells;
+              const keys = combinedCellMenu.cellKeys;
               setCombinedCellMenu(null);
+              setOptimisticLoaded((prev) => { const next = new Map(prev); keys.forEach((k) => next.set(k, false)); return next; });
               submitPortalCell(bulkLoadedFetcher, {
                 intent: "bulk_set_packing_qty_manual_loaded",
                 packingId: packingList.id,
@@ -22641,6 +22656,7 @@ function PackingCombinedRow({
   shopDomain,
   packingId,
   selectedCells,
+  optimisticLoaded,
   onCellClick,
   onCellContextMenu,
   sizes,
@@ -22653,6 +22669,7 @@ function PackingCombinedRow({
   shopDomain: string | null;
   packingId: number;
   selectedCells: Set<string>;
+  optimisticLoaded: Map<string, boolean>;
   onCellClick: (rowKey: string, size: string, event: React.MouseEvent) => void;
   onCellContextMenu: (rowKey: string, size: string, event: React.MouseEvent) => void;
   sizes: string[];
@@ -22660,6 +22677,9 @@ function PackingCombinedRow({
 }) {
   const fetcher = useFetcher();
   const isLoadedForSize = (size: string) => {
+    // Optimistic override wins so a just-marked cell flips instantly.
+    const override = optimisticLoaded.get(`${row.key}|${size}`);
+    if (override !== undefined) return override;
     const want = row.qtys[size] ?? 0;
     if (want <= 0) return false;
     const got = (row.shopifyLoadedQtys[size] ?? 0) + (row.manuallyLoadedQtys[size] ?? 0);
