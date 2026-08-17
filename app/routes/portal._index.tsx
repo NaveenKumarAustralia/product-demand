@@ -2353,6 +2353,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const since = String(form.get("since") ?? "").trim();
     const until = String(form.get("until") ?? "").trim();
     const q = String(form.get("q") ?? "").trim().toLowerCase();
+    const typeFilter = String(form.get("type") ?? "").trim();
     const pageNum = Math.max(1, parseInt(String(form.get("page") ?? "1"), 10) || 1);
     const refresh = String(form.get("refresh") ?? "") === "1";
     const pageSize = 50;
@@ -2379,9 +2380,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const totalSold = sizes.reduce((a, s) => a + s.unitsSold, 0);
       const rate = totalSold / lookbackDays;
       const weeksCover = rate > 0 ? totalStock / (rate * 7) : Infinity;
-      return { id: p.id, title: p.title, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, weeksCover };
+      return { id: p.id, title: p.title, productType: p.productType, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, weeksCover };
     });
-    const filtered = q ? enriched.filter((p) => p.title.toLowerCase().includes(q)) : enriched;
+    // Distinct product types across the whole catalogue (for the filter dropdown),
+    // computed before the type filter so the list stays stable.
+    const productTypes = Array.from(new Set(enriched.map((p) => p.productType).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    let filtered = q ? enriched.filter((p) => p.title.toLowerCase().includes(q)) : enriched;
+    if (typeFilter) filtered = filtered.filter((p) => p.productType === typeFilter);
     // Most urgent first: finite weeks-cover ascending, no-sales products last
     // (broken by more stock sitting = lower priority, so highest stock last).
     filtered.sort((a, b) => {
@@ -2397,7 +2402,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       ...p,
       weeksCover: Number.isFinite(p.weeksCover) ? Math.round(p.weeksCover * 10) / 10 : null,
     }));
-    return jsonResponse({ ok: true, products: slice, page: clampedPage, pageCount, totalProducts, pageSize, lookbackDays, salesAvailable: soldByProduct !== null });
+    return jsonResponse({ ok: true, products: slice, productTypes, page: clampedPage, pageCount, totalProducts, pageSize, lookbackDays, salesAvailable: soldByProduct !== null });
   }
 
   if (intent === "create_restock_order_from_portal") {
@@ -8137,7 +8142,7 @@ async function fetchReorderSalesAllVariants(since: string, until: string): Promi
 // and caches it, so ranking every product by weeks-of-cover doesn't cost one
 // Shopify call per product. Size labels reuse the same logic as the packing
 // list so they line up with the sell-through variant labels.
-type ReorderStockProduct = { id: string; title: string; imageUrl: string | null; sizes: Array<{ size: string; stock: number }> };
+type ReorderStockProduct = { id: string; title: string; imageUrl: string | null; productType: string; sizes: Array<{ size: string; stock: number }> };
 let _reorderStockCache: { at: number; shop: string; products: ReorderStockProduct[] } | null = null;
 const REORDER_STOCK_TTL_MS = 10 * 60 * 1000;
 async function getAllShopifyProductsWithInventory(shop: string, accessToken: string, force = false): Promise<ReorderStockProduct[]> {
@@ -8152,6 +8157,7 @@ async function getAllShopifyProductsWithInventory(shop: string, accessToken: str
           node {
             id
             title
+            productType
             featuredImage { url }
             variants(first: 100) {
               nodes { title sku inventoryQuantity selectedOptions { name value } }
@@ -8181,7 +8187,7 @@ async function getAllShopifyProductsWithInventory(shop: string, accessToken: str
         sizes.push({ size, stock: Math.max(0, Number(v.inventoryQuantity ?? 0) || 0) });
       }
       if (!sizes.length) continue;   // no size-bearing variants → not reorder-planned here
-      products.push({ id: String(node.id), title: String(node.title ?? ""), imageUrl: node.featuredImage?.url ?? null, sizes });
+      products.push({ id: String(node.id), title: String(node.title ?? ""), productType: String(node.productType ?? "").trim(), imageUrl: node.featuredImage?.url ?? null, sizes });
     }
     if (!conn.pageInfo?.hasNextPage) break;
     cursor = conn.pageInfo.endCursor ?? null;
@@ -26243,9 +26249,9 @@ function JJOrderRow({
 // sold, rate/day, days cover, an editable "sell until" date, a lead time, and an
 // auto-filled but editable suggested order. Stock is live Shopify; sell-through
 // comes from the analytics dashboard.
-type ReorderOverviewProduct = { id: string; title: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; weeksCover: number | null };
+type ReorderOverviewProduct = { id: string; title: string; productType?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; weeksCover: number | null };
 function ReorderPlannerPage() {
-  const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
+  const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
   const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
 
   const [lookback, setLookback] = useState("90");
@@ -26253,6 +26259,7 @@ function ReorderPlannerPage() {
   const [customUntil, setCustomUntil] = useState("");
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
   const [page, setPage] = useState(1);
   // Per-VARIANT overrides, keyed `${productId}:${size}`. sell-until + lead default
   // from the constants below; the suggested qty is auto-filled unless the user
@@ -26278,12 +26285,12 @@ function ReorderPlannerPage() {
   const lookbackDays = overviewFetcher.data?.lookbackDays ?? ((since && until) ? Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000)) : 90);
 
   useEffect(() => { const t = setTimeout(() => setDebouncedQ(q.trim()), 200); return () => clearTimeout(t); }, [q]);
-  useEffect(() => { setPage(1); }, [debouncedQ, since, until]);
+  useEffect(() => { setPage(1); }, [debouncedQ, since, until, typeFilter]);
 
   const submitOverview = (opts?: { refresh?: boolean }) => {
     if (!since || !until) return;
     overviewFetcher.submit(
-      { intent: "reorder_overview", since, until, q: debouncedQ, page: String(page), ...(opts?.refresh ? { refresh: "1" } : {}) },
+      { intent: "reorder_overview", since, until, q: debouncedQ, type: typeFilter, page: String(page), ...(opts?.refresh ? { refresh: "1" } : {}) },
       { method: "post" },
     );
   };
@@ -26291,7 +26298,12 @@ function ReorderPlannerPage() {
     if (!since || !until) return;
     submitOverview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [since, until, debouncedQ, page]);
+  }, [since, until, debouncedQ, typeFilter, page]);
+  // Keep the type list stable even while a type filter is applied (the server
+  // only recomputes it from the full catalogue, so the first non-empty wins).
+  const typeOptionsRef = useRef<string[]>([]);
+  if ((overviewFetcher.data?.productTypes?.length ?? 0) > 0) typeOptionsRef.current = overviewFetcher.data!.productTypes!;
+  const productTypeOptions = typeOptionsRef.current;
 
   const effUntil = (key: string) => overrides[key]?.until ?? DEFAULT_UNTIL;
   const effLead = (key: string) => overrides[key]?.lead ?? DEFAULT_LEAD;
@@ -26358,13 +26370,13 @@ function ReorderPlannerPage() {
   const sizeCell: React.CSSProperties = { padding: "5px 8px", textAlign: "center", fontSize: 13, minWidth: 76 };
 
   return (
-    <div style={{ ...s.productInfoPage, alignContent: "start", overflowY: "auto", padding: 16, background: "#fff" }}>
-      <div style={{ width: "100%" }}>
+    <div style={{ ...s.productInfoPage, alignContent: "start", overflowY: "auto", padding: 0, background: "#eef2f6" }}>
+      {/* Toolbar — a distinct, sticky bar separated from the content below */}
+      <div style={{ position: "sticky", top: 0, zIndex: 5, background: "#fff", borderBottom: "1px solid #e2e8f0", boxShadow: "0 2px 8px rgba(15,23,42,0.06)", padding: "14px 16px" }}>
         <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 800 }}>Reorder Planner</h2>
         <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>Every active product, most urgent first. Set the sales window, then tune “sell until”, lead time and the suggested order per size.</div>
 
-        {/* Top bar — just the window + search */}
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12, alignItems: "flex-end" }}>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div>
             <span style={label}>Sell-through window</span>
             <select value={lookback} onChange={(e) => setLookback(e.target.value)} style={input}>
@@ -26381,14 +26393,21 @@ function ReorderPlannerPage() {
               <div><span style={label}>To</span><input type="date" value={customUntil} onChange={(e) => setCustomUntil(e.target.value)} style={input} /></div>
             </div>
           )}
-          <div style={{ flex: 1, minWidth: 220 }}>
+          <div>
+            <span style={label}>Product type</span>
+            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ ...input, maxWidth: 200 }}>
+              <option value="">All product types</option>
+              {productTypeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1, minWidth: 200 }}>
             <span style={label}>Find a style</span>
             <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by product name…" style={{ ...input, width: "100%", boxSizing: "border-box" }} />
           </div>
         </div>
 
-        {/* Status bar */}
-        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+        {/* Status row */}
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
           <span style={{ fontSize: 13, color: "#6b7280" }}>
             {firstLoad ? "Loading…" : totalProducts === 0 ? "No products" : `Showing ${firstIdx}–${lastIdx} of ${totalProducts}`}
           </span>
@@ -26402,7 +26421,10 @@ function ReorderPlannerPage() {
             <button type="button" style={{ ...smallBtn, opacity: page >= pageCount ? 0.4 : 1, cursor: page >= pageCount ? "default" : "pointer" }} disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next ›</button>
           </div>
         </div>
+      </div>
 
+      {/* Content */}
+      <div style={{ padding: 16 }}>
         {/* Product cards — each full width, sizes laid out horizontally */}
         <div style={{ display: "flex", flexDirection: "column", gap: 10, opacity: loading && !firstLoad ? 0.6 : 1, transition: "opacity 120ms" }}>
           {firstLoad && <div style={{ color: "#9ca3af", padding: "28px 0", textAlign: "center" }}>Loading products…</div>}
@@ -26420,7 +26442,7 @@ function ReorderPlannerPage() {
                   {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 34, height: 42, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 34, height: 42, background: "#f1f5f9", borderRadius: 4 }} />}
                   <span style={{ fontWeight: 700, fontSize: 15 }}>{p.title}</span>
                   {daysBadge(productDays)}
-                  <span style={{ fontSize: 12, color: "#6b7280" }}>{p.totalStock} in stock · {p.totalSold} sold</span>
+                  <span style={{ fontSize: 12, color: "#6b7280" }}>{p.totalStock} in stock · {p.totalSold} sold · <strong style={{ color: "#374151" }}>{productRate.toFixed(2)}/day</strong></span>
                   <span style={{ flex: 1 }} />
                   <span style={{ fontSize: 12, color: "#6b7280" }}>Suggested total</span>
                   <span style={{ fontWeight: 800, fontSize: 16, color: totalSuggested > 0 ? "#0f766e" : "#9ca3af", minWidth: 28, textAlign: "right" }}>{totalSuggested}</span>
@@ -26446,10 +26468,6 @@ function ReorderPlannerPage() {
                       <tr>
                         <td style={metricLabel}>Sold ({lookbackDays}d)</td>
                         {calc.map((c) => <td key={c.key} style={sizeCell}>{c.unitsSold}</td>)}
-                      </tr>
-                      <tr>
-                        <td style={metricLabel}>Rate/day</td>
-                        {calc.map((c) => <td key={c.key} style={{ ...sizeCell, color: "#6b7280" }}>{c.rate.toFixed(2)}</td>)}
                       </tr>
                       <tr>
                         <td style={metricLabel}>Days cover</td>
