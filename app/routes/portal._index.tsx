@@ -68,6 +68,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     COLLECTION_FABRIC_STATUS_KEY,
     COLLECTION_ORDER_STATUS_KEY,
     COLLECTION_FABRIC_LINK_KEY,
+    COLLECTION_GROUPS_KEY,
     INR_AUD_CACHE_KEY,
   ];
   const needsOrders = isRestockPage || page === "packing";
@@ -860,6 +861,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
   }
 
+  // Collection groups (reversible folders) for the Collections pages.
+  const collectionGroups = isCollectionsPage ? normalizeCollectionGroups(wrap(COLLECTION_GROUPS_KEY)?.value) : [];
+
   // Whole-site search (admin only) — searches every data source, including
   // pages hidden from the nav.
   const globalSearchQuery = page === "search" ? (url.searchParams.get("q") ?? "").trim() : "";
@@ -937,6 +941,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
     globalSearchQuery,
     globalSearch,
+    collectionGroups,
     jjInboxCollectionId,
     jjTabs: normalizeJJTabs(wrap(JJ_TABS_KEY)?.value),
     fabricStockIndex,
@@ -3554,6 +3559,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
     return null;
   }
+  if (intent === "set_collection_groups") {
+    // Save the whole collection-groups list (create / rename / add-remove members
+    // / ungroup). The client sends the full normalized list.
+    let groups: CollectionGroup[] = [];
+    try { groups = normalizeCollectionGroups(JSON.parse(String(form.get("groups") ?? "[]"))); } catch { groups = []; }
+    // Drop empty groups (no members) so ungrouping the last member removes it.
+    groups = groups.filter((g) => g.collectionIds.length > 0);
+    await prisma.portalSetting.upsert({
+      where: { key: COLLECTION_GROUPS_KEY },
+      create: { key: COLLECTION_GROUPS_KEY, value: { groups } },
+      update: { value: { groups } },
+    });
+    return jsonResponse({ ok: true });
+  }
   if (intent === "set_collection_fabric_link") {
     // Pin a fabric NAME to a specific fabric-in-stock entry (fabricKey) for this
     // collection, so the in-stock meters read that exact entry. Stored as
@@ -5048,7 +5067,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (!formData && currentUrl && nextUrl) {
     const cur = new URL(currentUrl);
     const nxt = new URL(nextUrl);
-    for (const p of ["thread", "row", "collectionId", "shootId"]) {
+    for (const p of ["thread", "row", "collectionId", "shootId", "groupId"]) {
       cur.searchParams.delete(p);
       nxt.searchParams.delete(p);
     }
@@ -5111,6 +5130,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "set_collection_fabric_status" || intent === "set_collection_order_status" || intent === "set_collection_fabric_link") return false;
+  if (intent === "set_collection_groups") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths" || intent === "update_photoshoot_column_widths" || intent === "update_jj_column_widths") return false;
   // Photo shoot row edits keep their own local state; the slim shoot list
   // (loader) only needs refreshing on add/rename/delete, not row edits.
@@ -5497,6 +5517,27 @@ const COLLECTION_ORDER_STATUS_KEY = "collections-order-status-v1";
 // by collection id. When set, the detail-page "in stock" meters read that
 // fabric's on-hand meters instead of guessing from the rows.
 const COLLECTION_FABRIC_LINK_KEY = "collections-fabric-link-v1";
+// Collection groups (reversible folders): a group bundles several collections
+// under one tile. { groups: [{ id, name, collectionIds:[] }] }. Collections not
+// in any group show as normal tiles; a collection lives in at most one group.
+const COLLECTION_GROUPS_KEY = "collections-groups-v1";
+type CollectionGroup = { id: string; name: string; collectionIds: number[] };
+function normalizeCollectionGroups(value: unknown): CollectionGroup[] {
+  const arr = value && typeof value === "object" && Array.isArray((value as { groups?: unknown }).groups)
+    ? (value as { groups: unknown[] }).groups : Array.isArray(value) ? value : [];
+  const seen = new Set<number>();
+  return arr
+    .map((g): CollectionGroup | null => {
+      if (!g || typeof g !== "object") return null;
+      const id = String((g as CollectionGroup).id ?? "").trim();
+      const name = String((g as CollectionGroup).name ?? "").trim();
+      const ids = Array.isArray((g as CollectionGroup).collectionIds) ? (g as CollectionGroup).collectionIds : [];
+      // Each collection can only belong to one group — dedupe across groups.
+      const collectionIds = ids.map((n) => Number(n)).filter((n) => Number.isInteger(n) && !seen.has(n) && (seen.add(n), true));
+      return id && name ? { id, name, collectionIds } : null;
+    })
+    .filter((g): g is CollectionGroup => Boolean(g));
+}
 // Chip catalogs for the Collections Status + Sample columns. Reuses
 // the same shape as RestockOption so the dropdown UI can be reused.
 type CollectionChipOption = { value: string; label: string; bg: string; color: string };
@@ -9534,6 +9575,7 @@ export default function PortalDashboard() {
     jjColumnWidths,
     globalSearchQuery,
     globalSearch,
+    collectionGroups,
     jjInboxCollectionId,
     jjTabs,
     fabricStockIndex,
@@ -10225,6 +10267,7 @@ export default function PortalDashboard() {
                 photoShoots={photoShoots}
                 etaByProductId={collectionEtaByProductId}
                 shipmentByProductId={collectionShipmentByProductId}
+                collectionGroups={collectionGroups}
               />
             </div>
           </div>
@@ -14028,7 +14071,7 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   );
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [] }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[] }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -14048,6 +14091,40 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const [showHidden, setShowHidden] = useState(false);
   // Tiles filter by fabric status: "" = all, "in_stock", "on_order".
   const [fabricStatusFilter, setFabricStatusFilter] = useState("");
+
+  // ── Collection groups (reversible folders) ──────────────────────────────
+  const [groups, setGroups] = useState<CollectionGroup[]>(collectionGroups);
+  useEffect(() => { setGroups(collectionGroups); }, [collectionGroups]);
+  const groupFetcher = useFetcher();
+  const saveGroups = (next: CollectionGroup[]) => {
+    const cleaned = next.filter((g) => g.collectionIds.length > 0);
+    setGroups(cleaned); // optimistic
+    groupFetcher.submit({ intent: "set_collection_groups", groups: JSON.stringify(cleaned) }, { method: "post" });
+  };
+  const groupIdParam = searchParams.get("groupId");
+  const openGroupNav = (id: string | null) => {
+    const next = new URLSearchParams(searchParams);
+    if (id) next.set("groupId", id); else next.delete("groupId");
+    setSearchParams(next, { replace: false });
+  };
+  const groupedIds = useMemo(() => { const s = new Set<number>(); groups.forEach((g) => g.collectionIds.forEach((id) => s.add(id))); return s; }, [groups]);
+  // Selection (checkbox) for creating a group.
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const toggleSelect = (id: number) => setSelectedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const clearSelection = () => setSelectedIds(new Set());
+  const groupSelected = () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length < 2) return;
+    const name = window.prompt("Name this group of collections:", "")?.trim();
+    if (!name) return;
+    const stripped = groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !selectedIds.has(id)) }));
+    const id = `g_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+    saveGroups([...stripped, { id, name, collectionIds: ids }]);
+    clearSelection();
+  };
+  const removeFromGroup = (collectionId: number) => saveGroups(groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => id !== collectionId) })));
+  const ungroup = (groupId: string) => { saveGroups(groups.filter((g) => g.id !== groupId)); openGroupNav(null); };
+  const renameGroup = (groupId: string) => { const g = groups.find((x) => x.id === groupId); if (!g) return; const name = window.prompt("Rename group:", g.name)?.trim(); if (!name) return; saveGroups(groups.map((x) => x.id === groupId ? { ...x, name } : x)); };
 
   useEffect(() => {
     setCollections(initialCollections.filter((c) => !deletedRef.current.has(c.id)));
@@ -14282,10 +14359,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
       )}
 
-      <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
-        {/* When "Show hidden" is on, show ONLY the hidden collections;
-            otherwise only the visible ones. Also filter by fabric status. */}
-        {collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter)).map((c) => (
+      {(() => {
+        const visibleCollections = collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter));
+        const openGroup = groups.find((g) => g.id === groupIdParam) ?? null;
+        const card = (c: CollectionListItem) => (
           <CollectionCard
             key={c.id}
             collection={c}
@@ -14302,19 +14379,90 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             orderStatus={c.orderStatus ?? ""}
             onSetOrderStatus={(st) => handleSetOrderStatus(c.id, st)}
             onSetCover={(file) => handleSetCover(c.id, file)}
+            selectable={!c.hidden}
+            selected={selectedIds.has(c.id)}
+            onToggleSelected={() => toggleSelect(c.id)}
             onDragStart={(e) => { setDragId(c.id); e.dataTransfer.effectAllowed = "move"; }}
             onDragOver={(e) => { if (!dragId) return; e.preventDefault(); setDragOverId(c.id); }}
             onDragLeave={() => setDragOverId((cur) => cur === c.id ? null : cur)}
             onDrop={(e) => { e.preventDefault(); reorder(c.id); setDragId(null); setDragOverId(null); }}
             onDragEnd={() => { setDragId(null); setDragOverId(null); }}
           />
-        ))}
-        {collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter)).length === 0 && (
-          <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-            {fabricStatusFilter ? "No collections with this fabric status." : showHidden ? "No hidden collections." : "No collections yet. Click Add Collection to create your first one."}
+        );
+        const smallBtn: React.CSSProperties = { background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" };
+
+        // Selection action bar (choose tiles → group them).
+        const selectionBar = selectedIds.size > 0 ? (
+          <div style={{ margin: "0 14px 12px", padding: "8px 12px", background: "#0d9488", color: "#fff", borderRadius: 8, display: "flex", alignItems: "center", gap: 12, fontSize: 13, fontWeight: 700, flexWrap: "wrap" }}>
+            <span>{selectedIds.size} selected</span>
+            {openGroup ? (
+              <button type="button" onClick={() => { Array.from(selectedIds).forEach((id) => removeFromGroup(id)); clearSelection(); }} style={{ background: "#fff", color: "#b91c1c", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: "pointer" }}>Remove from group</button>
+            ) : (
+              <button type="button" onClick={groupSelected} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }}>＋ Group these into one tile</button>
+            )}
+            <button type="button" onClick={clearSelection} style={{ background: "transparent", color: "#fff", border: "1px solid rgba(255,255,255,0.5)", borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}>Cancel</button>
           </div>
-        )}
-      </div>
+        ) : null;
+
+        if (openGroup) {
+          const members = visibleCollections.filter((c) => openGroup.collectionIds.includes(c.id));
+          return (
+            <div>
+              <div style={{ margin: "0 14px 12px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={smallBtn}>← All collections</button>
+                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: "#111827" }}>{openGroup.name}</h3>
+                <span style={{ color: "#6b7280", fontSize: 12 }}>{openGroup.collectionIds.length} collections</span>
+                <button type="button" onClick={() => renameGroup(openGroup.id)} style={smallBtn}>Rename</button>
+                <button type="button" onClick={() => { if (window.confirm("Ungroup — put these collections back as individual tiles?")) ungroup(openGroup.id); }} style={smallBtn}>Ungroup</button>
+              </div>
+              {selectionBar}
+              <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
+                {members.map(card)}
+                {members.length === 0 && (
+                  <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>This group is empty.</div>
+                )}
+              </div>
+            </div>
+          );
+        }
+
+        return (
+          <div>
+            {selectionBar}
+            <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
+              {/* Group tiles (folders) first, then ungrouped collections. */}
+              {!showHidden && groups.map((g) => {
+                const memberCount = g.collectionIds.length;
+                const cover = collections.find((c) => g.collectionIds.includes(c.id) && c.hasThumbnail);
+                return (
+                  <div key={g.id} onClick={() => openGroupNav(g.id)} style={{ ...s.productStyleCard, cursor: "pointer", position: "relative" }} title={`Open ${g.name}`}>
+                    <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative", background: "#0f766e" }}>
+                      {cover ? (
+                        <img src={`/portal/thumbnail/collection/${cover.id}?v=${new Date(cover.updatedAt).getTime()}`} alt={g.name} style={{ ...s.productStyleImage, filter: "brightness(0.9)" }} loading="lazy" decoding="async" />
+                      ) : (
+                        <div style={s.productStyleImageEmpty}>Group</div>
+                      )}
+                      {/* Folder badge (stacked-card look). */}
+                      <div style={{ position: "absolute", top: 8, left: 8, background: "rgba(15,118,110,0.92)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>📦 {memberCount}</div>
+                      <div style={{ position: "absolute", inset: 0, boxShadow: "inset 0 0 0 3px rgba(255,255,255,0.5)", borderRadius: 6, pointerEvents: "none" }} />
+                    </div>
+                    <div style={{ padding: "8px 4px 2px" }}>
+                      <div style={{ fontWeight: 800, fontSize: 14, color: "#111827", textAlign: "center" }}>{g.name}</div>
+                      <div style={{ fontSize: 11, color: "#6b7280", textAlign: "center" }}>{memberCount} collections</div>
+                    </div>
+                  </div>
+                );
+              })}
+              {visibleCollections.filter((c) => showHidden || !groupedIds.has(c.id)).map(card)}
+              {visibleCollections.filter((c) => showHidden || !groupedIds.has(c.id)).length === 0 && groups.length === 0 && (
+                <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+                  {fabricStatusFilter ? "No collections with this fabric status." : showHidden ? "No hidden collections." : "No collections yet. Click Add Collection to create your first one."}
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Show hidden / back-to-active toggle, at the BOTTOM of the page. */}
       {(() => {
@@ -14533,6 +14681,9 @@ function CollectionCard({
   thumbnailEntity = "collection",
   noun = "collection",
   countNoun = "row",
+  selectable = false,
+  selected = false,
+  onToggleSelected,
 }: {
   collection: CollectionListItem;
   isDragging: boolean;
@@ -14562,6 +14713,10 @@ function CollectionCard({
   thumbnailEntity?: string;
   noun?: string;
   countNoun?: string;
+  // Group-selection checkbox (Collections tiles): tick to bundle into a group.
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelected?: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [hover, setHover] = useState(false);
@@ -14572,7 +14727,7 @@ function CollectionCard({
 
   return (
     <div
-      style={{ ...s.productStyleCard, ...(isDragging ? s.productStyleCardDragging : {}), ...(isDragOver ? s.productStyleCardDropTarget : {}), ...(hidden ? { opacity: 0.45 } : {}), cursor: "pointer" }}
+      style={{ ...s.productStyleCard, ...(isDragging ? s.productStyleCardDragging : {}), ...(isDragOver ? s.productStyleCardDropTarget : {}), ...(hidden ? { opacity: 0.45 } : {}), ...(selected ? { outline: "3px solid #0d9488", outlineOffset: -1 } : {}), cursor: "pointer" }}
       onClick={() => { if (!editing) onOpen(); }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -14580,6 +14735,15 @@ function CollectionCard({
       onDragLeave={onDragLeave}
       onDrop={onDrop}
     >
+      {selectable && (
+        <div
+          onClick={(e) => { e.stopPropagation(); onToggleSelected?.(); }}
+          title="Select to group"
+          style={{ position: "absolute", top: 8, left: 8, zIndex: 5, width: 24, height: 24, borderRadius: 6, background: selected ? "#0d9488" : "rgba(255,255,255,0.92)", border: "1px solid rgba(0,0,0,0.15)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }}
+        >
+          {selected && <span style={{ color: "#fff", fontSize: 15, fontWeight: 900, lineHeight: 1 }}>✓</span>}
+        </div>
+      )}
       <span
         draggable
         style={{ ...s.productStyleDragHandle, pointerEvents: "auto", cursor: "grab", opacity: hover ? 0.6 : 0.25, transition: "opacity 0.15s" }}
