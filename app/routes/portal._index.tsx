@@ -2345,6 +2345,61 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, sizes, salesAvailable: sales !== null });
   }
 
+  // All-products overview: every active Shopify product ranked by weeks-of-cover
+  // (most urgent first), paginated. Stock comes from a cached full-catalogue
+  // snapshot; sell-through from one bulk dashboard query. The client does the
+  // per-row target/lead arithmetic so tweaks are instant.
+  if (intent === "reorder_overview") {
+    const since = String(form.get("since") ?? "").trim();
+    const until = String(form.get("until") ?? "").trim();
+    const q = String(form.get("q") ?? "").trim().toLowerCase();
+    const pageNum = Math.max(1, parseInt(String(form.get("page") ?? "1"), 10) || 1);
+    const refresh = String(form.get("refresh") ?? "") === "1";
+    const pageSize = 50;
+    if (!since || !until) return jsonResponse({ ok: false, error: "bad_input" });
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+    const [stockProducts, soldByProduct] = await Promise.all([
+      getAllShopifyProductsWithInventory(session.shop, session.accessToken, refresh).catch(() => [] as ReorderStockProduct[]),
+      fetchReorderSalesAllVariants(since, until),
+    ]);
+    const lookbackDays = Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000));
+    const numId = (id: string) => id.replace(/[^0-9]/g, "");
+    const enriched = stockProducts.map((p) => {
+      const soldMap = soldByProduct?.[numId(p.id)] ?? {};
+      // Match sold rows to sizes by normalized label.
+      const soldBySize = new Map<string, number>();
+      let soldTotalAll = 0;
+      for (const [variant, units] of Object.entries(soldMap)) { const u = Number(units) || 0; soldTotalAll += u; soldBySize.set(normalizeVariantSizeLabel(variant), (soldBySize.get(normalizeVariantSizeLabel(variant)) ?? 0) + u); }
+      // Single-variant products (e.g. "Free Size") report sold under "Default
+      // Title", which won't match the size label — so give the lone size all the
+      // product's sales.
+      const sizes = p.sizes.map((s) => ({ size: s.size, stock: s.stock, unitsSold: p.sizes.length === 1 ? soldTotalAll : (soldBySize.get(normalizeVariantSizeLabel(s.size)) ?? 0) }));
+      const totalStock = sizes.reduce((a, s) => a + s.stock, 0);
+      const totalSold = sizes.reduce((a, s) => a + s.unitsSold, 0);
+      const rate = totalSold / lookbackDays;
+      const weeksCover = rate > 0 ? totalStock / (rate * 7) : Infinity;
+      return { id: p.id, title: p.title, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, weeksCover };
+    });
+    const filtered = q ? enriched.filter((p) => p.title.toLowerCase().includes(q)) : enriched;
+    // Most urgent first: finite weeks-cover ascending, no-sales products last
+    // (broken by more stock sitting = lower priority, so highest stock last).
+    filtered.sort((a, b) => {
+      const av = Number.isFinite(a.weeksCover) ? a.weeksCover : Number.POSITIVE_INFINITY;
+      const bv = Number.isFinite(b.weeksCover) ? b.weeksCover : Number.POSITIVE_INFINITY;
+      if (av !== bv) return av - bv;
+      return b.totalSold - a.totalSold;
+    });
+    const totalProducts = filtered.length;
+    const pageCount = Math.max(1, Math.ceil(totalProducts / pageSize));
+    const clampedPage = Math.min(pageNum, pageCount);
+    const slice = filtered.slice((clampedPage - 1) * pageSize, clampedPage * pageSize).map((p) => ({
+      ...p,
+      weeksCover: Number.isFinite(p.weeksCover) ? Math.round(p.weeksCover * 10) / 10 : null,
+    }));
+    return jsonResponse({ ok: true, products: slice, page: clampedPage, pageCount, totalProducts, pageSize, lookbackDays, salesAvailable: soldByProduct !== null });
+  }
+
   if (intent === "create_restock_order_from_portal") {
     let product: ShopifySearchProduct;
     let qtys: Record<string, number>;
@@ -5174,7 +5229,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (intent === "vb_get_item" || intent === "get_sample_full"
     || intent === "get_sample_iteration_thumbnails"
     || intent === "get_collection_full" || intent === "ps_get_shoot"
-    || intent === "reorder_search" || intent === "reorder_plan") return false;
+    || intent === "reorder_search" || intent === "reorder_plan" || intent === "reorder_overview") return false;
   return defaultShouldRevalidate;
 };
 
@@ -8058,6 +8113,82 @@ async function fetchReorderVariantSales(productId: string, productTitle: string,
   } catch {
     return null;
   }
+}
+
+// Bulk sell-through for the whole catalogue in one dashboard call, used by the
+// all-products overview. Returns { "<productId>": { "<variant>": unitsSold } }
+// or null if the dashboard isn't configured / reachable.
+async function fetchReorderSalesAllVariants(since: string, until: string): Promise<Record<string, Record<string, number>> | null> {
+  const key = process.env.PORTAL_API_KEY;
+  if (!key) return null;
+  const params = new URLSearchParams({ since, until });
+  try {
+    const res = await fetch(`${REORDER_DASHBOARD_URL}/api/reorder/sales-by-variant-all?${params.toString()}`, { headers: { "X-Portal-Key": key } });
+    if (!res.ok) return null;
+    const json = await res.json() as { ok?: boolean; byProduct?: Record<string, Record<string, number>> };
+    return json.byProduct && typeof json.byProduct === "object" ? json.byProduct : null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── All-products stock snapshot for the Reorder Planner overview ─────────────
+// Pages the entire catalogue once (per-variant on-hand via inventoryQuantity)
+// and caches it, so ranking every product by weeks-of-cover doesn't cost one
+// Shopify call per product. Size labels reuse the same logic as the packing
+// list so they line up with the sell-through variant labels.
+type ReorderStockProduct = { id: string; title: string; imageUrl: string | null; sizes: Array<{ size: string; stock: number }> };
+let _reorderStockCache: { at: number; shop: string; products: ReorderStockProduct[] } | null = null;
+const REORDER_STOCK_TTL_MS = 10 * 60 * 1000;
+async function getAllShopifyProductsWithInventory(shop: string, accessToken: string, force = false): Promise<ReorderStockProduct[]> {
+  if (!force && _reorderStockCache && _reorderStockCache.shop === shop && Date.now() - _reorderStockCache.at < REORDER_STOCK_TTL_MS) {
+    return _reorderStockCache.products;
+  }
+  const query = `#graphql
+    query ReorderAllProducts($cursor: String) {
+      products(first: 100, after: $cursor, sortKey: TITLE, query: "status:active") {
+        edges {
+          cursor
+          node {
+            id
+            title
+            featuredImage { url }
+            variants(first: 100) {
+              nodes { title sku inventoryQuantity selectedOptions { name value } }
+            }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  `;
+  const products: ReorderStockProduct[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < 40; page++) {   // hard cap ~4000 products
+    const json: any = await shopifyGraphql<any>(shop, accessToken, query, { cursor });
+    const conn = json?.data?.products;
+    if (!conn) break;
+    for (const edge of conn.edges ?? []) {
+      const node = edge?.node;
+      if (!node?.id) continue;
+      const variantNodes: any[] = node.variants?.nodes ?? [];
+      const seen = new Set<string>();
+      const sizes: Array<{ size: string; stock: number }> = [];
+      for (const v of variantNodes) {
+        const size = extractShopifySizeLabel(v.selectedOptions, variantNodes.length);
+        if (!size || seen.has(size)) continue;
+        seen.add(size);
+        sizes.push({ size, stock: Math.max(0, Number(v.inventoryQuantity ?? 0) || 0) });
+      }
+      if (!sizes.length) continue;   // no size-bearing variants → not reorder-planned here
+      products.push({ id: String(node.id), title: String(node.title ?? ""), imageUrl: node.featuredImage?.url ?? null, sizes });
+    }
+    if (!conn.pageInfo?.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor ?? null;
+    if (!cursor) break;
+  }
+  _reorderStockCache = { at: Date.now(), shop, products };
+  return products;
 }
 
 async function searchShopifyProducts(query: string): Promise<ShopifySearchProduct[]> {
@@ -26105,94 +26236,134 @@ function JJOrderRow({
   );
 }
 
-// Reorder Planner — search a style, and it says how many to order (per size) to
-// last until a target, accounting for lead time. Sell-through comes from the
-// analytics dashboard; current stock from live Shopify.
+// Reorder Planner — every active product, ranked most-urgent-first (lowest
+// weeks-of-cover), 50 per page. Set the sell-through window up top; each row has
+// its own "sell until" + "lead time" so you can tune a single style, and the
+// suggested per-size order recomputes instantly. Stock is live Shopify;
+// sell-through comes from the analytics dashboard.
+type ReorderOverviewProduct = { id: string; title: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; weeksCover: number | null };
 function ReorderPlannerPage() {
-  const searchFetcher = useFetcher<{ ok?: boolean; products?: ShopifySearchProduct[] }>();
-  const planFetcher = useFetcher<{ ok?: boolean; sizes?: Array<{ size: string; stock: number; unitsSold: number }>; salesAvailable?: boolean; error?: string }>();
-  const pushFetcher = useFetcher<{ success?: boolean; order?: { id: number } } | Record<string, unknown>>();
-  const [query, setQuery] = useState("");
-  const [selected, setSelected] = useState<ShopifySearchProduct | null>(null);
+  const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
+  const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
+
   const [lookback, setLookback] = useState("90");
   const [customFrom, setCustomFrom] = useState("");
   const [customUntil, setCustomUntil] = useState("");
-  const [targetMode, setTargetMode] = useState<"date" | "weeks">("date");
-  const [targetDate, setTargetDate] = useState("");
-  const [targetWeeks, setTargetWeeks] = useState("16");
-  const [leadDays, setLeadDays] = useState("30");
+  const [targetMode, setTargetMode] = useState<"date" | "weeks">("weeks");
+  const [globalTargetDate, setGlobalTargetDate] = useState("");
+  const [globalTargetWeeks, setGlobalTargetWeeks] = useState("16");
+  const [globalLead, setGlobalLead] = useState("30");
+  const [q, setQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
+  const [page, setPage] = useState(1);
+  const [overrides, setOverrides] = useState<Record<string, { target?: string; lead?: string }>>({});
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [pushedFor, setPushedFor] = useState<Record<string, string>>({});
+  const pushTargetRef = useRef<{ id: string; label: string } | null>(null);
 
   const fmtISO = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const addDays = (d: Date, n: number) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
   const addYears = (d: Date, n: number) => { const x = new Date(d); x.setFullYear(x.getFullYear() + n); return x; };
   const today = new Date(); today.setHours(0, 0, 0, 0);
 
-  const daysToTarget = targetMode === "weeks"
-    ? Math.round((Number(targetWeeks) || 0) * 7)
-    : (targetDate ? Math.round((new Date(targetDate).getTime() - today.getTime()) / 86400000) : 0);
-  const targetValid = daysToTarget > 0;
-  const leadTimeDays = Math.max(0, Math.round(Number(leadDays) || 0));
+  // Global default target (in days) — also sizes the "same period last year" window.
+  const globalDaysToTarget = targetMode === "weeks"
+    ? Math.round((Number(globalTargetWeeks) || 0) * 7)
+    : (globalTargetDate ? Math.round((new Date(globalTargetDate).getTime() - today.getTime()) / 86400000) : 0);
 
-  // Lookback window → since/until (YYYY-MM-DD).
+  // Sell-through window → since/until (YYYY-MM-DD).
   let since = "", until = "";
   if (lookback === "custom") { since = customFrom; until = customUntil; }
-  else if (lookback === "lastyear") { since = fmtISO(addYears(today, -1)); until = fmtISO(addYears(addDays(today, Math.max(1, daysToTarget)), -1)); }
+  else if (lookback === "lastyear") { since = fmtISO(addYears(today, -1)); until = fmtISO(addYears(addDays(today, Math.max(1, globalDaysToTarget)), -1)); }
   else { const n = Number(lookback) || 90; since = fmtISO(addDays(today, -n)); until = fmtISO(today); }
-  const lookbackDays = (since && until) ? Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000)) : 1;
+  const lookbackDays = overviewFetcher.data?.lookbackDays ?? ((since && until) ? Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000)) : 90);
 
-  useEffect(() => {
-    if (!selected || !since || !until) return;
-    planFetcher.submit({ intent: "reorder_plan", productId: selected.id, productTitle: selected.title, since, until }, { method: "post" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, since, until]);
+  // Debounce the search box; reset to page 1 when the filter or window changes.
+  useEffect(() => { const t = setTimeout(() => setDebouncedQ(q.trim()), 300); return () => clearTimeout(t); }, [q]);
+  useEffect(() => { setPage(1); }, [debouncedQ, since, until]);
 
-  const runSearch = (q: string) => { setQuery(q); if (q.trim().length >= 2) searchFetcher.submit({ intent: "reorder_search", q }, { method: "post" }); };
-
-  const coverageDays = daysToTarget + leadTimeDays;
-  const rows = (planFetcher.data?.sizes ?? []).map((s) => {
-    const rate = s.unitsSold / lookbackDays; // units/day
-    const weeksCover = rate > 0 ? s.stock / (rate * 7) : Infinity;
-    const suggested = targetValid ? Math.max(0, Math.ceil(rate * coverageDays - s.stock)) : 0;
-    return { ...s, rate, weeksCover, suggested };
-  });
-  const totalSuggested = rows.reduce((a, r) => a + r.suggested, 0);
-  const salesAvailable = planFetcher.data?.salesAvailable !== false;
-
-  const push = (supplier: string) => {
-    if (!selected || totalSuggested <= 0) return;
-    const qtys: Record<string, number> = {};
-    rows.forEach((r) => { if (r.suggested > 0) qtys[r.size] = r.suggested; });
-    pushFetcher.submit({ intent: "create_restock_order_from_portal", product: JSON.stringify(selected), qtys: JSON.stringify(qtys), supplier }, { method: "post" });
+  const submitOverview = (opts?: { refresh?: boolean; page?: number }) => {
+    if (!since || !until) return;
+    overviewFetcher.submit(
+      { intent: "reorder_overview", since, until, q: debouncedQ, page: String(opts?.page ?? page), ...(opts?.refresh ? { refresh: "1" } : {}) },
+      { method: "post" },
+    );
   };
+  useEffect(() => {
+    if (!since || !until) return;
+    submitOverview();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [since, until, debouncedQ, page]);
+
+  // Per-product target / lead (override falls back to the global default).
+  const effTarget = (id: string) => overrides[id]?.target ?? (targetMode === "date" ? globalTargetDate : globalTargetWeeks);
+  const effLead = (id: string) => overrides[id]?.lead ?? globalLead;
+  const daysToTargetFor = (id: string) => {
+    const val = effTarget(id);
+    if (targetMode === "weeks") return Math.round((Number(val) || 0) * 7);
+    return val ? Math.round((new Date(val).getTime() - today.getTime()) / 86400000) : 0;
+  };
+  const computeProduct = (p: ReorderOverviewProduct) => {
+    const dtt = daysToTargetFor(p.id);
+    const lead = Math.max(0, Math.round(Number(effLead(p.id)) || 0));
+    const coverage = dtt + lead;
+    const valid = dtt > 0;
+    const rows = p.sizes.map((sz) => {
+      const rate = sz.unitsSold / lookbackDays;
+      const weeksCover = rate > 0 ? sz.stock / (rate * 7) : Infinity;
+      const suggested = valid ? Math.max(0, Math.ceil(rate * coverage - sz.stock)) : 0;
+      return { ...sz, rate, weeksCover, suggested };
+    });
+    return { rows, total: rows.reduce((a, r) => a + r.suggested, 0), valid, dtt, lead, coverage };
+  };
+
+  const push = (p: ReorderOverviewProduct, supplier: string, label: string) => {
+    const c = computeProduct(p);
+    if (!c.valid || c.total <= 0) return;
+    const qtys: Record<string, number> = {};
+    c.rows.forEach((r) => { if (r.suggested > 0) qtys[r.size] = r.suggested; });
+    pushTargetRef.current = { id: p.id, label };
+    const product = { id: p.id, shop: p.shop, title: p.title, imageUrl: p.imageUrl, skus: [], sizes: p.sizes.map((s) => s.size), variants: [] };
+    pushFetcher.submit({ intent: "create_restock_order_from_portal", product: JSON.stringify(product), qtys: JSON.stringify(qtys), supplier }, { method: "post" });
+  };
+  useEffect(() => {
+    if (pushFetcher.state === "idle" && (pushFetcher.data as { success?: boolean } | undefined)?.success && pushTargetRef.current) {
+      const t = pushTargetRef.current; pushTargetRef.current = null;
+      setPushedFor((prev) => ({ ...prev, [t.id]: t.label }));
+    }
+  }, [pushFetcher.state, pushFetcher.data]);
 
   const input: React.CSSProperties = { border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 10px", fontSize: 14, background: "#fff" };
   const label: React.CSSProperties = { fontSize: 12, fontWeight: 700, color: "#6b7280", marginBottom: 4, display: "block" };
+  const th: React.CSSProperties = { padding: "8px 10px", position: "sticky", top: 0, background: "#f8fafc", zIndex: 1, borderBottom: "2px solid #e5e7eb", fontSize: 12, fontWeight: 700, color: "#6b7280", whiteSpace: "nowrap" };
+  const td: React.CSSProperties = { padding: "6px 10px", fontSize: 13, verticalAlign: "middle" };
+  const coverColor = (w: number | null) => w == null ? "#9ca3af" : w < 4 ? "#dc2626" : w < 8 ? "#b45309" : "#111827";
+  const coverBadge = (w: number | null) => (
+    <span style={{ display: "inline-block", minWidth: 44, textAlign: "center", fontWeight: 800, fontSize: 12, borderRadius: 999, padding: "2px 8px", color: coverColor(w), background: w == null ? "#f1f5f9" : w < 4 ? "#fee2e2" : w < 8 ? "#fef3c7" : "#ecfdf5" }}>{w == null ? "—" : `${w.toFixed(1)}w`}</span>
+  );
+
+  const data = overviewFetcher.data;
+  const products = data?.products ?? [];
+  const salesAvailable = data?.salesAvailable !== false;
+  const loading = overviewFetcher.state !== "idle";
+  const pageCount = data?.pageCount ?? 1;
+  const totalProducts = data?.totalProducts ?? 0;
+  const pageSize = data?.pageSize ?? 50;
+  const firstIdx = totalProducts === 0 ? 0 : (page - 1) * pageSize + 1;
+  const lastIdx = Math.min(totalProducts, page * pageSize);
+
+  const smallBtn: React.CSSProperties = { border: "1px solid #d1d5db", background: "#fff", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" };
 
   return (
     <div style={{ ...s.productInfoPage, alignContent: "start", overflowY: "auto", padding: 16 }}>
-      <div style={{ maxWidth: 900 }}>
+      <div style={{ maxWidth: 1200 }}>
         <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 800 }}>Reorder Planner</h2>
-        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>Search a style, set how long you want it to last and the lead time — it suggests how many to order per size.</div>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>Every active product, most urgent first. Set the sales window up top; tune “sell until” and lead time per row — it suggests how many to order per size.</div>
 
-        {/* Search */}
-        <div style={{ position: "relative", marginBottom: 16 }}>
-          <input type="search" value={query} onChange={(e) => runSearch(e.target.value)} placeholder="Search a product…" style={{ ...input, width: "100%", boxSizing: "border-box" }} />
-          {query.trim().length >= 2 && !selected && (searchFetcher.data?.products?.length ?? 0) > 0 && (
-            <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 30, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", maxHeight: 320, overflowY: "auto", marginTop: 4 }}>
-              {searchFetcher.data!.products!.map((p) => (
-                <div key={p.id} onClick={() => { setSelected(p); setQuery(p.title); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer", borderBottom: "1px solid #f3f4f6" }}>
-                  {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 36, height: 44, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 36, height: 44, background: "#f1f5f9", borderRadius: 4 }} />}
-                  <span style={{ fontSize: 13 }}>{p.title}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Controls */}
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
+        {/* Top bar controls */}
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12, alignItems: "flex-end" }}>
           <div>
-            <span style={label}>Sell-through lookback</span>
+            <span style={label}>Sell-through window</span>
             <select value={lookback} onChange={(e) => setLookback(e.target.value)} style={input}>
               <option value="30">Last 30 days</option>
               <option value="60">Last 60 days</option>
@@ -26208,87 +26379,122 @@ function ReorderPlannerPage() {
             </div>
           )}
           <div>
-            <span style={label}>Make it last</span>
+            <span style={label}>Make it last (default)</span>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               <select value={targetMode} onChange={(e) => setTargetMode(e.target.value as "date" | "weeks")} style={input}>
-                <option value="date">Until date</option>
                 <option value="weeks">For weeks</option>
+                <option value="date">Until date</option>
               </select>
               {targetMode === "date"
-                ? <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} style={input} />
-                : <input type="number" min={1} value={targetWeeks} onChange={(e) => setTargetWeeks(e.target.value)} style={{ ...input, width: 80 }} />}
+                ? <input type="date" value={globalTargetDate} onChange={(e) => setGlobalTargetDate(e.target.value)} style={input} />
+                : <input type="number" min={1} value={globalTargetWeeks} onChange={(e) => setGlobalTargetWeeks(e.target.value)} style={{ ...input, width: 80 }} />}
             </div>
           </div>
           <div>
-            <span style={label}>Lead time (days)</span>
-            <input type="number" min={0} value={leadDays} onChange={(e) => setLeadDays(e.target.value)} style={{ ...input, width: 90 }} title="Days until the order arrives — longer for sea, shorter for air" />
+            <span style={label}>Lead time (default)</span>
+            <input type="number" min={0} value={globalLead} onChange={(e) => setGlobalLead(e.target.value)} style={{ ...input, width: 90 }} title="Days until the order arrives — longer for sea, shorter for air" />
+          </div>
+          <div style={{ flex: 1, minWidth: 200 }}>
+            <span style={label}>Find a style</span>
+            <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by product name…" style={{ ...input, width: "100%", boxSizing: "border-box" }} />
           </div>
         </div>
 
-        {!selected && <div style={{ color: "#9ca3af", fontSize: 14, padding: "24px 0" }}>Search and pick a product to plan its reorder.</div>}
+        {/* Status bar */}
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+          <span style={{ fontSize: 13, color: "#6b7280" }}>
+            {loading ? "Loading…" : totalProducts === 0 ? "No products" : `Showing ${firstIdx}–${lastIdx} of ${totalProducts}`}
+          </span>
+          {!salesAvailable && <span style={{ color: "#b45309", fontSize: 12, fontWeight: 700 }}>Analytics unavailable — check the dashboard connection.</span>}
+          {globalDaysToTarget <= 0 && <span style={{ color: "#b45309", fontSize: 12 }}>Set a default target (date/weeks) to see suggested quantities.</span>}
+          <span style={{ flex: 1 }} />
+          <button type="button" style={smallBtn} onClick={() => submitOverview({ refresh: true })} title="Re-scan live Shopify stock (cached ~10 min)">↻ Refresh stock</button>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <button type="button" style={{ ...smallBtn, opacity: page <= 1 ? 0.4 : 1, cursor: page <= 1 ? "default" : "pointer" }} disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>‹ Prev</button>
+            <span style={{ fontSize: 12, color: "#6b7280", minWidth: 70, textAlign: "center" }}>Page {page}/{pageCount}</span>
+            <button type="button" style={{ ...smallBtn, opacity: page >= pageCount ? 0.4 : 1, cursor: page >= pageCount ? "default" : "pointer" }} disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next ›</button>
+          </div>
+        </div>
 
-        {selected && (
-          <>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <strong style={{ fontSize: 15 }}>{selected.title}</strong>
-              <button type="button" onClick={() => { setSelected(null); setQuery(""); }} style={{ ...input, padding: "4px 10px", cursor: "pointer", fontSize: 12 }}>Change</button>
-              {!targetValid && <span style={{ color: "#b45309", fontSize: 12 }}>Set a target date/weeks to see suggested quantities.</span>}
-              {!salesAvailable && <span style={{ color: "#b45309", fontSize: 12 }}>Analytics unavailable — check the dashboard connection.</span>}
-            </div>
-            {planFetcher.state !== "idle" ? (
-              <div style={{ color: "#6b7280", padding: "16px 0" }}>Loading stock &amp; sell-through…</div>
-            ) : rows.length === 0 ? (
-              <div style={{ color: "#9ca3af", padding: "16px 0" }}>No variants found for this product.</div>
-            ) : (
-              <>
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
-                    <thead>
-                      <tr style={{ textAlign: "left", color: "#6b7280", borderBottom: "2px solid #e5e7eb" }}>
-                        <th style={{ padding: "6px 10px" }}>Size</th>
-                        <th style={{ padding: "6px 10px", textAlign: "center" }}>In stock</th>
-                        <th style={{ padding: "6px 10px", textAlign: "center" }}>Sold ({lookbackDays}d)</th>
-                        <th style={{ padding: "6px 10px", textAlign: "center" }}>Rate/day</th>
-                        <th style={{ padding: "6px 10px", textAlign: "center" }}>Weeks cover</th>
-                        <th style={{ padding: "6px 10px", textAlign: "center", color: "#0f766e" }}>Order</th>
+        {/* Table */}
+        <div style={{ overflowX: "auto", border: "1px solid #e5e7eb", borderRadius: 10 }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 900 }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left", minWidth: 220 }}>Product / Size</th>
+                <th style={{ ...th, textAlign: "center" }}>In stock</th>
+                <th style={{ ...th, textAlign: "center" }}>Sold ({lookbackDays}d)</th>
+                <th style={{ ...th, textAlign: "center" }}>Rate/day</th>
+                <th style={{ ...th, textAlign: "center" }}>Weeks cover</th>
+                <th style={{ ...th, textAlign: "center" }}>Sell until</th>
+                <th style={{ ...th, textAlign: "center" }}>Lead</th>
+                <th style={{ ...th, textAlign: "center", color: "#0f766e" }}>Order</th>
+              </tr>
+            </thead>
+            <tbody>
+              {products.length === 0 && !loading && (
+                <tr><td colSpan={8} style={{ ...td, textAlign: "center", color: "#9ca3af", padding: "28px 10px" }}>No products match.</td></tr>
+              )}
+              {products.map((p) => {
+                const c = computeProduct(p);
+                const isOpen = !collapsed.has(p.id);
+                const productRate = p.totalSold / lookbackDays;
+                const pushed = pushedFor[p.id];
+                return (
+                  <Fragment key={p.id}>
+                    <tr style={{ borderTop: "1px solid #e5e7eb", background: "#fafafa" }}>
+                      <td style={{ ...td, fontWeight: 700 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <button type="button" onClick={() => setCollapsed((prev) => { const n = new Set(prev); if (n.has(p.id)) n.delete(p.id); else n.add(p.id); return n; })} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 12, color: "#6b7280", width: 14 }} title={isOpen ? "Hide sizes" : "Show sizes"}>{isOpen ? "▾" : "▸"}</button>
+                          {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 30, height: 38, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 30, height: 38, background: "#f1f5f9", borderRadius: 4 }} />}
+                          <span>{p.title}</span>
+                        </div>
+                      </td>
+                      <td style={{ ...td, textAlign: "center", fontWeight: 700 }}>{p.totalStock}</td>
+                      <td style={{ ...td, textAlign: "center", fontWeight: 700 }}>{p.totalSold}</td>
+                      <td style={{ ...td, textAlign: "center", color: "#6b7280" }}>{productRate.toFixed(2)}</td>
+                      <td style={{ ...td, textAlign: "center" }}>{coverBadge(p.weeksCover)}</td>
+                      <td style={{ ...td, textAlign: "center" }}>
+                        {targetMode === "date"
+                          ? <input type="date" value={effTarget(p.id)} onChange={(e) => setOverrides((prev) => ({ ...prev, [p.id]: { ...prev[p.id], target: e.target.value } }))} style={{ ...input, padding: "4px 6px", fontSize: 12 }} />
+                          : <input type="number" min={1} value={effTarget(p.id)} onChange={(e) => setOverrides((prev) => ({ ...prev, [p.id]: { ...prev[p.id], target: e.target.value } }))} style={{ ...input, padding: "4px 6px", fontSize: 12, width: 64 }} />}
+                      </td>
+                      <td style={{ ...td, textAlign: "center" }}>
+                        <input type="number" min={0} value={effLead(p.id)} onChange={(e) => setOverrides((prev) => ({ ...prev, [p.id]: { ...prev[p.id], lead: e.target.value } }))} style={{ ...input, padding: "4px 6px", fontSize: 12, width: 60 }} />
+                      </td>
+                      <td style={{ ...td, textAlign: "center" }}>
+                        <div style={{ fontWeight: 800, color: c.total > 0 ? "#0f766e" : "#9ca3af", fontSize: 15 }}>{c.total}</div>
+                        {c.valid && c.total > 0 && (
+                          pushed
+                            ? <div style={{ color: "#047857", fontSize: 11, fontWeight: 700 }}>✓ {pushed}</div>
+                            : <div style={{ display: "flex", gap: 4, justifyContent: "center", marginTop: 2 }}>
+                                <button type="button" title="Push to Existing Products Restock" onClick={() => push(p, "Karma East", "Restock")} disabled={pushFetcher.state !== "idle"} style={{ ...smallBtn, padding: "2px 7px", fontSize: 11, background: "#0d9488", color: "#fff", border: "none" }}>Restock</button>
+                                <button type="button" title="Push to JJ On Order" onClick={() => push(p, "JJ", "JJ")} disabled={pushFetcher.state !== "idle"} style={{ ...smallBtn, padding: "2px 7px", fontSize: 11, background: "#1d4ed8", color: "#fff", border: "none" }}>JJ</button>
+                              </div>
+                        )}
+                      </td>
+                    </tr>
+                    {isOpen && c.rows.map((r) => (
+                      <tr key={`${p.id}:${r.size}`} style={{ borderTop: "1px solid #f3f4f6" }}>
+                        <td style={{ ...td, paddingLeft: 48, color: "#374151" }}>{r.size}</td>
+                        <td style={{ ...td, textAlign: "center" }}>{r.stock}</td>
+                        <td style={{ ...td, textAlign: "center" }}>{r.unitsSold}</td>
+                        <td style={{ ...td, textAlign: "center", color: "#6b7280" }}>{r.rate.toFixed(2)}</td>
+                        <td style={{ ...td, textAlign: "center", color: coverColor(r.weeksCover === Infinity ? null : r.weeksCover) }}>{r.weeksCover === Infinity ? "—" : `${r.weeksCover.toFixed(1)}w`}</td>
+                        <td style={td} />
+                        <td style={td} />
+                        <td style={{ ...td, textAlign: "center", fontWeight: 800, color: r.suggested > 0 ? "#0f766e" : "#d1d5db" }}>{r.suggested}</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {rows.map((r) => (
-                        <tr key={r.size} style={{ borderBottom: "1px solid #f3f4f6" }}>
-                          <td style={{ padding: "6px 10px", fontWeight: 700 }}>{r.size}</td>
-                          <td style={{ padding: "6px 10px", textAlign: "center" }}>{r.stock}</td>
-                          <td style={{ padding: "6px 10px", textAlign: "center" }}>{r.unitsSold}</td>
-                          <td style={{ padding: "6px 10px", textAlign: "center", color: "#6b7280" }}>{r.rate.toFixed(2)}</td>
-                          <td style={{ padding: "6px 10px", textAlign: "center", color: r.weeksCover === Infinity ? "#9ca3af" : r.weeksCover < 4 ? "#dc2626" : "#111827" }}>{r.weeksCover === Infinity ? "—" : r.weeksCover.toFixed(1)}</td>
-                          <td style={{ padding: "6px 10px", textAlign: "center", fontWeight: 800, color: r.suggested > 0 ? "#0f766e" : "#9ca3af" }}>{r.suggested}</td>
-                        </tr>
-                      ))}
-                      <tr style={{ borderTop: "2px solid #e5e7eb", fontWeight: 800 }}>
-                        <td style={{ padding: "6px 10px" }}>Total</td>
-                        <td style={{ padding: "6px 10px", textAlign: "center" }}>{rows.reduce((a, r) => a + r.stock, 0)}</td>
-                        <td style={{ padding: "6px 10px", textAlign: "center" }}>{rows.reduce((a, r) => a + r.unitsSold, 0)}</td>
-                        <td colSpan={2} />
-                        <td style={{ padding: "6px 10px", textAlign: "center", color: "#0f766e" }}>{totalSuggested}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                <div style={{ fontSize: 12, color: "#6b7280", margin: "8px 0 14px" }}>
-                  Order covers <strong>{daysToTarget}</strong> days to target + <strong>{leadTimeDays}</strong> days lead time = <strong>{coverageDays}</strong> days, minus what's in stock.
-                </div>
-                {targetValid && totalSuggested > 0 && (
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: "#374151" }}>Push {totalSuggested} pcs to:</span>
-                    <button type="button" onClick={() => push("Karma East")} disabled={pushFetcher.state !== "idle"} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Existing Products Restock</button>
-                    <button type="button" onClick={() => push("JJ")} disabled={pushFetcher.state !== "idle"} style={{ background: "#1d4ed8", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>JJ On Order</button>
-                    {(pushFetcher.data as { success?: boolean })?.success && <span style={{ color: "#047857", fontSize: 13, fontWeight: 700 }}>✓ Order created</span>}
-                  </div>
-                )}
-              </>
-            )}
-          </>
-        )}
+                    ))}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ fontSize: 12, color: "#6b7280", margin: "10px 0 24px" }}>
+          Order per size = rate/day × (days to your “sell until” + lead time) − what’s in stock. Ranked by weeks of cover (lowest first). Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
+        </div>
       </div>
     </div>
   );
