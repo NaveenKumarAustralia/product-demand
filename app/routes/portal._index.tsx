@@ -19012,7 +19012,7 @@ function CombinedFabricStockPanel({
     const search = nameSearch.trim().toLowerCase();
     const typeFilter = canonicalizeFabricType(fabricTypeFilter).toLowerCase();
     const supplier = supplierFilter.trim().toLowerCase();
-    return allRows.filter((entry) => {
+    const filtered = allRows.filter((entry) => {
       if (typeFilter) {
         const raw = entry.cells.fabricType ? entry.cells.fabricType.value.trim() : entry.primarySheet.name.trim();
         if (canonicalizeFabricType(raw).toLowerCase() !== typeFilter) return false;
@@ -19026,6 +19026,20 @@ function CombinedFabricStockPanel({
       }
       return true;
     });
+    // Keep fabrics of the same type together (e.g. all Rayon, all 40x40 Printed).
+    // Stable sort by canonical fabric type (alphabetical); each type keeps its
+    // existing row order within the group, and untyped rows sink to the bottom.
+    const typeOf = (entry: (typeof filtered)[number]) =>
+      canonicalizeFabricType(entry.cells.fabricType ? entry.cells.fabricType.value.trim() : entry.primarySheet.name.trim()).toLowerCase();
+    return filtered
+      .map((entry, i) => ({ entry, i, t: typeOf(entry) }))
+      .sort((a, b) => {
+        if (a.t === b.t) return a.i - b.i;
+        if (!a.t) return 1;
+        if (!b.t) return -1;
+        return a.t.localeCompare(b.t);
+      })
+      .map((x) => x.entry);
   }, [allRows, nameSearch, fabricTypeFilter, supplierFilter]);
 
   const orderedColumns = useMemo(() => {
