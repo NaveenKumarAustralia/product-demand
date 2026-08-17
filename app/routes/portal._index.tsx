@@ -2311,6 +2311,40 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true });
   }
 
+  // ─── Reorder Planner ──────────────────────────────────────────────────────
+  // Product search (reuses the Shopify search) for the planner's search box.
+  if (intent === "reorder_search") {
+    const q = String(form.get("q") ?? "").trim();
+    const products = q.length >= 2 ? await searchShopifyProducts(q) : [];
+    return jsonResponse({ ok: true, products });
+  }
+  // Per-size plan for one product: current on-hand stock (live Shopify) + units
+  // sold over the lookback window (from the analytics dashboard). The client does
+  // the rate / weeks-of-cover / suggested-order arithmetic so target + lead-time
+  // tweaks are instant without re-fetching.
+  if (intent === "reorder_plan") {
+    const productId = String(form.get("productId") ?? "").trim();
+    const productTitle = String(form.get("productTitle") ?? "").trim();
+    const since = String(form.get("since") ?? "").trim();
+    const until = String(form.get("until") ?? "").trim();
+    if (!productId || !since || !until) return jsonResponse({ ok: false, error: "bad_input" });
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop) return jsonResponse({ ok: false, error: "no_session" });
+    const [variants, sales] = await Promise.all([
+      getShopifyInventoryVariants(session.shop, productId).catch(() => [] as ShopifyInventoryVariantInfo[]),
+      fetchReorderVariantSales(productId, productTitle, since, until),
+    ]);
+    // Match sold rows to sizes by normalized variant title.
+    const soldBySize = new Map<string, number>();
+    for (const r of sales ?? []) soldBySize.set(normalizeVariantSizeLabel(r.variant), (soldBySize.get(normalizeVariantSizeLabel(r.variant)) ?? 0) + (r.unitsSold || 0));
+    const sizes = variants.map((v) => ({
+      size: v.title,
+      stock: v.availableInventory ?? 0,
+      unitsSold: soldBySize.get(normalizeVariantSizeLabel(v.title)) ?? 0,
+    }));
+    return jsonResponse({ ok: true, sizes, salesAvailable: sales !== null });
+  }
+
   if (intent === "create_restock_order_from_portal") {
     let product: ShopifySearchProduct;
     let qtys: Record<string, number>;
@@ -2368,7 +2402,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       data: {
         shop,
         poNumber: null,
-        supplier: "Portal",
+        supplier: (String(form.get("supplier") ?? "").trim() || "Portal"),
         productId: product.id,
         productTitle: product.title,
         productType: normalizeProductGroup(String(form.get("productType") ?? "")) || null,
@@ -2399,7 +2433,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         fromName: currentUser?.name ?? null,
       });
     }
-    return null;
+    return jsonResponse({ success: true, orderId: createdOrder.id });
   }
 
   if (intent === "mark_message_read") {
@@ -5139,7 +5173,8 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // any data the page renders, so the loader doesn't need to re-run.
   if (intent === "vb_get_item" || intent === "get_sample_full"
     || intent === "get_sample_iteration_thumbnails"
-    || intent === "get_collection_full" || intent === "ps_get_shoot") return false;
+    || intent === "get_collection_full" || intent === "ps_get_shoot"
+    || intent === "reorder_search" || intent === "reorder_plan") return false;
   return defaultShouldRevalidate;
 };
 
@@ -5937,6 +5972,7 @@ const ALL_NAV_ITEMS = [
   { id: "restock", label: "Existing Products Restock", href: "/portal" },
   { id: "jj-restock", label: "JJ Order", href: "/portal?page=jj-restock" },
   { id: "jj-new-products", label: "JJ New Products", href: "/portal?page=jj-new-products" },
+  { id: "reorder", label: "Reorder Planner", href: "/portal?page=reorder" },
   { id: "fabric", label: "Fabric in stock", href: "/portal?page=fabric" },
   { id: "packing", label: "Packing Lists", href: "/portal?page=packing" },
   { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
@@ -5946,7 +5982,7 @@ const ALL_NAV_ITEMS = [
   { id: "dropbox", label: "Dropbox", href: "/portal?page=dropbox" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "reorder", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -8000,6 +8036,30 @@ async function findShopifyProductForSupplierLine(
   return matched;
 }
 
+// ─── Reorder Planner: sell-through from the analytics dashboard ────────────────
+// The dashboard (Ecommerce-Dashboard) exposes ShopifyQL-backed sell-through via a
+// shared-secret endpoint. DASHBOARD_URL defaults to the known Railway domain;
+// PORTAL_API_KEY must match on both services. Returns per-size units sold, or
+// null if not configured / unreachable (the page then shows "analytics
+// unavailable" rather than breaking).
+const REORDER_DASHBOARD_URL = (process.env.DASHBOARD_URL || "https://ecommerce-dashboard-production-35b3.up.railway.app").replace(/\/$/, "");
+async function fetchReorderVariantSales(productId: string, productTitle: string, since: string, until: string): Promise<Array<{ variant: string; unitsSold: number }> | null> {
+  const key = process.env.PORTAL_API_KEY;
+  if (!key) return null;
+  const params = new URLSearchParams({ since, until });
+  const numericId = String(productId ?? "").replace(/[^0-9]/g, "");
+  if (numericId) params.set("productId", numericId);
+  if (productTitle) params.set("productTitle", productTitle);
+  try {
+    const res = await fetch(`${REORDER_DASHBOARD_URL}/api/reorder/sales-by-variant?${params.toString()}`, { headers: { "X-Portal-Key": key } });
+    if (!res.ok) return null;
+    const json = await res.json() as { ok?: boolean; rows?: Array<{ variant: string; unitsSold: number }> };
+    return Array.isArray(json.rows) ? json.rows : null;
+  } catch {
+    return null;
+  }
+}
+
 async function searchShopifyProducts(query: string): Promise<ShopifySearchProduct[]> {
   const trimmedQuery = query.trim();
   if (trimmedQuery.length < 2) return [];
@@ -9801,6 +9861,7 @@ export default function PortalDashboard() {
     : page === "visionboard" ? "Vision Board"
     : page === "collections" ? "Collections"
     : page === "jj-new-products" ? "JJ New Products"
+    : page === "reorder" ? "Reorder Planner"
     : page === "search" ? "Search"
     : page === "dropbox" ? "Dropbox"
     : page === "photoshoot" ? "Photo Shoots"
@@ -10280,6 +10341,8 @@ export default function PortalDashboard() {
           </div>
         ) : page === "dropbox" ? (
           <DropboxPanel />
+        ) : page === "reorder" ? (
+          <ReorderPlannerPage />
         ) : page === "search" ? (
           <GlobalSearchPage query={globalSearchQuery} results={globalSearch} isAdmin={Boolean(currentUser?.admin)} shopDomain={shopDomain} />
         ) : page === "jj-restock" ? (
@@ -26039,6 +26102,195 @@ function JJOrderRow({
         </td>
       )}
     </tr>
+  );
+}
+
+// Reorder Planner — search a style, and it says how many to order (per size) to
+// last until a target, accounting for lead time. Sell-through comes from the
+// analytics dashboard; current stock from live Shopify.
+function ReorderPlannerPage() {
+  const searchFetcher = useFetcher<{ ok?: boolean; products?: ShopifySearchProduct[] }>();
+  const planFetcher = useFetcher<{ ok?: boolean; sizes?: Array<{ size: string; stock: number; unitsSold: number }>; salesAvailable?: boolean; error?: string }>();
+  const pushFetcher = useFetcher<{ success?: boolean; order?: { id: number } } | Record<string, unknown>>();
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<ShopifySearchProduct | null>(null);
+  const [lookback, setLookback] = useState("90");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customUntil, setCustomUntil] = useState("");
+  const [targetMode, setTargetMode] = useState<"date" | "weeks">("date");
+  const [targetDate, setTargetDate] = useState("");
+  const [targetWeeks, setTargetWeeks] = useState("16");
+  const [leadDays, setLeadDays] = useState("30");
+
+  const fmtISO = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const addDays = (d: Date, n: number) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const addYears = (d: Date, n: number) => { const x = new Date(d); x.setFullYear(x.getFullYear() + n); return x; };
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+
+  const daysToTarget = targetMode === "weeks"
+    ? Math.round((Number(targetWeeks) || 0) * 7)
+    : (targetDate ? Math.round((new Date(targetDate).getTime() - today.getTime()) / 86400000) : 0);
+  const targetValid = daysToTarget > 0;
+  const leadTimeDays = Math.max(0, Math.round(Number(leadDays) || 0));
+
+  // Lookback window → since/until (YYYY-MM-DD).
+  let since = "", until = "";
+  if (lookback === "custom") { since = customFrom; until = customUntil; }
+  else if (lookback === "lastyear") { since = fmtISO(addYears(today, -1)); until = fmtISO(addYears(addDays(today, Math.max(1, daysToTarget)), -1)); }
+  else { const n = Number(lookback) || 90; since = fmtISO(addDays(today, -n)); until = fmtISO(today); }
+  const lookbackDays = (since && until) ? Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000)) : 1;
+
+  useEffect(() => {
+    if (!selected || !since || !until) return;
+    planFetcher.submit({ intent: "reorder_plan", productId: selected.id, productTitle: selected.title, since, until }, { method: "post" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, since, until]);
+
+  const runSearch = (q: string) => { setQuery(q); if (q.trim().length >= 2) searchFetcher.submit({ intent: "reorder_search", q }, { method: "post" }); };
+
+  const coverageDays = daysToTarget + leadTimeDays;
+  const rows = (planFetcher.data?.sizes ?? []).map((s) => {
+    const rate = s.unitsSold / lookbackDays; // units/day
+    const weeksCover = rate > 0 ? s.stock / (rate * 7) : Infinity;
+    const suggested = targetValid ? Math.max(0, Math.ceil(rate * coverageDays - s.stock)) : 0;
+    return { ...s, rate, weeksCover, suggested };
+  });
+  const totalSuggested = rows.reduce((a, r) => a + r.suggested, 0);
+  const salesAvailable = planFetcher.data?.salesAvailable !== false;
+
+  const push = (supplier: string) => {
+    if (!selected || totalSuggested <= 0) return;
+    const qtys: Record<string, number> = {};
+    rows.forEach((r) => { if (r.suggested > 0) qtys[r.size] = r.suggested; });
+    pushFetcher.submit({ intent: "create_restock_order_from_portal", product: JSON.stringify(selected), qtys: JSON.stringify(qtys), supplier }, { method: "post" });
+  };
+
+  const input: React.CSSProperties = { border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 10px", fontSize: 14, background: "#fff" };
+  const label: React.CSSProperties = { fontSize: 12, fontWeight: 700, color: "#6b7280", marginBottom: 4, display: "block" };
+
+  return (
+    <div style={{ ...s.productInfoPage, alignContent: "start", overflowY: "auto", padding: 16 }}>
+      <div style={{ maxWidth: 900 }}>
+        <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 800 }}>Reorder Planner</h2>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 16 }}>Search a style, set how long you want it to last and the lead time — it suggests how many to order per size.</div>
+
+        {/* Search */}
+        <div style={{ position: "relative", marginBottom: 16 }}>
+          <input type="search" value={query} onChange={(e) => runSearch(e.target.value)} placeholder="Search a product…" style={{ ...input, width: "100%", boxSizing: "border-box" }} />
+          {query.trim().length >= 2 && !selected && (searchFetcher.data?.products?.length ?? 0) > 0 && (
+            <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 30, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", maxHeight: 320, overflowY: "auto", marginTop: 4 }}>
+              {searchFetcher.data!.products!.map((p) => (
+                <div key={p.id} onClick={() => { setSelected(p); setQuery(p.title); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer", borderBottom: "1px solid #f3f4f6" }}>
+                  {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 36, height: 44, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 36, height: 44, background: "#f1f5f9", borderRadius: 4 }} />}
+                  <span style={{ fontSize: 13 }}>{p.title}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Controls */}
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
+          <div>
+            <span style={label}>Sell-through lookback</span>
+            <select value={lookback} onChange={(e) => setLookback(e.target.value)} style={input}>
+              <option value="30">Last 30 days</option>
+              <option value="60">Last 60 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="lastyear">Same period last year</option>
+              <option value="custom">Custom range…</option>
+            </select>
+          </div>
+          {lookback === "custom" && (
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+              <div><span style={label}>From</span><input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} style={input} /></div>
+              <div><span style={label}>To</span><input type="date" value={customUntil} onChange={(e) => setCustomUntil(e.target.value)} style={input} /></div>
+            </div>
+          )}
+          <div>
+            <span style={label}>Make it last</span>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <select value={targetMode} onChange={(e) => setTargetMode(e.target.value as "date" | "weeks")} style={input}>
+                <option value="date">Until date</option>
+                <option value="weeks">For weeks</option>
+              </select>
+              {targetMode === "date"
+                ? <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} style={input} />
+                : <input type="number" min={1} value={targetWeeks} onChange={(e) => setTargetWeeks(e.target.value)} style={{ ...input, width: 80 }} />}
+            </div>
+          </div>
+          <div>
+            <span style={label}>Lead time (days)</span>
+            <input type="number" min={0} value={leadDays} onChange={(e) => setLeadDays(e.target.value)} style={{ ...input, width: 90 }} title="Days until the order arrives — longer for sea, shorter for air" />
+          </div>
+        </div>
+
+        {!selected && <div style={{ color: "#9ca3af", fontSize: 14, padding: "24px 0" }}>Search and pick a product to plan its reorder.</div>}
+
+        {selected && (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <strong style={{ fontSize: 15 }}>{selected.title}</strong>
+              <button type="button" onClick={() => { setSelected(null); setQuery(""); }} style={{ ...input, padding: "4px 10px", cursor: "pointer", fontSize: 12 }}>Change</button>
+              {!targetValid && <span style={{ color: "#b45309", fontSize: 12 }}>Set a target date/weeks to see suggested quantities.</span>}
+              {!salesAvailable && <span style={{ color: "#b45309", fontSize: 12 }}>Analytics unavailable — check the dashboard connection.</span>}
+            </div>
+            {planFetcher.state !== "idle" ? (
+              <div style={{ color: "#6b7280", padding: "16px 0" }}>Loading stock &amp; sell-through…</div>
+            ) : rows.length === 0 ? (
+              <div style={{ color: "#9ca3af", padding: "16px 0" }}>No variants found for this product.</div>
+            ) : (
+              <>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+                    <thead>
+                      <tr style={{ textAlign: "left", color: "#6b7280", borderBottom: "2px solid #e5e7eb" }}>
+                        <th style={{ padding: "6px 10px" }}>Size</th>
+                        <th style={{ padding: "6px 10px", textAlign: "center" }}>In stock</th>
+                        <th style={{ padding: "6px 10px", textAlign: "center" }}>Sold ({lookbackDays}d)</th>
+                        <th style={{ padding: "6px 10px", textAlign: "center" }}>Rate/day</th>
+                        <th style={{ padding: "6px 10px", textAlign: "center" }}>Weeks cover</th>
+                        <th style={{ padding: "6px 10px", textAlign: "center", color: "#0f766e" }}>Order</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((r) => (
+                        <tr key={r.size} style={{ borderBottom: "1px solid #f3f4f6" }}>
+                          <td style={{ padding: "6px 10px", fontWeight: 700 }}>{r.size}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "center" }}>{r.stock}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "center" }}>{r.unitsSold}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "center", color: "#6b7280" }}>{r.rate.toFixed(2)}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "center", color: r.weeksCover === Infinity ? "#9ca3af" : r.weeksCover < 4 ? "#dc2626" : "#111827" }}>{r.weeksCover === Infinity ? "—" : r.weeksCover.toFixed(1)}</td>
+                          <td style={{ padding: "6px 10px", textAlign: "center", fontWeight: 800, color: r.suggested > 0 ? "#0f766e" : "#9ca3af" }}>{r.suggested}</td>
+                        </tr>
+                      ))}
+                      <tr style={{ borderTop: "2px solid #e5e7eb", fontWeight: 800 }}>
+                        <td style={{ padding: "6px 10px" }}>Total</td>
+                        <td style={{ padding: "6px 10px", textAlign: "center" }}>{rows.reduce((a, r) => a + r.stock, 0)}</td>
+                        <td style={{ padding: "6px 10px", textAlign: "center" }}>{rows.reduce((a, r) => a + r.unitsSold, 0)}</td>
+                        <td colSpan={2} />
+                        <td style={{ padding: "6px 10px", textAlign: "center", color: "#0f766e" }}>{totalSuggested}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{ fontSize: 12, color: "#6b7280", margin: "8px 0 14px" }}>
+                  Order covers <strong>{daysToTarget}</strong> days to target + <strong>{leadTimeDays}</strong> days lead time = <strong>{coverageDays}</strong> days, minus what's in stock.
+                </div>
+                {targetValid && totalSuggested > 0 && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#374151" }}>Push {totalSuggested} pcs to:</span>
+                    <button type="button" onClick={() => push("Karma East")} disabled={pushFetcher.state !== "idle"} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Existing Products Restock</button>
+                    <button type="button" onClick={() => push("JJ")} disabled={pushFetcher.state !== "idle"} style={{ background: "#1d4ed8", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>JJ On Order</button>
+                    {(pushFetcher.data as { success?: boolean })?.success && <span style={{ color: "#047857", fontSize: 13, fontWeight: 700 }}>✓ Order created</span>}
+                  </div>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 
