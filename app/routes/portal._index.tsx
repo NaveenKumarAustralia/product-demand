@@ -2473,29 +2473,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (etaRaw && !eta) return null;
 
     const notes = String(form.get("notes") ?? "").trim();
-    // Portal-added rows never jump to the top (only Shopify-placed orders do).
-    //  • Product already has an open order → inherit its earliest createdAt so
-    //    the new row sits with that product's group.
-    //  • Genuinely new product → land at the BOTTOM: give it a createdAt just
-    //    older than the current oldest open order (default sort is newest-
-    //    first, so oldest sits at the bottom). Each new row stacks below the
-    //    last. Falls back to now() only when there are no orders at all.
-    const existingForProduct = await prisma.supplierOrder.findFirst({
-      where: { productId: product.id, status: "open" },
-      orderBy: { createdAt: "asc" },
-      select: { createdAt: true },
-    }).catch(() => null);
-    let createdAtOverride: Date | undefined;
-    if (existingForProduct) {
-      createdAtOverride = existingForProduct.createdAt;
-    } else {
-      const oldest = await prisma.supplierOrder.findFirst({
-        where: { status: "open" },
-        orderBy: { createdAt: "asc" },
-        select: { createdAt: true },
-      }).catch(() => null);
-      if (oldest) createdAtOverride = new Date(oldest.createdAt.getTime() - 1000);
-    }
+    // Always stamp the order with today's date (default createdAt = now) so it
+    // shows the real order date and lands at the TOP (default sort is
+    // newest-first). Duplicates of the same product still cluster together
+    // because the table groups by productId, independent of the date.
+    const createdAtOverride: Date | undefined = undefined;
     const createdOrder = await prisma.supplierOrder.create({
       data: {
         shop,
@@ -10427,6 +10409,29 @@ export default function PortalDashboard() {
               <select value={selectedDestination} onChange={(event) => updateParams({ destination: event.currentTarget.value })} style={s.productTypeFilter}>
                 <option value="">All destinations</option>
                 {destinationFilters.map((destination) => (
+                  <option key={destination} value={destination}>{labelForOption(restockSettings.destinationOptions, destination)}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+
+        {page === "jj-restock" && (
+          <div style={s.restockFilterBar}>
+            <label style={s.filterLabel}>
+              Status
+              <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
+                <option value="">All statuses</option>
+                {statusFilters.map((status: string) => (
+                  <option key={status} value={status}>{labelForOption(restockSettings.statusOptions, status)} ({statusFilterCounts[status] ?? 0})</option>
+                ))}
+              </select>
+            </label>
+            <label style={s.filterLabel}>
+              Destination
+              <select value={selectedDestination} onChange={(event) => updateParams({ destination: event.currentTarget.value })} style={s.productTypeFilter}>
+                <option value="">All destinations</option>
+                {destinationFilters.map((destination: string) => (
                   <option key={destination} value={destination}>{labelForOption(restockSettings.destinationOptions, destination)}</option>
                 ))}
               </select>
@@ -26896,7 +26901,18 @@ function JJRestockPanel({
       || ((o as { barcodeBase?: string | null }).barcodeBase ?? "").toLowerCase().includes(term)
       || lines.some((l) => (l.sku ?? "").toLowerCase().includes(term) || (l.barcode ?? "").toLowerCase().includes(term));
   };
-  const visible = (term ? localOrders.filter(matchesTerm) : localOrders) as Order[];
+  // Group by product (duplicates cluster) and sort newest-first, mirroring the
+  // loader — so optimistic adds land at the top and stay grouped instantly.
+  const visible = useMemo(() => {
+    const base = (term ? localOrders.filter(matchesTerm) : localOrders) as Order[];
+    const keyFor = (o: Order) => o.productId ? `pid:${o.productId}` : `title:${(o.productTitle ?? "").trim().toLowerCase() || `id:${o.id}`}`;
+    const timeOf = (o: Order) => { const t = new Date(o.createdAt as unknown as string).getTime(); return Number.isFinite(t) ? t : 0; };
+    const groups = new Map<string, Order[]>();
+    for (const o of base) { const k = keyFor(o); const b = groups.get(k); if (b) b.push(o); else groups.set(k, [o]); }
+    for (const b of groups.values()) b.sort((a, c) => { const d = timeOf(c) - timeOf(a); return d !== 0 ? d : (c.id - a.id); });
+    return Array.from(groups.values()).sort((ga, gb) => Math.max(...gb.map(timeOf)) - Math.max(...ga.map(timeOf))).flat();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localOrders, term]);
 
   const toggle = (id: number) => setSelected((prev) => {
     const next = new Set(prev);
