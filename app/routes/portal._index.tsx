@@ -26323,7 +26323,11 @@ function ReorderPlannerPage() {
   // to keep its own date (held in overrides[id].until) unaffected by shared edits.
   const [sharedUntil, setSharedUntil] = useState("");
   const [pinnedUntil, setPinnedUntil] = useState<Set<string>>(new Set());
-  // Per-PRODUCT lead + a pinned product's own sell-until (key = productId).
+  // Lead time shares the same way: editing one moves all, unless the product is
+  // pinned (pinnedLead) to keep its own lead in overrides[id].lead.
+  const [sharedLead, setSharedLead] = useState("");
+  const [pinnedLead, setPinnedLead] = useState<Set<string>>(new Set());
+  // overrides[id] holds a pinned product's own sell-until / lead (key = productId).
   const [overrides, setOverrides] = useState<Record<string, { until?: string; lead?: string }>>({});
   // Per-VARIANT manual suggested override (key `${productId}:${size}`); auto-fills
   // otherwise, and is cleared for a product when its sell-until/lead change.
@@ -26331,6 +26335,9 @@ function ReorderPlannerPage() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [pushedFor, setPushedFor] = useState<Record<string, string>>({});
   const pushTargetRef = useRef<{ id: string; label: string } | null>(null);
+  // Focusable "Suggested" inputs, keyed by `${productId}:${size}`, for arrow-key
+  // movement between size cells.
+  const suggestRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const fmtISO = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const addDays = (d: Date, n: number) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
@@ -26368,7 +26375,7 @@ function ReorderPlannerPage() {
   // Pinned products keep their own date (overrides[id].until); everyone else
   // follows the shared date (which falls back to the default until first edited).
   const effUntil = (id: string) => pinnedUntil.has(id) ? (overrides[id]?.until ?? (sharedUntil || DEFAULT_UNTIL)) : (sharedUntil || DEFAULT_UNTIL);
-  const effLead = (id: string) => overrides[id]?.lead ?? DEFAULT_LEAD;
+  const effLead = (id: string) => pinnedLead.has(id) ? (overrides[id]?.lead ?? (sharedLead || DEFAULT_LEAD)) : (sharedLead || DEFAULT_LEAD);
   const clearManualForProduct = (id: string) => setManualQty((prev) => {
     const keys = Object.keys(prev).filter((k) => k.startsWith(`${id}:`));
     if (!keys.length) return prev;
@@ -26376,12 +26383,10 @@ function ReorderPlannerPage() {
   });
   const setUntil = (id: string, val: string) => {
     if (pinnedUntil.has(id)) {
-      // Only this product.
       setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], until: val } }));
       clearManualForProduct(id);
     } else {
-      // Shared: move every product that isn't pinned; re-autofill all quantities.
-      setSharedUntil(val);
+      setSharedUntil(val);   // shared: move every non-pinned product, re-autofill all
       setManualQty({});
     }
   };
@@ -26396,7 +26401,26 @@ function ReorderPlannerPage() {
       setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], until: cur } }));
     }
   };
-  const setLead = (id: string, val: string) => { setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], lead: val } })); clearManualForProduct(id); };
+  const setLead = (id: string, val: string) => {
+    if (pinnedLead.has(id)) {
+      setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], lead: val } }));
+      clearManualForProduct(id);
+    } else {
+      setSharedLead(val);
+      setManualQty({});
+    }
+  };
+  const togglePinLead = (id: string) => {
+    if (pinnedLead.has(id)) {
+      setPinnedLead((prev) => { const n = new Set(prev); n.delete(id); return n; });
+      setOverrides((prev) => { if (!prev[id]) return prev; const rest = { ...prev[id] }; delete rest.lead; return { ...prev, [id]: rest }; });
+      clearManualForProduct(id);
+    } else {
+      const cur = effLead(id);
+      setPinnedLead((prev) => { const n = new Set(prev); n.add(id); return n; });
+      setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], lead: cur } }));
+    }
+  };
 
   type VariantCalc = { size: string; key: string; stock: number; unitsSold: number; rate: number; daysCover: number; onOrder: number; computed: number; qty: number; qtyStr: string };
   const calcProduct = (p: ReorderOverviewProduct) => {
@@ -26571,7 +26595,12 @@ function ReorderPlannerPage() {
                           <button type="button" onClick={() => togglePinUntil(p.id)} title={pinnedUntil.has(p.id) ? "Set for this product only — click to follow all products again" : "This date applies to every product — click to set it just for this one"} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0, opacity: pinnedUntil.has(p.id) ? 1 : 0.3, filter: pinnedUntil.has(p.id) ? "none" : "grayscale(1)" }}>📌</button>
                         </div>
                       </td>
-                      <td style={cell}><input type="number" min={0} value={effLead(p.id)} onChange={(e) => setLead(p.id, e.target.value)} style={{ ...cellInput, width: 58 }} /></td>
+                      <td style={cell}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
+                          <input type="number" min={0} value={effLead(p.id)} onChange={(e) => setLead(p.id, e.target.value)} style={{ ...cellInput, width: 52 }} />
+                          <button type="button" onClick={() => togglePinLead(p.id)} title={pinnedLead.has(p.id) ? "Lead set for this product only — click to follow all products again" : "This lead time applies to every product — click to set it just for this one"} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0, opacity: pinnedLead.has(p.id) ? 1 : 0.3, filter: pinnedLead.has(p.id) ? "none" : "grayscale(1)" }}>📌</button>
+                        </div>
+                      </td>
                       <td style={{ ...cell, fontWeight: 800, color: calc.total > 0 ? "#0f766e" : "#94a3b8", fontSize: 15 }}>{calc.total}</td>
                       <td style={{ ...cell, textAlign: "right" }}>
                         {pushed
@@ -26600,10 +26629,6 @@ function ReorderPlannerPage() {
                                   <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Sold ({lookbackDays}d)</td>
                                   {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13 }}>{c.unitsSold}</td>)}
                                 </tr>
-                                <tr>
-                                  <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Days cover</td>
-                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13, fontWeight: 700, color: daysColor(c.daysCover === Infinity ? null : Math.round(c.daysCover)) }}>{c.daysCover === Infinity ? "—" : `${Math.round(c.daysCover)}d`}</td>)}
-                                </tr>
                                 {/* Already on order — each open order with its destination, then the total */}
                                 {(p.onOrder?.entries?.length ?? 0) === 0 ? (
                                   <tr>
@@ -26628,7 +26653,25 @@ function ReorderPlannerPage() {
                                 </>}
                                 <tr>
                                   <td style={{ padding: "6px 12px 4px 0", fontSize: 12, color: "#0f766e", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap", borderTop: "1px solid #e2e8f0" }}>Suggested</td>
-                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "6px 8px 4px", textAlign: "center", borderTop: "1px solid #e2e8f0" }}><input type="text" inputMode="numeric" value={c.qtyStr} onChange={(e) => setManualQty((prev) => ({ ...prev, [c.key]: e.target.value.replace(/[^0-9]/g, "") }))} style={{ ...cellInput, width: 56, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#94a3b8", borderColor: c.qty > 0 ? "#5eead4" : "#cbd5e1" }} /></td>)}
+                                  {calc.rows.map((c, i) => <td key={c.key} style={{ padding: "6px 8px 4px", textAlign: "center", borderTop: "1px solid #e2e8f0" }}><input
+                                    type="text" inputMode="numeric" value={c.qtyStr}
+                                    ref={(el) => { suggestRefs.current[c.key] = el; }}
+                                    onChange={(e) => setManualQty((prev) => ({ ...prev, [c.key]: e.target.value.replace(/[^0-9]/g, "") }))}
+                                    onKeyDown={(ev) => {
+                                      const el = ev.currentTarget;
+                                      if (ev.key === "ArrowRight" && el.selectionStart === el.value.length && i < calc.rows.length - 1) { ev.preventDefault(); const nx = suggestRefs.current[calc.rows[i + 1].key]; if (nx) { nx.focus(); nx.select(); } }
+                                      else if (ev.key === "ArrowLeft" && el.selectionStart === 0 && i > 0) { ev.preventDefault(); const pv = suggestRefs.current[calc.rows[i - 1].key]; if (pv) { pv.focus(); pv.select(); } }
+                                    }}
+                                    style={{ ...cellInput, width: 56, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#94a3b8", borderColor: c.qty > 0 ? "#5eead4" : "#cbd5e1" }} /></td>)}
+                                </tr>
+                                {/* After ordering: projected total position and how long it covers */}
+                                <tr>
+                                  <td style={{ padding: "6px 12px 3px 0", fontSize: 12, color: "#334155", fontWeight: 800, textAlign: "right", whiteSpace: "nowrap", borderTop: "1px solid #e2e8f0" }}>Total (stock + on order + order)</td>
+                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "6px 8px 3px", textAlign: "center", fontSize: 13, fontWeight: 800, color: "#334155", borderTop: "1px solid #e2e8f0" }}>{c.stock + c.onOrder + c.qty}</td>)}
+                                </tr>
+                                <tr>
+                                  <td style={{ padding: "3px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Days cover</td>
+                                  {calc.rows.map((c) => { const tot = c.stock + c.onOrder + c.qty; const d = c.rate > 0 ? Math.round(tot / c.rate) : null; return <td key={c.key} style={{ padding: "3px 8px 4px", textAlign: "center", fontSize: 13, fontWeight: 700, color: daysColor(d) }}>{d == null ? "—" : `${d}d`}</td>; })}
                                 </tr>
                               </tbody>
                             </table>
@@ -26644,7 +26687,7 @@ function ReorderPlannerPage() {
         </div>
       </div>
       <div style={{ fontSize: 12, color: "#6b7280", margin: "12px 2px 24px" }}>
-        Changing a “Sell until” date moves every product to that date; click the 📌 to set (and keep) one product’s date on its own. Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (min 14), not the whole window, so new releases aren’t understated. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
+        Changing a “Sell until” date or lead time moves every product; click the 📌 beside it to set (and keep) that product on its own. Expand a row and use ← → to move across the Suggested boxes. Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (min 14), not the whole window, so new releases aren’t understated. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
       </div>
     </div>
   );
