@@ -2380,7 +2380,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const totalSold = sizes.reduce((a, s) => a + s.unitsSold, 0);
       const rate = totalSold / lookbackDays;
       const weeksCover = rate > 0 ? totalStock / (rate * 7) : Infinity;
-      return { id: p.id, title: p.title, productType: p.productType, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, weeksCover };
+      return { id: p.id, title: p.title, productType: p.productType, vendor: p.vendor, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, weeksCover };
     });
     // Distinct product types across the whole catalogue (for the filter dropdown),
     // computed before the type filter so the list stays stable.
@@ -8142,7 +8142,7 @@ async function fetchReorderSalesAllVariants(since: string, until: string): Promi
 // and caches it, so ranking every product by weeks-of-cover doesn't cost one
 // Shopify call per product. Size labels reuse the same logic as the packing
 // list so they line up with the sell-through variant labels.
-type ReorderStockProduct = { id: string; title: string; imageUrl: string | null; productType: string; sizes: Array<{ size: string; stock: number }> };
+type ReorderStockProduct = { id: string; title: string; imageUrl: string | null; productType: string; vendor: string; sizes: Array<{ size: string; stock: number }> };
 let _reorderStockCache: { at: number; shop: string; products: ReorderStockProduct[] } | null = null;
 const REORDER_STOCK_TTL_MS = 10 * 60 * 1000;
 async function getAllShopifyProductsWithInventory(shop: string, accessToken: string, force = false): Promise<ReorderStockProduct[]> {
@@ -8158,6 +8158,7 @@ async function getAllShopifyProductsWithInventory(shop: string, accessToken: str
             id
             title
             productType
+            vendor
             featuredImage { url }
             variants(first: 100) {
               nodes { title sku inventoryQuantity selectedOptions { name value } }
@@ -8187,7 +8188,7 @@ async function getAllShopifyProductsWithInventory(shop: string, accessToken: str
         sizes.push({ size, stock: Math.max(0, Number(v.inventoryQuantity ?? 0) || 0) });
       }
       if (!sizes.length) continue;   // no size-bearing variants → not reorder-planned here
-      products.push({ id: String(node.id), title: String(node.title ?? ""), productType: String(node.productType ?? "").trim(), imageUrl: node.featuredImage?.url ?? null, sizes });
+      products.push({ id: String(node.id), title: String(node.title ?? ""), productType: String(node.productType ?? "").trim(), vendor: String(node.vendor ?? "").trim(), imageUrl: node.featuredImage?.url ?? null, sizes });
     }
     if (!conn.pageInfo?.hasNextPage) break;
     cursor = conn.pageInfo.endCursor ?? null;
@@ -26243,13 +26244,14 @@ function JJOrderRow({
 }
 
 
-// Reorder Planner — every active product, full-width and ranked most-urgent-first
-// (lowest days-of-cover), 50 per page. Only the sell-through window + search sit
-// up top. Each product shows its sizes HORIZONTALLY; per size you get in-stock,
-// sold, rate/day, days cover, an editable "sell until" date, a lead time, and an
-// auto-filled but editable suggested order. Stock is live Shopify; sell-through
-// comes from the analytics dashboard.
-type ReorderOverviewProduct = { id: string; title: string; productType?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; weeksCover: number | null };
+
+// Reorder Planner — a full-width table of every active product, ranked most-
+// urgent-first (lowest days-of-cover). Each product is one row with its summary
+// columns + product-level "sell until" / lead; expand a row to see the per-size
+// breakdown and edit suggested quantities. "Place order" auto-routes to Existing
+// Products Restock or JJ On Order based on the product's vendor. Stock is live
+// Shopify; sell-through comes from the analytics dashboard.
+type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; weeksCover: number | null };
 function ReorderPlannerPage() {
   const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
   const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
@@ -26261,12 +26263,12 @@ function ReorderPlannerPage() {
   const [debouncedQ, setDebouncedQ] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [page, setPage] = useState(1);
-  // Per-VARIANT overrides, keyed `${productId}:${size}`. sell-until + lead default
-  // from the constants below; the suggested qty is auto-filled unless the user
-  // types over it (manualQty), and editing sell-until/lead clears that override
-  // so it auto-fills again.
+  // Per-PRODUCT sell-until + lead (key = productId); default from the constants.
   const [overrides, setOverrides] = useState<Record<string, { until?: string; lead?: string }>>({});
+  // Per-VARIANT manual suggested override (key `${productId}:${size}`); auto-fills
+  // otherwise, and is cleared for a product when its sell-until/lead change.
   const [manualQty, setManualQty] = useState<Record<string, string>>({});
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [pushedFor, setPushedFor] = useState<Record<string, string>>({});
   const pushTargetRef = useRef<{ id: string; label: string } | null>(null);
 
@@ -26299,43 +26301,53 @@ function ReorderPlannerPage() {
     submitOverview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [since, until, debouncedQ, typeFilter, page]);
-  // Keep the type list stable even while a type filter is applied (the server
-  // only recomputes it from the full catalogue, so the first non-empty wins).
   const typeOptionsRef = useRef<string[]>([]);
   if ((overviewFetcher.data?.productTypes?.length ?? 0) > 0) typeOptionsRef.current = overviewFetcher.data!.productTypes!;
   const productTypeOptions = typeOptionsRef.current;
 
-  const effUntil = (key: string) => overrides[key]?.until ?? DEFAULT_UNTIL;
-  const effLead = (key: string) => overrides[key]?.lead ?? DEFAULT_LEAD;
-  const setUntil = (key: string, val: string) => {
-    setOverrides((prev) => ({ ...prev, [key]: { ...prev[key], until: val } }));
-    setManualQty((prev) => { if (!(key in prev)) return prev; const n = { ...prev }; delete n[key]; return n; });
-  };
-  const setLead = (key: string, val: string) => {
-    setOverrides((prev) => ({ ...prev, [key]: { ...prev[key], lead: val } }));
-    setManualQty((prev) => { if (!(key in prev)) return prev; const n = { ...prev }; delete n[key]; return n; });
-  };
-
-  type VariantCalc = { size: string; key: string; stock: number; unitsSold: number; rate: number; daysCover: number; until: string; lead: number; computed: number; qty: number; qtyStr: string };
-  const calcProduct = (p: ReorderOverviewProduct): VariantCalc[] => p.sizes.map((sz) => {
-    const key = `${p.id}:${sz.size}`;
-    const rate = sz.unitsSold / lookbackDays;
-    const daysCover = rate > 0 ? sz.stock / rate : Infinity;
-    const until = effUntil(key);
-    const lead = Math.max(0, Math.round(Number(effLead(key)) || 0));
-    const dtt = until ? Math.round((new Date(until).getTime() - today.getTime()) / 86400000) : 0;
-    const computed = dtt > 0 ? Math.max(0, Math.ceil(rate * (dtt + lead) - sz.stock)) : 0;
-    const qtyStr = key in manualQty ? manualQty[key] : String(computed);
-    return { size: sz.size, key, stock: sz.stock, unitsSold: sz.unitsSold, rate, daysCover, until, lead, computed, qty: Math.max(0, parseInt(qtyStr) || 0), qtyStr };
+  const effUntil = (id: string) => overrides[id]?.until ?? DEFAULT_UNTIL;
+  const effLead = (id: string) => overrides[id]?.lead ?? DEFAULT_LEAD;
+  const clearManualForProduct = (id: string) => setManualQty((prev) => {
+    const keys = Object.keys(prev).filter((k) => k.startsWith(`${id}:`));
+    if (!keys.length) return prev;
+    const n = { ...prev }; keys.forEach((k) => delete n[k]); return n;
   });
+  const setUntil = (id: string, val: string) => { setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], until: val } })); clearManualForProduct(id); };
+  const setLead = (id: string, val: string) => { setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], lead: val } })); clearManualForProduct(id); };
 
-  const push = (p: ReorderOverviewProduct, calc: VariantCalc[], supplier: string, label: string) => {
+  type VariantCalc = { size: string; key: string; stock: number; unitsSold: number; rate: number; daysCover: number; computed: number; qty: number; qtyStr: string };
+  const calcProduct = (p: ReorderOverviewProduct) => {
+    const until = effUntil(p.id);
+    const lead = Math.max(0, Math.round(Number(effLead(p.id)) || 0));
+    const dtt = until ? Math.round((new Date(until).getTime() - today.getTime()) / 86400000) : 0;
+    const valid = dtt > 0;
+    const coverage = dtt + lead;
+    const rows: VariantCalc[] = p.sizes.map((sz) => {
+      const key = `${p.id}:${sz.size}`;
+      const rate = sz.unitsSold / lookbackDays;
+      const daysCover = rate > 0 ? sz.stock / rate : Infinity;
+      const computed = valid ? Math.max(0, Math.ceil(rate * coverage - sz.stock)) : 0;
+      const qtyStr = key in manualQty ? manualQty[key] : String(computed);
+      return { size: sz.size, key, stock: sz.stock, unitsSold: sz.unitsSold, rate, daysCover, computed, qty: Math.max(0, parseInt(qtyStr) || 0), qtyStr };
+    });
+    return { rows, total: rows.reduce((a, r) => a + r.qty, 0), until, lead, dtt, coverage, valid };
+  };
+
+  // Where a product's order goes, from its Shopify vendor.
+  const routeFor = (vendor?: string) => {
+    const v = (vendor || "").toLowerCase();
+    if (v.includes("jj")) return { supplier: "JJ", label: "JJ Order" };
+    return { supplier: "Karma East", label: "Existing Products Restock" };
+  };
+
+  const placeOrder = (p: ReorderOverviewProduct, calc: ReturnType<typeof calcProduct>) => {
+    const route = routeFor(p.vendor);
     const qtys: Record<string, number> = {};
-    calc.forEach((c) => { if (c.qty > 0) qtys[c.size] = c.qty; });
+    calc.rows.forEach((c) => { if (c.qty > 0) qtys[c.size] = c.qty; });
     if (!Object.keys(qtys).length) return;
-    pushTargetRef.current = { id: p.id, label };
-    const product = { id: p.id, shop: p.shop, title: p.title, imageUrl: p.imageUrl, skus: [], sizes: p.sizes.map((s) => s.size), variants: [] };
-    pushFetcher.submit({ intent: "create_restock_order_from_portal", product: JSON.stringify(product), qtys: JSON.stringify(qtys), supplier }, { method: "post" });
+    pushTargetRef.current = { id: p.id, label: route.label };
+    const product = { id: p.id, shop: p.shop, title: p.title, imageUrl: p.imageUrl, skus: [], sizes: p.sizes.map((sz) => sz.size), variants: [] };
+    pushFetcher.submit({ intent: "create_restock_order_from_portal", product: JSON.stringify(product), qtys: JSON.stringify(qtys), supplier: route.supplier }, { method: "post" });
   };
   useEffect(() => {
     if (pushFetcher.state === "idle" && (pushFetcher.data as { success?: boolean } | undefined)?.success && pushTargetRef.current) {
@@ -26344,11 +26356,13 @@ function ReorderPlannerPage() {
     }
   }, [pushFetcher.state, pushFetcher.data]);
 
-  const input: React.CSSProperties = { border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 10px", fontSize: 14, background: "#fff" };
-  const label: React.CSSProperties = { fontSize: 12, fontWeight: 700, color: "#6b7280", marginBottom: 4, display: "block" };
-  const smallBtn: React.CSSProperties = { border: "1px solid #d1d5db", background: "#fff", borderRadius: 6, padding: "4px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" };
-  const cellInput: React.CSSProperties = { border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 6px", fontSize: 12, background: "#fff", boxSizing: "border-box", textAlign: "center" };
-  const daysColor = (d: number | null) => d == null ? "#9ca3af" : d < 30 ? "#dc2626" : d < 60 ? "#b45309" : "#111827";
+  const labelStyle: React.CSSProperties = { fontSize: 12, fontWeight: 700, color: "#64748b", marginBottom: 4, display: "block" };
+  const ctrl: React.CSSProperties = { height: 38, boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 8, padding: "0 10px", fontSize: 14, background: "#fff" };
+  const smallBtn: React.CSSProperties = { border: "1px solid #cbd5e1", background: "#fff", borderRadius: 6, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" };
+  const th: React.CSSProperties = { position: "sticky", top: 0, zIndex: 3, background: "#f1f5f9", borderBottom: "2px solid #e2e8f0", padding: "9px 10px", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.03em", whiteSpace: "nowrap", textAlign: "center" };
+  const cell: React.CSSProperties = { padding: "8px 10px", fontSize: 13, borderBottom: "1px solid #eef2f7", verticalAlign: "middle", textAlign: "center" };
+  const cellInput: React.CSSProperties = { height: 30, boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 6, padding: "0 6px", fontSize: 12, background: "#fff", textAlign: "center" };
+  const daysColor = (d: number | null) => d == null ? "#94a3b8" : d < 30 ? "#dc2626" : d < 60 ? "#b45309" : "#0f172a";
   const daysBg = (d: number | null) => d == null ? "#f1f5f9" : d < 30 ? "#fee2e2" : d < 60 ? "#fef3c7" : "#ecfdf5";
   const daysBadge = (d: number | null) => (
     <span style={{ display: "inline-block", minWidth: 46, textAlign: "center", fontWeight: 800, fontSize: 12, borderRadius: 999, padding: "2px 8px", color: daysColor(d), background: daysBg(d) }}>{d == null ? "—" : `${d}d`}</span>
@@ -26365,21 +26379,18 @@ function ReorderPlannerPage() {
   const firstIdx = totalProducts === 0 ? 0 : (page - 1) * pageSize + 1;
   const lastIdx = Math.min(totalProducts, page * pageSize);
 
-  // Metric rows down the left of each product's horizontal size grid.
-  const metricLabel: React.CSSProperties = { position: "sticky", left: 0, background: "#fff", zIndex: 1, padding: "5px 12px 5px 0", fontSize: 12, color: "#6b7280", fontWeight: 700, whiteSpace: "nowrap", textAlign: "right", minWidth: 96 };
-  const sizeCell: React.CSSProperties = { padding: "5px 8px", textAlign: "center", fontSize: 13, minWidth: 76 };
-
   return (
-    <div style={{ ...s.productInfoPage, alignContent: "start", overflowY: "auto", padding: 0, background: "#eef2f6" }}>
-      {/* Toolbar — a distinct, sticky bar separated from the content below */}
-      <div style={{ position: "sticky", top: 0, zIndex: 5, background: "#fff", borderBottom: "1px solid #e2e8f0", boxShadow: "0 2px 8px rgba(15,23,42,0.06)", padding: "14px 16px" }}>
+    <div style={{ ...s.productInfoPage, alignContent: "start", overflowY: "auto", padding: 16, background: "#eef2f6" }}>
+      {/* Toolbar — a distinct card with the grey background showing around it */}
+      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, boxShadow: "0 1px 3px rgba(15,23,42,0.06)", padding: "14px 16px", marginBottom: 16 }}>
         <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 800 }}>Reorder Planner</h2>
-        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>Every active product, most urgent first. Set the sales window, then tune “sell until”, lead time and the suggested order per size.</div>
+        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>Every active product, most urgent first. Set the sales window, then tune “sell until” and lead time — the suggested order fills in per size. Expand a row for the size breakdown.</div>
 
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <div>
-            <span style={label}>Sell-through window</span>
-            <select value={lookback} onChange={(e) => setLookback(e.target.value)} style={input}>
+        {/* Filters — all in one line, same height */}
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <span style={labelStyle}>Sell-through window</span>
+            <select value={lookback} onChange={(e) => setLookback(e.target.value)} style={{ ...ctrl, width: 180 }}>
               <option value="30">Last 30 days</option>
               <option value="60">Last 60 days</option>
               <option value="90">Last 90 days</option>
@@ -26387,31 +26398,27 @@ function ReorderPlannerPage() {
               <option value="custom">Custom range…</option>
             </select>
           </div>
-          {lookback === "custom" && (
-            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-              <div><span style={label}>From</span><input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} style={input} /></div>
-              <div><span style={label}>To</span><input type="date" value={customUntil} onChange={(e) => setCustomUntil(e.target.value)} style={input} /></div>
-            </div>
-          )}
-          <div>
-            <span style={label}>Product type</span>
-            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ ...input, maxWidth: 200 }}>
+          {lookback === "custom" && <>
+            <div style={{ display: "flex", flexDirection: "column" }}><span style={labelStyle}>From</span><input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} style={{ ...ctrl, width: 150 }} /></div>
+            <div style={{ display: "flex", flexDirection: "column" }}><span style={labelStyle}>To</span><input type="date" value={customUntil} onChange={(e) => setCustomUntil(e.target.value)} style={{ ...ctrl, width: 150 }} /></div>
+          </>}
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            <span style={labelStyle}>Product type</span>
+            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ ...ctrl, width: 190 }}>
               <option value="">All product types</option>
               {productTypeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </div>
-          <div style={{ flex: 1, minWidth: 200 }}>
-            <span style={label}>Find a style</span>
-            <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by product name…" style={{ ...input, width: "100%", boxSizing: "border-box" }} />
+          <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 200 }}>
+            <span style={labelStyle}>Find a style</span>
+            <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by product name…" style={{ ...ctrl, width: "100%" }} />
           </div>
         </div>
 
         {/* Status row */}
-        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
-          <span style={{ fontSize: 13, color: "#6b7280" }}>
-            {firstLoad ? "Loading…" : totalProducts === 0 ? "No products" : `Showing ${firstIdx}–${lastIdx} of ${totalProducts}`}
-          </span>
-          {loading && !firstLoad && <span style={{ fontSize: 12, color: "#9ca3af" }}>updating…</span>}
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 12, borderTop: "1px solid #f1f5f9", paddingTop: 12 }}>
+          <span style={{ fontSize: 13, color: "#6b7280" }}>{firstLoad ? "Loading…" : totalProducts === 0 ? "No products" : `Showing ${firstIdx}–${lastIdx} of ${totalProducts}`}</span>
+          {loading && !firstLoad && <span style={{ fontSize: 12, color: "#94a3b8" }}>updating…</span>}
           {!salesAvailable && <span style={{ color: "#b45309", fontSize: 12, fontWeight: 700 }}>Analytics unavailable — check the dashboard connection.</span>}
           <span style={{ flex: 1 }} />
           <button type="button" style={smallBtn} onClick={() => submitOverview({ refresh: true })} title="Re-scan live Shopify stock (cached ~10 min)">↻ Refresh stock</button>
@@ -26423,78 +26430,103 @@ function ReorderPlannerPage() {
         </div>
       </div>
 
-      {/* Content */}
-      <div style={{ padding: 16 }}>
-        {/* Product cards — each full width, sizes laid out horizontally */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, opacity: loading && !firstLoad ? 0.6 : 1, transition: "opacity 120ms" }}>
-          {firstLoad && <div style={{ color: "#9ca3af", padding: "28px 0", textAlign: "center" }}>Loading products…</div>}
-          {!firstLoad && products.length === 0 && <div style={{ color: "#9ca3af", padding: "28px 0", textAlign: "center" }}>No products match.</div>}
-          {products.map((p) => {
-            const calc = calcProduct(p);
-            const productRate = p.totalSold / lookbackDays;
-            const productDays = productRate > 0 ? Math.round(p.totalStock / productRate) : null;
-            const totalSuggested = calc.reduce((a, c) => a + c.qty, 0);
-            const pushed = pushedFor[p.id];
-            return (
-              <div key={p.id} style={{ border: "1px solid #e5e7eb", borderRadius: 10, background: "#fff", padding: 12 }}>
-                {/* Product header */}
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
-                  {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 34, height: 42, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 34, height: 42, background: "#f1f5f9", borderRadius: 4 }} />}
-                  <span style={{ fontWeight: 700, fontSize: 15 }}>{p.title}</span>
-                  {daysBadge(productDays)}
-                  <span style={{ fontSize: 12, color: "#6b7280" }}>{p.totalStock} in stock · {p.totalSold} sold · <strong style={{ color: "#374151" }}>{productRate.toFixed(2)}/day</strong></span>
-                  <span style={{ flex: 1 }} />
-                  <span style={{ fontSize: 12, color: "#6b7280" }}>Suggested total</span>
-                  <span style={{ fontWeight: 800, fontSize: 16, color: totalSuggested > 0 ? "#0f766e" : "#9ca3af", minWidth: 28, textAlign: "right" }}>{totalSuggested}</span>
-                  {pushed
-                    ? <span style={{ color: "#047857", fontSize: 12, fontWeight: 700 }}>✓ Pushed to {pushed}</span>
-                    : <>
-                        <button type="button" title="Push to Existing Products Restock" onClick={() => push(p, calc, "Karma East", "Restock")} disabled={pushFetcher.state !== "idle" || totalSuggested <= 0} style={{ ...smallBtn, background: totalSuggested > 0 ? "#0d9488" : "#e5e7eb", color: totalSuggested > 0 ? "#fff" : "#9ca3af", border: "none", cursor: totalSuggested > 0 ? "pointer" : "default" }}>→ Restock</button>
-                        <button type="button" title="Push to JJ On Order" onClick={() => push(p, calc, "JJ", "JJ")} disabled={pushFetcher.state !== "idle" || totalSuggested <= 0} style={{ ...smallBtn, background: totalSuggested > 0 ? "#1d4ed8" : "#e5e7eb", color: totalSuggested > 0 ? "#fff" : "#9ca3af", border: "none", cursor: totalSuggested > 0 ? "pointer" : "default" }}>→ JJ</button>
-                      </>}
-                </div>
-                {/* Horizontal size grid */}
-                <div style={{ overflowX: "auto" }}>
-                  <table style={{ borderCollapse: "collapse", background: "#fff" }}>
-                    <tbody>
+      {/* Product table */}
+      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, overflow: "hidden", opacity: loading && !firstLoad ? 0.6 : 1, transition: "opacity 120ms" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 1060 }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left", minWidth: 260 }}>Product</th>
+                <th style={th}>Days stock</th>
+                <th style={th}>In stock</th>
+                <th style={th}>Sold</th>
+                <th style={th}>Sold/day</th>
+                <th style={th}>Days cover</th>
+                <th style={th}>Sell until</th>
+                <th style={th}>Lead</th>
+                <th style={th}>Suggested</th>
+                <th style={{ ...th, textAlign: "right" }}>Order</th>
+              </tr>
+            </thead>
+            <tbody>
+              {firstLoad && <tr><td colSpan={10} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>Loading products…</td></tr>}
+              {!firstLoad && products.length === 0 && <tr><td colSpan={10} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>No products match.</td></tr>}
+              {products.map((p) => {
+                const calc = calcProduct(p);
+                const productRate = p.totalSold / lookbackDays;
+                const productDaysStock = productRate > 0 ? Math.round(p.totalStock / productRate) : null;
+                const isOpen = expanded.has(p.id);
+                const route = routeFor(p.vendor);
+                const pushed = pushedFor[p.id];
+                const toggle = () => setExpanded((prev) => { const n = new Set(prev); if (n.has(p.id)) n.delete(p.id); else n.add(p.id); return n; });
+                return (
+                  <Fragment key={p.id}>
+                    <tr style={{ background: "#fff" }}>
+                      <td style={{ ...cell, textAlign: "left" }}>
+                        <div onClick={toggle} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                          <span style={{ color: "#94a3b8", fontSize: 12, width: 12 }}>{isOpen ? "▾" : "▸"}</span>
+                          {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 34, height: 42, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 34, height: 42, background: "#f1f5f9", borderRadius: 4 }} />}
+                          <span style={{ fontWeight: 700, fontSize: 14 }}>{p.title}</span>
+                        </div>
+                      </td>
+                      <td style={cell}>{daysBadge(productDaysStock)}</td>
+                      <td style={{ ...cell, fontWeight: 700 }}>{p.totalStock}</td>
+                      <td style={cell}>{p.totalSold}</td>
+                      <td style={{ ...cell, color: "#64748b" }}>{productRate.toFixed(2)}</td>
+                      <td style={{ ...cell, color: "#64748b" }}>{calc.valid ? `${calc.coverage}d` : "—"}</td>
+                      <td style={cell}><input type="date" value={calc.until} onChange={(e) => setUntil(p.id, e.target.value)} style={{ ...cellInput, width: 132 }} /></td>
+                      <td style={cell}><input type="number" min={0} value={effLead(p.id)} onChange={(e) => setLead(p.id, e.target.value)} style={{ ...cellInput, width: 58 }} /></td>
+                      <td style={{ ...cell, fontWeight: 800, color: calc.total > 0 ? "#0f766e" : "#94a3b8", fontSize: 15 }}>{calc.total}</td>
+                      <td style={{ ...cell, textAlign: "right" }}>
+                        {pushed
+                          ? <span style={{ color: "#047857", fontSize: 12, fontWeight: 700 }}>✓ Sent to {pushed}</span>
+                          : <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+                              <button type="button" onClick={() => placeOrder(p, calc)} disabled={pushFetcher.state !== "idle" || calc.total <= 0} style={{ border: "none", borderRadius: 7, padding: "7px 14px", fontSize: 13, fontWeight: 700, background: calc.total > 0 ? "#0f766e" : "#e5e7eb", color: calc.total > 0 ? "#fff" : "#9ca3af", cursor: calc.total > 0 ? "pointer" : "default", whiteSpace: "nowrap" }}>Place order</button>
+                              <span style={{ fontSize: 10, color: "#94a3b8", whiteSpace: "nowrap" }}>→ {route.label}</span>
+                            </div>}
+                      </td>
+                    </tr>
+                    {isOpen && (
                       <tr>
-                        <td style={{ ...metricLabel, color: "#111827" }} />
-                        {calc.map((c) => <td key={c.key} style={{ ...sizeCell, fontWeight: 800, borderBottom: "2px solid #e5e7eb" }}>{c.size}</td>)}
+                        <td colSpan={10} style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0", padding: "10px 16px 14px 38px" }}>
+                          <div style={{ overflowX: "auto" }}>
+                            <table style={{ borderCollapse: "collapse", background: "transparent" }}>
+                              <tbody>
+                                <tr>
+                                  <td style={{ padding: "4px 12px 4px 0", fontSize: 11, fontWeight: 700, color: "#94a3b8", textAlign: "right", whiteSpace: "nowrap" }} />
+                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontWeight: 800, fontSize: 13, borderBottom: "2px solid #e2e8f0", minWidth: 74 }}>{c.size}</td>)}
+                                </tr>
+                                <tr>
+                                  <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>In stock</td>
+                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13, fontWeight: 700 }}>{c.stock}</td>)}
+                                </tr>
+                                <tr>
+                                  <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Sold ({lookbackDays}d)</td>
+                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13 }}>{c.unitsSold}</td>)}
+                                </tr>
+                                <tr>
+                                  <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Days cover</td>
+                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13, fontWeight: 700, color: daysColor(c.daysCover === Infinity ? null : Math.round(c.daysCover)) }}>{c.daysCover === Infinity ? "—" : `${Math.round(c.daysCover)}d`}</td>)}
+                                </tr>
+                                <tr>
+                                  <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#0f766e", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Suggested</td>
+                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center" }}><input type="number" min={0} value={c.qtyStr} onChange={(e) => setManualQty((prev) => ({ ...prev, [c.key]: e.target.value }))} style={{ ...cellInput, width: 64, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#94a3b8", borderColor: c.qty > 0 ? "#5eead4" : "#cbd5e1" }} /></td>)}
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </td>
                       </tr>
-                      <tr>
-                        <td style={metricLabel}>In stock</td>
-                        {calc.map((c) => <td key={c.key} style={{ ...sizeCell, fontWeight: 700 }}>{c.stock}</td>)}
-                      </tr>
-                      <tr>
-                        <td style={metricLabel}>Sold ({lookbackDays}d)</td>
-                        {calc.map((c) => <td key={c.key} style={sizeCell}>{c.unitsSold}</td>)}
-                      </tr>
-                      <tr>
-                        <td style={metricLabel}>Days cover</td>
-                        {calc.map((c) => <td key={c.key} style={{ ...sizeCell, fontWeight: 700, color: daysColor(c.daysCover === Infinity ? null : Math.round(c.daysCover)) }}>{c.daysCover === Infinity ? "—" : `${Math.round(c.daysCover)}d`}</td>)}
-                      </tr>
-                      <tr>
-                        <td style={metricLabel}>Sell until</td>
-                        {calc.map((c) => <td key={c.key} style={sizeCell}><input type="date" value={c.until} onChange={(e) => setUntil(c.key, e.target.value)} style={{ ...cellInput, width: 128 }} /></td>)}
-                      </tr>
-                      <tr>
-                        <td style={metricLabel}>Lead (days)</td>
-                        {calc.map((c) => <td key={c.key} style={sizeCell}><input type="number" min={0} value={effLead(c.key)} onChange={(e) => setLead(c.key, e.target.value)} style={{ ...cellInput, width: 60 }} /></td>)}
-                      </tr>
-                      <tr>
-                        <td style={{ ...metricLabel, color: "#0f766e" }}>Suggested</td>
-                        {calc.map((c) => <td key={c.key} style={sizeCell}><input type="number" min={0} value={c.qtyStr} onChange={(e) => setManualQty((prev) => ({ ...prev, [c.key]: e.target.value }))} style={{ ...cellInput, width: 64, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#9ca3af", borderColor: c.qty > 0 ? "#5eead4" : "#d1d5db" }} /></td>)}
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            );
-          })}
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
-        <div style={{ fontSize: 12, color: "#6b7280", margin: "12px 0 24px" }}>
-          Suggested = rate/day × (days to “sell until” + lead) − in stock. Auto-filled — type over any cell to set it yourself. Ranked by days of cover (lowest first). Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
-        </div>
+      </div>
+      <div style={{ fontSize: 12, color: "#6b7280", margin: "12px 2px 24px" }}>
+        Suggested = sold/day × (days to “sell until” + lead) − in stock. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
       </div>
     </div>
   );
