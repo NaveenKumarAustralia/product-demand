@@ -18,20 +18,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // ?__fixdates=<key>&ids=1,2    → set those orders' createdAt to now
   const __fk = url.searchParams.get("__fixdates");
   if (__fk === "fixjj_7a91c2e4b8d3") {
-    const idsParam = url.searchParams.get("ids");
-    if (!idsParam) {
-      const recent = await prisma.supplierOrder.findMany({
-        where: { supplier: "JJ", status: "open" },
-        orderBy: { id: "desc" },
-        take: 15,
-        select: { id: true, productTitle: true, createdAt: true, updatedAt: true, totalQty: true, lines: { select: { sku: true, variantTitle: true, qtyOrdered: true }, take: 3 } },
-      });
-      return new Response(JSON.stringify({ mode: "list", recent }, null, 2), { headers: { "Content-Type": "application/json" } });
+    try {
+      const idsParam = url.searchParams.get("ids");
+      if (!idsParam) {
+        const recent = await prisma.supplierOrder.findMany({
+          where: { supplier: "JJ", status: "open" },
+          orderBy: { id: "desc" },
+          take: 15,
+          select: { id: true, productTitle: true, createdAt: true, updatedAt: true, totalQty: true },
+        });
+        return jsonResponse({ mode: "list", recent });
+      }
+      const ids = idsParam.split(",").map((sv) => parseInt(sv.trim(), 10)).filter((n) => Number.isFinite(n));
+      const now = new Date();
+      const res = await prisma.supplierOrder.updateMany({ where: { id: { in: ids }, supplier: "JJ" }, data: { createdAt: now } });
+      return jsonResponse({ mode: "fix", ids, updated: res.count, now });
+    } catch (e) {
+      return jsonResponse({ error: String((e as Error)?.message || e) });
     }
-    const ids = idsParam.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
-    const now = new Date();
-    const res = await prisma.supplierOrder.updateMany({ where: { id: { in: ids }, supplier: "JJ" }, data: { createdAt: now } });
-    return new Response(JSON.stringify({ mode: "fix", ids, updated: res.count, now }, null, 2), { headers: { "Content-Type": "application/json" } });
   }
   const page = url.searchParams.get("page") ?? "restock";
   // The restock table is shared by two vendor-scoped pages: the default
