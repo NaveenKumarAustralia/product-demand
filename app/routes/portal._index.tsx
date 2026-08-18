@@ -26318,7 +26318,12 @@ function ReorderPlannerPage() {
   const [debouncedQ, setDebouncedQ] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
   const [page, setPage] = useState(1);
-  // Per-PRODUCT sell-until + lead (key = productId); default from the constants.
+  // Sell-until is SHARED across the page by default: editing any product's date
+  // moves every product to that date. A product can be "pinned" (in pinnedUntil)
+  // to keep its own date (held in overrides[id].until) unaffected by shared edits.
+  const [sharedUntil, setSharedUntil] = useState("");
+  const [pinnedUntil, setPinnedUntil] = useState<Set<string>>(new Set());
+  // Per-PRODUCT lead + a pinned product's own sell-until (key = productId).
   const [overrides, setOverrides] = useState<Record<string, { until?: string; lead?: string }>>({});
   // Per-VARIANT manual suggested override (key `${productId}:${size}`); auto-fills
   // otherwise, and is cleared for a product when its sell-until/lead change.
@@ -26360,14 +26365,37 @@ function ReorderPlannerPage() {
   if ((overviewFetcher.data?.productTypes?.length ?? 0) > 0) typeOptionsRef.current = overviewFetcher.data!.productTypes!;
   const productTypeOptions = typeOptionsRef.current;
 
-  const effUntil = (id: string) => overrides[id]?.until ?? DEFAULT_UNTIL;
+  // Pinned products keep their own date (overrides[id].until); everyone else
+  // follows the shared date (which falls back to the default until first edited).
+  const effUntil = (id: string) => pinnedUntil.has(id) ? (overrides[id]?.until ?? (sharedUntil || DEFAULT_UNTIL)) : (sharedUntil || DEFAULT_UNTIL);
   const effLead = (id: string) => overrides[id]?.lead ?? DEFAULT_LEAD;
   const clearManualForProduct = (id: string) => setManualQty((prev) => {
     const keys = Object.keys(prev).filter((k) => k.startsWith(`${id}:`));
     if (!keys.length) return prev;
     const n = { ...prev }; keys.forEach((k) => delete n[k]); return n;
   });
-  const setUntil = (id: string, val: string) => { setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], until: val } })); clearManualForProduct(id); };
+  const setUntil = (id: string, val: string) => {
+    if (pinnedUntil.has(id)) {
+      // Only this product.
+      setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], until: val } }));
+      clearManualForProduct(id);
+    } else {
+      // Shared: move every product that isn't pinned; re-autofill all quantities.
+      setSharedUntil(val);
+      setManualQty({});
+    }
+  };
+  const togglePinUntil = (id: string) => {
+    if (pinnedUntil.has(id)) {
+      setPinnedUntil((prev) => { const n = new Set(prev); n.delete(id); return n; });
+      setOverrides((prev) => { if (!prev[id]) return prev; const rest = { ...prev[id] }; delete rest.until; return { ...prev, [id]: rest }; });
+      clearManualForProduct(id);
+    } else {
+      const cur = effUntil(id);
+      setPinnedUntil((prev) => { const n = new Set(prev); n.add(id); return n; });
+      setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], until: cur } }));
+    }
+  };
   const setLead = (id: string, val: string) => { setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], lead: val } })); clearManualForProduct(id); };
 
   type VariantCalc = { size: string; key: string; stock: number; unitsSold: number; rate: number; daysCover: number; onOrder: number; computed: number; qty: number; qtyStr: string };
@@ -26537,7 +26565,12 @@ function ReorderPlannerPage() {
                       <td style={cell}>{p.totalSold}</td>
                       <td style={{ ...cell, color: "#64748b" }}>{productRate.toFixed(2)}</td>
                       <td style={{ ...cell, color: "#64748b" }} title="Days from today until your ‘sell until’ date">{calc.valid ? `${calc.dtt}d` : "—"}</td>
-                      <td style={cell}><input type="date" value={calc.until} onChange={(e) => setUntil(p.id, e.target.value)} style={{ ...cellInput, width: 132 }} /></td>
+                      <td style={cell}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
+                          <input type="date" value={calc.until} onChange={(e) => setUntil(p.id, e.target.value)} style={{ ...cellInput, width: 124 }} />
+                          <button type="button" onClick={() => togglePinUntil(p.id)} title={pinnedUntil.has(p.id) ? "Set for this product only — click to follow all products again" : "This date applies to every product — click to set it just for this one"} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0, opacity: pinnedUntil.has(p.id) ? 1 : 0.3, filter: pinnedUntil.has(p.id) ? "none" : "grayscale(1)" }}>📌</button>
+                        </div>
+                      </td>
                       <td style={cell}><input type="number" min={0} value={effLead(p.id)} onChange={(e) => setLead(p.id, e.target.value)} style={{ ...cellInput, width: 58 }} /></td>
                       <td style={{ ...cell, fontWeight: 800, color: calc.total > 0 ? "#0f766e" : "#94a3b8", fontSize: 15 }}>{calc.total}</td>
                       <td style={{ ...cell, textAlign: "right" }}>
@@ -26611,7 +26644,7 @@ function ReorderPlannerPage() {
         </div>
       </div>
       <div style={{ fontSize: 12, color: "#6b7280", margin: "12px 2px 24px" }}>
-        Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (min 14), not the whole window, so new releases aren’t understated. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
+        Changing a “Sell until” date moves every product to that date; click the 📌 to set (and keep) one product’s date on its own. Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (min 14), not the whole window, so new releases aren’t understated. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
       </div>
     </div>
   );
