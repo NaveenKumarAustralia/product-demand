@@ -2354,6 +2354,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const until = String(form.get("until") ?? "").trim();
     const q = String(form.get("q") ?? "").trim().toLowerCase();
     const typeFilter = String(form.get("type") ?? "").trim();
+    const hideSale = String(form.get("hideSale") ?? "") === "1";
     const pageNum = Math.max(1, parseInt(String(form.get("page") ?? "1"), 10) || 1);
     const refresh = String(form.get("refresh") ?? "") === "1";
     const pageSize = 50;
@@ -2392,6 +2393,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const productTypes = Array.from(new Set(enriched.map((p) => p.productType).filter(Boolean))).sort((a, b) => a.localeCompare(b));
     let filtered = q ? enriched.filter((p) => p.title.toLowerCase().includes(q)) : enriched;
     if (typeFilter) filtered = filtered.filter((p) => p.productType === typeFilter);
+    // Hide Sale products (never reordered): product type is exactly "Sale", or any
+    // tag contains "sale". Filtered out entirely so ranking + pagination exclude them.
+    if (hideSale) {
+      const saleIds = new Set(stockProducts.filter((p) => p.productType.trim().toLowerCase() === "sale" || (p.tags ?? []).some((t) => t.toLowerCase().includes("sale"))).map((p) => p.id));
+      filtered = filtered.filter((p) => !saleIds.has(p.id));
+    }
     // Most urgent first: finite weeks-cover ascending, no-sales products last
     // (broken by more stock sitting = lower priority, so highest stock last).
     filtered.sort((a, b) => {
@@ -8178,7 +8185,7 @@ async function fetchReorderSellingDays(since: string, until: string): Promise<Re
 // and caches it, so ranking every product by weeks-of-cover doesn't cost one
 // Shopify call per product. Size labels reuse the same logic as the packing
 // list so they line up with the sell-through variant labels.
-type ReorderStockProduct = { id: string; title: string; imageUrl: string | null; productType: string; vendor: string; sizes: Array<{ size: string; stock: number }> };
+type ReorderStockProduct = { id: string; title: string; imageUrl: string | null; productType: string; vendor: string; tags: string[]; sizes: Array<{ size: string; stock: number }> };
 let _reorderStockCache: { at: number; shop: string; products: ReorderStockProduct[] } | null = null;
 const REORDER_STOCK_TTL_MS = 10 * 60 * 1000;
 async function getAllShopifyProductsWithInventory(shop: string, accessToken: string, force = false): Promise<ReorderStockProduct[]> {
@@ -8195,6 +8202,7 @@ async function getAllShopifyProductsWithInventory(shop: string, accessToken: str
             title
             productType
             vendor
+            tags
             featuredImage { url }
             variants(first: 100) {
               nodes { title sku inventoryQuantity selectedOptions { name value } }
@@ -8224,7 +8232,7 @@ async function getAllShopifyProductsWithInventory(shop: string, accessToken: str
         sizes.push({ size, stock: Math.max(0, Number(v.inventoryQuantity ?? 0) || 0) });
       }
       if (!sizes.length) continue;   // no size-bearing variants → not reorder-planned here
-      products.push({ id: String(node.id), title: String(node.title ?? ""), productType: String(node.productType ?? "").trim(), vendor: String(node.vendor ?? "").trim(), imageUrl: node.featuredImage?.url ?? null, sizes });
+      products.push({ id: String(node.id), title: String(node.title ?? ""), productType: String(node.productType ?? "").trim(), vendor: String(node.vendor ?? "").trim(), tags: Array.isArray(node.tags) ? node.tags.map((t: unknown) => String(t)) : [], imageUrl: node.featuredImage?.url ?? null, sizes });
     }
     if (!conn.pageInfo?.hasNextPage) break;
     cursor = conn.pageInfo.endCursor ?? null;
@@ -9936,6 +9944,7 @@ export default function PortalDashboard() {
   // JJ search — lifted so it can live in the header (same spot/style as the
   // Existing Products Restock search).
   const [jjSearch, setJjSearch] = useState("");
+  const [reorderSearch, setReorderSearch] = useState("");
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { url: string; alt?: string };
@@ -10345,6 +10354,18 @@ export default function PortalDashboard() {
                   />
                 </label>
               )}
+              {page === "reorder" && (
+                <label style={s.filterLabel}>
+                  Search
+                  <input
+                    type="search"
+                    value={reorderSearch}
+                    onChange={(event) => setReorderSearch(event.currentTarget.value)}
+                    style={s.searchInput}
+                    placeholder="Product name"
+                  />
+                </label>
+              )}
               <MessagesMenu messages={messages} />
               <ThreadPanel users={users} currentUser={currentUser} />
               <div style={s.activeUsers} title="Currently active">
@@ -10539,7 +10560,7 @@ export default function PortalDashboard() {
         ) : page === "dropbox" ? (
           <DropboxPanel />
         ) : page === "reorder" ? (
-          <ReorderPlannerPage />
+          <ReorderPlannerPage search={reorderSearch} />
         ) : page === "search" ? (
           <GlobalSearchPage query={globalSearchQuery} results={globalSearch} isAdmin={Boolean(currentUser?.admin)} shopDomain={shopDomain} />
         ) : page === "jj-restock" ? (
@@ -26312,7 +26333,7 @@ function JJOrderRow({
 // Shopify; sell-through comes from the analytics dashboard.
 type ReorderOnOrderEntry = { label: string; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number };
 type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; effectiveDays?: number; weeksCover: number | null; onOrder?: { entries: ReorderOnOrderEntry[]; bySize: Record<string, number> } };
-function ReorderPlannerPage() {
+function ReorderPlannerPage({ search = "" }: { search?: string }) {
   const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
   const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
 
@@ -26320,9 +26341,9 @@ function ReorderPlannerPage() {
   const [customFrom, setCustomFrom] = useState("");
   const [customUntil, setCustomUntil] = useState("");
   const [growth, setGrowth] = useState("0");   // % more (or less) than the baseline period
-  const [q, setQ] = useState("");
-  const [debouncedQ, setDebouncedQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");   // debounced copy of the header search
   const [typeFilter, setTypeFilter] = useState("");
+  const [hideSale, setHideSale] = useState(true);     // hide Sale products (never reordered)
   const [page, setPage] = useState(1);
   // Sell-until is SHARED across the page by default: editing any product's date
   // moves every product to that date. A product can be "pinned" (in pinnedUntil)
@@ -26361,13 +26382,13 @@ function ReorderPlannerPage() {
   // Growth: scale the sell rate up/down so orders plan for more/less than the baseline.
   const growthFactor = Math.max(0, 1 + (Number(growth) || 0) / 100);
 
-  useEffect(() => { const t = setTimeout(() => setDebouncedQ(q.trim()), 200); return () => clearTimeout(t); }, [q]);
-  useEffect(() => { setPage(1); }, [debouncedQ, since, until, typeFilter]);
+  useEffect(() => { const t = setTimeout(() => setDebouncedQ(search.trim()), 200); return () => clearTimeout(t); }, [search]);
+  useEffect(() => { setPage(1); }, [debouncedQ, since, until, typeFilter, hideSale]);
 
   const submitOverview = (opts?: { refresh?: boolean }) => {
     if (!since || !until) return;
     overviewFetcher.submit(
-      { intent: "reorder_overview", since, until, q: debouncedQ, type: typeFilter, page: String(page), ...(opts?.refresh ? { refresh: "1" } : {}) },
+      { intent: "reorder_overview", since, until, q: debouncedQ, type: typeFilter, hideSale: hideSale ? "1" : "", page: String(page), ...(opts?.refresh ? { refresh: "1" } : {}) },
       { method: "post" },
     );
   };
@@ -26375,7 +26396,7 @@ function ReorderPlannerPage() {
     if (!since || !until) return;
     submitOverview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [since, until, debouncedQ, typeFilter, page]);
+  }, [since, until, debouncedQ, typeFilter, hideSale, page]);
   const typeOptionsRef = useRef<string[]>([]);
   if ((overviewFetcher.data?.productTypes?.length ?? 0) > 0) typeOptionsRef.current = overviewFetcher.data!.productTypes!;
   const productTypeOptions = typeOptionsRef.current;
@@ -26536,10 +26557,20 @@ function ReorderPlannerPage() {
               {productTypeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </div>
-          <div style={{ display: "flex", flexDirection: "column", flex: 1, minWidth: 200 }}>
-            <span style={labelStyle}>Find a style</span>
-            <input type="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by product name…" style={{ ...ctrl, width: "100%" }} />
+          <div style={{ display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              onClick={() => setHideSale((v) => !v)}
+              title="Hide products whose type is Sale or that have a tag containing “sale” — you never reorder these"
+              style={{ ...ctrl, display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", width: "auto", fontWeight: 700, color: hideSale ? "#0f766e" : "#6b7280", background: hideSale ? "#ecfdf5" : "#fff", borderColor: hideSale ? "#5eead4" : "#cbd5e1" }}
+            >
+              <span style={{ display: "inline-flex", width: 30, height: 18, borderRadius: 999, background: hideSale ? "#0d9488" : "#cbd5e1", position: "relative", transition: "background 120ms" }}>
+                <span style={{ position: "absolute", top: 2, left: hideSale ? 14 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left 120ms" }} />
+              </span>
+              Hide Sale items
+            </button>
           </div>
+          <span style={{ flex: 1 }} />
         </div>
 
         {/* Status row */}
