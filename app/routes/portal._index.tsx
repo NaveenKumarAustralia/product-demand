@@ -13,28 +13,6 @@ import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFile
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
-  // TEMP one-off (remove after use): stamp specific JJ orders with today's date.
-  // ?__fixdates=<key>            → list recent JJ open orders to identify them
-  // ?__fixdates=<key>&ids=1,2    → set those orders' createdAt to now
-  const __fk = url.searchParams.get("__fixdates");
-  if (__fk === "fixjj_7a91c2e4b8d3") {
-    try {
-      const now = new Date();
-      const todayMidnight = new Date(now.toISOString().slice(0, 10));
-      // The two orders placed from the Reorder Planner that got a stale date.
-      const where = {
-        supplier: "JJ",
-        status: "open",
-        productTitle: { in: ["Shell T-shirt Electric Blue", "Shell T-shirt Terracotta"] },
-        createdAt: { lt: todayMidnight },   // only the ones with a past (wrong) date
-      };
-      const before = await prisma.supplierOrder.findMany({ where, select: { id: true, productTitle: true, createdAt: true, totalQty: true } });
-      const res = await prisma.supplierOrder.updateMany({ where, data: { createdAt: now } });
-      return jsonResponse({ ok: true, updated: res.count, now, before });
-    } catch (e) {
-      return jsonResponse({ error: String((e as Error)?.message || e) });
-    }
-  }
   const page = url.searchParams.get("page") ?? "restock";
   // The restock table is shared by two vendor-scoped pages: the default
   // "restock" page (Karma East) and "jj-restock" (JJ). They behave
