@@ -2483,6 +2483,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const totalQty = variants.reduce((sum, variant) => sum + (qtys[variant.title] ?? 0), 0);
     if (totalQty <= 0) return null;
 
+    // Pull SKU + barcode from Shopify up front so barcodes are filled in the
+    // moment the order lands (no need to press "Update" per row afterwards).
+    const codeSession = await prisma.session.findFirst({ where: { shop, accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    const variantCodes = codeSession?.accessToken
+      ? await getShopifyVariantCodes(shop, codeSession.accessToken, product.id).catch(() => [] as ShopifyVariantCode[])
+      : [];
+    const barcodeForVariant = (v: { id: string; title: string; sku: string | null }): string | null => {
+      const byId = variantCodes.find((c) => c.id === v.id);
+      if ((byId?.barcode ?? "").trim()) return byId!.barcode;
+      const sku = (v.sku ?? "").trim().toLowerCase();
+      const bySku = sku ? variantCodes.find((c) => (c.sku ?? "").trim().toLowerCase() === sku) : undefined;
+      if ((bySku?.barcode ?? "").trim()) return bySku!.barcode;
+      const byTitle = variantCodes.find((c) => normalizeVariantSizeLabel(c.title) === normalizeVariantSizeLabel(v.title));
+      return (byTitle?.barcode ?? "").trim() || null;
+    };
+
     const etaRaw = String(form.get("eta") ?? "");
     const eta = etaRaw ? parsePortalDate(etaRaw) : null;
     if (etaRaw && !eta) return null;
@@ -2514,6 +2530,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variantId: variant.id,
             variantTitle: variant.title,
             sku: variant.sku,
+            barcode: barcodeForVariant(variant),
             qtyOrdered: qtys[variant.title] ?? 0,
           })),
         },
