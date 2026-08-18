@@ -26382,6 +26382,25 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   // Growth: scale the sell rate up/down so orders plan for more/less than the baseline.
   const growthFactor = Math.max(0, 1 + (Number(growth) || 0) / 100);
 
+  // Remember the sell-through window across refreshes (localStorage).
+  const windowLoadedRef = useRef(false);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("reorder-window-v1");
+      if (raw) {
+        const w = JSON.parse(raw) as { lookback?: string; customFrom?: string; customUntil?: string };
+        if (w.lookback) setLookback(w.lookback);
+        if (typeof w.customFrom === "string") setCustomFrom(w.customFrom);
+        if (typeof w.customUntil === "string") setCustomUntil(w.customUntil);
+      }
+    } catch { /* ignore */ }
+    windowLoadedRef.current = true;
+  }, []);
+  useEffect(() => {
+    if (!windowLoadedRef.current) return;   // don't clobber the stored value before it's read
+    try { localStorage.setItem("reorder-window-v1", JSON.stringify({ lookback, customFrom, customUntil })); } catch { /* ignore */ }
+  }, [lookback, customFrom, customUntil]);
+
   useEffect(() => { const t = setTimeout(() => setDebouncedQ(search.trim()), 200); return () => clearTimeout(t); }, [search]);
   useEffect(() => { setPage(1); }, [debouncedQ, since, until, typeFilter, hideSale]);
 
