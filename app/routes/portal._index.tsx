@@ -19,20 +19,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const __fk = url.searchParams.get("__fixdates");
   if (__fk === "fixjj_7a91c2e4b8d3") {
     try {
-      const idsParam = url.searchParams.get("ids");
-      if (!idsParam) {
-        const recent = await prisma.supplierOrder.findMany({
-          where: { supplier: "JJ", status: "open" },
-          orderBy: { id: "desc" },
-          take: 15,
-          select: { id: true, productTitle: true, createdAt: true, updatedAt: true, totalQty: true },
-        });
-        return jsonResponse({ mode: "list", recent });
-      }
-      const ids = idsParam.split(",").map((sv) => parseInt(sv.trim(), 10)).filter((n) => Number.isFinite(n));
       const now = new Date();
-      const res = await prisma.supplierOrder.updateMany({ where: { id: { in: ids }, supplier: "JJ" }, data: { createdAt: now } });
-      return jsonResponse({ mode: "fix", ids, updated: res.count, now });
+      const todayMidnight = new Date(now.toISOString().slice(0, 10));
+      // The two orders placed from the Reorder Planner that got a stale date.
+      const where = {
+        supplier: "JJ",
+        status: "open",
+        productTitle: { in: ["Shell T-shirt Electric Blue", "Shell T-shirt Terracotta"] },
+        createdAt: { lt: todayMidnight },   // only the ones with a past (wrong) date
+      };
+      const before = await prisma.supplierOrder.findMany({ where, select: { id: true, productTitle: true, createdAt: true, totalQty: true } });
+      const res = await prisma.supplierOrder.updateMany({ where, data: { createdAt: now } });
+      return jsonResponse({ ok: true, updated: res.count, now, before });
     } catch (e) {
       return jsonResponse({ error: String((e as Error)?.message || e) });
     }
