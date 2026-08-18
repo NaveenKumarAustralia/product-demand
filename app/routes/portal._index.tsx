@@ -25922,12 +25922,36 @@ const JJ_COLOUR_NAME_HEX: Record<string, string> = {
 // Keys ordered longest-first so multi-word colours win over their single-word
 // parts (e.g. "navy blue" beats "blue").
 const JJ_COLOUR_NAME_KEYS = Object.keys(JJ_COLOUR_NAME_HEX).sort((a, b) => b.length - a.length);
+function hslToHex(h: number, sPct: number, lPct: number): string {
+  const s = sPct / 100, l = lPct / 100;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const c = l - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)));
+    return Math.round(255 * c).toString(16).padStart(2, "0");
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+// Stable colour derived from a word — used as a fallback for brand/fantasy colour
+// names (Dusk, Kalamata, Camellia…) that aren't in the known-colour map, so every
+// product still gets a consistent swatch from its title.
+function hashColour(word: string): string {
+  let h = 0;
+  for (let i = 0; i < word.length; i++) h = (h * 31 + word.charCodeAt(i)) >>> 0;
+  return hslToHex(h % 360, 52, 55);
+}
 function colourFromProductName(name: string): string | undefined {
-  const hay = ` ${(name ?? "").toLowerCase().replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ")} `;
+  const clean = (name ?? "").toLowerCase().replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
+  const hay = ` ${clean} `;
   // Longest key first, so "navy blue" wins over "blue".
   for (const key of JJ_COLOUR_NAME_KEYS) {
     if (hay.includes(` ${key} `)) return JJ_COLOUR_NAME_HEX[key];
   }
+  // Fallback: derive a stable colour from the last word (the colour name) of the
+  // title, so custom colour names still get a swatch.
+  const words = clean.split(" ").filter(Boolean);
+  const last = words[words.length - 1];
+  if (last && last.length >= 3) return hashColour(last);
   return undefined;
 }
 // Perceived-luminance pick so a light swatch (e.g. 17 = white) uses black text.
@@ -26065,8 +26089,8 @@ function JJColourCodeCell({ orderId, value, productName }: { orderId: number; va
         textAlign: "center", padding: "4px 6px",
         background: swatch ?? "transparent",
         color: swatch ? readableTextOn(swatch) : "#111827",
-        fontSize: swatch ? 20 : 13,
-        fontWeight: swatch ? 800 : 400,
+        fontSize: 18,
+        fontWeight: 800,
       }}
     />
   );
@@ -26181,7 +26205,7 @@ function JJOrderRow({
       <td style={{ ...s.td, padding: 0, position: "relative", ...frozenTd(3), ...destinationRowBg }}><JJColourCodeCell orderId={order.id} value={(order as { colourCode?: string | null }).colourCode ?? ""} productName={order.productTitle} /></td>
       <td style={{ ...s.td, ...frozenTd(4), ...destinationRowBg, overflow: "visible" }}>
         {linked
-          ? <span style={{ fontSize: 13, wordBreak: "break-word" }}>{order.productTitle}</span>
+          ? <span style={{ fontSize: 13, wordBreak: "break-word", display: "block", width: "100%", textAlign: "center" }}>{order.productTitle}</span>
           : <JJFieldCell orderId={order.id} field="name" value={order.productTitle ?? ""} placeholder="Product name" />}
         {/* Destination stamp overlay — centred across the frozen columns,
             pinned to the bottom, same treatment as the restock sheet. */}
@@ -26509,13 +26533,17 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
     calc.rows.forEach((c) => { if (c.qty > 0) qtys[c.size] = c.qty; });
     if (!Object.keys(qtys).length) return;
     pushTargetRef.current = { id: p.id, label: route.label };
+    // Optimistic: show "✓ Sent" instantly; the effect below reverts if it fails.
+    setPushedFor((prev) => ({ ...prev, [p.id]: route.label }));
     const product = { id: p.id, shop: p.shop, title: p.title, imageUrl: p.imageUrl, skus: [], sizes: p.sizes.map((sz) => sz.size), variants: [] };
     pushFetcher.submit({ intent: "create_restock_order_from_portal", product: JSON.stringify(product), qtys: JSON.stringify(qtys), supplier: route.supplier }, { method: "post" });
   };
   useEffect(() => {
-    if (pushFetcher.state === "idle" && (pushFetcher.data as { success?: boolean } | undefined)?.success && pushTargetRef.current) {
+    if (pushFetcher.state === "idle" && pushTargetRef.current) {
       const t = pushTargetRef.current; pushTargetRef.current = null;
-      setPushedFor((prev) => ({ ...prev, [t.id]: t.label }));
+      const ok = (pushFetcher.data as { success?: boolean } | null | undefined)?.success;
+      // Failed → roll back the optimistic ✓ so the buttons come back.
+      if (!ok) setPushedFor((prev) => { const n = { ...prev }; delete n[t.id]; return n; });
     }
   }, [pushFetcher.state, pushFetcher.data]);
 
