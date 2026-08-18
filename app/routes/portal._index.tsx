@@ -1860,6 +1860,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // SKU + barcode from Shopify for every ordered line (used after the user
     // edits codes in Shopify and wants the portal to catch up).
     const refresh = String(form.get("mode") ?? "") === "refresh";
+    // Optional: scope to a single order (the per-row "Update" button); otherwise
+    // scan every JJ order (the bulk backfill).
+    const oneId = Number(String(form.get("orderId") ?? "").trim()) || null;
     const session = await prisma.session.findFirst({
       where: { accessToken: { not: "" } },
       orderBy: { isOnline: "asc" },
@@ -1867,7 +1870,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!session?.shop || !session.accessToken) return { jjError: "No Shopify session available" };
 
     const orders = await prisma.supplierOrder.findMany({
-      where: { supplier: "JJ" },
+      where: { supplier: "JJ", ...(oneId ? { id: oneId } : {}) },
       select: { id: true, productId: true, lines: { select: { id: true, variantTitle: true, sku: true, barcode: true, qtyOrdered: true } } },
     }).catch(() => [] as Array<{ id: number; productId: string; lines: Array<{ id: number; variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }> }>);
 
@@ -26123,6 +26126,10 @@ function JJOrderRow({
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("scroll", close, true); };
   }, [rowMenu]);
   const linked = Boolean(order.productId);
+  // Per-row "Update" — re-pull SKU + barcode from Shopify for this product.
+  const updateFetcher = useFetcher<{ jjBackfill?: { updated: number; noMatch: number }; jjError?: string }>();
+  const updating = updateFetcher.state !== "idle";
+  const updateResult = updateFetcher.data?.jjBackfill;
   // Optimistic local status so the chip updates the instant it's picked —
   // update_status skips loader revalidation, so the prop won't refresh until a
   // full reload otherwise (mirrors the restock sheet's StatusCell).
@@ -26343,6 +26350,22 @@ function JJOrderRow({
           )}
         </td>
       )}
+      {/* Update — re-pull SKU + barcode from Shopify (after fixing them there). */}
+      <td style={{ ...s.td, textAlign: "center" }}>
+        {linked ? (
+          <button
+            type="button"
+            disabled={updating}
+            onClick={() => updateFetcher.submit({ intent: "jj_backfill_barcodes", orderId: String(order.id), mode: "refresh" }, { method: "post" })}
+            title="Re-pull SKU & barcode from Shopify for this product (do this after updating them in Shopify)"
+            style={{ padding: "4px 10px", background: "#fff", color: "#0f766e", border: "1px solid #5eead4", borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: updating ? "default" : "pointer", opacity: updating ? 0.6 : 1, whiteSpace: "nowrap" }}
+          >
+            {updating ? "Updating…" : updateResult ? `✓ ${updateResult.updated}` : "↻ Update"}
+          </button>
+        ) : (
+          <span style={{ color: "#9ca3af", fontSize: 11 }}>—</span>
+        )}
+      </td>
     </tr>
   );
 }
@@ -26924,6 +26947,7 @@ function JJRestockPanel({
       { id: "destination", label: "Destination", defaultWidth: 150, center: true },
     ];
     if (canLoadInventory) cols.push({ id: "load", label: "Load", defaultWidth: JJ_LOAD_COL_WIDTH, center: true });
+    cols.push({ id: "update", label: "Update", defaultWidth: 96, center: true });
     return cols;
   }, [sizes, canLoadInventory]);
 
