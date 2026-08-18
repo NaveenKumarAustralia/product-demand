@@ -26464,7 +26464,7 @@ function ReorderPlannerPage() {
                     <tr style={{ background: "#fff" }}>
                       <td style={{ ...cell, textAlign: "left" }}>
                         <div onClick={toggle} style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-                          <span style={{ color: "#94a3b8", fontSize: 12, width: 12 }}>{isOpen ? "▾" : "▸"}</span>
+                          <span style={{ color: "#475569", fontSize: 18, lineHeight: 1, width: 18, textAlign: "center" }}>{isOpen ? "▾" : "▸"}</span>
                           {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 34, height: 42, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 34, height: 42, background: "#f1f5f9", borderRadius: 4 }} />}
                           <span style={{ fontWeight: 700, fontSize: 14 }}>{p.title}</span>
                         </div>
@@ -26510,7 +26510,7 @@ function ReorderPlannerPage() {
                                 </tr>
                                 <tr>
                                   <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#0f766e", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Suggested</td>
-                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center" }}><input type="number" min={0} value={c.qtyStr} onChange={(e) => setManualQty((prev) => ({ ...prev, [c.key]: e.target.value }))} style={{ ...cellInput, width: 64, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#94a3b8", borderColor: c.qty > 0 ? "#5eead4" : "#cbd5e1" }} /></td>)}
+                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center" }}><input type="text" inputMode="numeric" value={c.qtyStr} onChange={(e) => setManualQty((prev) => ({ ...prev, [c.key]: e.target.value.replace(/[^0-9]/g, "") }))} style={{ ...cellInput, width: 56, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#94a3b8", borderColor: c.qty > 0 ? "#5eead4" : "#cbd5e1" }} /></td>)}
                                 </tr>
                               </tbody>
                             </table>
