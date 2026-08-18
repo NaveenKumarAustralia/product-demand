@@ -26429,24 +26429,22 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   // Growth: scale the sell rate up/down so orders plan for more/less than the baseline.
   const growthFactor = Math.max(0, 1 + (Number(growth) || 0) / 100);
 
-  // Remember the sell-through window across refreshes (localStorage).
-  const windowLoadedRef = useRef(false);
+  // Remember the sell-through window across refreshes. Restore once on mount;
+  // persist only on an actual user change (writing in an effect would clobber the
+  // stored value with the default before the restore lands).
   useEffect(() => {
     try {
       const raw = localStorage.getItem("reorder-window-v1");
-      if (raw) {
-        const w = JSON.parse(raw) as { lookback?: string; customFrom?: string; customUntil?: string };
-        if (w.lookback) setLookback(w.lookback);
-        if (typeof w.customFrom === "string") setCustomFrom(w.customFrom);
-        if (typeof w.customUntil === "string") setCustomUntil(w.customUntil);
-      }
+      if (!raw) return;
+      const w = JSON.parse(raw) as { lookback?: string; customFrom?: string; customUntil?: string };
+      if (w.lookback) setLookback(w.lookback);
+      if (typeof w.customFrom === "string") setCustomFrom(w.customFrom);
+      if (typeof w.customUntil === "string") setCustomUntil(w.customUntil);
     } catch { /* ignore */ }
-    windowLoadedRef.current = true;
   }, []);
-  useEffect(() => {
-    if (!windowLoadedRef.current) return;   // don't clobber the stored value before it's read
-    try { localStorage.setItem("reorder-window-v1", JSON.stringify({ lookback, customFrom, customUntil })); } catch { /* ignore */ }
-  }, [lookback, customFrom, customUntil]);
+  const persistWindow = (patch: { lookback?: string; customFrom?: string; customUntil?: string }) => {
+    try { localStorage.setItem("reorder-window-v1", JSON.stringify({ lookback, customFrom, customUntil, ...patch })); } catch { /* ignore */ }
+  };
 
   useEffect(() => { const t = setTimeout(() => setDebouncedQ(search.trim()), 200); return () => clearTimeout(t); }, [search]);
   useEffect(() => { setPage(1); }, [debouncedQ, since, until, typeFilter, hideSale]);
@@ -26604,7 +26602,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div style={{ display: "flex", flexDirection: "column" }}>
             <span style={labelStyle}>Sell-through window</span>
-            <select value={lookback} onChange={(e) => setLookback(e.target.value)} style={{ ...ctrl, width: 180 }}>
+            <select value={lookback} onChange={(e) => { setLookback(e.target.value); persistWindow({ lookback: e.target.value }); }} style={{ ...ctrl, width: 180 }}>
               <option value="30">Last 30 days</option>
               <option value="60">Last 60 days</option>
               <option value="90">Last 90 days</option>
@@ -26613,8 +26611,8 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
             </select>
           </div>
           {lookback === "custom" && <>
-            <div style={{ display: "flex", flexDirection: "column" }}><span style={labelStyle}>From</span><input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} style={{ ...ctrl, width: 150 }} /></div>
-            <div style={{ display: "flex", flexDirection: "column" }}><span style={labelStyle}>To</span><input type="date" value={customUntil} onChange={(e) => setCustomUntil(e.target.value)} style={{ ...ctrl, width: 150 }} /></div>
+            <div style={{ display: "flex", flexDirection: "column" }}><span style={labelStyle}>From</span><input type="date" value={customFrom} onChange={(e) => { setCustomFrom(e.target.value); persistWindow({ customFrom: e.target.value }); }} style={{ ...ctrl, width: 150 }} /></div>
+            <div style={{ display: "flex", flexDirection: "column" }}><span style={labelStyle}>To</span><input type="date" value={customUntil} onChange={(e) => { setCustomUntil(e.target.value); persistWindow({ customUntil: e.target.value }); }} style={{ ...ctrl, width: 150 }} /></div>
           </>}
           <div style={{ display: "flex", flexDirection: "column" }}>
             <span style={labelStyle}>Growth %</span>
