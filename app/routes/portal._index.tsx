@@ -1895,7 +1895,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       for (const line of target.lines) {
         scanned++;
         const wanted = normalizeVariantSizeLabel(line.variantTitle ?? "");
-        const match = codes.find((c) => normalizeVariantSizeLabel(c.title) === wanted);
+        const lineSku = (line.sku ?? "").trim().toLowerCase();
+        // Match the exact Shopify variant by SKU first (the unique key), then fall
+        // back to the size label. SKU-first fixes sizes whose label doesn't line up
+        // (e.g. the S row here) but whose SKU does.
+        const match = (lineSku ? codes.find((c) => (c.sku ?? "").trim().toLowerCase() === lineSku) : undefined)
+          ?? codes.find((c) => normalizeVariantSizeLabel(c.title) === wanted);
         const barcode = (match?.barcode ?? "").trim();
         const sku = (match?.sku ?? "").trim();
         if (!barcode && !sku) { noMatch++; continue; }
