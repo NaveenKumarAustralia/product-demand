@@ -26679,8 +26679,10 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
       </div>
 
       {/* Product table */}
-      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, overflow: "hidden", opacity: loading && !firstLoad ? 0.6 : 1, transition: "opacity 120ms" }}>
-        <div style={{ overflowX: "auto" }}>
+      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, opacity: loading && !firstLoad ? 0.6 : 1, transition: "opacity 120ms" }}>
+        {/* Own scroll region (vertical + horizontal) so the column header can
+            freeze (sticky) while the rows scroll under it. */}
+        <div style={{ overflow: "auto", maxHeight: "calc(100vh - 300px)", borderRadius: 12 }}>
           <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 1060 }}>
             <thead>
               <tr>
