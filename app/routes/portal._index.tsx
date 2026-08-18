@@ -26314,6 +26314,7 @@ function ReorderPlannerPage() {
   const [lookback, setLookback] = useState("90");
   const [customFrom, setCustomFrom] = useState("");
   const [customUntil, setCustomUntil] = useState("");
+  const [growth, setGrowth] = useState("0");   // % more (or less) than the baseline period
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
@@ -26352,6 +26353,8 @@ function ReorderPlannerPage() {
   else if (lookback === "lastyear") { since = fmtISO(addYears(today, -1)); until = fmtISO(addYears(addDays(today, 90), -1)); }
   else { const n = Number(lookback) || 90; since = fmtISO(addDays(today, -n)); until = fmtISO(today); }
   const lookbackDays = overviewFetcher.data?.lookbackDays ?? ((since && until) ? Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000)) : 90);
+  // Growth: scale the sell rate up/down so orders plan for more/less than the baseline.
+  const growthFactor = Math.max(0, 1 + (Number(growth) || 0) / 100);
 
   useEffect(() => { const t = setTimeout(() => setDebouncedQ(q.trim()), 200); return () => clearTimeout(t); }, [q]);
   useEffect(() => { setPage(1); }, [debouncedQ, since, until, typeFilter]);
@@ -26437,7 +26440,7 @@ function ReorderPlannerPage() {
     const serveDays = Math.max(0, dtt - lead);
     const rows: VariantCalc[] = p.sizes.map((sz) => {
       const key = `${p.id}:${sz.size}`;
-      const rate = sz.unitsSold / denom;
+      const rate = (sz.unitsSold / denom) * growthFactor;
       const daysCover = rate > 0 ? sz.stock / rate : Infinity;
       const onOrder = onOrderBySize[sz.size] ?? 0;
       const stockAtArrival = Math.max(0, sz.stock + onOrder - rate * lead);
@@ -26518,6 +26521,10 @@ function ReorderPlannerPage() {
             <div style={{ display: "flex", flexDirection: "column" }}><span style={labelStyle}>To</span><input type="date" value={customUntil} onChange={(e) => setCustomUntil(e.target.value)} style={{ ...ctrl, width: 150 }} /></div>
           </>}
           <div style={{ display: "flex", flexDirection: "column" }}>
+            <span style={labelStyle}>Growth %</span>
+            <input type="number" value={growth} onChange={(e) => setGrowth(e.target.value)} style={{ ...ctrl, width: 90 }} title="Plan for this much more (or less, if negative) than the baseline period — e.g. 20 orders 20% above last year" />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column" }}>
             <span style={labelStyle}>Product type</span>
             <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ ...ctrl, width: 190 }}>
               <option value="">All product types</option>
@@ -26568,8 +26575,10 @@ function ReorderPlannerPage() {
               {!firstLoad && products.length === 0 && <tr><td colSpan={10} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>No products match.</td></tr>}
               {products.map((p) => {
                 const calc = calcProduct(p);
-                const productRate = p.totalSold / (p.effectiveDays || lookbackDays);
+                const productRate = (p.totalSold / (p.effectiveDays || lookbackDays)) * growthFactor;
                 const productDaysStock = productRate > 0 ? Math.round(p.totalStock / productRate) : null;
+                // Warn if any size's CURRENT stock runs out before the sell-until date.
+                const runOutSizes = calc.valid ? calc.rows.filter((c) => c.rate > 0 && c.daysCover < calc.dtt).map((c) => `${c.size} (${Math.round(c.daysCover)}d)`) : [];
                 const isOpen = expanded.has(p.id);
                 const route = routeFor(p.vendor);
                 const pushed = pushedFor[p.id];
@@ -26582,6 +26591,7 @@ function ReorderPlannerPage() {
                           <span style={{ color: "#475569", fontSize: 18, lineHeight: 1, width: 18, textAlign: "center" }}>{isOpen ? "▾" : "▸"}</span>
                           {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 34, height: 42, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 34, height: 42, background: "#f1f5f9", borderRadius: 4 }} />}
                           <span style={{ fontWeight: 700, fontSize: 14 }}>{p.title}</span>
+                          {runOutSizes.length > 0 && <span title={`Runs out before your sell-until date — ${runOutSizes.join(", ")}. Expand to see sizes.`} style={{ fontSize: 15, lineHeight: 1, cursor: "help" }}>⚠️</span>}
                         </div>
                       </td>
                       <td style={cell}>{daysBadge(productDaysStock)}</td>
@@ -26687,7 +26697,7 @@ function ReorderPlannerPage() {
         </div>
       </div>
       <div style={{ fontSize: 12, color: "#6b7280", margin: "12px 2px 24px" }}>
-        Changing a “Sell until” date or lead time moves every product; click the 📌 beside it to set (and keep) that product on its own. Expand a row and use ← → to move across the Suggested boxes. Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (min 14), not the whole window, so new releases aren’t understated. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
+        Changing a “Sell until” date or lead time moves every product; click the 📌 beside it to set (and keep) that product on its own. Expand a row and use ← → to move across the Suggested boxes. Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (min 14), not the whole window, so new releases aren’t understated. Growth % scales the sell rate up/down, so e.g. 20% plans the order for 20% more than the baseline period. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
       </div>
     </div>
   );
