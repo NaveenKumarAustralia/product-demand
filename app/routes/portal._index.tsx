@@ -2360,11 +2360,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!since || !until) return jsonResponse({ ok: false, error: "bad_input" });
     const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
     if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
-    const [stockProducts, soldByProduct] = await Promise.all([
+    const [stockProducts, soldByProduct, sellingDaysByProd] = await Promise.all([
       getAllShopifyProductsWithInventory(session.shop, session.accessToken, refresh).catch(() => [] as ReorderStockProduct[]),
       fetchReorderSalesAllVariants(since, until),
+      fetchReorderSellingDays(since, until),
     ]);
     const lookbackDays = Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000));
+    // Rate denominator: days the product has been selling in the window, floored
+    // at 14 (or the window if shorter) so brand-new items don't get a jumpy rate.
+    const rateFloor = Math.min(14, lookbackDays);
     const numId = (id: string) => id.replace(/[^0-9]/g, "");
     const enriched = stockProducts.map((p) => {
       const soldMap = soldByProduct?.[numId(p.id)] ?? {};
@@ -2378,9 +2382,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const sizes = p.sizes.map((s) => ({ size: s.size, stock: s.stock, unitsSold: p.sizes.length === 1 ? soldTotalAll : (soldBySize.get(normalizeVariantSizeLabel(s.size)) ?? 0) }));
       const totalStock = sizes.reduce((a, s) => a + s.stock, 0);
       const totalSold = sizes.reduce((a, s) => a + s.unitsSold, 0);
-      const rate = totalSold / lookbackDays;
+      const effectiveDays = Math.max(rateFloor, Math.min(lookbackDays, sellingDaysByProd?.[numId(p.id)] ?? lookbackDays));
+      const rate = totalSold / effectiveDays;
       const weeksCover = rate > 0 ? totalStock / (rate * 7) : Infinity;
-      return { id: p.id, title: p.title, productType: p.productType, vendor: p.vendor, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, weeksCover };
+      return { id: p.id, title: p.title, productType: p.productType, vendor: p.vendor, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, effectiveDays, weeksCover };
     });
     // Distinct product types across the whole catalogue (for the filter dropdown),
     // computed before the type filter so the list stays stable.
@@ -8164,6 +8169,22 @@ async function fetchReorderSalesAllVariants(since: string, until: string): Promi
     const res = await fetch(`${REORDER_DASHBOARD_URL}/api/reorder/sales-by-variant-all?${params.toString()}`, { headers: { "X-Portal-Key": key } });
     if (!res.ok) return null;
     const json = await res.json() as { ok?: boolean; byProduct?: Record<string, Record<string, number>> };
+    return json.byProduct && typeof json.byProduct === "object" ? json.byProduct : null;
+  } catch {
+    return null;
+  }
+}
+
+// Per-product "days selling in the window" for the release-date-aware rate.
+// { "<productId>": sellingDays } or null if the dashboard isn't reachable.
+async function fetchReorderSellingDays(since: string, until: string): Promise<Record<string, number> | null> {
+  const key = process.env.PORTAL_API_KEY;
+  if (!key) return null;
+  const params = new URLSearchParams({ since, until });
+  try {
+    const res = await fetch(`${REORDER_DASHBOARD_URL}/api/reorder/selling-days-all?${params.toString()}`, { headers: { "X-Portal-Key": key } });
+    if (!res.ok) return null;
+    const json = await res.json() as { ok?: boolean; byProduct?: Record<string, number> };
     return json.byProduct && typeof json.byProduct === "object" ? json.byProduct : null;
   } catch {
     return null;
@@ -26285,7 +26306,7 @@ function JJOrderRow({
 // Products Restock or JJ On Order based on the product's vendor. Stock is live
 // Shopify; sell-through comes from the analytics dashboard.
 type ReorderOnOrderEntry = { label: string; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number };
-type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; weeksCover: number | null; onOrder?: { entries: ReorderOnOrderEntry[]; bySize: Record<string, number> } };
+type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; effectiveDays?: number; weeksCover: number | null; onOrder?: { entries: ReorderOnOrderEntry[]; bySize: Record<string, number> } };
 function ReorderPlannerPage() {
   const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
   const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
@@ -26355,19 +26376,24 @@ function ReorderPlannerPage() {
     const lead = Math.max(0, Math.round(Number(effLead(p.id)) || 0));
     const dtt = until ? Math.round((new Date(until).getTime() - today.getTime()) / 86400000) : 0;
     const valid = dtt > 0;
-    const coverage = dtt + lead;
+    const denom = p.effectiveDays || lookbackDays;   // days-since-release (min 14)
     const onOrderBySize = p.onOrder?.bySize ?? {};
+    // Arrival-aware, no buffer: the order lands after `lead` days, so it only
+    // needs to cover selling from arrival to the sell-until date (dtt − lead),
+    // and we credit only the stock that's STILL on the shelf when it lands
+    // (in stock + on order minus what sells during the lead time).
+    const serveDays = Math.max(0, dtt - lead);
     const rows: VariantCalc[] = p.sizes.map((sz) => {
       const key = `${p.id}:${sz.size}`;
-      const rate = sz.unitsSold / lookbackDays;
+      const rate = sz.unitsSold / denom;
       const daysCover = rate > 0 ? sz.stock / rate : Infinity;
       const onOrder = onOrderBySize[sz.size] ?? 0;
-      // Net out stock already on hand AND already on order.
-      const computed = valid ? Math.max(0, Math.ceil(rate * coverage - sz.stock - onOrder)) : 0;
+      const stockAtArrival = Math.max(0, sz.stock + onOrder - rate * lead);
+      const computed = valid ? Math.max(0, Math.ceil(rate * serveDays - stockAtArrival)) : 0;
       const qtyStr = key in manualQty ? manualQty[key] : String(computed);
       return { size: sz.size, key, stock: sz.stock, unitsSold: sz.unitsSold, rate, daysCover, onOrder, computed, qty: Math.max(0, parseInt(qtyStr) || 0), qtyStr };
     });
-    return { rows, total: rows.reduce((a, r) => a + r.qty, 0), until, lead, dtt, coverage, valid, onOrderTotal: rows.reduce((a, r) => a + r.onOrder, 0) };
+    return { rows, total: rows.reduce((a, r) => a + r.qty, 0), until, lead, dtt, valid, onOrderTotal: rows.reduce((a, r) => a + r.onOrder, 0) };
   };
 
   // Where a product's order goes, from its Shopify vendor.
@@ -26490,7 +26516,7 @@ function ReorderPlannerPage() {
               {!firstLoad && products.length === 0 && <tr><td colSpan={10} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>No products match.</td></tr>}
               {products.map((p) => {
                 const calc = calcProduct(p);
-                const productRate = p.totalSold / lookbackDays;
+                const productRate = p.totalSold / (p.effectiveDays || lookbackDays);
                 const productDaysStock = productRate > 0 ? Math.round(p.totalStock / productRate) : null;
                 const isOpen = expanded.has(p.id);
                 const route = routeFor(p.vendor);
@@ -26510,7 +26536,7 @@ function ReorderPlannerPage() {
                       <td style={{ ...cell, fontWeight: 700 }}>{p.totalStock}</td>
                       <td style={cell}>{p.totalSold}</td>
                       <td style={{ ...cell, color: "#64748b" }}>{productRate.toFixed(2)}</td>
-                      <td style={{ ...cell, color: "#64748b" }}>{calc.valid ? `${calc.coverage}d` : "—"}</td>
+                      <td style={{ ...cell, color: "#64748b" }} title="Days from today until your ‘sell until’ date">{calc.valid ? `${calc.dtt}d` : "—"}</td>
                       <td style={cell}><input type="date" value={calc.until} onChange={(e) => setUntil(p.id, e.target.value)} style={{ ...cellInput, width: 132 }} /></td>
                       <td style={cell}><input type="number" min={0} value={effLead(p.id)} onChange={(e) => setLead(p.id, e.target.value)} style={{ ...cellInput, width: 58 }} /></td>
                       <td style={{ ...cell, fontWeight: 800, color: calc.total > 0 ? "#0f766e" : "#94a3b8", fontSize: 15 }}>{calc.total}</td>
@@ -26585,7 +26611,7 @@ function ReorderPlannerPage() {
         </div>
       </div>
       <div style={{ fontSize: 12, color: "#6b7280", margin: "12px 2px 24px" }}>
-        Suggested = sold/day × (days to “sell until” + lead) − in stock. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
+        Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (min 14), not the whole window, so new releases aren’t understated. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
       </div>
     </div>
   );
