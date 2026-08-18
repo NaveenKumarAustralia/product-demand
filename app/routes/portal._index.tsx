@@ -2398,10 +2398,43 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const totalProducts = filtered.length;
     const pageCount = Math.max(1, Math.ceil(totalProducts / pageSize));
     const clampedPage = Math.min(pageNum, pageCount);
-    const slice = filtered.slice((clampedPage - 1) * pageSize, clampedPage * pageSize).map((p) => ({
-      ...p,
-      weeksCover: Number.isFinite(p.weeksCover) ? Math.round(p.weeksCover * 10) / 10 : null,
-    }));
+    const sliceRaw = filtered.slice((clampedPage - 1) * pageSize, clampedPage * pageSize);
+    // Already-on-order: open supplier orders for the products on this page, so the
+    // suggestion nets out what's already coming. One query for the whole page.
+    const pageIds = sliceRaw.map((p) => p.id);
+    const openOrders = pageIds.length
+      ? await prisma.supplierOrder.findMany({
+          where: { productId: { in: pageIds }, status: "open" },
+          select: { productId: true, supplier: true, destination: true, lines: { select: { variantTitle: true, qtyOrdered: true } } },
+        }).catch(() => [] as Array<{ productId: string | null; supplier: string | null; destination: string | null; lines: Array<{ variantTitle: string | null; qtyOrdered: number }> }>)
+      : [];
+    const ordersByProduct = new Map<string, typeof openOrders>();
+    for (const o of openOrders) { if (!o.productId) continue; const arr = ordersByProduct.get(o.productId) ?? []; arr.push(o); ordersByProduct.set(o.productId, arr); }
+    const pageLabelFor = (supplier: string | null) => (supplier ?? "").trim().toLowerCase() === "jj" ? "JJ Order" : "Restock";
+    const slice = sliceRaw.map((p) => {
+      const normToSize = new Map(p.sizes.map((sz) => [normalizeVariantSizeLabel(sz.size), sz.size]));
+      const entries: Array<{ label: string; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number }> = [];
+      const bySize: Record<string, number> = {};
+      for (const o of ordersByProduct.get(p.id) ?? []) {
+        const eBySize: Record<string, number> = {};
+        let total = 0;
+        for (const ln of o.lines ?? []) {
+          const sizeLabel = normToSize.get(normalizeVariantSizeLabel(ln.variantTitle ?? ""));
+          if (!sizeLabel) continue;
+          const qc = Math.max(0, ln.qtyOrdered || 0);
+          if (qc <= 0) continue;
+          eBySize[sizeLabel] = (eBySize[sizeLabel] ?? 0) + qc;
+          bySize[sizeLabel] = (bySize[sizeLabel] ?? 0) + qc;
+          total += qc;
+        }
+        if (total > 0) entries.push({ label: pageLabelFor(o.supplier), destination: (o.destination ?? "").trim() || null, supplier: o.supplier ?? null, bySize: eBySize, total });
+      }
+      return {
+        ...p,
+        weeksCover: Number.isFinite(p.weeksCover) ? Math.round(p.weeksCover * 10) / 10 : null,
+        onOrder: { entries, bySize },
+      };
+    });
     return jsonResponse({ ok: true, products: slice, productTypes, page: clampedPage, pageCount, totalProducts, pageSize, lookbackDays, salesAvailable: soldByProduct !== null });
   }
 
@@ -26251,7 +26284,8 @@ function JJOrderRow({
 // breakdown and edit suggested quantities. "Place order" auto-routes to Existing
 // Products Restock or JJ On Order based on the product's vendor. Stock is live
 // Shopify; sell-through comes from the analytics dashboard.
-type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; weeksCover: number | null };
+type ReorderOnOrderEntry = { label: string; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number };
+type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; weeksCover: number | null; onOrder?: { entries: ReorderOnOrderEntry[]; bySize: Record<string, number> } };
 function ReorderPlannerPage() {
   const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
   const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
@@ -26315,22 +26349,25 @@ function ReorderPlannerPage() {
   const setUntil = (id: string, val: string) => { setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], until: val } })); clearManualForProduct(id); };
   const setLead = (id: string, val: string) => { setOverrides((prev) => ({ ...prev, [id]: { ...prev[id], lead: val } })); clearManualForProduct(id); };
 
-  type VariantCalc = { size: string; key: string; stock: number; unitsSold: number; rate: number; daysCover: number; computed: number; qty: number; qtyStr: string };
+  type VariantCalc = { size: string; key: string; stock: number; unitsSold: number; rate: number; daysCover: number; onOrder: number; computed: number; qty: number; qtyStr: string };
   const calcProduct = (p: ReorderOverviewProduct) => {
     const until = effUntil(p.id);
     const lead = Math.max(0, Math.round(Number(effLead(p.id)) || 0));
     const dtt = until ? Math.round((new Date(until).getTime() - today.getTime()) / 86400000) : 0;
     const valid = dtt > 0;
     const coverage = dtt + lead;
+    const onOrderBySize = p.onOrder?.bySize ?? {};
     const rows: VariantCalc[] = p.sizes.map((sz) => {
       const key = `${p.id}:${sz.size}`;
       const rate = sz.unitsSold / lookbackDays;
       const daysCover = rate > 0 ? sz.stock / rate : Infinity;
-      const computed = valid ? Math.max(0, Math.ceil(rate * coverage - sz.stock)) : 0;
+      const onOrder = onOrderBySize[sz.size] ?? 0;
+      // Net out stock already on hand AND already on order.
+      const computed = valid ? Math.max(0, Math.ceil(rate * coverage - sz.stock - onOrder)) : 0;
       const qtyStr = key in manualQty ? manualQty[key] : String(computed);
-      return { size: sz.size, key, stock: sz.stock, unitsSold: sz.unitsSold, rate, daysCover, computed, qty: Math.max(0, parseInt(qtyStr) || 0), qtyStr };
+      return { size: sz.size, key, stock: sz.stock, unitsSold: sz.unitsSold, rate, daysCover, onOrder, computed, qty: Math.max(0, parseInt(qtyStr) || 0), qtyStr };
     });
-    return { rows, total: rows.reduce((a, r) => a + r.qty, 0), until, lead, dtt, coverage, valid };
+    return { rows, total: rows.reduce((a, r) => a + r.qty, 0), until, lead, dtt, coverage, valid, onOrderTotal: rows.reduce((a, r) => a + r.onOrder, 0) };
   };
 
   // Where a product's order goes, from its Shopify vendor.
@@ -26508,9 +26545,31 @@ function ReorderPlannerPage() {
                                   <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Days cover</td>
                                   {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13, fontWeight: 700, color: daysColor(c.daysCover === Infinity ? null : Math.round(c.daysCover)) }}>{c.daysCover === Infinity ? "—" : `${Math.round(c.daysCover)}d`}</td>)}
                                 </tr>
+                                {/* Already on order — each open order with its destination, then the total */}
+                                {(p.onOrder?.entries?.length ?? 0) === 0 ? (
+                                  <tr>
+                                    <td style={{ padding: "6px 12px 4px 0", fontSize: 12, color: "#94a3b8", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap", borderTop: "1px solid #e2e8f0" }}>On order</td>
+                                    {calc.rows.map((c) => <td key={c.key} style={{ padding: "6px 8px 4px", textAlign: "center", fontSize: 13, color: "#cbd5e1", borderTop: "1px solid #e2e8f0" }}>—</td>)}
+                                  </tr>
+                                ) : <>
+                                  {p.onOrder!.entries.map((e, i) => (
+                                    <tr key={`oo${i}`}>
+                                      <td style={{ padding: i === 0 ? "6px 12px 3px 0" : "3px 12px 3px 0", fontSize: 12, color: "#7c3aed", fontWeight: 600, textAlign: "right", whiteSpace: "nowrap", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>
+                                        On order → {e.label}{e.destination ? ` · ${e.destination}` : ""} <span style={{ color: "#a78bda", fontWeight: 700 }}>({e.total})</span>
+                                      </td>
+                                      {calc.rows.map((c) => <td key={c.key} style={{ padding: i === 0 ? "6px 8px 3px" : "3px 8px", textAlign: "center", fontSize: 13, color: (e.bySize[c.size] ?? 0) > 0 ? "#7c3aed" : "#cbd5e1", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>{e.bySize[c.size] ?? 0}</td>)}
+                                    </tr>
+                                  ))}
+                                  {p.onOrder!.entries.length > 1 && (
+                                    <tr>
+                                      <td style={{ padding: "3px 12px 4px 0", fontSize: 12, color: "#6d28d9", fontWeight: 800, textAlign: "right", whiteSpace: "nowrap" }}>Total on order</td>
+                                      {calc.rows.map((c) => <td key={c.key} style={{ padding: "3px 8px 4px", textAlign: "center", fontSize: 13, fontWeight: 800, color: (p.onOrder!.bySize[c.size] ?? 0) > 0 ? "#6d28d9" : "#cbd5e1" }}>{p.onOrder!.bySize[c.size] ?? 0}</td>)}
+                                    </tr>
+                                  )}
+                                </>}
                                 <tr>
-                                  <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#0f766e", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Suggested</td>
-                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center" }}><input type="text" inputMode="numeric" value={c.qtyStr} onChange={(e) => setManualQty((prev) => ({ ...prev, [c.key]: e.target.value.replace(/[^0-9]/g, "") }))} style={{ ...cellInput, width: 56, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#94a3b8", borderColor: c.qty > 0 ? "#5eead4" : "#cbd5e1" }} /></td>)}
+                                  <td style={{ padding: "6px 12px 4px 0", fontSize: 12, color: "#0f766e", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap", borderTop: "1px solid #e2e8f0" }}>Suggested</td>
+                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "6px 8px 4px", textAlign: "center", borderTop: "1px solid #e2e8f0" }}><input type="text" inputMode="numeric" value={c.qtyStr} onChange={(e) => setManualQty((prev) => ({ ...prev, [c.key]: e.target.value.replace(/[^0-9]/g, "") }))} style={{ ...cellInput, width: 56, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#94a3b8", borderColor: c.qty > 0 ? "#5eead4" : "#cbd5e1" }} /></td>)}
                                 </tr>
                               </tbody>
                             </table>
