@@ -1874,10 +1874,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       select: { id: true, productId: true, lines: { select: { id: true, variantTitle: true, sku: true, barcode: true, qtyOrdered: true } } },
     }).catch(() => [] as Array<{ id: number; productId: string; lines: Array<{ id: number; variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }> }>);
 
-    // Ordered lines. Backfill only touches lines missing a barcode; refresh
-    // re-pulls every ordered line.
+    // All lines (any quantity — sizes with 0 qty still need their barcode).
+    // Backfill only touches lines missing a barcode; refresh re-pulls every line.
     const targets = orders
-      .map((o) => ({ productId: o.productId, lines: o.lines.filter((l) => (l.qtyOrdered || 0) > 0 && (refresh || !(l.barcode ?? "").trim())) }))
+      .map((o) => ({ productId: o.productId, lines: o.lines.filter((l) => refresh || !(l.barcode ?? "").trim()) }))
       .filter((o) => o.productId && o.lines.length > 0);
     if (targets.length === 0) return { jjBackfill: { scanned: 0, updated: 0, noMatch: 0, refresh } };
 
