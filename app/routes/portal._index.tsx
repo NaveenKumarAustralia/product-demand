@@ -4062,6 +4062,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const id = Number(form.get("shootId"));
     if (!id) return jsonResponse({ shoot: null });
     const shoot = await prisma.photoShoot.findUnique({ where: { id } }).catch(() => null);
+    if (!shoot) return jsonResponse({ shoot: null });
+    // Chunked image migration (same as collections): move inline base64 images
+    // out to the CollectionImage table so opening a shoot ships slim rows +
+    // lazy-loaded images instead of tens of MB inline. Keyed by -id so a shoot's
+    // images never collide with a real collection's. First open migrates in
+    // batches ({migrating, remaining}); after that the rows are already slim.
+    try {
+      const rows = normalizeCollectionRows(shoot.rows);
+      const { changed, remaining } = await offloadInlineCollectionImages(-id, rows, 40, PHOTOSHOOT_IMAGE_COLUMN_IDS);
+      if (changed) await prisma.photoShoot.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+      if (remaining > 0) return jsonResponse({ shoot: null, migrating: true, remaining });
+      if (changed) return jsonResponse({ shoot: { ...shoot, rows } });
+    } catch (e) {
+      console.warn("[ps_get_shoot] image offload failed:", e);
+    }
     return jsonResponse({ shoot });
   }
   if (intent === "ps_update_shoot") {
@@ -9396,6 +9411,9 @@ async function compressBufferToThumbDataUrl(buf: Buffer): Promise<string> {
 
 // Collection cells that hold images (multi-image manager format).
 const COLLECTION_IMAGE_COLUMN_IDS = ["modelPicture", "fabric", "maniPicsTaken"];
+// Photoshoot image columns (image / image-multi) — same storage format as
+// collections, so the offload below works on them too.
+const PHOTOSHOOT_IMAGE_COLUMN_IDS = ["productImage", "earrings", "shoesImage"];
 // Move any inline base64 image data out of the rows into the CollectionImage
 // table (referenced by key), so the rows JSON stays small and get_collection_full
 // returns quickly. Mutates `rows` in place; returns true if anything changed.
@@ -9403,12 +9421,13 @@ async function offloadInlineCollectionImages(
   collectionId: number,
   rows: Array<Record<string, string>>,
   cap = Infinity,
+  imageColumnIds: readonly string[] = COLLECTION_IMAGE_COLUMN_IDS,
 ): Promise<{ changed: boolean; remaining: number }> {
   // Gather all inline images that need offloading (in row/column/position order).
   const pending: Array<{ entry: CollectionImageEntry; buf: Buffer; mime: string; row: Record<string, string>; colId: string; entries: CollectionImageEntry[] }> = [];
   for (let ri = 0; ri < rows.length; ri++) {
     const row = rows[ri];
-    for (const colId of COLLECTION_IMAGE_COLUMN_IDS) {
+    for (const colId of imageColumnIds) {
       const val = row[colId];
       if (!val || !val.includes("data:")) continue;
       const entries = parseMultiImageValue(val);
@@ -14128,7 +14147,7 @@ function CollectionsPhotoShootToggle({ active }: { active: "collections" | "phot
 function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { photoShoots: PhotoShootListItem[]; productInfo: ProductInfo; savedColumnWidths: Record<string, number> }) {
   const [params, setParams] = useSearchParams();
   const fetcher = useFetcher();
-  const loadFetcher = useFetcher<{ shoot: PhotoShootFullType | null }>();
+  const loadFetcher = useFetcher<{ shoot: PhotoShootFullType | null; migrating?: boolean; remaining?: number }>();
   const addFetcher = useFetcher<{ ok?: boolean; shoot?: { id: number; name: string } }>();
   const widthsFetcher = useFetcher();
   const [shoots, setShoots] = useState(photoShoots);
@@ -14170,16 +14189,34 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
 
   const [rows, setRows] = useState<Record<string, string>[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [migratingRemaining, setMigratingRemaining] = useState<number | null>(null);
+  const loadShoot = useCallback((sid: number) => {
+    loadFetcher.submit({ intent: "ps_get_shoot", shootId: String(sid) }, { method: "post" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => {
-    if (!selectedShootId) { setRows([]); setLoaded(true); return; }
+    if (!selectedShootId) { setRows([]); setLoaded(true); setMigratingRemaining(null); return; }
     setLoaded(false);
-    loadFetcher.submit({ intent: "ps_get_shoot", shootId: String(selectedShootId) }, { method: "post" });
+    setMigratingRemaining(null);
+    loadShoot(selectedShootId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedShootId]);
+  // Chunked image migration: while the server reports images still to move,
+  // advance the next batch (keeps each response tiny so opening never hangs).
+  useEffect(() => {
+    if (loaded || loadFetcher.state !== "idle" || !selectedShootId) return;
+    const data = loadFetcher.data;
+    if (data?.migrating) {
+      setMigratingRemaining(data.remaining ?? 0);
+      const t = setTimeout(() => loadShoot(selectedShootId), 250);
+      return () => clearTimeout(t);
+    }
+  }, [loaded, loadFetcher.state, loadFetcher.data, selectedShootId, loadShoot]);
   useEffect(() => {
     const shoot = loadFetcher.data?.shoot;
     if (shoot && shoot.id === selectedShootId) {
       setRows(normalizeCollectionRows(shoot.rows));
+      setMigratingRemaining(null);
       setLoaded(true);
     }
   }, [loadFetcher.data, selectedShootId]);
@@ -14275,7 +14312,11 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
           <h2 style={{ ...s.productInfoHeading, margin: 0, cursor: "pointer" }} onClick={() => renameShoot(selectedShoot.id)} title="Click to rename">{selectedShoot.name}</h2>
         </div>
         {!loaded ? (
-          <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>Loading…</div>
+          <div style={{ padding: 40, textAlign: "center", color: "#94a3b8", fontSize: 13 }}>
+            {migratingRemaining !== null
+              ? <>Optimising images — {migratingRemaining} left. This only happens once for this shoot.</>
+              : "Loading…"}
+          </div>
         ) : (
           <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0 }}>
             <table style={{ ...s.table, width: 48 + PHOTOSHOOT_COLUMNS.reduce((sum, c) => sum + widthFor(c.id), 0), minWidth: 1100 }}>
