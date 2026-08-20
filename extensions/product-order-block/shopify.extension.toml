@@ -19,3 +19,12 @@ uid = "b9867cbf-d901-7bd7-d5d9-ed0ac356c09f5b3b901a"
   [[extensions.targeting]]
   module = "./src/ActionExtension.tsx"
   target = "admin.product-details.action.render"
+
+[[extensions]]
+type = "ui_extension"
+name = "Product Sales By Country"
+handle = "product-sales-by-country"
+
+  [[extensions.targeting]]
+  module = "./src/SalesByCountryBlock.tsx"
+  target = "admin.product-details.block.render"
