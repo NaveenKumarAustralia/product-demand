@@ -75,11 +75,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   ];
   const needsOrders = isRestockPage || page === "packing";
   const needsPackingLists = page === "packing" || packingId !== null;
-  // activityLogs feeds the Settings activity panel and the cell-history popups on
-  // the restock/JJ/packing/collections tables. Pages with neither (photoshoot,
-  // reorder, dropbox, …) don't need the 1000-row, 90-day scan — skipping it makes
-  // those pages load noticeably faster.
-  const needsActivityLogs = !["visionboard", "samples", "photoshoot", "reorder", "dropbox"].includes(page);
+  // activityLogs feeds the Settings activity panel and the cell-history popups —
+  // which only exist on the restock/JJ tables (historyEntity) and the packing
+  // page (show-cell-history event). Every other page (photoshoot, collections,
+  // product info, fabric, reorder, …) can skip the 1000-row, 90-day scan, which
+  // makes them load noticeably faster.
+  const needsActivityLogs = page === "settings" || isRestockPage || page === "packing";
 
   // Defensive: the SupplierOrder schema gained `destination` recently. If
   // this environment hasn't run the migration yet, Prisma's findMany
