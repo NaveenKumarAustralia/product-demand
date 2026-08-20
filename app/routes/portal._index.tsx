@@ -48,14 +48,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     JJ_TABS_KEY,
     TABLE_HEADER_LABELS_KEY,
     TABLE_CUSTOM_COLUMNS_KEY,
-    TABLE_CUSTOM_CELLS_KEY,
+    // Custom-cell overrides can hold inline images — only the restock/packing
+    // tables render them, so don't ship this blob to other pages.
+    ...((isRestockPage || page === "packing") ? [TABLE_CUSTOM_CELLS_KEY] : []),
     TABLE_ROW_HEIGHTS_KEY,
-    FABRIC_CUSTOM_SHEETS_KEY,
-    FABRIC_MANUAL_SHEETS_KEY,
-    FABRIC_CELL_OVERRIDES_KEY,
-    FABRIC_CUSTOM_ROWS_KEY,
-    FABRIC_DELETED_ROWS_KEY,
-    FABRIC_DELETED_SHEETS_KEY,
+    // The six heavy fabric-data blobs are only parsed on pages that render the
+    // fabric spreadsheet (fabric / restock / packing / collections). Skip
+    // fetching them elsewhere (e.g. photoshoot) so those pages don't ship them.
+    ...((page === "fabric" || isRestockPage || page === "packing" || isCollectionsPage)
+      ? [FABRIC_CUSTOM_SHEETS_KEY, FABRIC_MANUAL_SHEETS_KEY, FABRIC_CELL_OVERRIDES_KEY, FABRIC_CUSTOM_ROWS_KEY, FABRIC_DELETED_ROWS_KEY, FABRIC_DELETED_SHEETS_KEY]
+      : []),
     RESTOCK_SETTINGS_KEY,
     COLLECTION_SETTINGS_KEY,
     UNIVERSAL_SETTINGS_KEY,
@@ -73,7 +75,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   ];
   const needsOrders = isRestockPage || page === "packing";
   const needsPackingLists = page === "packing" || packingId !== null;
-  const needsActivityLogs = page !== "visionboard" && page !== "samples";
+  // activityLogs feeds the Settings activity panel and the cell-history popups on
+  // the restock/JJ/packing/collections tables. Pages with neither (photoshoot,
+  // reorder, dropbox, …) don't need the 1000-row, 90-day scan — skipping it makes
+  // those pages load noticeably faster.
+  const needsActivityLogs = !["visionboard", "samples", "photoshoot", "reorder", "dropbox"].includes(page);
 
   // Defensive: the SupplierOrder schema gained `destination` recently. If
   // this environment hasn't run the migration yet, Prisma's findMany
