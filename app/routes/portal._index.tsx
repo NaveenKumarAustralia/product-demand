@@ -10038,8 +10038,15 @@ export default function PortalDashboard() {
   const [localRestockOrders, setLocalRestockOrders] = useState<Order[]>(orders);
   useEffect(() => { setLocalRestockOrders(orders); }, [orders]);
   const restockSplitFetcher = useFetcher();
+  // Rows currently playing a fireworks celebration (the just-created split row).
+  const [celebrateRows, setCelebrateRows] = useState<Set<number>>(new Set());
+  const celebrate = (id: number) => {
+    setCelebrateRows((p) => { const n = new Set(p); n.add(id); return n; });
+    window.setTimeout(() => setCelebrateRows((p) => { const n = new Set(p); n.delete(id); return n; }), 4600);
+  };
   const splitRestockOrder = (orderId: number, destination: string, qtys: Record<string, number>) => {
     type SL = { variantTitle: string; qtyOrdered: number; sku?: string | null; barcode?: string | null; variantId?: string };
+    const tempId = -(Date.now());
     setLocalRestockOrders((prev) => {
       const src = prev.find((o) => o.id === orderId) as (Order & { lines?: SL[] }) | undefined;
       if (!src) return prev;
@@ -10050,10 +10057,11 @@ export default function PortalDashboard() {
         const sl = srcLines.find((l) => l.variantTitle === size);
         return { variantTitle: size, qtyOrdered: q, sku: sl?.sku ?? null, barcode: sl?.barcode ?? null, variantId: sl?.variantId ?? "" };
       });
-      const tempSplit = { ...src, id: -(Date.now()), destination, lines: splitLines, totalQty: splitLines.reduce((s: number, l: SL) => s + (l.qtyOrdered || 0), 0), createdAt: new Date().toISOString() } as unknown as Order;
+      const tempSplit = { ...src, id: tempId, destination, lines: splitLines, totalQty: splitLines.reduce((s: number, l: SL) => s + (l.qtyOrdered || 0), 0), createdAt: new Date().toISOString() } as unknown as Order;
       // Insert the split row right after the source so they stay adjacent.
       return prev.flatMap((o) => o.id === orderId ? [deducted, tempSplit] : [o]);
     });
+    celebrate(tempId);
     restockSplitFetcher.submit({ intent: "split_order_to_destination", orderId: String(orderId), destination, qtys: JSON.stringify(qtys) }, { method: "post" });
   };
   const columns: ColumnDef[] = [
@@ -10737,6 +10745,7 @@ export default function PortalDashboard() {
                     productInfo={productInfo}
                     allFabrics={allFabrics}
                     onSplit={splitRestockOrder}
+                    celebrating={celebrateRows.has(order.id)}
                   />
                   );
                 })}
@@ -24476,6 +24485,7 @@ function OrderRow({
   productInfo,
   allFabrics,
   onSplit,
+  celebrating,
 }: {
   order: Order;
   rowIndex: number;
@@ -24498,8 +24508,10 @@ function OrderRow({
   productInfo: ProductInfo;
   allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
   onSplit?: (orderId: number, destination: string, qtys: Record<string, number>) => void;
+  celebrating?: boolean;
 }) {
   const fetcher = useFetcher();
+  const trRef = useRef<HTMLTableRowElement | null>(null);
   // On-demand Shopify inventory fetch — populated the first time staff
   // open the ▼ inventory row for this order. Removed from the page
   // loader so the restock page renders fast; we only pay the Shopify
@@ -24582,7 +24594,8 @@ function OrderRow({
   const destinationRowBg = destinationStamp ? { background: destinationStamp.rowBg } : undefined;
   return (
     <>
-      <tr id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(destinationStamp ? { background: destinationStamp.rowBg } : {}) }}>
+      {celebrating && <RowFireworks anchorRef={trRef} />}
+      <tr ref={trRef} id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(destinationStamp ? { background: destinationStamp.rowBg } : {}) }}>
         <RowNumberCell rowNumber={rowIndex} actions={[
           { label: "Split to destination…", onClick: () => setSplitOpen(true) },
           { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
@@ -25021,6 +25034,78 @@ function PortalUndoButton() {
     >
       ↶ Undo
     </button>
+  );
+}
+
+// Just-for-fun: one firework that bursts above a row, then rains twinkling
+// sparkles down over it for ~4s. The canvas extends above the row so the
+// explosion has room and the sparkles fall through the row area.
+function RowFireworks({ anchorRef }: { anchorRef: React.RefObject<HTMLElement | null> }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [box, setBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  useEffect(() => {
+    const el = anchorRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // Extend upward so the burst sits above the row and sparkles fall onto it.
+    setBox({ left: r.left, top: r.top - 110, width: r.width, height: r.height + 130 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  useEffect(() => {
+    if (!box) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const W = Math.max(1, Math.round(box.width));
+    const H = Math.max(1, Math.round(box.height));
+    canvas.width = W; canvas.height = H;
+    type P = { x: number; y: number; vx: number; vy: number; life: number; decay: number; color: string; seed: number };
+    const colors = ["#f43f5e", "#f59e0b", "#10b981", "#3b82f6", "#a855f7", "#ec4899", "#eab308"];
+    // One big burst near the top, slightly right of centre for a natural look.
+    const cx = W * 0.5, cy = H * 0.16;
+    const particles: P[] = [];
+    const DURATION = 4200;
+    const N = 80;
+    for (let i = 0; i < N; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 1.2 + Math.random() * 4.8;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s - 1.2,   // a touch of upward pop
+        life: 1, decay: 0.8 + Math.random() * 0.5,
+        color: colors[i % colors.length], seed: Math.random() * 6.28,
+      });
+    }
+    const start = performance.now();
+    let raf = 0;
+    const loop = (t: number) => {
+      const elapsed = t - start;
+      ctx.clearRect(0, 0, W, H);
+      for (const p of particles) {
+        p.x += p.vx; p.y += p.vy;
+        p.vx *= 0.985;                 // air drag
+        p.vy = p.vy * 0.985 + 0.10;    // gravity → sparkles fall
+        p.life -= (p.decay / (DURATION / 16.7));
+      }
+      for (const p of particles) {
+        if (p.life <= 0) continue;
+        const twinkle = 0.5 + 0.5 * Math.sin(elapsed * 0.02 + p.seed);
+        ctx.globalAlpha = Math.max(0, Math.min(1, p.life)) * twinkle;
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 1.9, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      if (elapsed < DURATION) raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [box]);
+  if (!box || typeof document === "undefined") return null;
+  return createPortal(
+    <canvas ref={canvasRef} aria-hidden style={{ position: "fixed", left: box.left, top: box.top, width: box.width, height: box.height, pointerEvents: "none", zIndex: 9998 }} />,
+    document.body,
   );
 }
 
