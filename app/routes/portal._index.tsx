@@ -10028,6 +10028,30 @@ export default function PortalDashboard() {
   const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
   const canLoadPackingInventory = canPortalUserLoadPackingInventory(users, currentUser);
+  // Optimistic copy of the restock orders so "Split to destination" shows
+  // instantly instead of waiting ~5s for the (heavy) loader to revalidate. The
+  // background revalidation resyncs this to the real split when it lands.
+  const [localRestockOrders, setLocalRestockOrders] = useState<Order[]>(orders);
+  useEffect(() => { setLocalRestockOrders(orders); }, [orders]);
+  const restockSplitFetcher = useFetcher();
+  const splitRestockOrder = (orderId: number, destination: string, qtys: Record<string, number>) => {
+    type SL = { variantTitle: string; qtyOrdered: number; sku?: string | null; barcode?: string | null; variantId?: string };
+    setLocalRestockOrders((prev) => {
+      const src = prev.find((o) => o.id === orderId) as (Order & { lines?: SL[] }) | undefined;
+      if (!src) return prev;
+      const srcLines: SL[] = src.lines ?? [];
+      const deductedLines = srcLines.map((l) => { const q = qtys[l.variantTitle] ?? 0; return q > 0 ? { ...l, qtyOrdered: Math.max(0, (l.qtyOrdered || 0) - q) } : l; });
+      const deducted = { ...src, lines: deductedLines, totalQty: deductedLines.reduce((s: number, l: SL) => s + (l.qtyOrdered || 0), 0) } as Order;
+      const splitLines: SL[] = Object.entries(qtys).filter(([, q]) => (q || 0) > 0).map(([size, q]) => {
+        const sl = srcLines.find((l) => l.variantTitle === size);
+        return { variantTitle: size, qtyOrdered: q, sku: sl?.sku ?? null, barcode: sl?.barcode ?? null, variantId: sl?.variantId ?? "" };
+      });
+      const tempSplit = { ...src, id: -(Date.now()), destination, lines: splitLines, totalQty: splitLines.reduce((s: number, l: SL) => s + (l.qtyOrdered || 0), 0), createdAt: new Date().toISOString() } as unknown as Order;
+      // Insert the split row right after the source so they stay adjacent.
+      return prev.flatMap((o) => o.id === orderId ? [deducted, tempSplit] : [o]);
+    });
+    restockSplitFetcher.submit({ intent: "split_order_to_destination", orderId: String(orderId), destination, qtys: JSON.stringify(qtys) }, { method: "post" });
+  };
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
     { id: "orderDate", label: "Order Date" },
@@ -10071,8 +10095,8 @@ export default function PortalDashboard() {
   }, [searchTitleInput, isSearchFocused, page]);
   const restockSearch = page === "restock" ? searchTitleInput.trim().toLowerCase() : "";
   const visibleOrders = page === "restock" && restockSearch
-    ? orders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
-    : orders;
+    ? localRestockOrders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
+    : localRestockOrders;
   // Lookup: product title (e.g. "Vivien Dress Queen Protea") → per-piece
   // rupee cost. Style data drives stitching/factory/profit/etc. Fabric
   // cost is computed live from the fabric-in-stock sheet:
@@ -10707,6 +10731,7 @@ export default function PortalDashboard() {
                     fxRupeeBuffer={fxRupeeBuffer}
                     productInfo={productInfo}
                     allFabrics={allFabrics}
+                    onSplit={splitRestockOrder}
                   />
                   );
                 })}
@@ -24445,6 +24470,7 @@ function OrderRow({
   fxRupeeBuffer,
   productInfo,
   allFabrics,
+  onSplit,
 }: {
   order: Order;
   rowIndex: number;
@@ -24466,6 +24492,7 @@ function OrderRow({
   fxRupeeBuffer: number;
   productInfo: ProductInfo;
   allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
+  onSplit?: (orderId: number, destination: string, qtys: Record<string, number>) => void;
 }) {
   const fetcher = useFetcher();
   // On-demand Shopify inventory fetch — populated the first time staff
@@ -24566,7 +24593,10 @@ function OrderRow({
             currentDestination={destinationLocal}
             onClose={() => setSplitOpen(false)}
             onSubmit={(destination, qtys) => {
-              fetcher.submit({ intent: "split_order_to_destination", orderId: String(order.id), destination, qtys: JSON.stringify(qtys) }, { method: "post" });
+              // Prefer the parent's optimistic handler (instant); fall back to a
+              // plain submit if none was passed.
+              if (onSplit) onSplit(order.id, destination, qtys);
+              else fetcher.submit({ intent: "split_order_to_destination", orderId: String(order.id), destination, qtys: JSON.stringify(qtys) }, { method: "post" });
               setSplitOpen(false);
             }}
           />
