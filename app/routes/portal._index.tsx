@@ -10024,6 +10024,10 @@ export default function PortalDashboard() {
     window.addEventListener("keydown", handleUndoKey);
     return () => window.removeEventListener("keydown", handleUndoKey);
   }, [undoFetcher]);
+  // Scope the undo stack to the logged-in user so nobody can undo someone else's
+  // change (even on a shared computer). Set every render (a cheap module-var
+  // write) so it's correct before any child reads the stack.
+  setPortalUndoUser(currentUser?.id);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
@@ -10441,6 +10445,7 @@ export default function PortalDashboard() {
                   />
                 </label>
               )}
+              {(isRestockPage || page === "packing" || page === "fabric" || page === "productinfo") && <PortalUndoButton />}
               <MessagesMenu messages={messages} />
               <ThreadPanel users={users} currentUser={currentUser} />
               <div style={s.activeUsers} title="Currently active">
@@ -24907,10 +24912,22 @@ function OrderRow({
 const PORTAL_UNDO_STACK_KEY = "production-portal-undo-stack-v1";
 const MAX_PORTAL_UNDO_ENTRIES = 80;
 
+// Undo is per portal-user: the stack is keyed by the logged-in user, so on a
+// shared computer one person can never undo another's change (and on their own
+// device it's trivially theirs). Set once the current user is known.
+let _portalUndoUser = "shared";
+function setPortalUndoUser(id: string | number | null | undefined) {
+  _portalUndoUser = id != null && String(id).trim() ? String(id) : "shared";
+}
+function portalUndoStackKey() { return `${PORTAL_UNDO_STACK_KEY}:${_portalUndoUser}`; }
+function notifyPortalUndoChanged() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("portal-undo-changed"));
+}
+
 function readPortalUndoStack(): PortalUndoEntry[] {
   if (typeof window === "undefined") return [];
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(PORTAL_UNDO_STACK_KEY) ?? "[]");
+    const parsed = JSON.parse(window.localStorage.getItem(portalUndoStackKey()) ?? "[]");
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((entry): entry is PortalUndoEntry => (
       entry
@@ -24941,7 +24958,7 @@ function pushPortalUndo(entry?: PortalUndoEntry | null) {
   try { payload = JSON.stringify(trimmed); } catch { return; }
   const writeWithRetry = (s: PortalUndoEntry[], p: string) => {
     try {
-      window.localStorage.setItem(PORTAL_UNDO_STACK_KEY, p);
+      window.localStorage.setItem(portalUndoStackKey(), p);
     } catch (err) {
       // Quota likely exceeded — keep retrying with fewer entries
       // until it fits, then bail completely if even one entry won't
@@ -24951,11 +24968,12 @@ function pushPortalUndo(entry?: PortalUndoEntry | null) {
         try { writeWithRetry(shorter, JSON.stringify(shorter)); } catch { /* drop */ }
         return;
       }
-      try { window.localStorage.removeItem(PORTAL_UNDO_STACK_KEY); } catch { /* ignore */ }
+      try { window.localStorage.removeItem(portalUndoStackKey()); } catch { /* ignore */ }
       console.warn("[undo] dropped — entry too large for localStorage", err);
     }
   };
   writeWithRetry(trimmed, payload);
+  notifyPortalUndoChanged();
 }
 
 function submitLastPortalUndo(fetcher: ReturnType<typeof useFetcher>) {
@@ -24963,9 +24981,47 @@ function submitLastPortalUndo(fetcher: ReturnType<typeof useFetcher>) {
   const stack = readPortalUndoStack();
   const entry = stack.pop();
   if (!entry) return false;
-  window.localStorage.setItem(PORTAL_UNDO_STACK_KEY, JSON.stringify(stack));
+  window.localStorage.setItem(portalUndoStackKey(), JSON.stringify(stack));
+  notifyPortalUndoChanged();
   submitPortalCell(fetcher, entry.fields, null);
   return true;
+}
+
+// Top-bar "Undo" button — undoes the current user's own last cell change. Its
+// enabled state / tooltip track the per-user undo stack via the
+// "portal-undo-changed" event, so it lights up the moment you make an
+// undoable edit and greys out when there's nothing (of yours) to undo.
+function PortalUndoButton() {
+  const undoFetcher = useFetcher();
+  const [topLabel, setTopLabel] = useState<string | null>(null);
+  const refresh = useCallback(() => {
+    const s = readPortalUndoStack();
+    setTopLabel(s.length ? s[s.length - 1].label : null);
+  }, []);
+  useEffect(() => {
+    refresh();
+    const h = () => refresh();
+    window.addEventListener("portal-undo-changed", h);
+    window.addEventListener("focus", h);
+    return () => { window.removeEventListener("portal-undo-changed", h); window.removeEventListener("focus", h); };
+  }, [refresh]);
+  const disabled = !topLabel;
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={() => submitLastPortalUndo(undoFetcher)}
+      title={topLabel ? `Undo: ${topLabel}  (⌘Z / Ctrl+Z)` : "Nothing of yours to undo"}
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6, height: 32,
+        padding: "0 12px", borderRadius: 8, fontSize: 13, fontWeight: 700,
+        border: "1px solid #cbd5e1", cursor: disabled ? "default" : "pointer",
+        background: disabled ? "#f1f5f9" : "#fff", color: disabled ? "#9ca3af" : "#334155",
+      }}
+    >
+      ↶ Undo
+    </button>
+  );
 }
 
 function submitPortalCell(
