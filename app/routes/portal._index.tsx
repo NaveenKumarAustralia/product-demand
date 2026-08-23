@@ -4870,8 +4870,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "update_collection_row_in_shopify") {
-    // Push info edits for an already-linked row to its Shopify product (safe
-    // fields only — no variants/inventory). Clears the row's dirty flag.
+    // Push edits for an already-linked row to its Shopify product — FULL sync:
+    // info, variants, price, SKU/barcode, cost, metafields AND images (images
+    // are replaced, not duplicated). Status is preserved. Clears the dirty flag.
     const id = Number(form.get("collectionId"));
     const idx = Number(form.get("rowIndex"));
     if (!id) return jsonResponse({ ok: false, error: "no_collection" });
@@ -4882,9 +4883,39 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const rows = normalizeCollectionRows(collection.rows);
     if (!Number.isFinite(idx) || idx < 0 || idx >= rows.length) return jsonResponse({ ok: false, error: "bad_index" });
     const row = rows[idx];
-    if (!(row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return jsonResponse({ ok: false, error: "not_linked" });
-    const res = await updateShopifyProductFromRow(session.shop, session.accessToken, row);
+    const linkedId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+    if (!linkedId) return jsonResponse({ ok: false, error: "not_linked" });
+
+    const isJJNew = (collection as { kind?: string }).kind === "jj-new";
+    const inrPerAud = await getCachedInrPerAud().catch(() => null);
+    const thbPerAud = isJJNew ? await getCachedThbPerAud().catch(() => null) : null;
+    const productInfoForUpdate = await loadProductInfoForAction().catch(() => null);
+    const storedStatus = (row[COL_ROW_SHOPIFY_STATUS] ?? "").toUpperCase();
+    const status = storedStatus === "ACTIVE" || storedStatus === "DRAFT" ? (storedStatus as "ACTIVE" | "DRAFT") : undefined;
+
+    const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, {
+      productId: linkedId,
+      status,
+      inrPerAud,
+      thbPerAud,
+      currency: isJJNew ? "THB" : "INR",
+      productInfo: productInfoForUpdate ?? undefined,
+    });
     if (!res.ok) return jsonResponse({ ok: false, error: (res.errors ?? []).join("; ") || "update_failed" });
+
+    // Sync images: replace the product's media with the row's pictures so they
+    // don't pile up. Only when the row actually has images (never wipe blindly).
+    try {
+      const imgs = parseMultiImageValue(row.modelPicture ?? "");
+      if (imgs.length) {
+        await deleteAllProductMedia(session.shop, session.accessToken, linkedId);
+        const imgErrors = await pushRowImagesToShopify(session.shop, session.accessToken, linkedId, imgs);
+        if (imgErrors.length) console.warn(`[collection update] row ${idx} image errors:`, imgErrors);
+      }
+    } catch (e) {
+      console.warn(`[collection update] row ${idx} images failed:`, e);
+    }
+
     rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "" };
     await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
     return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId }] });
@@ -8942,7 +8973,7 @@ async function createShopifyProductFromRow(
   shop: string,
   accessToken: string,
   row: Record<string, string>,
-  opts: { status: "DRAFT" | "ACTIVE"; inrPerAud?: number | null; thbPerAud?: number | null; currency?: "INR" | "THB"; productInfo?: ProductInfo } = { status: "DRAFT" },
+  opts: { status?: "DRAFT" | "ACTIVE"; productId?: string; inrPerAud?: number | null; thbPerAud?: number | null; currency?: "INR" | "THB"; productInfo?: ProductInfo } = { status: "DRAFT" },
 ): Promise<CollectionPushResult> {
   // Title is required. Name is the title column (Title column was
   // removed in V2). We still fall back to legacy `title` for any rows
@@ -9064,10 +9095,15 @@ async function createShopifyProductFromRow(
 
   const input: Record<string, unknown> = {
     title,
-    status: opts.status,
     productOptions,
     variants,
   };
+  // Update mode: pass the existing product id so productSet UPDATES it (full
+  // sync) instead of creating a new product.
+  if (opts.productId) input.id = opts.productId;
+  // Only set status when asked — on update we omit it so the live product's
+  // status (active/draft) is preserved.
+  if (opts.status) input.status = opts.status;
   const description = (row.description ?? "").trim();
   if (description) input.descriptionHtml = description;
   // Product type comes from the row's Product type column (auto-filled from the
@@ -9112,56 +9148,6 @@ async function createShopifyProductFromRow(
     return { ok: false, errors: userErrors.map((e: { message?: string }) => e.message || "Unknown error") };
   }
   const product = json?.data?.productSet?.product;
-  if (!product?.id) return { ok: false, errors: ["Shopify returned no product"] };
-  return { ok: true, productId: String(product.id), handle: String(product.handle ?? "") };
-}
-
-// Push edits to an EXISTING linked product. Uses productUpdate for the safe
-// info fields only (title, description, product type, tags, SEO, colour +
-// categories metafields) — it deliberately does NOT touch variants or
-// inventory (those come from the packing list). Used by the "Update in Shopify"
-// button that appears once a linked row's info is edited.
-async function updateShopifyProductFromRow(
-  shop: string,
-  accessToken: string,
-  row: Record<string, string>,
-): Promise<CollectionPushResult> {
-  const productId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
-  if (!productId) return { ok: false, errors: ["Row isn't linked to a Shopify product"] };
-  const input: Record<string, unknown> = { id: productId };
-  const title = (row.name || row.title || "").trim();
-  if (title) input.title = title;
-  // descriptionHtml is always set (empty clears it) so edits — including
-  // deletions — sync.
-  input.descriptionHtml = (row.description ?? "").trim();
-  const productType = (row.productType ?? "").trim();
-  if (productType) input.productType = productType;
-  const tagsRaw = (row.tags ?? "").trim();
-  input.tags = tagsRaw ? tagsRaw.split(/\s*,\s*/).filter(Boolean) : [];
-  const seoTitle = (row.seoTitle ?? "").trim();
-  const seoDesc = (row.seoDescription ?? "").trim();
-  if (seoTitle || seoDesc) {
-    input.seo = { ...(seoTitle ? { title: seoTitle } : {}), ...(seoDesc ? { description: seoDesc } : {}) };
-  }
-  const colour = (row.colour ?? "").trim();
-  const categories = (row.categories ?? "").trim() || deriveCategoryFromProductType(productType);
-  const metafields: Array<{ namespace: string; key: string; type: string; value: string }> = [];
-  if (colour) metafields.push({ namespace: "custom", key: "colour", type: "single_line_text_field", value: colour });
-  if (categories) metafields.push({ namespace: "custom", key: "categories", type: "single_line_text_field", value: categories });
-  if (metafields.length) input.metafields = metafields;
-
-  const json = await shopifyGraphql<any>(shop, accessToken, `
-    mutation UpdateCollectionRowProduct($input: ProductInput!) {
-      productUpdate(input: $input) {
-        product { id handle status }
-        userErrors { field message }
-      }
-    }
-  `, { input });
-
-  const userErrors = json?.data?.productUpdate?.userErrors ?? [];
-  if (userErrors.length) return { ok: false, errors: userErrors.map((e: { message?: string }) => e.message || "Unknown error") };
-  const product = json?.data?.productUpdate?.product;
   if (!product?.id) return { ok: false, errors: ["Shopify returned no product"] };
   return { ok: true, productId: String(product.id), handle: String(product.handle ?? "") };
 }
@@ -9234,6 +9220,23 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
   const errs = json?.data?.productCreateMedia?.mediaUserErrors ?? [];
   for (const e of errs) errors.push(e.message || "media error");
   return errors;
+}
+
+// Remove all existing media from a product (used before re-pushing a row's
+// images on update, so images sync instead of piling up as duplicates).
+async function deleteAllProductMedia(shop: string, accessToken: string, productId: string): Promise<void> {
+  const q = await shopifyGraphql<{ data?: { product?: { media?: { nodes?: Array<{ id?: string }> } } } }>(
+    shop, accessToken,
+    `query ProductMedia($id: ID!) { product(id: $id) { media(first: 100) { nodes { id } } } }`,
+    { id: productId },
+  );
+  const ids = (q?.data?.product?.media?.nodes ?? []).map((n) => n.id).filter(Boolean) as string[];
+  if (!ids.length) return;
+  await shopifyGraphql(shop, accessToken, `
+    mutation DeleteProductMedia($productId: ID!, $mediaIds: [ID!]!) {
+      productDeleteMedia(productId: $productId, mediaIds: $mediaIds) { deletedMediaIds mediaUserErrors { message } }
+    }
+  `, { productId, mediaIds: ids });
 }
 
 // Two-way SKU/barcode sync (order → sheet): write the JJ order's base SKU /
