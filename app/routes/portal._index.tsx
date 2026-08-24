@@ -16658,7 +16658,8 @@ function CollectionSpreadsheetPage({
                               col.type === "number" && !["price", "priceRupees", "compareAtPrice"].includes(col.id) ? (
                                 <span style={{ display: "block", width: "100%", textAlign: "center", fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)", fontWeight: 600, color: "#dc2626", padding: "1px 2px" }}>{value}</span>
                               ) : (
-                                <span style={{ fontSize: 12, color: "#374151", padding: "2px 4px" }}>{value}</span>
+                                // Other locked cells: keep the normal table text size (was shrinking to 12px).
+                                <span style={{ fontSize: "var(--portal-table-font-size, 14px)", color: "var(--portal-table-text-color, #374151)", padding: "2px 4px", display: "inline-block" }}>{value}</span>
                               )
                             ) : (
                               <CollectionCell
