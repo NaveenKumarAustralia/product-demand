@@ -18939,6 +18939,7 @@ function ProductInformationPanel({
 }) {
   const fetcher = useFetcher();
   const [showHidden, setShowHidden] = useState(false);
+  const [addStyleModal, setAddStyleModal] = useState<{ categoryId: string; name: string } | null>(null);
   const [styleChoice, setStyleChoice] = useState<ProductInfoStyle | null>(null);
   const [detailStyle, setDetailStyle] = useState<ProductInfoStyle | null>(null);
   const [detailDraft, setDetailDraft] = useState<Record<string, string>>({});
@@ -18982,26 +18983,19 @@ function ProductInformationPanel({
     fetcher.submit(fields, { method: "post" });
   };
 
+  // "Add Style" opens a small popup with a category dropdown + name box (works
+  // in the "All products" view where no single category is selected).
   const addStyle = () => {
-    // Works in "All products" mode too: pick which category to add to.
-    let category = selectedCategory;
-    if (!category) {
-      const cats = productInfo.categories;
-      if (cats.length === 0) { window.alert("Create a category first, then add a style to it."); return; }
-      if (cats.length === 1) {
-        category = cats[0];
-      } else {
-        const list = cats.map((c, i) => `${i + 1}. ${c.name}`).join("\n");
-        const pick = window.prompt(`Add the style to which category? Type the number:\n\n${list}`);
-        if (pick == null) return;
-        const idx = Number(pick.trim()) - 1;
-        if (!Number.isInteger(idx) || idx < 0 || idx >= cats.length) { window.alert("Didn't recognise that number — nothing added."); return; }
-        category = cats[idx];
-      }
-    }
-    const name = window.prompt("Style name");
-    if (!name?.trim()) return;
-    submitProductInfo({ intent: "add_product_style", categoryId: category.id, name: name.trim() });
+    const cats = productInfo.categories;
+    if (cats.length === 0) { window.alert("Create a category first, then add a style to it."); return; }
+    setAddStyleModal({ categoryId: selectedCategory?.id ?? cats[0].id, name: "" });
+  };
+  const submitAddStyle = () => {
+    if (!addStyleModal) return;
+    const name = addStyleModal.name.trim();
+    if (!name || !addStyleModal.categoryId) return;
+    submitProductInfo({ intent: "add_product_style", categoryId: addStyleModal.categoryId, name });
+    setAddStyleModal(null);
   };
 
   const deleteStyle = (style: ProductInfoStyle) => {
@@ -19141,6 +19135,43 @@ function ProductInformationPanel({
           </button>
         </div>
       </div>
+      {addStyleModal && typeof document !== "undefined" && createPortal(
+        <div
+          onClick={() => setAddStyleModal(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", zIndex: 100000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 12, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", width: "100%", maxWidth: 380, padding: 22, display: "grid", gap: 14 }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#111827" }}>Add a style</div>
+            <label style={{ display: "grid", gap: 6, fontSize: 12, fontWeight: 700, color: "#6b7280" }}>
+              Category
+              <select
+                value={addStyleModal.categoryId}
+                onChange={(e) => setAddStyleModal((m) => m ? { ...m, categoryId: e.target.value } : m)}
+                style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: "9px 10px", fontSize: 14, background: "#fff", color: "#111827" }}
+              >
+                {productInfo.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </label>
+            <label style={{ display: "grid", gap: 6, fontSize: 12, fontWeight: 700, color: "#6b7280" }}>
+              Style name
+              <input
+                type="text"
+                autoFocus
+                value={addStyleModal.name}
+                onChange={(e) => setAddStyleModal((m) => m ? { ...m, name: e.target.value } : m)}
+                onKeyDown={(e) => { if (e.key === "Enter") submitAddStyle(); if (e.key === "Escape") setAddStyleModal(null); }}
+                placeholder="e.g. Alice Dress"
+                style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: "9px 10px", fontSize: 14 }}
+              />
+            </label>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 2 }}>
+              <button type="button" onClick={() => setAddStyleModal(null)} style={{ border: "1px solid #d1d5db", background: "#fff", color: "#374151", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+              <button type="button" onClick={submitAddStyle} disabled={!addStyleModal.name.trim() || !addStyleModal.categoryId} style={{ border: "none", background: addStyleModal.name.trim() ? "#0d9488" : "#e5e7eb", color: addStyleModal.name.trim() ? "#fff" : "#9ca3af", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: addStyleModal.name.trim() ? "pointer" : "default" }}>Add style</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
 
       <div style={{ ...s.productInfoList, gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }}>
         {visibleStyles.map((style) => (
