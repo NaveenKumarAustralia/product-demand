@@ -29,6 +29,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // flow). They share all machinery; only the Collection.kind they list differs.
   const isCollectionsPage = page === "collections" || page === "jj-new-products";
   const collectionKind = page === "jj-new-products" ? "jj-new" : "collection";
+  // Shipment/ETA badges only render inside an OPENED collection's rows, never on
+  // the grid of tiles. So only pay for that (unbounded packing-list scan) when a
+  // collection is actually open (?collectionId=… present) — the bare grid skips it.
+  const collectionIsOpen = isCollectionsPage && Boolean(url.searchParams.get("collectionId"));
   const selectedProductGroup = normalizeProductGroup(
     url.searchParams.get("productGroup") ?? url.searchParams.get("productType") ?? "",
   );
@@ -419,7 +423,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // ordered totals. Both queries run in parallel, and the whole thing runs in
   // parallel with the collections + photo-shoot list queries below.
   const shipmentDataPromise: Promise<{ eta: Record<string, string>; shipment: Record<string, { label: string; partial: boolean }> }> =
-    isCollectionsPage
+    collectionIsOpen
       ? (async () => {
           const eta: Record<string, string> = {};
           const shipment: Record<string, { label: string; partial: boolean }> = {};
@@ -16406,13 +16410,14 @@ function CollectionSpreadsheetPage({
                 // CollectionCell so the readonly type shows the value.
                 const computedValueFor = (colId: string): string | null => {
                   if (colId === "totalOrdered") return totalOrdered ? String(totalOrdered) : "";
-                  // Link column → storefront URL (the ✓ Shopify badge
-                  // already covers admin, so these two clicks now
-                  // surface different destinations).
-                  if (colId === "link") return storefrontLink;
+                  // Link column → Shopify ADMIN product page. Built from the
+                  // product id (no storefront handle needed), so it works the
+                  // moment the product exists in Shopify — even before it's
+                  // published/has a handle.
+                  if (colId === "link") return adminLink;
                   return null;
                 };
-                void adminLink;
+                void storefrontLink;
                 return (
                   <tr
                     key={rIdx}
@@ -16480,8 +16485,8 @@ function CollectionSpreadsheetPage({
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
                               <a href={computed} target="_blank" rel="noopener noreferrer"
                                 style={{ fontSize: 12, color: "#0d9488", fontWeight: 600, padding: "6px 8px", display: "inline-block" }}
-                                title="Open live storefront product page"
-                              >View live page</a>
+                                title="Open this product in Shopify admin"
+                              >Open in Shopify</a>
                             </Td>
                           );
                         }
@@ -16489,8 +16494,8 @@ function CollectionSpreadsheetPage({
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
                               <span style={{ fontSize: 11, color: "#9ca3af", padding: "6px 8px", display: "inline-block" }}
-                                title="Run 'Backfill storefront links' on the Collections list page"
-                              >(no handle yet)</span>
+                                title="This row is linked but has no Shopify product id yet"
+                              >—</span>
                             </Td>
                           );
                         }
