@@ -13,6 +13,41 @@ import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFile
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
+  // TEMP one-off (remove after use): backfill the restock-row image for orders
+  // created from collections before the image seeding was fixed. Matches each
+  // Karma East order that has no image to its collection row (by productId) and
+  // copies the first model picture in whatever form it's stored.
+  if (url.searchParams.get("__backfillimg") === "bfimg_5c1e9a7d4b") {
+    try {
+      const cols = await prisma.collection.findMany({ select: { rows: true } });
+      const imgByProduct = new Map<string, string>();
+      for (const c of cols) {
+        for (const row of normalizeCollectionRows(c.rows)) {
+          const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+          if (!pid || imgByProduct.has(pid)) continue;
+          const f = parseMultiImageValue(row.modelPicture ?? "")[0];
+          const u = f ? (/^https?:\/\//i.test(f.thumb) ? f.thumb : f.key ? `/portal/collection-image/${f.key}` : (f.thumb ?? "").startsWith("data:") ? f.thumb : "") : "";
+          if (u) imgByProduct.set(pid, u);
+        }
+      }
+      const orders = await prisma.supplierOrder.findMany({
+        where: { productId: { not: "" }, productTitle: { contains: "Acacia Maxi Dress Nila" }, OR: [{ productImageUrl: null }, { productImageUrl: "" }] },
+        select: { id: true, productId: true, productTitle: true },
+      });
+      let updated = 0;
+      const sample: Array<{ id: number; title: string }> = [];
+      for (const o of orders) {
+        const img = imgByProduct.get(o.productId);
+        if (!img) continue;
+        await prisma.supplierOrder.update({ where: { id: o.id }, data: { productImageUrl: img } });
+        updated++;
+        if (sample.length < 30) sample.push({ id: o.id, title: o.productTitle });
+      }
+      return jsonResponse({ ok: true, imagesInCollections: imgByProduct.size, ordersMissingImage: orders.length, updated, sample });
+    } catch (e) {
+      return jsonResponse({ error: String((e as Error)?.message || e) });
+    }
+  }
   // TEMP diagnostic: add ?perf=1 to the URL to get a timing/size breakdown of
   // the loader (shown in a small on-page box). Remove once the slow page is fixed.
   const perfOn = url.searchParams.get("perf") === "1";
