@@ -13,6 +13,10 @@ import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFile
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
+  // TEMP diagnostic: add ?perf=1 to the URL to get a timing/size breakdown of
+  // the loader (shown in a small on-page box). Remove once the slow page is fixed.
+  const perfOn = url.searchParams.get("perf") === "1";
+  const perfMarks: Record<string, number> = { t0: Date.now() };
   const page = url.searchParams.get("page") ?? "restock";
   // The restock table is shared by two vendor-scoped pages: the default
   // "restock" page (Karma East) and "jj-restock" (JJ). They behave
@@ -154,6 +158,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ]),
     "portal base data",
   );
+  perfMarks.baseData = Date.now();
   const settingsMap = new Map(settingsRows.map((row) => [row.key, row.value as unknown]));
   const wrap = (key: string) => {
     const value = settingsMap.get(key);
@@ -463,6 +468,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // Run the three collections-page queries together instead of one-after-another.
   const [collections, photoShoots, shipmentData] = await Promise.all([collectionsPromise, photoShootsPromise, shipmentDataPromise]);
+  perfMarks.lists = Date.now();
   const collectionEtaByProductId = shipmentData.eta;
   const collectionShipmentByProductId = shipmentData.shipment;
   // activityLogs is fetched in the initial Promise.all above (parallel).
@@ -886,7 +892,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
     });
 
+  perfMarks.build = Date.now();
+  const perf = perfOn ? (() => {
+    const base = perfMarks.baseData - perfMarks.t0;
+    const lists = perfMarks.lists - perfMarks.baseData;
+    const rest = perfMarks.build - perfMarks.lists;
+    const total = perfMarks.build - perfMarks.t0;
+    // Approx sizes of the biggest payload pieces (KB).
+    const kb = (v: unknown) => { try { return Math.round(JSON.stringify(v).length / 1024); } catch { return -1; } };
+    return { page, total, base, lists, rest, sizeKB: { productInfo: kb(productInfo), collections: kb(collections), photoShoots: kb(photoShoots), fabricSheets: kb(fabricSheets), settings: kb(settingsRows), activityLogs: kb(activityLogs) } };
+  })() : undefined;
   return {
+    perf,
     orders,
     sizes: allSizes,
     productGroups,
@@ -7935,11 +7952,14 @@ async function recordAndGetActiveUsers(currentUser: PortalUser | null, users: Po
     Object.entries(activeMap).filter(([, timestamp]) => now - timestamp <= ACTIVE_USER_WINDOW_MS),
   );
   if (currentUser) {
-    await prisma.portalSetting.upsert({
+    // Fire-and-forget: the returned list is already computed from the in-memory
+    // map (which includes this user's fresh timestamp), so the "last seen" write
+    // never needs to block the page load.
+    prisma.portalSetting.upsert({
       where: { key: PORTAL_ACTIVE_USERS_KEY },
       create: { key: PORTAL_ACTIVE_USERS_KEY, value: freshActiveMap },
       update: { value: freshActiveMap },
-    });
+    }).catch((e) => console.warn("[active users] write failed:", e));
   }
   return users
     .filter((user) => user.active && freshActiveMap[user.id])
@@ -9810,6 +9830,7 @@ type PortalUndoEntry = {
 
 export default function PortalDashboard() {
   const {
+    perf,
     orders,
     sizes,
     productGroups,
@@ -10359,6 +10380,13 @@ export default function PortalDashboard() {
           : PORTAL_LOGO_WALLPAPER_URL,
         ["--portal-watermark-color" as never]: "rgba(17, 24, 39, 0.06)",
       } as React.CSSProperties}>
+        {perf && (
+          <div style={{ position: "fixed", bottom: 12, right: 12, zIndex: 99999, background: "#0f172a", color: "#e2e8f0", font: "12px/1.5 ui-monospace, monospace", padding: "10px 14px", borderRadius: 8, boxShadow: "0 6px 24px rgba(0,0,0,.35)", maxWidth: 320 }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>⏱ Loader perf — {perf.page}</div>
+            <div>total: <b>{perf.total}ms</b> · base {perf.base} · lists {perf.lists} · rest {perf.rest}</div>
+            <div style={{ marginTop: 4, color: "#94a3b8" }}>size KB — productInfo {perf.sizeKB.productInfo} · collections {perf.sizeKB.collections} · photoShoots {perf.sizeKB.photoShoots} · fabric {perf.sizeKB.fabricSheets} · settings {perf.sizeKB.settings} · logs {perf.sizeKB.activityLogs}</div>
+          </div>
+        )}
         <header style={s.pageHeader}>
           <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
             <h1 style={s.pageTitle}>{activePageTitle}</h1>
