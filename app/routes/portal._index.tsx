@@ -14546,6 +14546,17 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     saveGroups([...stripped, { id, name, collectionIds: ids }]);
     clearSelection();
   };
+  // Add the currently-selected collections to an EXISTING group. A collection
+  // only ever belongs to one group, so first pull them out of any other group.
+  const addSelectedToGroup = (groupId: string) => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length || !groupId) return;
+    const stripped = groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !selectedIds.has(id)) }));
+    saveGroups(stripped.map((g) => g.id === groupId
+      ? { ...g, collectionIds: [...g.collectionIds, ...ids.filter((id) => !g.collectionIds.includes(id))] }
+      : g));
+    clearSelection();
+  };
   const removeFromGroup = (collectionId: number) => saveGroups(groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => id !== collectionId) })));
   const ungroup = (groupId: string) => { saveGroups(groups.filter((g) => g.id !== groupId)); openGroupNav(null); };
   const renameGroup = (groupId: string) => { const g = groups.find((x) => x.id === groupId); if (!g) return; const name = window.prompt("Rename group:", g.name)?.trim(); if (!name) return; saveGroups(groups.map((x) => x.id === groupId ? { ...x, name } : x)); };
@@ -14822,7 +14833,20 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             {openGroup ? (
               <button type="button" onClick={() => { Array.from(selectedIds).forEach((id) => removeFromGroup(id)); clearSelection(); }} style={{ background: "#fff", color: "#b91c1c", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: "pointer" }}>Remove from group</button>
             ) : (
-              <button type="button" onClick={groupSelected} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }}>＋ Group these into one tile</button>
+              <>
+                <button type="button" onClick={groupSelected} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }}>＋ Group these into one tile</button>
+                {groups.length > 0 && (
+                  <select
+                    value=""
+                    onChange={(e) => { if (e.target.value) addSelectedToGroup(e.target.value); }}
+                    title="Add the selected collections to an existing group"
+                    style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 10px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+                  >
+                    <option value="">＋ Add to existing group…</option>
+                    {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select>
+                )}
+              </>
             )}
             <button type="button" onClick={clearSelection} style={{ background: "transparent", color: "#fff", border: "1px solid rgba(255,255,255,0.5)", borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}>Cancel</button>
           </div>
@@ -18959,10 +18983,25 @@ function ProductInformationPanel({
   };
 
   const addStyle = () => {
-    if (!selectedCategory) return;
+    // Works in "All products" mode too: pick which category to add to.
+    let category = selectedCategory;
+    if (!category) {
+      const cats = productInfo.categories;
+      if (cats.length === 0) { window.alert("Create a category first, then add a style to it."); return; }
+      if (cats.length === 1) {
+        category = cats[0];
+      } else {
+        const list = cats.map((c, i) => `${i + 1}. ${c.name}`).join("\n");
+        const pick = window.prompt(`Add the style to which category? Type the number:\n\n${list}`);
+        if (pick == null) return;
+        const idx = Number(pick.trim()) - 1;
+        if (!Number.isInteger(idx) || idx < 0 || idx >= cats.length) { window.alert("Didn't recognise that number — nothing added."); return; }
+        category = cats[idx];
+      }
+    }
     const name = window.prompt("Style name");
     if (!name?.trim()) return;
-    submitProductInfo({ intent: "add_product_style", categoryId: selectedCategory.id, name: name.trim() });
+    submitProductInfo({ intent: "add_product_style", categoryId: category.id, name: name.trim() });
   };
 
   const deleteStyle = (style: ProductInfoStyle) => {
@@ -19097,7 +19136,7 @@ function ProductInformationPanel({
               </button>
             ))}
           </div>
-          <button type="button" style={s.primaryActionButton} onClick={addStyle} disabled={isSubmitting || !selectedCategory}>
+          <button type="button" style={s.primaryActionButton} onClick={addStyle} disabled={isSubmitting}>
             Add Style
           </button>
         </div>
