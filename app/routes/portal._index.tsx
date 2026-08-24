@@ -16653,7 +16653,13 @@ function CollectionSpreadsheetPage({
                         return (
                           <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky} style={noteTdStyle}>
                             {lockedDisplay ? (
-                              <span style={{ fontSize: 12, color: "#374151", padding: "2px 4px" }}>{value}</span>
+                              // Size / qty columns: keep the same big centred font as the
+                              // editable cell, but red (inventory is now managed elsewhere).
+                              col.type === "number" && !["price", "priceRupees", "compareAtPrice"].includes(col.id) ? (
+                                <span style={{ display: "block", width: "100%", textAlign: "center", fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)", fontWeight: 600, color: "#dc2626", padding: "1px 2px" }}>{value}</span>
+                              ) : (
+                                <span style={{ fontSize: 12, color: "#374151", padding: "2px 4px" }}>{value}</span>
+                              )
                             ) : (
                               <CollectionCell
                                 value={value}
