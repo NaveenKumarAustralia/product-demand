@@ -9326,8 +9326,17 @@ async function seedRestockOrderFromCollectionRow(shop: string, accessToken: stri
     return { variantId: v?.id ?? `col:${label}`, variantTitle: v?.title ?? label, sku: v?.sku ?? null, barcode: v?.barcode ?? null, qtyOrdered: qty };
   });
   const total = lines.reduce((s, l) => s + l.qtyOrdered, 0);
+  // First model picture → the restock row image. Handle all three storage forms:
+  // a public URL, an offloaded image (served via /portal/collection-image/<key>),
+  // or an inline data: URI.
   const imgs = parseMultiImageValue(row.modelPicture ?? "");
-  const firstUrl = imgs.find((i) => /^https?:\/\//i.test(i.thumb));
+  const firstImg = imgs[0];
+  const imageUrl = firstImg
+    ? (/^https?:\/\//i.test(firstImg.thumb) ? firstImg.thumb
+      : firstImg.key ? `/portal/collection-image/${firstImg.key}`
+      : (firstImg.thumb ?? "").startsWith("data:") ? firstImg.thumb
+      : null)
+    : null;
   const created = await prisma.supplierOrder.create({
     data: {
       shop: shop || "",
@@ -9337,7 +9346,7 @@ async function seedRestockOrderFromCollectionRow(shop: string, accessToken: stri
       status: "open",
       // Carry over the collection row's status onto the restock order.
       supplierStatus: (row.status ?? "").trim() || "on_order",
-      productImageUrl: firstUrl ? firstUrl.thumb : null,
+      productImageUrl: imageUrl,
       destination: null,
       totalQty: total,
       lines: { create: lines },
