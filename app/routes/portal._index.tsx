@@ -13650,7 +13650,7 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "duplicateFrom", label: "DUPLICATE FROM", width: 140 },
   { id: "modelHeightSize", label: "Model height and size", width: 130 },
   { id: "createdBy", label: "Created by", width: 100 },
-  { id: "link", label: "Link", type: "readonly", width: 130 },
+  { id: "link", label: "Open in Shopify", type: "readonly", width: 130 },
   { id: "description", label: "Description", width: 200 },
   { id: "categories", label: "Categories", width: 130 },
   { id: "productType", label: "Product type", width: 120 },
@@ -16484,9 +16484,14 @@ function CollectionSpreadsheetPage({
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
                               <a href={computed} target="_blank" rel="noopener noreferrer"
-                                style={{ fontSize: 12, color: "#0d9488", fontWeight: 600, padding: "6px 8px", display: "inline-block" }}
                                 title="Open this product in Shopify admin"
-                              >Open in Shopify</a>
+                                style={{
+                                  display: "inline-flex", alignItems: "center", gap: 4,
+                                  fontSize: 12, fontWeight: 600, color: "#fff",
+                                  background: "#0d9488", borderRadius: 6,
+                                  padding: "4px 10px", textDecoration: "none",
+                                }}
+                              >Open <span aria-hidden style={{ fontSize: 13, lineHeight: 1 }}>↗</span></a>
                             </Td>
                           );
                         }
@@ -16637,7 +16642,11 @@ function CollectionSpreadsheetPage({
                           || col.id === "totalOrdered"
                           || col.id === "modelPicture"
                           || col.id === "fabric"
-                          || col.id === "maniPicsTaken";
+                          || col.id === "maniPicsTaken"
+                          // Tags stay editable even after the product is created —
+                          // add/remove/search tags then "Update in Shopify" pushes
+                          // them (updateCell flags the row dirty automatically).
+                          || col.id === "tags";
                         const lockedDisplay = linked && !isSpecialRender;
                         // Notes cells need the table-layout "height: 1"
                         // trick + zero padding so the inner wrap can
