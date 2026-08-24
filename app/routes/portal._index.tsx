@@ -16832,6 +16832,32 @@ function CollectionSpreadsheetPage({
 // same visual style as the restock chip dropdown but stripped down —
 // just value/onChange + the options list. Settings can be edited
 // inline (click a chip to rename / recolour, "+ Add" for a new one).
+// Position a fixed/portal dropdown so it stays fully on-screen: opens downward
+// normally, flips UP when there's more room above, clamps its height to the
+// available space (so it scrolls instead of running off the bottom), and shifts
+// left when it would overflow the right edge. Pass the trigger's rect.
+function dropdownMenuStyle(rect: DOMRect, opts?: { width?: number; desired?: number; gap?: number; margin?: number }): React.CSSProperties {
+  const margin = opts?.margin ?? 8;
+  const gap = opts?.gap ?? 4;
+  const width = opts?.width ?? Math.max(rect.width, 200);
+  const desired = opts?.desired ?? 360;
+  const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+  const spaceBelow = vh - rect.bottom - margin;
+  const spaceAbove = rect.top - margin;
+  const openUp = spaceBelow < Math.min(desired, 240) && spaceAbove > spaceBelow;
+  const maxHeight = Math.max(140, Math.min(desired, openUp ? spaceAbove : spaceBelow));
+  const left = Math.max(margin, Math.min(rect.left, vw - width - margin));
+  return {
+    position: "fixed",
+    left,
+    ...(openUp ? { bottom: vh - rect.top + gap } : { top: rect.bottom + gap }),
+    minWidth: width,
+    maxHeight,
+    overflowY: "auto",
+  };
+}
+
 function CollectionChipDropdown({
   value,
   options,
@@ -16930,11 +16956,10 @@ function CollectionChipDropdown({
         <div
           data-collection-chip-menu="1"
           style={{
-            position: "fixed",
-            top: rect.bottom + 4, left: rect.left, zIndex: 99999,
+            ...dropdownMenuStyle(rect, { width: Math.max(rect.width, 200) }),
+            zIndex: 99999,
             background: "#fff", border: "1px solid #e5e7eb",
             borderRadius: 8, boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
-            minWidth: Math.max(rect.width, 200), maxHeight: 360, overflowY: "auto",
           }}
         >
           {options.map((opt) => {
@@ -20945,9 +20970,7 @@ function FabricChipDropdown({
       data-fabric-chip-menu="true"
       style={{
         ...s.fabricChipMenu,
-        top: rect.bottom + 6,
-        left: rect.left,
-        minWidth: Math.max(rect.width, 240),
+        ...dropdownMenuStyle(rect, { width: Math.max(rect.width, 240), desired: 420, gap: 6 }),
       }}
     >
       <button
@@ -25376,9 +25399,7 @@ function RestockOptionChipDropdown({
       data-restock-chip-menu={`${orderId}-${optionKind}`}
       style={{
         ...s.fabricChipMenu,
-        top: rect.bottom + 6,
-        left: rect.left,
-        minWidth: Math.max(rect.width, 250),
+        ...dropdownMenuStyle(rect, { width: Math.max(rect.width, 250), desired: 420, gap: 6 }),
       }}
     >
       {emptyLabel && (
