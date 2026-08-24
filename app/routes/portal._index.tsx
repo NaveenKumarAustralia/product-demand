@@ -30200,7 +30200,7 @@ const s: Record<string, React.CSSProperties> = {
     justifyContent: "center",
     width: "100%",
   },
-  thumb: { width: 86, height: 115, objectFit: "cover", borderRadius: 2, display: "block", margin: "0 auto" },
+  thumb: { width: 86, height: 115, objectFit: "contain", borderRadius: 2, display: "block", margin: "0 auto", background: "#fff" },
   noImg: { color: "#d1d5db", textAlign: "center" },
   productName: { fontWeight: 600, color: "#111827", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 },
   sku: { fontFamily: "monospace", fontSize: 11, color: "#111827", whiteSpace: "pre-line" },
