@@ -4768,10 +4768,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const product = json?.data?.product;
     if (!product) return jsonResponse({ ok: false, error: "not_found" });
     const v0 = product.variants?.nodes?.[0] ?? {};
+    // Rewrite the copied description so its print reference matches the new
+    // row's product (print swap via AI); falls back to the verbatim copy.
+    const newName = String(form.get("newName") ?? "").trim();
+    const description = await adaptDuplicatedDescription(String(product.title ?? ""), newName, String(product.descriptionHtml ?? ""));
     return jsonResponse({
       ok: true,
       fields: {
-        description: String(product.descriptionHtml ?? ""),
+        description,
         productType: String(product.productType ?? ""),
         tags: Array.isArray(product.tags) ? product.tags.join(", ") : "",
         vendor: String(product.vendor ?? ""),
@@ -17233,7 +17237,7 @@ function CollectionCellInner({
     return <CollectionProductTypeCell value={value} onCommit={onCommit} />;
   }
   if (columnId === "tags") {
-    return <CollectionTagsCell value={value} onCommit={onCommit} />;
+    return <CollectionTagsCell value={value} onCommit={onCommit} rowName={rowName} />;
   }
   // Description + SEO are handled as special popup cells in renderCol (rich-text
   // editor / combined page-title+meta-description). They never reach here.
@@ -17242,66 +17246,135 @@ function CollectionCellInner({
   );
 }
 
-// Tags cell — chips + a type-ahead that pulls existing Shopify tags and lets
-// you create new ones. Stored as a comma-separated string (Shopify's format).
-function CollectionTagsCell({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+// Tags cell — shows the current tags as chips; clicking opens a clean popup to
+// search existing Shopify tags, add/remove them, and create new ones. Stored as
+// a comma-separated string (Shopify's format).
+function CollectionTagsCell({ value, onCommit, rowName }: { value: string; onCommit: (v: string) => void; rowName?: string }) {
   const tags = useMemo(() => value.split(",").map((s) => s.trim()).filter(Boolean), [value]);
   const [input, setInput] = useState("");
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement>(null);
   const fetcher = useFetcher<{ tags?: string[] }>();
   const loadedRef = useRef(false);
   const load = () => { if (!loadedRef.current) { loadedRef.current = true; fetcher.load("/api/shopify-product-meta?kind=tags"); } };
+  const loading = fetcher.state !== "idle" && !fetcher.data;
   const all = fetcher.data?.tags ?? [];
   const has = (t: string) => tags.some((x) => x.toLowerCase() === t.toLowerCase());
   const q = input.trim().toLowerCase();
-  const matches = (q ? all.filter((t) => t.toLowerCase().includes(q)) : all).filter((t) => !has(t)).slice(0, 30);
+  const matches = (q ? all.filter((t) => t.toLowerCase().includes(q)) : all).filter((t) => !has(t)).slice(0, 60);
   const exactExists = q.length > 0 && (all.some((t) => t.toLowerCase() === q) || has(q));
   const commit = (next: string[]) => onCommit(next.join(", "));
   const add = (tag: string) => { const t = tag.trim(); if (!t || has(t)) { setInput(""); return; } commit([...tags, t]); setInput(""); };
   const remove = (t: string) => commit(tags.filter((x) => x !== t));
+  const openModal = () => { load(); setOpen(true); };
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => { if (!wrapRef.current?.contains(e.target as Node)) setOpen(false); };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
   }, [open]);
+
+  const chip = (t: string, onRemove?: () => void) => (
+    <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "#eef2ff", color: "#3730a3", borderRadius: 999, padding: onRemove ? "3px 6px 3px 11px" : "2px 8px", fontSize: 12.5, fontWeight: 600, lineHeight: 1.4 }}>
+      {t}
+      {onRemove && (
+        <button type="button" title="Remove tag" onClick={onRemove} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 16, height: 16, borderRadius: 999, border: "none", background: "rgba(99,102,241,0.18)", color: "#4338ca", cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}>×</button>
+      )}
+    </span>
+  );
+
   return (
-    <div ref={wrapRef} style={{ position: "relative", width: "100%", padding: "3px 4px" }}>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
-        {tags.map((t) => (
-          <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#eef2ff", color: "#3730a3", borderRadius: 999, padding: "2px 8px", fontSize: 12, fontWeight: 600 }}>
-            {t}
-            <button type="button" title="Remove tag" onClick={() => remove(t)} style={{ border: "none", background: "transparent", color: "#6366f1", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>×</button>
-          </span>
-        ))}
-        <input
-          value={input}
-          onFocus={() => { load(); setOpen(true); }}
-          onChange={(e) => { setInput(e.target.value); setOpen(true); }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === ",") { e.preventDefault(); if (input.trim()) add(input); }
-            else if (e.key === "Backspace" && !input && tags.length) remove(tags[tags.length - 1]);
-          }}
-          placeholder={tags.length ? "" : "Add tag…"
-          }
-          style={{ flex: 1, minWidth: 70, border: "none", outline: "none", fontSize: 12, fontFamily: "inherit", background: "transparent", padding: "2px 0" }}
-        />
-      </div>
-      {open && (matches.length > 0 || (q && !exactExists)) && (
-        <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 40, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, marginTop: 2, maxHeight: 220, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.12)" }}>
-          {q && !exactExists && (
-            <button type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => add(input)} style={{ display: "block", width: "100%", textAlign: "left", border: "none", borderBottom: "1px solid #f3f4f6", background: "transparent", padding: "8px 12px", fontSize: 13, cursor: "pointer", color: "#0d9488", fontWeight: 600 }}>
-              + Create “{input.trim()}”
-            </button>
-          )}
-          {matches.map((t) => (
-            <button key={t} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => add(t)} style={{ display: "block", width: "100%", textAlign: "left", border: "none", borderBottom: "1px solid #f3f4f6", background: "transparent", padding: "8px 12px", fontSize: 13, cursor: "pointer", color: "#111827" }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f9fafb"; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
-            >{t}</button>
-          ))}
-        </div>
+    <div style={{ width: "100%", padding: "3px 4px" }}>
+      {/* Cell preview — click to open the tag picker. */}
+      <button
+        type="button"
+        onClick={openModal}
+        title="Edit tags"
+        style={{
+          display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center",
+          width: "100%", minHeight: 26, textAlign: "left", cursor: "pointer",
+          border: "1px dashed #d1d5db", borderRadius: 6, background: "transparent",
+          padding: tags.length ? "4px 6px" : "5px 8px",
+        }}
+      >
+        {tags.length ? tags.map((t) => chip(t)) : <span style={{ fontSize: 12, color: "#6b7280" }}>＋ Add tags</span>}
+      </button>
+
+      {open && typeof document !== "undefined" && createPortal(
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+          onClick={() => setOpen(false)}
+        >
+          <div
+            style={{ background: "#fff", borderRadius: 12, width: 460, maxWidth: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "16px 18px 12px" }}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>Tags</div>
+                {rowName ? <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{rowName}</div> : null}
+              </div>
+              <button type="button" onClick={() => setOpen(false)} title="Close" style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 20, lineHeight: 1, color: "#9ca3af", padding: 0 }}>×</button>
+            </div>
+
+            {/* Selected tags */}
+            <div style={{ padding: "0 18px 12px" }}>
+              {tags.length ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{tags.map((t) => chip(t, () => remove(t)))}</div>
+              ) : (
+                <div style={{ fontSize: 12.5, color: "#9ca3af", fontStyle: "italic" }}>No tags yet.</div>
+              )}
+            </div>
+
+            {/* Search / create */}
+            <div style={{ padding: "0 18px 12px" }}>
+              <input
+                autoFocus
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") { e.preventDefault(); if (input.trim() && !exactExists) add(input); else if (matches.length) add(matches[0]); }
+                  else if (e.key === "Backspace" && !input && tags.length) remove(tags[tags.length - 1]);
+                }}
+                placeholder="Search tags or create a new one…"
+                style={{ width: "100%", boxSizing: "border-box", border: "1px solid #d1d5db", borderRadius: 8, padding: "9px 12px", fontSize: 13.5, outline: "none", fontFamily: "inherit" }}
+              />
+            </div>
+
+            {/* Results */}
+            <div style={{ flex: 1, overflowY: "auto", borderTop: "1px solid #f1f5f9", padding: "6px 0", minHeight: 80 }}>
+              {q && !exactExists && (
+                <button type="button" onClick={() => add(input)} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", border: "none", background: "transparent", padding: "9px 18px", fontSize: 13.5, cursor: "pointer", color: "#0d9488", fontWeight: 600 }}
+                  onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f0fdfa"; }}
+                  onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+                >
+                  <span style={{ fontSize: 16, lineHeight: 1 }}>＋</span> Create “{input.trim()}”
+                </button>
+              )}
+              {loading ? (
+                <div style={{ padding: "12px 18px", fontSize: 13, color: "#9ca3af" }}>Loading tags from Shopify…</div>
+              ) : matches.length ? (
+                matches.map((t) => (
+                  <button key={t} type="button" onClick={() => add(t)} style={{ display: "block", width: "100%", textAlign: "left", border: "none", background: "transparent", padding: "9px 18px", fontSize: 13.5, cursor: "pointer", color: "#111827" }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "#f9fafb"; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+                  >{t}</button>
+                ))
+              ) : !q ? (
+                <div style={{ padding: "12px 18px", fontSize: 13, color: "#9ca3af" }}>Start typing to search your Shopify tags.</div>
+              ) : !exactExists ? null : (
+                <div style={{ padding: "12px 18px", fontSize: 13, color: "#9ca3af" }}>“{input.trim()}” is already added.</div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 18px", borderTop: "1px solid #f1f5f9" }}>
+              <span style={{ fontSize: 12, color: "#9ca3af" }}>{tags.length} tag{tags.length === 1 ? "" : "s"}</span>
+              <button type="button" onClick={() => setOpen(false)} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>Done</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
@@ -18632,6 +18705,39 @@ function CollectionImageManagerModal({
   );
 }
 
+// When a Collections row is duplicated from an existing Shopify product, the
+// copied description still describes the SOURCE product's print (its name +
+// colours/motifs). Rewrite it with AI so it references the NEW product's print
+// instead, keeping every garment detail (fit, fabric, care, model, bullets)
+// unchanged. Returns the original HTML untouched if AI is unavailable or errors.
+async function adaptDuplicatedDescription(sourceTitle: string, newName: string, descriptionHtml: string): Promise<string> {
+  const key = process.env.ANTHROPIC_API_KEY;
+  const src = (descriptionHtml ?? "").trim();
+  if (!key || !src || !newName.trim() || !sourceTitle.trim()) return descriptionHtml;
+  // Best-effort new print name: the words in the new name that aren't shared
+  // with the source title (the style words are shared; the print differs).
+  const srcWords = new Set(sourceTitle.toLowerCase().split(/\s+/).filter(Boolean));
+  const newPrint = (newName.trim().split(/\s+/).filter((w) => !srcWords.has(w.toLowerCase())).join(" ").trim()
+    || newName.trim().split(/\s+/).slice(-1)[0] || "").trim();
+  if (!newPrint) return descriptionHtml;
+  const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
+  const system = "You adapt product descriptions for a women's fashion brand when the SAME garment is offered in a new print/pattern. Keep every garment detail identical — fit, silhouette, fabric composition, waistband, styling suggestions, care instructions, model height/size, and any bullet list — and change ONLY the wording that refers to the print: its name and any description of its specific colours or motifs. Never invent specific colours or motifs for the new print; if the new print's look isn't given, refer to it by name (e.g. \"the <print> print\") and drop the specific colour/motif clause. Output ONLY the description as HTML in the same structure and length as the input — no preamble, quotes, or labels.";
+  const user = `Original product: "${sourceTitle}"\nNew product: "${newName}" (its print is "${newPrint}")\n\nThe new product is the SAME garment in a different print. Rewrite the description below for the new product: replace the original print's name and every reference to its specific colours/motifs with a reference to the "${newPrint}" print by name. Keep all other wording exactly.\n\nOriginal description (HTML):\n${src}`;
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({ model, max_tokens: 800, system, messages: [{ role: "user", content: user }] }),
+    });
+    if (!res.ok) return descriptionHtml;
+    const json = await res.json() as { content?: Array<{ type?: string; text?: string }> };
+    const text = (json.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "").join("").trim();
+    return text || descriptionHtml;
+  } catch {
+    return descriptionHtml;
+  }
+}
+
 // Duplicate From: opens a modal picker, searches recent Shopify
 // products by STYLE (the style name from product info matched against
 // the row's name — e.g. "Corduroy Jacket Black" matches style
@@ -18679,6 +18785,9 @@ function CollectionDuplicateFromCell({
     const fd = new FormData();
     fd.set("intent", "duplicate_from_shopify_product");
     fd.set("productId", p.id);
+    // The new row's name carries the new print — the server uses it to swap the
+    // copied description's print reference to match this product.
+    fd.set("newName", currentName ?? "");
     pickFetcher.submit(fd, { method: "post" });
   };
   useEffect(() => {
