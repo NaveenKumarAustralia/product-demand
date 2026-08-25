@@ -9153,6 +9153,10 @@ function escapeHtmlText(s: string): string {
   return (s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
 }
 type BarcodeItem = { label: string; sku: string; barcode: string; qty: number };
+// Physical label size (AHUJA 50×25mm roll on the TVS LP 46 NEO). One label per
+// page so it prints one die-cut label at a time on the thermal printer.
+const LABEL_W_MM = 50;
+const LABEL_H_MM = 25;
 // Build the print sheet (one label per requested copy) in a hidden iframe and
 // trigger the browser's print dialog — no popup window, no external deps.
 function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { count: number }>) {
@@ -9161,21 +9165,23 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
     const n = Math.max(0, Math.floor(it.count) || 0);
     const code = (it.barcode ?? "").trim();
     if (!n || !code) continue;
-    const svg = code128Svg(code, { widthMm: 36, heightMm: 12 });
-    const heading = escapeHtmlText([productName, it.label].filter(Boolean).join(" · "));
-    const one = `<div class="lbl"><div class="pname">${heading}</div><div class="bc">${svg}</div><div class="code">${escapeHtmlText(code)}</div></div>`;
+    const svg = code128Svg(code, { widthMm: 44, heightMm: 9 });
+    const name = escapeHtmlText(productName);
+    const sku = escapeHtmlText((it.sku ?? "").trim());
+    const one = `<div class="lbl"><div class="pname">${name}</div>${sku ? `<div class="sku">${sku}</div>` : ""}<div class="bc">${svg}</div><div class="code">${escapeHtmlText(code)}</div></div>`;
     for (let i = 0; i < n; i++) labels.push(one);
   }
   if (!labels.length) return;
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Barcodes</title><style>
     *{box-sizing:border-box;} body{margin:0;font-family:Arial,Helvetica,sans-serif;}
-    .sheet{display:flex;flex-wrap:wrap;gap:2mm;padding:4mm;}
-    .lbl{width:40mm;height:24mm;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1mm;border:1px dashed #ccc;page-break-inside:avoid;}
-    .pname{font-size:7pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-bottom:0.5mm;}
-    .bc{line-height:0;} .bc svg{display:block;}
-    .code{font-size:8pt;letter-spacing:1px;margin-top:0.5mm;font-family:'Courier New',monospace;}
-    @media print{ .lbl{border:none;} @page{margin:6mm;} }
-  </style></head><body><div class="sheet">${labels.join("")}</div></body></html>`;
+    @page{ size:${LABEL_W_MM}mm ${LABEL_H_MM}mm; margin:0; }
+    .lbl{width:${LABEL_W_MM}mm;height:${LABEL_H_MM}mm;padding:1.5mm 1mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;page-break-after:always;}
+    .lbl:last-child{page-break-after:auto;}
+    .pname{font-size:6.5pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1.15;}
+    .sku{font-size:7.5pt;font-weight:700;text-align:center;line-height:1.15;}
+    .bc{line-height:0;margin-top:0.5mm;} .bc svg{display:block;}
+    .code{font-size:8pt;letter-spacing:1px;font-family:'Courier New',monospace;line-height:1.15;}
+  </style></head><body>${labels.join("")}</body></html>`;
   const iframe = document.createElement("iframe");
   iframe.setAttribute("aria-hidden", "true");
   Object.assign(iframe.style, { position: "fixed", right: "0", bottom: "0", width: "0", height: "0", border: "0" });
@@ -9211,63 +9217,75 @@ function collectionRowBarcodeItems(row: Record<string, string>): BarcodeItem[] {
     };
   });
 }
-// Shared popup: lists each variant with an editable copy count (pre-filled from
-// the ordered qty), then prints the labels.
-function PrintBarcodesModal({ title, items, onClose }: { title: string; items: BarcodeItem[]; onClose: () => void }) {
+// Shared popup: lists each variant ACROSS with an editable copy count
+// (pre-filled from the ordered qty), fetches any missing barcodes from Shopify
+// on the fly, then prints the labels.
+function PrintBarcodesModal({ title, items, productId, onClose }: { title: string; items: BarcodeItem[]; productId?: string; onClose: () => void }) {
+  const [rows, setRows] = useState<BarcodeItem[]>(items);
   const [counts, setCounts] = useState<number[]>(() => items.map((it) => Math.max(0, Math.floor(it.qty) || 0)));
+  const codesFetcher = useFetcher<{ variants?: Array<{ title: string; sku: string; barcode: string }> }>();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
-  const total = counts.reduce((s, n, i) => s + (items[i].barcode ? (Number(n) || 0) : 0), 0);
-  const anyMissing = items.some((it) => !it.barcode);
+  // Fill any missing barcodes straight from Shopify (one product at a time).
+  useEffect(() => {
+    if (!productId) return;
+    if (!rows.some((r) => !r.barcode)) return;
+    codesFetcher.load(`/api/product-variant-codes?productId=${encodeURIComponent(productId)}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [productId]);
+  useEffect(() => {
+    const variants = codesFetcher.data?.variants;
+    if (!variants?.length) return;
+    const byLabel = new Map<string, { sku: string; barcode: string }>();
+    for (const v of variants) byLabel.set(normalizeVariantSizeLabel(v.title), { sku: v.sku, barcode: v.barcode });
+    setRows((prev) => prev.map((r) => {
+      if (r.barcode) return r;
+      const m = byLabel.get(normalizeVariantSizeLabel(r.label));
+      return m && m.barcode ? { ...r, barcode: m.barcode, sku: r.sku || m.sku } : r;
+    }));
+  }, [codesFetcher.data]);
+  const fetching = codesFetcher.state !== "idle";
+  const total = counts.reduce((s, n, i) => s + (rows[i]?.barcode ? (Number(n) || 0) : 0), 0);
+  const anyMissing = rows.some((it) => !it.barcode);
   if (typeof document === "undefined") return null;
   return createPortal(
     <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
-      <div style={{ background: "#fff", borderRadius: 12, width: 480, maxWidth: "100%", maxHeight: "82vh", display: "flex", flexDirection: "column", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }} onClick={(e) => e.stopPropagation()}>
+      <div style={{ background: "#fff", borderRadius: 12, width: 620, maxWidth: "100%", maxHeight: "82vh", display: "flex", flexDirection: "column", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "16px 18px 10px" }}>
           <div>
             <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>Print barcodes</div>
-            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{title}</div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{title}{fetching ? " · fetching barcodes from Shopify…" : ""}</div>
           </div>
           <button type="button" onClick={onClose} title="Close" style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 20, lineHeight: 1, color: "#9ca3af", padding: 0 }}>×</button>
         </div>
-        <div style={{ flex: 1, overflowY: "auto", padding: "0 18px" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-            <thead>
-              <tr style={{ textAlign: "left", color: "#6b7280", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>
-                <th style={{ padding: "6px 4px" }}>Size</th>
-                <th style={{ padding: "6px 4px" }}>Barcode</th>
-                <th style={{ padding: "6px 4px", width: 90, textAlign: "right" }}>Copies</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((it, i) => (
-                <tr key={i} style={{ borderTop: "1px solid #f1f5f9" }}>
-                  <td style={{ padding: "8px 4px", fontWeight: 600, color: "#111827" }}>{it.label || "—"}</td>
-                  <td style={{ padding: "8px 4px", fontFamily: "monospace", color: it.barcode ? "#111827" : "#dc2626" }}>{it.barcode || "no barcode"}</td>
-                  <td style={{ padding: "8px 4px", textAlign: "right" }}>
-                    <input
-                      type="number"
-                      min={0}
-                      value={counts[i]}
-                      disabled={!it.barcode}
-                      onChange={(e) => setCounts((cur) => cur.map((c, j) => j === i ? Math.max(0, Math.floor(Number(e.target.value) || 0)) : c))}
-                      style={{ width: 70, textAlign: "right", border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 8px", fontSize: 13, opacity: it.barcode ? 1 : 0.5 }}
-                    />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {anyMissing && <div style={{ fontSize: 12, color: "#b45309", padding: "8px 0" }}>Sizes without a barcode can&rsquo;t be printed — generate the SKU/barcode first.</div>}
+        {/* Variants laid out ACROSS (wrap to new lines as needed). */}
+        <div style={{ flex: 1, overflowY: "auto", padding: "4px 18px 12px", display: "flex", flexWrap: "wrap", gap: 10 }}>
+          {rows.map((it, i) => (
+            <div key={i} style={{ border: "1px solid #e5e7eb", borderRadius: 10, padding: "10px 12px", width: 128, textAlign: "center", background: it.barcode ? "#fff" : "#fef2f2" }}>
+              <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>{it.label || "—"}</div>
+              <div style={{ fontFamily: "monospace", fontSize: 10.5, color: it.barcode ? "#6b7280" : "#dc2626", margin: "3px 0 9px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={it.barcode || "no barcode"}>{it.barcode || (fetching ? "…" : "no barcode")}</div>
+              <input
+                type="number"
+                min={0}
+                value={counts[i]}
+                disabled={!it.barcode}
+                onChange={(e) => setCounts((cur) => cur.map((c, j) => j === i ? Math.max(0, Math.floor(Number(e.target.value) || 0)) : c))}
+                style={{ width: 72, textAlign: "center", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 8px", fontSize: 14, opacity: it.barcode ? 1 : 0.5 }}
+              />
+              <div style={{ fontSize: 10, color: "#9ca3af", marginTop: 3 }}>copies</div>
+            </div>
+          ))}
+          {rows.length === 0 && <div style={{ fontSize: 13, color: "#9ca3af", padding: "12px 0" }}>No variants to print.</div>}
         </div>
+        {anyMissing && !fetching && <div style={{ fontSize: 12, color: "#b45309", padding: "0 18px 8px" }}>Some sizes still have no barcode in Shopify — those are skipped.</div>}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 18px", borderTop: "1px solid #f1f5f9" }}>
           <span style={{ fontSize: 12, color: "#6b7280" }}>{total} label{total === 1 ? "" : "s"}</span>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" onClick={onClose} style={{ background: "#f3f4f6", color: "#374151", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-            <button type="button" disabled={total <= 0} onClick={() => printBarcodeLabels(title, items.map((it, i) => ({ ...it, count: counts[i] })))} style={{ background: total > 0 ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", fontSize: 13.5, fontWeight: 700, cursor: total > 0 ? "pointer" : "default" }}>🖨 Print</button>
+            <button type="button" disabled={total <= 0} onClick={() => printBarcodeLabels(title, rows.map((it, i) => ({ ...it, count: counts[i] })))} style={{ background: total > 0 ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", fontSize: 13.5, fontWeight: 700, cursor: total > 0 ? "pointer" : "default" }}>🖨 Print</button>
           </div>
         </div>
       </div>
@@ -17301,6 +17319,7 @@ function CollectionSpreadsheetPage({
       {printRowIdx !== null && rows[printRowIdx] && (
         <PrintBarcodesModal
           title={rows[printRowIdx].name ?? rows[printRowIdx].title ?? "Product"}
+          productId={rows[printRowIdx][COL_ROW_SHOPIFY_PRODUCT_ID] ?? ""}
           items={collectionRowBarcodeItems(rows[printRowIdx])}
           onClose={() => setPrintRowIdx(null)}
         />
@@ -25403,6 +25422,7 @@ function OrderRow({
         {printOpen && (
           <PrintBarcodesModal
             title={order.productTitle ?? "Product"}
+            productId={order.productId ?? ""}
             items={(order.lines as Array<{ variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }>).map((l) => ({ label: l.variantTitle, sku: l.sku ?? "", barcode: l.barcode ?? "", qty: l.qtyOrdered }))}
             onClose={() => setPrintOpen(false)}
           />
@@ -27443,24 +27463,29 @@ function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; s
   // Aggregate USA-marked orders into one tile per product (group by productId
   // when linked, else lowercased title so custom rows still merge).
   const tiles = useMemo(() => {
-    const byKey = new Map<string, { key: string; title: string; productType: string; productId: string; imageUrl: string; bySize: Record<string, number> }>();
+    const byKey = new Map<string, { key: string; title: string; productType: string; productId: string; imageUrl: string; bySize: Record<string, number>; codes: Record<string, { sku: string; barcode: string }> }>();
     for (const o of orders) {
       const title = (o.productTitle ?? "").trim();
       const key = o.productId ? `pid:${o.productId}` : `title:${title.toLowerCase() || `id:${o.id}`}`;
       let t = byKey.get(key);
-      if (!t) { t = { key, title: title || "(untitled)", productType: (o.productType ?? "") || "", productId: (o.productId ?? "") || "", imageUrl: (o.productImageUrl ?? "") || "", bySize: {} }; byKey.set(key, t); }
+      if (!t) { t = { key, title: title || "(untitled)", productType: (o.productType ?? "") || "", productId: (o.productId ?? "") || "", imageUrl: (o.productImageUrl ?? "") || "", bySize: {}, codes: {} }; byKey.set(key, t); }
       if (!t.imageUrl && o.productImageUrl) t.imageUrl = o.productImageUrl;
       if (!t.productType && o.productType) t.productType = o.productType;
-      const lines = (o.lines ?? []) as Array<{ variantTitle: string; qtyOrdered: number }>;
+      const lines = (o.lines ?? []) as Array<{ variantTitle: string; qtyOrdered: number; sku?: string | null; barcode?: string | null }>;
       for (const l of lines) {
         const size = (l.variantTitle ?? "").trim();
         const qty = Number(l.qtyOrdered) || 0;
         if (!size || qty <= 0) continue;
         t.bySize[size] = (t.bySize[size] ?? 0) + qty;
+        const cur = t.codes[size] ?? { sku: "", barcode: "" };
+        if (!cur.sku && l.sku) cur.sku = String(l.sku);
+        if (!cur.barcode && l.barcode) cur.barcode = String(l.barcode);
+        t.codes[size] = cur;
       }
     }
     return Array.from(byKey.values()).filter((t) => Object.keys(t.bySize).length > 0).sort((a, b) => a.title.localeCompare(b.title));
   }, [orders]);
+  const [printTileKey, setPrintTileKey] = useState<string | null>(null);
 
   const types = useMemo(() => Array.from(new Set(tiles.map((t) => t.productType).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [tiles]);
   const q = search.trim().toLowerCase();
@@ -27542,10 +27567,17 @@ function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; s
                 ))}
               </div>
               <div style={s.usaCardTotal}>{total} pcs</div>
+              <button type="button" onClick={() => setPrintTileKey(t.key)} style={s.usaCardPrintBtn} title="Print barcodes for this product">🏷️ Print barcodes</button>
             </div>
           );
         })}
       </div>
+      {printTileKey !== null && (() => {
+        const t = tiles.find((x) => x.key === printTileKey);
+        if (!t) return null;
+        const items = orderSizes(t.bySize).map((k) => ({ label: k, sku: t.codes[k]?.sku ?? "", barcode: t.codes[k]?.barcode ?? "", qty: t.bySize[k] }));
+        return <PrintBarcodesModal title={t.title} productId={t.productId} items={items} onClose={() => setPrintTileKey(null)} />;
+      })()}
     </div>
   );
 }
@@ -30896,7 +30928,8 @@ const s: Record<string, React.CSSProperties> = {
   usaSizeCol: { flex: "1 0 auto", minWidth: 40, textAlign: "center", borderRight: "1px solid #f1f5f9", padding: "6px 4px" },
   usaSizeLabel: { fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.02em" },
   usaSizeQty: { fontSize: 16, fontWeight: 700, color: "#0f172a", marginTop: 2 },
-  usaCardTotal: { fontSize: 11.5, fontWeight: 700, color: "#0e7490", textAlign: "right", padding: "6px 12px 10px", borderTop: "1px solid #f1f5f9" },
+  usaCardTotal: { fontSize: 11.5, fontWeight: 700, color: "#0e7490", textAlign: "right", padding: "6px 12px 4px", borderTop: "1px solid #f1f5f9" },
+  usaCardPrintBtn: { display: "block", width: "calc(100% - 16px)", margin: "0 8px 10px", background: "#0e7490", color: "#fff", border: "none", borderRadius: 7, padding: "7px 8px", fontSize: 12, fontWeight: 700, cursor: "pointer" },
   productName: { fontWeight: 600, color: "#111827", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 },
   sku: { fontFamily: "monospace", fontSize: 11, color: "#111827", whiteSpace: "pre-line" },
   barcode: { fontFamily: "monospace", fontSize: 10, color: "#111827", whiteSpace: "pre-line", marginTop: 2 },
