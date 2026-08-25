@@ -81,7 +81,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     COLLECTION_GROUPS_KEY,
     INR_AUD_CACHE_KEY,
   ];
-  const needsOrders = isRestockPage || page === "packing";
+  // usa-stock: a tile view of every open order marked "Send to USA" (across
+  // both vendors), so it needs the orders loaded but no vendor scoping.
+  const needsOrders = isRestockPage || page === "packing" || page === "usa-stock";
   const needsPackingLists = page === "packing" || packingId !== null;
   // activityLogs feeds the Settings activity panel and the cell-history popups —
   // which only exist on the restock/JJ tables (historyEntity) and the packing
@@ -701,7 +703,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // round-trips, the dominant 5-10s page-load cost. Variants are now
   // fetched on-demand by OrderRow when staff expand the ▼ inventory
   // panel, via /api/product-inventory.
-  const orders = filteredOrders;
+  // usa-stock shows every open order marked "Send to USA" as tiles, ignoring
+  // the restock table's status/priority/etc. filters (they don't apply here).
+  const orders = page === "usa-stock"
+    ? normalizedOrders.filter((order) => (order.destination ?? "") === "send_to_usa")
+    : filteredOrders;
   // Defensive: hydrate shippingMethod from the DB in case the Prisma client
   // wasn't regenerated on this environment to know about the field. The
   // ADD COLUMN IF NOT EXISTS makes this safe on a stale schema too.
@@ -10173,6 +10179,7 @@ export default function PortalDashboard() {
     : page === "collections" ? "Collections"
     : page === "jj-new-products" ? "JJ New Products"
     : page === "reorder" ? "Reorder Planner"
+    : page === "usa-stock" ? "USA Stock"
     : page === "search" ? "Search"
     : page === "dropbox" ? "Dropbox"
     : page === "photoshoot" ? "Photo Shoots"
@@ -10501,6 +10508,22 @@ export default function PortalDashboard() {
                   />
                 </label>
               )}
+              {page === "restock" && (
+                <button
+                  type="button"
+                  onClick={() => updateParams({ page: "usa-stock" })}
+                  style={s.usaStockNavButton}
+                  title="View products marked Send to USA as a picture grid"
+                >🇺🇸 USA Stock</button>
+              )}
+              {page === "usa-stock" && (
+                <button
+                  type="button"
+                  onClick={() => updateParams({ page: "restock" })}
+                  style={s.usaStockNavButton}
+                  title="Back to Existing Products Restock"
+                >← Restock</button>
+              )}
               {(isRestockPage || page === "packing" || page === "fabric" || page === "productinfo") && <PortalUndoButton />}
               <MessagesMenu messages={messages} />
               <ThreadPanel users={users} currentUser={currentUser} />
@@ -10699,6 +10722,8 @@ export default function PortalDashboard() {
           <ReorderPlannerPage search={reorderSearch} />
         ) : page === "search" ? (
           <GlobalSearchPage query={globalSearchQuery} results={globalSearch} isAdmin={Boolean(currentUser?.admin)} shopDomain={shopDomain} />
+        ) : page === "usa-stock" ? (
+          <UsaStockPanel orders={orders} shopDomain={shopDomain} />
         ) : page === "jj-restock" ? (
           <JJRestockPanel
             orders={orders}
@@ -26875,6 +26900,116 @@ function JJOrderRow({
 
 
 // Reorder Planner — a full-width table of every active product, ranked most-
+// USA Stock: a picture grid of every open order marked "Send to USA". Orders
+// are aggregated into one tile per product (per-size quantities summed across
+// that product's USA orders): photo, title, and a size → quantity strip.
+// Columns-across (3-6) and a product-type filter (buttons) sit at the top; the
+// column choice persists in localStorage.
+const USA_COLS_KEY = "usa-stock-cols-v1";
+function usaAdminProductUrl(productId: string, shopDomain: string | null): string {
+  const numeric = productId.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
+  if (!numeric) return "";
+  const store = (shopDomain ?? "").replace(/\.myshopify\.com$/i, "").trim();
+  return store ? `https://admin.shopify.com/store/${store}/products/${numeric}` : `https://admin.shopify.com/store/products/${numeric}`;
+}
+function UsaStockPanel({ orders, shopDomain }: { orders: Order[]; shopDomain: string | null }) {
+  const [cols, setCols] = useState<number>(() => {
+    if (typeof window === "undefined") return 6;
+    const v = Number(window.localStorage.getItem(USA_COLS_KEY));
+    return v >= 3 && v <= 6 ? v : 6;
+  });
+  const [typeFilter, setTypeFilter] = useState<string>("");
+  const setColsPersist = (n: number) => { setCols(n); try { window.localStorage.setItem(USA_COLS_KEY, String(n)); } catch { /* ignore */ } };
+
+  // Aggregate USA-marked orders into one tile per product (group by productId
+  // when linked, else lowercased title so custom rows still merge).
+  const tiles = useMemo(() => {
+    const byKey = new Map<string, { key: string; title: string; productType: string; productId: string; imageUrl: string; bySize: Record<string, number> }>();
+    for (const o of orders) {
+      const title = (o.productTitle ?? "").trim();
+      const key = o.productId ? `pid:${o.productId}` : `title:${title.toLowerCase() || `id:${o.id}`}`;
+      let t = byKey.get(key);
+      if (!t) { t = { key, title: title || "(untitled)", productType: (o.productType ?? "") || "", productId: (o.productId ?? "") || "", imageUrl: (o.productImageUrl ?? "") || "", bySize: {} }; byKey.set(key, t); }
+      if (!t.imageUrl && o.productImageUrl) t.imageUrl = o.productImageUrl;
+      if (!t.productType && o.productType) t.productType = o.productType;
+      const lines = (o.lines ?? []) as Array<{ variantTitle: string; qtyOrdered: number }>;
+      for (const l of lines) {
+        const size = (l.variantTitle ?? "").trim();
+        const qty = Number(l.qtyOrdered) || 0;
+        if (!size || qty <= 0) continue;
+        t.bySize[size] = (t.bySize[size] ?? 0) + qty;
+      }
+    }
+    return Array.from(byKey.values()).filter((t) => Object.keys(t.bySize).length > 0).sort((a, b) => a.title.localeCompare(b.title));
+  }, [orders]);
+
+  const types = useMemo(() => Array.from(new Set(tiles.map((t) => t.productType).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [tiles]);
+  const visible = typeFilter ? tiles.filter((t) => t.productType === typeFilter) : tiles;
+  const orderSizes = (bySize: Record<string, number>) => {
+    const idx = (v: string) => { const i = PACKING_SIZES.findIndex((p) => p.toUpperCase() === v.toUpperCase()); return i < 0 ? 999 : i; };
+    return Object.keys(bySize).sort((a, b) => idx(a) - idx(b) || a.localeCompare(b));
+  };
+
+  if (tiles.length === 0) {
+    return (
+      <div style={s.usaStockEmpty}>
+        <div style={{ fontSize: 40, marginBottom: 8 }}>🇺🇸</div>
+        <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 4 }}>No products marked for USA yet</div>
+        <div style={{ color: "#6b7280", fontSize: 13, maxWidth: 420, textAlign: "center" }}>On the Existing Products Restock page, set a product&rsquo;s Destination to &ldquo;Send to USA&rdquo; (or split part of an order to USA) and it will appear here.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: "4px 2px 40px" }}>
+      <div style={s.usaStockControls}>
+        <div style={s.usaStockTypeRow}>
+          <button type="button" onClick={() => setTypeFilter("")} style={{ ...s.usaTypeButton, ...(typeFilter === "" ? s.usaTypeButtonActive : {}) }}>All ({tiles.length})</button>
+          {types.map((t) => {
+            const count = tiles.filter((x) => x.productType === t).length;
+            return <button key={t} type="button" onClick={() => setTypeFilter(t)} style={{ ...s.usaTypeButton, ...(typeFilter === t ? s.usaTypeButtonActive : {}) }}>{t} ({count})</button>;
+          })}
+        </div>
+        <div style={s.usaStockColsRow}>
+          <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Across</span>
+          {[3, 4, 5, 6].map((n) => (
+            <button key={n} type="button" onClick={() => setColsPersist(n)} style={{ ...s.usaColButton, ...(cols === n ? s.usaColButtonActive : {}) }}>{n}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: 14, marginTop: 14 }}>
+        {visible.map((t) => {
+          const sizes = orderSizes(t.bySize);
+          const total = sizes.reduce((sum, k) => sum + t.bySize[k], 0);
+          const adminUrl = t.productId ? usaAdminProductUrl(t.productId, shopDomain) : "";
+          return (
+            <div key={t.key} style={s.usaCard}>
+              <div style={s.usaCardImageWrap}>
+                {t.imageUrl
+                  ? <img src={t.imageUrl} alt={t.title} loading="lazy" decoding="async" style={s.usaCardImage} title="Click to enlarge" onClick={() => document.dispatchEvent(new CustomEvent("show-image-lightbox", { detail: { url: t.imageUrl, alt: t.title } }))} />
+                  : <div style={s.usaCardNoImg}>—</div>}
+              </div>
+              <div style={s.usaCardTitle}>
+                {adminUrl ? <a href={adminUrl} target="_blank" rel="noopener noreferrer" style={{ color: "inherit", textDecoration: "none" }} title="Open in Shopify admin">{t.title}</a> : t.title}
+              </div>
+              <div style={s.usaSizeStrip}>
+                {sizes.map((k) => (
+                  <div key={k} style={s.usaSizeCol}>
+                    <div style={s.usaSizeLabel}>{k}</div>
+                    <div style={s.usaSizeQty}>{t.bySize[k]}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={s.usaCardTotal}>{total} pcs</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // urgent-first (lowest days-of-cover). Each product is one row with its summary
 // columns + product-level "sell until" / lead; expand a row to see the per-size
 // breakdown and edit suggested quantities. "Place order" auto-routes to Existing
@@ -30202,6 +30337,26 @@ const s: Record<string, React.CSSProperties> = {
   },
   thumb: { width: 86, height: 115, objectFit: "contain", borderRadius: 2, display: "block", margin: "0 auto", background: "#fff" },
   noImg: { color: "#d1d5db", textAlign: "center" },
+  // USA Stock page
+  usaStockNavButton: { display: "inline-flex", alignItems: "center", gap: 6, background: "#0e7490", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
+  usaStockEmpty: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, padding: "80px 20px", textAlign: "center" },
+  usaStockControls: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap", padding: "4px 2px" },
+  usaStockTypeRow: { display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", flex: 1 },
+  usaStockColsRow: { display: "flex", alignItems: "center", gap: 6 },
+  usaTypeButton: { background: "#fff", border: "1px solid #d1d5db", borderRadius: 999, padding: "6px 14px", fontSize: 13, fontWeight: 600, color: "#374151", cursor: "pointer" },
+  usaTypeButtonActive: { background: "#0e7490", borderColor: "#0e7490", color: "#fff" },
+  usaColButton: { width: 32, height: 30, background: "#fff", border: "1px solid #d1d5db", borderRadius: 7, fontSize: 13, fontWeight: 700, color: "#374151", cursor: "pointer" },
+  usaColButtonActive: { background: "#0e7490", borderColor: "#0e7490", color: "#fff" },
+  usaCard: { display: "flex", flexDirection: "column", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, overflow: "hidden", boxShadow: "0 1px 2px rgba(16,24,40,0.05)" },
+  usaCardImageWrap: { width: "100%", aspectRatio: "3 / 4", background: "#f9fafb", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" },
+  usaCardImage: { width: "100%", height: "100%", objectFit: "contain", cursor: "zoom-in", display: "block" },
+  usaCardNoImg: { color: "#d1d5db", fontSize: 24 },
+  usaCardTitle: { fontWeight: 700, fontSize: 13.5, color: "#111827", lineHeight: 1.3, padding: "10px 12px 6px", overflowWrap: "anywhere" },
+  usaSizeStrip: { display: "flex", flexWrap: "wrap", gap: 0, borderTop: "1px solid #f1f5f9", margin: "0 0 0", padding: "0" },
+  usaSizeCol: { flex: "1 0 auto", minWidth: 40, textAlign: "center", borderRight: "1px solid #f1f5f9", padding: "6px 4px" },
+  usaSizeLabel: { fontSize: 11, fontWeight: 700, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.02em" },
+  usaSizeQty: { fontSize: 16, fontWeight: 700, color: "#0f172a", marginTop: 2 },
+  usaCardTotal: { fontSize: 11.5, fontWeight: 700, color: "#0e7490", textAlign: "right", padding: "6px 12px 10px", borderTop: "1px solid #f1f5f9" },
   productName: { fontWeight: 600, color: "#111827", whiteSpace: "normal", overflowWrap: "anywhere", lineHeight: 1.35 },
   sku: { fontFamily: "monospace", fontSize: 11, color: "#111827", whiteSpace: "pre-line" },
   barcode: { fontFamily: "monospace", fontSize: 10, color: "#111827", whiteSpace: "pre-line", marginTop: 2 },
