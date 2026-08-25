@@ -5871,6 +5871,9 @@ type CollectionChipOption = { value: string; label: string; bg: string; color: s
 type CollectionSettings = {
   statusOptions: CollectionChipOption[];
   sampleOptions: CollectionChipOption[];
+  // Per-product workflow status chip shown at the bottom of the Name cell
+  // (To be created / Created / Needs work / Ready / Scheduled / Active…).
+  productStatusOptions: CollectionChipOption[];
   // The Sample chip whose selection should auto-fill the Sample
   // RECEIVED date column with today's date. Stored as the chip value.
   sampleReceivedChipValue: string;
@@ -5895,9 +5898,19 @@ const DEFAULT_COLLECTION_SAMPLE_OPTIONS: CollectionChipOption[] = [
   { value: "sample_hq", label: "Sample HQ", bg: "#7c3aed", color: "#ffffff" },
   { value: "jackie_shoot", label: "Jackie Shoot", bg: "#78350f", color: "#ffffff" },
 ];
+// Per-product workflow status (shown as a chip at the bottom of the Name cell).
+const DEFAULT_COLLECTION_PRODUCT_STATUS_OPTIONS: CollectionChipOption[] = [
+  { value: "to_be_created", label: "To be created", bg: "#f3f4f6", color: "#374151" },
+  { value: "created", label: "Created", bg: "#e0e7ff", color: "#3730a3" },
+  { value: "needs_work", label: "Needs work", bg: "#fee2e2", color: "#b91c1c" },
+  { value: "ready", label: "Ready", bg: "#fef9c3", color: "#a16207" },
+  { value: "scheduled", label: "Scheduled", bg: "#cffafe", color: "#0e7490" },
+  { value: "active", label: "Active", bg: "#2563eb", color: "#ffffff" },
+];
 const DEFAULT_COLLECTION_SETTINGS: CollectionSettings = {
   statusOptions: DEFAULT_COLLECTION_STATUS_OPTIONS,
   sampleOptions: DEFAULT_COLLECTION_SAMPLE_OPTIONS,
+  productStatusOptions: DEFAULT_COLLECTION_PRODUCT_STATUS_OPTIONS,
   // "Sample arrived" fills the Sample RECEIVED date column with today.
   sampleReceivedChipValue: "sample_arrived",
 };
@@ -5925,6 +5938,7 @@ function normalizeCollectionSettings(value: unknown): CollectionSettings {
   return {
     statusOptions: normalizeCollectionChipOptions(v.statusOptions, DEFAULT_COLLECTION_STATUS_OPTIONS),
     sampleOptions: normalizeCollectionChipOptions(v.sampleOptions, DEFAULT_COLLECTION_SAMPLE_OPTIONS),
+    productStatusOptions: normalizeCollectionChipOptions(v.productStatusOptions, DEFAULT_COLLECTION_PRODUCT_STATUS_OPTIONS),
     sampleReceivedChipValue: typeof v.sampleReceivedChipValue === "string" && v.sampleReceivedChipValue.trim()
       ? v.sampleReceivedChipValue
       : DEFAULT_COLLECTION_SETTINGS.sampleReceivedChipValue,
@@ -15890,10 +15904,12 @@ function CollectionSpreadsheetPage({
   // collectionSettings (collections-only).
   const [localStatusOptions, setLocalStatusOptions] = useState<CollectionChipOption[]>(restockSettings.statusOptions);
   const [localSampleOptions, setLocalSampleOptions] = useState(collectionSettings.sampleOptions);
+  const [localProductStatusOptions, setLocalProductStatusOptions] = useState(collectionSettings.productStatusOptions);
   useEffect(() => { setLocalStatusOptions(restockSettings.statusOptions); }, [restockSettings.statusOptions]);
   useEffect(() => { setLocalSampleOptions(collectionSettings.sampleOptions); }, [collectionSettings.sampleOptions]);
+  useEffect(() => { setLocalProductStatusOptions(collectionSettings.productStatusOptions); }, [collectionSettings.productStatusOptions]);
   const settingsFetcher = useFetcher();
-  const saveChipOptions = (which: "statusOptions" | "sampleOptions", next: CollectionChipOption[]) => {
+  const saveChipOptions = (which: "statusOptions" | "sampleOptions" | "productStatusOptions", next: CollectionChipOption[]) => {
     if (which === "statusOptions") {
       setLocalStatusOptions(next);
       // Write to the shared restock settings so both sheets update.
@@ -15903,10 +15919,12 @@ function CollectionSpreadsheetPage({
       );
       return;
     }
-    setLocalSampleOptions(next);
+    // Sample + product-status chips both live in collectionSettings.
+    if (which === "sampleOptions") setLocalSampleOptions(next); else setLocalProductStatusOptions(next);
     const payload: CollectionSettings = {
       statusOptions: collectionSettings.statusOptions,
-      sampleOptions: next,
+      sampleOptions: which === "sampleOptions" ? next : localSampleOptions,
+      productStatusOptions: which === "productStatusOptions" ? next : localProductStatusOptions,
       sampleReceivedChipValue: collectionSettings.sampleReceivedChipValue,
     };
     settingsFetcher.submit(
@@ -16053,8 +16071,9 @@ function CollectionSpreadsheetPage({
           }
         }
         // If this row is already a Shopify product, mark it as needing an
-        // update push (an info column changed after creation).
-        if ((patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
+        // update push (an info column changed after creation). The per-product
+        // workflow status is portal-only, so it never triggers a Shopify push.
+        if (colId !== "__productStatus" && (patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
         return patched;
       });
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
@@ -16853,34 +16872,51 @@ function CollectionSpreadsheetPage({
                               ...(stickyLeft === undefined ? { position: "relative" } : {}),
                             }
                           : {};
+                        const cellInner = lockedDisplay ? (
+                          // Size / qty columns: keep the same big centred font as the
+                          // editable cell, but red (inventory is now managed elsewhere).
+                          col.type === "number" && !["price", "priceRupees", "compareAtPrice"].includes(col.id) ? (
+                            <span style={{ display: "block", width: "100%", textAlign: "center", fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)", fontWeight: 600, color: "#dc2626", padding: "1px 2px" }}>{value}</span>
+                          ) : (
+                            // Other locked cells: normal table text size, centered.
+                            <span style={{ fontSize: "var(--portal-table-font-size, 14px)", color: "var(--portal-table-text-color, #374151)", padding: "2px 4px", display: "block", width: "100%", textAlign: "center" }}>{value}</span>
+                          )
+                        ) : (
+                          <CollectionCell
+                            value={value}
+                            type={col.type ?? "text"}
+                            columnId={col.id}
+                            rowIndex={rIdx}
+                            updateCell={updateCell}
+                            productInfo={productInfo}
+                            generateSkuAndBarcode={generateSkuAndBarcode}
+                            placeholder=""
+                            users={users}
+                            rowKey={row.__rowKey ?? ""}
+                            collectionId={listItem.id}
+                            rowName={row.name ?? row.title ?? ""}
+                            threadCounts={threadCounts}
+                          />
+                        );
                         return (
                           <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky} style={noteTdStyle}>
-                            {lockedDisplay ? (
-                              // Size / qty columns: keep the same big centred font as the
-                              // editable cell, but red (inventory is now managed elsewhere).
-                              col.type === "number" && !["price", "priceRupees", "compareAtPrice"].includes(col.id) ? (
-                                <span style={{ display: "block", width: "100%", textAlign: "center", fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)", fontWeight: 600, color: "#dc2626", padding: "1px 2px" }}>{value}</span>
-                              ) : (
-                                // Other locked cells: normal table text size, centered.
-                                <span style={{ fontSize: "var(--portal-table-font-size, 14px)", color: "var(--portal-table-text-color, #374151)", padding: "2px 4px", display: "block", width: "100%", textAlign: "center" }}>{value}</span>
-                              )
-                            ) : (
-                              <CollectionCell
-                                value={value}
-                                type={col.type ?? "text"}
-                                columnId={col.id}
-                                rowIndex={rIdx}
-                                updateCell={updateCell}
-                                productInfo={productInfo}
-                                generateSkuAndBarcode={generateSkuAndBarcode}
-                                placeholder=""
-                                users={users}
-                                rowKey={row.__rowKey ?? ""}
-                                collectionId={listItem.id}
-                                rowName={row.name ?? row.title ?? ""}
-                                threadCounts={threadCounts}
-                              />
-                            )}
+                            {col.id === "name" ? (
+                              // Name cell = product name on top + a per-product workflow
+                              // status chip pinned to the bottom (editable options).
+                              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 72, gap: 6 }}>
+                                <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>{cellInner}</div>
+                                <div onClick={(e) => e.stopPropagation()} style={{ width: "100%" }}>
+                                  <CollectionChipDropdown
+                                    value={row.__productStatus ?? ""}
+                                    options={localProductStatusOptions}
+                                    emptyLabel="Set status"
+                                    fullWidth
+                                    onChange={(v) => updateCell(rIdx, "__productStatus", v)}
+                                    onOptionsChange={(next) => saveChipOptions("productStatusOptions", next)}
+                                  />
+                                </div>
+                              </div>
+                            ) : cellInner}
                           </Td>
                         );
                       };
@@ -17074,12 +17110,14 @@ function CollectionChipDropdown({
   emptyLabel,
   onChange,
   onOptionsChange,
+  fullWidth = false,
 }: {
   value: string;
   options: CollectionChipOption[];
   emptyLabel?: string;
   onChange: (next: string) => void;
   onOptionsChange: (next: CollectionChipOption[]) => void;
+  fullWidth?: boolean;
 }) {
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const [open, setOpen] = useState(false);
@@ -17156,7 +17194,8 @@ function CollectionChipDropdown({
           border: "none", borderRadius: 6, padding: "5px 10px",
           fontSize: 12, fontWeight: 600, cursor: "pointer",
           minWidth: 96, maxWidth: "100%", textAlign: "center",
-          display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4,
+          display: fullWidth ? "flex" : "inline-flex", alignItems: "center", justifyContent: "center", gap: 4,
+          ...(fullWidth ? { width: "100%" } : {}),
         }}
       >
         <span>{option ? option.label : (emptyLabel ?? "—")}</span>
