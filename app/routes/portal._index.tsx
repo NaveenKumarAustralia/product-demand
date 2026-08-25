@@ -2627,6 +2627,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // newest-first). Duplicates of the same product still cluster together
     // because the table groups by productId, independent of the date.
     const createdAtOverride: Date | undefined = undefined;
+    // The product's group is its Shopify product type. The order block doesn't
+    // send it, so when it's not provided fetch it from Shopify at creation —
+    // otherwise the order lands ungrouped on the Restock/JJ/USA pages.
+    let resolvedProductType = normalizeProductGroup(String(form.get("productType") ?? ""));
+    if (!resolvedProductType && shop && codeSession?.accessToken) {
+      const pt = await shopifyGraphql<{ data?: { product?: { productType?: string } } }>(
+        shop, codeSession.accessToken,
+        `query($id:ID!){ product(id:$id){ productType } }`,
+        { id: product.id },
+      ).then((r) => (r?.data?.product?.productType ?? "").trim()).catch(() => "");
+      if (pt) resolvedProductType = normalizeProductGroup(pt);
+    }
     const createdOrder = await prisma.supplierOrder.create({
       data: {
         shop,
@@ -2634,7 +2646,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         supplier: (String(form.get("supplier") ?? "").trim() || "Portal"),
         productId: product.id,
         productTitle: product.title,
-        productType: normalizeProductGroup(String(form.get("productType") ?? "")) || null,
+        productType: resolvedProductType || null,
         status: "open",
         supplierStatus: String(form.get("supplierStatus") ?? "") || "on_order",
         priority: String(form.get("priority") ?? "") || null,
