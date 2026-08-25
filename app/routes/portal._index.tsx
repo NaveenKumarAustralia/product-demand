@@ -10549,6 +10549,22 @@ export default function PortalDashboard() {
                 </div>
               );
             })()}
+            {page === "usa-stock" && (() => {
+              // `orders` is already the USA-filtered set here. Totals: pieces,
+              // rupee value (per-piece style+fabric cost × qty), and AUD.
+              const fmt = (n: number) => n.toLocaleString();
+              const totalQty = orders.reduce((sum: number, o: { totalQty?: number | null }) => sum + (o.totalQty ?? 0), 0);
+              const rupees = orders.reduce((sum: number, o: { productTitle?: string; totalQty?: number | null }) => sum + (styleCostLookup.costForTitle(o.productTitle) || 0) * (o.totalQty ?? 0), 0);
+              const aud = rupees > 0 ? convertRupeesToAud(rupees, inrPerAudCachedRate) : null;
+              return (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <span style={s.restockTotalsLabel}>Total</span>
+                  <span style={s.restockTotalsBadge}>{fmt(totalQty)} pcs</span>
+                  {rupees > 0 && <span style={s.restockTotalsBadge}>₹{fmt(Math.round(rupees))}</span>}
+                  {aud != null && aud > 0 && <span style={s.restockTotalsBadge}>${fmt(Math.round(aud))} AUD</span>}
+                </div>
+              );
+            })()}
           </div>
           <div style={s.headerControls}>
             <div style={s.utilityBar}>
