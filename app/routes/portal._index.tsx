@@ -754,30 +754,57 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     "send_to_usa",
     ...restockSettings.destinationOptions.filter((o) => o.label.toLowerCase().includes("usa")).map((o) => o.value),
   ]);
-  const orders = page === "usa-stock"
-    ? (() => {
-        // The USA tile's group is the product's Shopify product type (captured
-        // onto the order at creation / backfilled). A USA split may be missing
-        // it — e.g. the type was chosen on the Existing Products Restock order
-        // AFTER the split was made. So borrow the type from any open order of
-        // the same product (the restock order) when the USA order lacks one.
-        const typeByProduct = new Map<string, string>();
-        for (const o of normalizedOrders) {
-          const t = (o.productType ?? "").trim();
-          if (!t) continue;
-          const key = o.productId ? `pid:${o.productId}` : `title:${(o.productTitle ?? "").trim().toLowerCase()}`;
-          if (!typeByProduct.has(key)) typeByProduct.set(key, t);
+  let orders = filteredOrders;
+  if (page === "usa-stock") {
+    const toGid = (p: string) => {
+      const t = (p ?? "").trim();
+      if (t.startsWith("gid://")) return t;
+      const n = t.replace(/\D/g, "");
+      return n ? `gid://shopify/Product/${n}` : "";
+    };
+    const usaOrders = normalizedOrders.filter((order) => usaDestinationValues.has((order.destination ?? "").trim()));
+    // 1) REFETCH the live Shopify product type for the USA products — the
+    //    authoritative source. Small set, so one batched GraphQL call.
+    const shopifyTypeByGid = new Map<string, string>();
+    const gids = Array.from(new Set(usaOrders.map((o) => toGid(o.productId ?? "")).filter(Boolean)));
+    if (gids.length) {
+      const sess = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" }, select: { shop: true, accessToken: true } }).catch(() => null);
+      if (sess?.shop && sess.accessToken) {
+        for (let i = 0; i < gids.length; i += 100) {
+          const res = await shopifyGraphql<{ data?: { nodes?: Array<{ id?: string; productType?: string } | null> } }>(
+            sess.shop, sess.accessToken,
+            `query($ids:[ID!]!){ nodes(ids:$ids){ ... on Product { id productType } } }`,
+            { ids: gids.slice(i, i + 100) },
+          ).catch(() => null);
+          for (const n of res?.data?.nodes ?? []) { if (n?.id) shopifyTypeByGid.set(n.id, (n.productType ?? "").trim()); }
         }
-        return normalizedOrders
-          .filter((order) => usaDestinationValues.has((order.destination ?? "").trim()))
-          .map((order) => {
-            if ((order.productType ?? "").trim()) return order;
-            const key = order.productId ? `pid:${order.productId}` : `title:${(order.productTitle ?? "").trim().toLowerCase()}`;
-            const fallback = typeByProduct.get(key);
-            return fallback ? { ...order, productType: fallback } : order;
-          });
-      })()
-    : filteredOrders;
+        // Persist the fetched Shopify types onto every open order of those
+        // products (fire-and-forget) so Restock/USA all read the same value.
+        for (const [gid, t] of shopifyTypeByGid) {
+          if (!t) continue;
+          const numeric = gid.replace(/\D/g, "");
+          void prisma.supplierOrder.updateMany({ where: { status: "open", productId: { in: [gid, numeric, `gid://shopify/Product/${numeric}`] }, productType: { not: normalizeProductGroup(t) } }, data: { productType: normalizeProductGroup(t) } }).catch(() => {});
+        }
+      }
+    }
+    // 2) Fallback type from any open order of the same product (the type
+    //    selected on the Existing Products Restock page) — used only when
+    //    Shopify has no type for that product.
+    const typeByProduct = new Map<string, string>();
+    for (const o of normalizedOrders) {
+      const t = (o.productType ?? "").trim();
+      if (!t) continue;
+      const key = o.productId ? `pid:${o.productId}` : `title:${(o.productTitle ?? "").trim().toLowerCase()}`;
+      if (!typeByProduct.has(key)) typeByProduct.set(key, t);
+    }
+    orders = usaOrders.map((order) => {
+      const shopType = normalizeProductGroup(shopifyTypeByGid.get(toGid(order.productId ?? "")) ?? "");
+      if (shopType) return { ...order, productType: shopType };
+      const key = order.productId ? `pid:${order.productId}` : `title:${(order.productTitle ?? "").trim().toLowerCase()}`;
+      const fallback = typeByProduct.get(key);
+      return fallback ? { ...order, productType: fallback } : { ...order, productType: null };
+    });
+  }
   // Defensive: hydrate shippingMethod from the DB in case the Prisma client
   // wasn't regenerated on this environment to know about the field. The
   // ADD COLUMN IF NOT EXISTS makes this safe on a stale schema too.
