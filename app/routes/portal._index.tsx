@@ -17025,6 +17025,23 @@ function CollectionSpreadsheetPage({
                         const isLastFrozen = frozenIdx >= 0 && frozenIdx === frozenCols.length - 1;
                         const tdSticky = { stickyLeft, isLastFrozen } as const;
                         const computed = computedValueFor(col.id);
+                        if (col.id === "totalOrdered") {
+                          // TOTAL Ordered cell: the total on top, a "Print
+                          // barcodes" button pinned to the very bottom.
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky} style={{ height: 1, verticalAlign: "top" }}>
+                              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 64, alignItems: "center", gap: 6 }}>
+                                <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: "calc(var(--portal-table-font-size, 14px) + 1px)", color: "#111827" }}>{computed || "0"}</div>
+                                <button
+                                  type="button"
+                                  onClick={() => setPrintRowIdx(rIdx)}
+                                  style={{ marginTop: "auto", width: "100%", background: "#0e7490", color: "#fff", border: "none", borderRadius: 6, padding: "5px 6px", fontSize: 11, fontWeight: 700, cursor: "pointer", lineHeight: 1.2, whiteSpace: "normal" }}
+                                  title="Print barcodes for this product"
+                                >🏷️ Print barcodes</button>
+                              </div>
+                            </Td>
+                          );
+                        }
                         if (col.id === "link" && computed) {
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
