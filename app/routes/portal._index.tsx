@@ -9153,35 +9153,69 @@ function escapeHtmlText(s: string): string {
   return (s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
 }
 type BarcodeItem = { label: string; sku: string; barcode: string; qty: number };
-// Physical label size (AHUJA 50×25mm roll on the TVS LP 46 NEO). One label per
-// page so it prints one die-cut label at a time on the thermal printer.
-const LABEL_W_MM = 50;
-const LABEL_H_MM = 25;
-// Build the print sheet (one label per requested copy) in a hidden iframe and
-// trigger the browser's print dialog — no popup window, no external deps.
-function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { count: number }>) {
+// Label media setup — persisted so it matches the user's physical stock.
+// `across` = how many labels sit side-by-side across the roll (2 for the
+// current 2-up 50×25 media). `gapMm` = the die-cut gap between columns.
+type LabelSetup = { across: number; wMm: number; hMm: number; gapMm: number };
+const LABEL_SETUP_KEY = "portal-label-setup-v1";
+const DEFAULT_LABEL_SETUP: LabelSetup = { across: 2, wMm: 50, hMm: 25, gapMm: 2 };
+function loadLabelSetup(): LabelSetup {
+  if (typeof window === "undefined") return DEFAULT_LABEL_SETUP;
+  try {
+    const v = JSON.parse(window.localStorage.getItem(LABEL_SETUP_KEY) ?? "null");
+    if (v && typeof v === "object") return {
+      across: Math.min(4, Math.max(1, Number(v.across) || DEFAULT_LABEL_SETUP.across)),
+      wMm: Math.max(10, Number(v.wMm) || DEFAULT_LABEL_SETUP.wMm),
+      hMm: Math.max(8, Number(v.hMm) || DEFAULT_LABEL_SETUP.hMm),
+      gapMm: Math.max(0, Number(v.gapMm) || 0),
+    };
+  } catch { /* ignore */ }
+  return DEFAULT_LABEL_SETUP;
+}
+// Build the print sheet in a hidden iframe and trigger the browser's print
+// dialog. Labels are laid out `across` per row so the page width matches the
+// full physical media (e.g. two 50×25 labels side by side) — that's what stops
+// the printer rotating/skipping labels.
+function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { count: number }>, setup: LabelSetup) {
+  const across = Math.min(4, Math.max(1, Math.floor(setup.across) || 1));
+  const wMm = setup.wMm, hMm = setup.hMm, gapMm = setup.gapMm;
+  const pageW = across * wMm + (across - 1) * gapMm;
+  const bcW = Math.max(10, wMm - 6);
+  const bcH = Math.max(5, Math.min(hMm * 0.4, 10));
   const labels: string[] = [];
   for (const it of items) {
     const n = Math.max(0, Math.floor(it.count) || 0);
     const code = (it.barcode ?? "").trim();
     if (!n || !code) continue;
-    const svg = code128Svg(code, { widthMm: 44, heightMm: 9 });
+    const svg = code128Svg(code, { widthMm: bcW, heightMm: bcH });
     const name = escapeHtmlText(productName);
     const sku = escapeHtmlText((it.sku ?? "").trim());
     const one = `<div class="lbl"><div class="pname">${name}</div>${sku ? `<div class="sku">${sku}</div>` : ""}<div class="bc">${svg}</div><div class="code">${escapeHtmlText(code)}</div></div>`;
     for (let i = 0; i < n; i++) labels.push(one);
   }
   if (!labels.length) return;
+  // Chunk into rows of `across` labels; each row is one printed page.
+  const rows: string[] = [];
+  for (let i = 0; i < labels.length; i += across) {
+    const cells: string[] = [];
+    for (let j = 0; j < across; j++) {
+      if (j > 0) cells.push(`<div class="gap"></div>`);
+      cells.push(labels[i + j] ?? `<div class="lbl"></div>`);
+    }
+    rows.push(`<div class="row">${cells.join("")}</div>`);
+  }
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Barcodes</title><style>
     *{box-sizing:border-box;} body{margin:0;font-family:Arial,Helvetica,sans-serif;}
-    @page{ size:${LABEL_W_MM}mm ${LABEL_H_MM}mm; margin:0; }
-    .lbl{width:${LABEL_W_MM}mm;height:${LABEL_H_MM}mm;padding:1.5mm 1mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;page-break-after:always;}
-    .lbl:last-child{page-break-after:auto;}
+    @page{ size:${pageW}mm ${hMm}mm; margin:0; }
+    .row{display:flex;width:${pageW}mm;height:${hMm}mm;page-break-after:always;}
+    .row:last-child{page-break-after:auto;}
+    .gap{width:${gapMm}mm;flex:0 0 ${gapMm}mm;}
+    .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:1.2mm 1mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;}
     .pname{font-size:6.5pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1.15;}
     .sku{font-size:7.5pt;font-weight:700;text-align:center;line-height:1.15;}
-    .bc{line-height:0;margin-top:0.5mm;} .bc svg{display:block;}
+    .bc{line-height:0;margin-top:0.4mm;} .bc svg{display:block;}
     .code{font-size:8pt;letter-spacing:1px;font-family:'Courier New',monospace;line-height:1.15;}
-  </style></head><body>${labels.join("")}</body></html>`;
+  </style></head><body>${rows.join("")}</body></html>`;
   const iframe = document.createElement("iframe");
   iframe.setAttribute("aria-hidden", "true");
   Object.assign(iframe.style, { position: "fixed", right: "0", bottom: "0", width: "0", height: "0", border: "0" });
@@ -9223,6 +9257,13 @@ function collectionRowBarcodeItems(row: Record<string, string>): BarcodeItem[] {
 function PrintBarcodesModal({ title, items, productId, onClose }: { title: string; items: BarcodeItem[]; productId?: string; onClose: () => void }) {
   const [rows, setRows] = useState<BarcodeItem[]>(items);
   const [counts, setCounts] = useState<number[]>(() => items.map((it) => Math.max(0, Math.floor(it.qty) || 0)));
+  const [setup, setSetup] = useState<LabelSetup>(() => loadLabelSetup());
+  const [showSetup, setShowSetup] = useState(false);
+  const updateSetup = (patch: Partial<LabelSetup>) => setSetup((cur) => {
+    const next = { ...cur, ...patch };
+    try { window.localStorage.setItem(LABEL_SETUP_KEY, JSON.stringify(next)); } catch { /* ignore */ }
+    return next;
+  });
   const codesFetcher = useFetcher<{ variants?: Array<{ title: string; sku: string; barcode: string }> }>();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -9281,11 +9322,39 @@ function PrintBarcodesModal({ title, items, productId, onClose }: { title: strin
           {rows.length === 0 && <div style={{ fontSize: 13, color: "#9ca3af", padding: "12px 0" }}>No variants to print.</div>}
         </div>
         {anyMissing && !fetching && <div style={{ fontSize: 12, color: "#b45309", padding: "0 18px 8px" }}>Some sizes still have no barcode in Shopify — those are skipped.</div>}
+        {/* Label media setup — match the physical roll (2-up 50×25 by default). */}
+        <div style={{ borderTop: "1px solid #f1f5f9", padding: "8px 18px" }}>
+          <button type="button" onClick={() => setShowSetup((v) => !v)} style={{ background: "transparent", border: "none", color: "#6b7280", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0 }}>
+            ⚙ Label size: {setup.across} across · {setup.wMm}×{setup.hMm}mm {showSetup ? "▲" : "▼"}
+          </button>
+          {showSetup && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 8, alignItems: "flex-end" }}>
+              {([
+                { k: "across", label: "Labels across", min: 1, max: 4 },
+                { k: "wMm", label: "Label width (mm)", min: 10, max: 200 },
+                { k: "hMm", label: "Label height (mm)", min: 8, max: 200 },
+                { k: "gapMm", label: "Gap between (mm)", min: 0, max: 20 },
+              ] as const).map((f) => (
+                <label key={f.k} style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11, color: "#6b7280", fontWeight: 600 }}>
+                  {f.label}
+                  <input
+                    type="number"
+                    min={f.min}
+                    max={f.max}
+                    value={setup[f.k]}
+                    onChange={(e) => updateSetup({ [f.k]: Math.max(f.min, Math.min(f.max, Number(e.target.value) || 0)) } as Partial<LabelSetup>)}
+                    style={{ width: 84, border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 8px", fontSize: 13 }}
+                  />
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 18px", borderTop: "1px solid #f1f5f9" }}>
           <span style={{ fontSize: 12, color: "#6b7280" }}>{total} label{total === 1 ? "" : "s"}</span>
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" onClick={onClose} style={{ background: "#f3f4f6", color: "#374151", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
-            <button type="button" disabled={total <= 0} onClick={() => printBarcodeLabels(title, rows.map((it, i) => ({ ...it, count: counts[i] })))} style={{ background: total > 0 ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", fontSize: 13.5, fontWeight: 700, cursor: total > 0 ? "pointer" : "default" }}>🖨 Print</button>
+            <button type="button" disabled={total <= 0} onClick={() => printBarcodeLabels(title, rows.map((it, i) => ({ ...it, count: counts[i] })), setup)} style={{ background: total > 0 ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", fontSize: 13.5, fontWeight: 700, cursor: total > 0 ? "pointer" : "default" }}>🖨 Print</button>
           </div>
         </div>
       </div>
