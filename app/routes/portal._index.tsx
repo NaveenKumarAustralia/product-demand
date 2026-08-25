@@ -14271,6 +14271,8 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   const widthsFetcher = useFetcher();
   const [shoots, setShoots] = useState(photoShoots);
   useEffect(() => { setShoots(photoShoots); }, [photoShoots]);
+  // Progressive reveal so the grid paints instantly and fills in batches.
+  const shootTileLimit = useProgressiveReveal(shoots.length, "photoshoot");
 
   // Resizable columns (global across shoots), persisted to a PortalSetting.
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
@@ -14507,7 +14509,7 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
         </div>
       </div>
       <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
-        {shoots.map((sh) => (
+        {shoots.slice(0, shootTileLimit).map((sh) => (
           <CollectionCard
             key={sh.id}
             collection={sh}
@@ -14537,6 +14539,24 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   );
 }
 
+// Progressive tile rendering: render a small first batch (so the page opens
+// instantly), then grow the visible count one batch at a time on idle until
+// everything is shown. `resetKey` restarts the reveal when the view/filter
+// changes. Returns the current cap to slice the list with.
+const TILE_RENDER_STEP = 24;
+function useProgressiveReveal(total: number, resetKey: string, step = TILE_RENDER_STEP): number {
+  const [limit, setLimit] = useState(step);
+  useEffect(() => { setLimit(step); }, [resetKey, step]);
+  useEffect(() => {
+    if (limit >= total) return;
+    const w = window as unknown as { requestIdleCallback?: (cb: () => void) => number; cancelIdleCallback?: (id: number) => void };
+    const schedule = w.requestIdleCallback ? w.requestIdleCallback.bind(w) : ((cb: () => void) => window.setTimeout(cb, 24) as unknown as number);
+    const cancel = w.cancelIdleCallback ? w.cancelIdleCallback.bind(w) : ((id: number) => window.clearTimeout(id));
+    const id = schedule(() => setLimit((n) => Math.min(n + step, total)));
+    return () => cancel(id);
+  }, [limit, total, step]);
+  return Math.min(limit, total);
+}
 function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [] }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[] }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
@@ -14574,6 +14594,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     setSearchParams(next, { replace: false });
   };
   const groupedIds = useMemo(() => { const s = new Set<number>(); groups.forEach((g) => g.collectionIds.forEach((id) => s.add(id))); return s; }, [groups]);
+  // Progressive reveal of the (potentially long) ungrouped tile list so the
+  // page paints instantly and fills in batch-by-batch.
+  const ungroupedVisibleCount = collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter) && (showHidden || !groupedIds.has(c.id))).length;
+  const tileLimit = useProgressiveReveal(ungroupedVisibleCount, `${showHidden}|${fabricStatusFilter}|${groupIdParam ?? ""}`);
   // Selection (checkbox) for creating a group.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const toggleSelect = (id: number) => setSelectedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
@@ -14943,7 +14967,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                   </div>
                 );
               })}
-              {visibleCollections.filter((c) => showHidden || !groupedIds.has(c.id)).map(card)}
+              {visibleCollections.filter((c) => showHidden || !groupedIds.has(c.id)).slice(0, tileLimit).map(card)}
               {visibleCollections.filter((c) => showHidden || !groupedIds.has(c.id)).length === 0 && groups.length === 0 && (
                 <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
                   {fabricStatusFilter ? "No collections with this fabric status." : showHidden ? "No hidden collections." : "No collections yet. Click Add Collection to create your first one."}
