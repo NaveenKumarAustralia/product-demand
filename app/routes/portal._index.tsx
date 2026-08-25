@@ -25564,8 +25564,18 @@ function OrderRow({
           </Td>
         ))}
 
-        {/* Total */}
-        <Td rowIndex={rowIndex} colIndex={totalCol} center><span style={s.total}>{order.totalQty}</span></Td>
+        {/* Total — value on top, Print barcodes button pinned to the bottom. */}
+        <Td rowIndex={rowIndex} colIndex={totalCol} center style={{ height: 1, verticalAlign: "top" }}>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 64, alignItems: "center", gap: 6 }}>
+            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}><span style={s.total}>{order.totalQty}</span></div>
+            <button
+              type="button"
+              onClick={() => setPrintOpen(true)}
+              style={{ marginTop: "auto", width: "100%", background: "#0e7490", color: "#fff", border: "none", borderRadius: 6, padding: "5px 6px", fontSize: 11, fontWeight: 700, cursor: "pointer", lineHeight: 1.2, whiteSpace: "normal" }}
+              title="Print barcodes for this product"
+            >🏷️ Print barcodes</button>
+          </div>
+        </Td>
 
         {/* Status */}
         <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} linkedPackingListId={order.packingListId ?? null} openPackingLists={openPackingLists} /></Td>
