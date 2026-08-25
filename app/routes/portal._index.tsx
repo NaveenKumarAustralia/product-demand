@@ -3876,6 +3876,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await Promise.all(ids.map((id, index) => prisma.collection.update({ where: { id }, data: { sortOrder: index } })));
     return null;
   }
+  if (intent === "merge_collections") {
+    // Combine several collections into one: append every source collection's
+    // rows to the target, re-home their offloaded images to the target, then
+    // delete the sources. Leaves a single collection with everything in it.
+    const targetId = Number(form.get("targetId"));
+    let sourceIds: number[] = [];
+    try { sourceIds = (JSON.parse(String(form.get("sourceIds") ?? "[]")) as number[]).filter((n) => Number.isInteger(n) && n !== targetId); } catch { sourceIds = []; }
+    if (!targetId || !sourceIds.length) return jsonResponse({ ok: false, error: "bad_input" });
+    const target = await prisma.collection.findUnique({ where: { id: targetId }, select: { id: true, rows: true } });
+    if (!target) return jsonResponse({ ok: false, error: "not_found" });
+    const sources = await prisma.collection.findMany({ where: { id: { in: sourceIds } }, select: { id: true, rows: true } });
+    const asRows = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+    const mergedRows = [...asRows(target.rows), ...sources.flatMap((s) => asRows(s.rows))];
+    // Keep the sources' offloaded images alive (they're keyed by collectionId)
+    // by re-homing them to the target before the sources are deleted.
+    await prisma.collectionImage.updateMany({ where: { collectionId: { in: sourceIds } }, data: { collectionId: targetId } }).catch(() => {});
+    await prisma.collection.update({ where: { id: targetId }, data: { rows: mergedRows as unknown as object } });
+    await prisma.collection.deleteMany({ where: { id: { in: sourceIds } } });
+    return jsonResponse({ ok: true, targetId, mergedRows: mergedRows.length, deleted: sourceIds.length });
+  }
   if (intent === "get_collection_full") {
     const id = Number(form.get("collectionId"));
     if (!id) return jsonResponse({ collection: null });
@@ -11176,16 +11196,16 @@ function RowNumberCell({
     <>
       <td
         tabIndex={0}
-        style={dragHandle ? { ...s.rowNumberCell, paddingTop: 15 } : s.rowNumberCell}
+        {...(dragHandle ? { "data-row-drag-handle": "" } : {})}
+        style={dragHandle ? { ...s.rowNumberCell, paddingTop: 15, cursor: "grab" } : s.rowNumberCell}
         onContextMenu={(event) => {
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
-        title="Right click for row actions"
+        title={dragHandle ? "Drag to move this row up or down · right-click for actions" : "Right click for row actions"}
       >
         {dragHandle ? (
           <span
-            data-row-drag-handle
             aria-hidden
             title="Drag to move this row up or down"
             style={{
@@ -14767,6 +14787,28 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const removeFromGroup = (collectionId: number) => saveGroups(groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => id !== collectionId) })));
   const ungroup = (groupId: string) => { saveGroups(groups.filter((g) => g.id !== groupId)); openGroupNav(null); };
   const renameGroup = (groupId: string) => { const g = groups.find((x) => x.id === groupId); if (!g) return; const name = window.prompt("Rename group:", g.name)?.trim(); if (!name) return; saveGroups(groups.map((x) => x.id === groupId ? { ...x, name } : x)); };
+  // Combine (MERGE) the selected collections into ONE: every row moves into the
+  // earliest-ordered selected collection and the others are deleted. Different
+  // from a group (which keeps the tiles separate under one folder) — this leaves
+  // a single collection containing everything.
+  const combineIntoCollection = () => {
+    const chosen = collections.filter((c) => selectedIds.has(c.id)).sort((a, b) => (a.sortOrder - b.sortOrder) || (a.id - b.id));
+    if (chosen.length < 2) return;
+    const target = chosen[0];
+    const sources = chosen.slice(1);
+    const sourceIds = sources.map((s) => s.id);
+    if (!window.confirm(`Combine ${chosen.length} collections into "${target.name}"?\n\nAll rows from the other ${sources.length} collection${sources.length === 1 ? "" : "s"} will be moved into "${target.name}", and those will be DELETED. This can't be undone.`)) return;
+    // Optimistic: drop the source tiles immediately (deletedRef keeps them gone
+    // through the revalidation that follows).
+    sourceIds.forEach((id) => deletedRef.current.add(id));
+    setCollections((prev) => prev.filter((c) => !sourceIds.includes(c.id)));
+    // Pull the deleted collections out of any group they belonged to.
+    if (groups.some((g) => g.collectionIds.some((id) => sourceIds.includes(id)))) {
+      saveGroups(groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !sourceIds.includes(id)) })));
+    }
+    clearSelection();
+    fetcher.submit({ intent: "merge_collections", targetId: String(target.id), sourceIds: JSON.stringify(sourceIds) }, { method: "post" });
+  };
 
   useEffect(() => {
     setCollections(initialCollections.filter((c) => !deletedRef.current.has(c.id)));
@@ -15041,7 +15083,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               <button type="button" onClick={() => { Array.from(selectedIds).forEach((id) => removeFromGroup(id)); clearSelection(); }} style={{ background: "#fff", color: "#b91c1c", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: "pointer" }}>Remove from group</button>
             ) : (
               <>
-                <button type="button" onClick={groupSelected} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }}>＋ Group these into one tile</button>
+                <button type="button" onClick={groupSelected} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title="Keep separate tiles inside one folder">📁 Combine into group</button>
+                <button type="button" onClick={combineIntoCollection} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#b45309", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title="Merge all rows into one collection and delete the rest">⧉ Combine into collection</button>
                 {groups.length > 0 && (
                   <select
                     value=""
