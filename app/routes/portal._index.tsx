@@ -746,8 +746,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // panel, via /api/product-inventory.
   // usa-stock shows every open order marked "Send to USA" as tiles, ignoring
   // the restock table's status/priority/etc. filters (they don't apply here).
+  // The destination VALUE is store-configurable — this shop uses "send_to_us"
+  // (not the built-in "send_to_usa") — so match the known USA values plus any
+  // destination option whose LABEL says USA. ("AUS" labels never contain "usa".)
+  const usaDestinationValues = new Set<string>([
+    "send_to_us",
+    "send_to_usa",
+    ...restockSettings.destinationOptions.filter((o) => o.label.toLowerCase().includes("usa")).map((o) => o.value),
+  ]);
   const orders = page === "usa-stock"
-    ? normalizedOrders.filter((order) => (order.destination ?? "") === "send_to_usa")
+    ? normalizedOrders.filter((order) => usaDestinationValues.has((order.destination ?? "").trim()))
     : filteredOrders;
   // Defensive: hydrate shippingMethod from the DB in case the Prisma client
   // wasn't regenerated on this environment to know about the field. The
