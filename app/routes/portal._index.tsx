@@ -755,7 +755,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ...restockSettings.destinationOptions.filter((o) => o.label.toLowerCase().includes("usa")).map((o) => o.value),
   ]);
   const orders = page === "usa-stock"
-    ? normalizedOrders.filter((order) => usaDestinationValues.has((order.destination ?? "").trim()))
+    ? (() => {
+        // The USA tile's group is the product's Shopify product type (captured
+        // onto the order at creation / backfilled). A USA split may be missing
+        // it — e.g. the type was chosen on the Existing Products Restock order
+        // AFTER the split was made. So borrow the type from any open order of
+        // the same product (the restock order) when the USA order lacks one.
+        const typeByProduct = new Map<string, string>();
+        for (const o of normalizedOrders) {
+          const t = (o.productType ?? "").trim();
+          if (!t) continue;
+          const key = o.productId ? `pid:${o.productId}` : `title:${(o.productTitle ?? "").trim().toLowerCase()}`;
+          if (!typeByProduct.has(key)) typeByProduct.set(key, t);
+        }
+        return normalizedOrders
+          .filter((order) => usaDestinationValues.has((order.destination ?? "").trim()))
+          .map((order) => {
+            if ((order.productType ?? "").trim()) return order;
+            const key = order.productId ? `pid:${order.productId}` : `title:${(order.productTitle ?? "").trim().toLowerCase()}`;
+            const fallback = typeByProduct.get(key);
+            return fallback ? { ...order, productType: fallback } : order;
+          });
+      })()
     : filteredOrders;
   // Defensive: hydrate shippingMethod from the DB in case the Prisma client
   // wasn't regenerated on this environment to know about the field. The
