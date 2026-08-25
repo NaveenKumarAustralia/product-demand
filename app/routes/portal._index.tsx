@@ -63,14 +63,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     // The six heavy fabric-data blobs are only parsed on pages that render the
     // fabric spreadsheet (fabric / restock / packing / collections). Skip
     // fetching them elsewhere (e.g. photoshoot) so those pages don't ship them.
+    // FABRIC_MANUAL_SHEETS_KEY is fetched separately (image-stripped in
+    // Postgres) — it holds ~35MB of pasted swatch images that only the Fabric
+    // page displays; the cost lookup needs just names/meters/cost.
     ...((page === "fabric" || isRestockPage || page === "packing" || isCollectionsPage)
-      ? [FABRIC_CUSTOM_SHEETS_KEY, FABRIC_MANUAL_SHEETS_KEY, FABRIC_CELL_OVERRIDES_KEY, FABRIC_CUSTOM_ROWS_KEY, FABRIC_DELETED_ROWS_KEY, FABRIC_DELETED_SHEETS_KEY]
+      ? [FABRIC_CUSTOM_SHEETS_KEY, FABRIC_CELL_OVERRIDES_KEY, FABRIC_CUSTOM_ROWS_KEY, FABRIC_DELETED_ROWS_KEY, FABRIC_DELETED_SHEETS_KEY]
       : []),
     RESTOCK_SETTINGS_KEY,
     COLLECTION_SETTINGS_KEY,
     UNIVERSAL_SETTINGS_KEY,
     FABRIC_SETTINGS_KEY,
-    PRODUCT_INFO_KEY,
+    // PRODUCT_INFO_KEY is fetched separately (image-stripped in Postgres) — it
+    // can be tens of MB of embedded style images that the cost lookup never
+    // needs. See productInfoValuePromise below.
     PORTAL_USERS_KEY,
     PORTAL_ACTIVE_USERS_KEY,
     PORTAL_NAV_ORDER_KEY,
@@ -179,12 +184,48 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const customCellsSetting = wrap(TABLE_CUSTOM_CELLS_KEY);
   const rowHeightsSetting = wrap(TABLE_ROW_HEIGHTS_KEY);
   const fabricCustomSheetsSetting = wrap(FABRIC_CUSTOM_SHEETS_KEY);
-  const fabricManualSheetsSetting = wrap(FABRIC_MANUAL_SHEETS_KEY);
   const restockSettingsSetting = wrap(RESTOCK_SETTINGS_KEY);
   const collectionSettings: CollectionSettings = normalizeCollectionSettings(settingsMap.get(COLLECTION_SETTINGS_KEY));
   const universalSettingsSetting = wrap(UNIVERSAL_SETTINGS_KEY);
   const fabricSettingsSetting = wrap(FABRIC_SETTINGS_KEY);
-  const productInfoSetting = wrap(PRODUCT_INFO_KEY);
+  // Product Info is stored as one JSON blob that can be tens of MB because each
+  // style may carry an embedded image (data URI). Only the Product Information
+  // page actually displays those images; everywhere else uses just the numeric
+  // cost fields. So fetch a SLIM copy with every style's `imageUrl` stripped
+  // INSIDE Postgres — the huge image payload never leaves the database. This
+  // is what made photoshoot/collections/etc. take ~5s to open.
+  const needsFullProductInfo = page === "productinfo";
+  const productInfoValuePromise: Promise<unknown> = (async () => {
+    if (needsFullProductInfo) {
+      const row = await prisma.portalSetting.findUnique({ where: { key: PRODUCT_INFO_KEY }, select: { value: true } }).catch(() => null);
+      return row?.value ?? null;
+    }
+    try {
+      const rows = await prisma.$queryRawUnsafe<Array<{ value: unknown }>>(
+        `SELECT CASE
+           WHEN jsonb_typeof(value->'categories') = 'array' THEN
+             jsonb_set(value, '{categories}', (
+               SELECT COALESCE(jsonb_agg(
+                 CASE WHEN jsonb_typeof(cat->'styles') = 'array'
+                   THEN jsonb_set(cat, '{styles}', (
+                     SELECT COALESCE(jsonb_agg(style - 'imageUrl'), '[]'::jsonb)
+                     FROM jsonb_array_elements(cat->'styles') style
+                   ))
+                   ELSE cat END
+               ), '[]'::jsonb)
+               FROM jsonb_array_elements(value->'categories') cat
+             ))
+           ELSE value END AS value
+         FROM "PortalSetting" WHERE key = $1`,
+        PRODUCT_INFO_KEY,
+      );
+      return rows[0]?.value ?? null;
+    } catch (e) {
+      console.warn("[product-info slim] in-DB strip failed, falling back to full:", e);
+      const row = await prisma.portalSetting.findUnique({ where: { key: PRODUCT_INFO_KEY }, select: { value: true } }).catch(() => null);
+      return row?.value ?? null;
+    }
+  })();
   const usersSetting = wrap(PORTAL_USERS_KEY);
   const activeUsersSetting = wrap(PORTAL_ACTIVE_USERS_KEY);
   const navOrderSetting = wrap(PORTAL_NAV_ORDER_KEY);
@@ -485,7 +526,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
   const universalSettings = normalizeUniversalSettings(universalSettingsSetting?.value);
   let fabricSettings = normalizeFabricSettings(fabricSettingsSetting?.value);
-  const productInfo = normalizeProductInfo(productInfoSetting?.value);
+  const productInfo = normalizeProductInfo(await productInfoValuePromise);
   const usersWithSeed = await ensureSuperAdmin(users);
   const currentUser = getCurrentPortalUser(request, usersWithSeed);
   // JJ-only supplier lockdown: a non-admin user whose ONLY granted page is
@@ -788,6 +829,41 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // fabric-cost lookups on the Collections detail table read from them. Without
   // this the picker is empty ("No fabrics match").
   const needsFabricSheets = page === "fabric" || isRestockPage || page === "packing" || isCollectionsPage;
+  // Fetch the manual fabric sheets separately, image-stripped inside Postgres
+  // (swatch is row cell index 2) so the ~35MB of images never crosses the wire
+  // — except the Fabric page, which renders them.
+  const fabricManualSheetsValuePromise: Promise<unknown> = !needsFabricSheets
+    ? Promise.resolve(null)
+    : page === "fabric"
+      ? prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } }).then((r) => r?.value ?? null).catch(() => null)
+      : (async () => {
+          try {
+            const rows = await prisma.$queryRawUnsafe<Array<{ value: unknown }>>(
+              `SELECT CASE WHEN jsonb_typeof(value) = 'array' THEN (
+                 SELECT COALESCE(jsonb_agg(
+                   CASE WHEN jsonb_typeof(sheet->'rows') = 'array'
+                     THEN jsonb_set(sheet, '{rows}', (
+                       SELECT COALESCE(jsonb_agg(
+                         CASE WHEN jsonb_typeof(r) = 'array' AND jsonb_array_length(r) > 2
+                           THEN jsonb_set(r, '{2}', '""'::jsonb)
+                           ELSE r END
+                       ), '[]'::jsonb)
+                       FROM jsonb_array_elements(sheet->'rows') AS r
+                     ))
+                     ELSE sheet END
+                 ), '[]'::jsonb)
+                 FROM jsonb_array_elements(value) AS sheet
+               ) ELSE value END AS value
+               FROM "PortalSetting" WHERE key = $1`,
+              FABRIC_MANUAL_SHEETS_KEY,
+            );
+            return rows[0]?.value ?? null;
+          } catch (e) {
+            console.warn("[fabric slim] in-DB strip failed, falling back to full:", e);
+            const r = await prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } }).catch(() => null);
+            return r?.value ?? null;
+          }
+        })();
   // These come from the single batched settings query above (no extra round-
   // trips) — they were 4 sequential DB fetches, a big chunk of the restock/
   // packing/collections page load.
@@ -798,7 +874,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const inrToAudRate = page === "fabric" ? await getInrToAudRate() : null;
   const manualFabricSheets = needsFabricSheets
     ? await getManualFabricSheets({
-        savedValue: fabricManualSheetsSetting?.value,
+        savedValue: await fabricManualSheetsValuePromise,
         customSheetsValue: fabricCustomSheetsSetting?.value,
         customRowsValue: fabricCustomRowsSetting?.value,
         deletedRowsValue: fabricDeletedRowsSetting?.value,
