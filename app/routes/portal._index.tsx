@@ -9098,6 +9098,184 @@ function buildCollectionSkuBarcode(row: Record<string, string>, base: string): {
   };
 }
 
+// ── Barcode printing ──────────────────────────────────────────────────────
+// Pure Code128-B encoder → SVG (no external library; the app's bundle/CSP
+// stays clean). Handles any printable ASCII (digits + letters), which covers
+// the SKU-style barcodes used here (e.g. "2596XS").
+const CODE128_PATTERNS = [
+  "212222","222122","222221","121223","121322","131222","122213","122312","132212","221213",
+  "221312","231212","112232","122132","122231","113222","123122","123221","223211","221132",
+  "221231","213212","223112","312131","311222","321122","321221","312212","322112","322211",
+  "212123","212321","232121","111323","131123","131321","112313","132113","132311","211313",
+  "231113","231311","112133","112331","132131","113123","113321","133121","313121","211331",
+  "231131","213113","213311","213131","311123","311321","331121","312113","312311","332111",
+  "314111","221411","431111","111224","111422","121124","121421","141122","141221","112214",
+  "112412","122114","122411","142112","142211","241211","221114","413111","241112","134111",
+  "111242","121142","121241","114212","124112","124211","411212","421112","421211","212141",
+  "214121","412121","111143","111341","131141","114113","114311","411113","411311","113141",
+  "114131","311141","411131","211412","211214","211232","2331112",
+];
+function code128BCodes(text: string): number[] {
+  const codes = [104]; // Start B
+  for (const ch of text) {
+    const v = ch.charCodeAt(0) - 32;
+    if (v < 0 || v > 94) continue; // only encodable Code-B chars (ASCII 32–126)
+    codes.push(v);
+  }
+  let sum = 104;
+  for (let i = 1; i < codes.length; i++) sum += codes[i] * i;
+  codes.push(sum % 103); // checksum
+  codes.push(106); // Stop
+  return codes;
+}
+// Returns an <svg> string sized in millimetres so it prints at a predictable
+// physical width regardless of screen DPI.
+function code128Svg(text: string, opts: { widthMm?: number; heightMm?: number } = {}): string {
+  const widthMm = opts.widthMm ?? 40;
+  const heightMm = opts.heightMm ?? 12;
+  const patterns = code128BCodes(text).map((c) => CODE128_PATTERNS[c]);
+  let totalModules = 0;
+  for (const p of patterns) for (const d of p) totalModules += Number(d);
+  if (!totalModules) return "";
+  const mw = widthMm / totalModules;
+  let x = 0;
+  const rects: string[] = [];
+  for (const p of patterns) {
+    for (let i = 0; i < p.length; i++) {
+      const w = Number(p[i]) * mw;
+      if (i % 2 === 0) rects.push(`<rect x="${x.toFixed(3)}" y="0" width="${w.toFixed(3)}" height="${heightMm}" fill="#000"/>`);
+      x += w;
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}">${rects.join("")}</svg>`;
+}
+function escapeHtmlText(s: string): string {
+  return (s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
+}
+type BarcodeItem = { label: string; sku: string; barcode: string; qty: number };
+// Build the print sheet (one label per requested copy) in a hidden iframe and
+// trigger the browser's print dialog — no popup window, no external deps.
+function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { count: number }>) {
+  const labels: string[] = [];
+  for (const it of items) {
+    const n = Math.max(0, Math.floor(it.count) || 0);
+    const code = (it.barcode ?? "").trim();
+    if (!n || !code) continue;
+    const svg = code128Svg(code, { widthMm: 36, heightMm: 12 });
+    const heading = escapeHtmlText([productName, it.label].filter(Boolean).join(" · "));
+    const one = `<div class="lbl"><div class="pname">${heading}</div><div class="bc">${svg}</div><div class="code">${escapeHtmlText(code)}</div></div>`;
+    for (let i = 0; i < n; i++) labels.push(one);
+  }
+  if (!labels.length) return;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Barcodes</title><style>
+    *{box-sizing:border-box;} body{margin:0;font-family:Arial,Helvetica,sans-serif;}
+    .sheet{display:flex;flex-wrap:wrap;gap:2mm;padding:4mm;}
+    .lbl{width:40mm;height:24mm;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1mm;border:1px dashed #ccc;page-break-inside:avoid;}
+    .pname{font-size:7pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;margin-bottom:0.5mm;}
+    .bc{line-height:0;} .bc svg{display:block;}
+    .code{font-size:8pt;letter-spacing:1px;margin-top:0.5mm;font-family:'Courier New',monospace;}
+    @media print{ .lbl{border:none;} @page{margin:6mm;} }
+  </style></head><body><div class="sheet">${labels.join("")}</div></body></html>`;
+  const iframe = document.createElement("iframe");
+  iframe.setAttribute("aria-hidden", "true");
+  Object.assign(iframe.style, { position: "fixed", right: "0", bottom: "0", width: "0", height: "0", border: "0" });
+  document.body.appendChild(iframe);
+  const doc = iframe.contentWindow?.document;
+  if (!doc) { document.body.removeChild(iframe); return; }
+  doc.open(); doc.write(html); doc.close();
+  const win = iframe.contentWindow;
+  window.setTimeout(() => {
+    try { win?.focus(); win?.print(); } catch { /* ignore */ }
+    window.setTimeout(() => { try { document.body.removeChild(iframe); } catch { /* ignore */ } }, 1500);
+  }, 300);
+}
+// Per-size barcode items for a Collections row: prefers the row's stored
+// per-size SKU/barcode lines, else regenerates from the SKU base.
+function collectionRowBarcodeItems(row: Record<string, string>): BarcodeItem[] {
+  const skuLines = (row.sku ?? "").split(/\r?\n/).map((s) => s.trim());
+  const barcodeLines = (row.barcode ?? "").split(/\r?\n/).map((s) => s.trim());
+  const freeSizeQty = Number(row.freeSize) || 0;
+  if (freeSizeQty > 0) {
+    return [{ label: "Free Size", sku: skuLines[0] ?? "", barcode: barcodeLines[0] ?? "", qty: freeSizeQty }];
+  }
+  const ordered = COLLECTION_SIZE_COLUMN_LABELS.filter(([id]) => (Number(row[id]) || 0) > 0);
+  const base = deriveCollectionSkuBase(row.sku ?? "");
+  const aligned = (arr: string[]) => arr.length === ordered.length && arr.every(Boolean);
+  return ordered.map(([id, label], i) => {
+    const sfx = collectionSizeSfx(label);
+    return {
+      label,
+      sku: aligned(skuLines) ? skuLines[i] : (base ? `K${base}${sfx}` : ""),
+      barcode: aligned(barcodeLines) ? barcodeLines[i] : (base ? `${base}${sfx}` : ""),
+      qty: Number(row[id]) || 0,
+    };
+  });
+}
+// Shared popup: lists each variant with an editable copy count (pre-filled from
+// the ordered qty), then prints the labels.
+function PrintBarcodesModal({ title, items, onClose }: { title: string; items: BarcodeItem[]; onClose: () => void }) {
+  const [counts, setCounts] = useState<number[]>(() => items.map((it) => Math.max(0, Math.floor(it.qty) || 0)));
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  const total = counts.reduce((s, n, i) => s + (items[i].barcode ? (Number(n) || 0) : 0), 0);
+  const anyMissing = items.some((it) => !it.barcode);
+  if (typeof document === "undefined") return null;
+  return createPortal(
+    <div style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.55)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
+      <div style={{ background: "#fff", borderRadius: 12, width: 480, maxWidth: "100%", maxHeight: "82vh", display: "flex", flexDirection: "column", boxShadow: "0 24px 60px rgba(0,0,0,0.3)", overflow: "hidden" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "16px 18px 10px" }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "#111827" }}>Print barcodes</div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{title}</div>
+          </div>
+          <button type="button" onClick={onClose} title="Close" style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 20, lineHeight: 1, color: "#9ca3af", padding: 0 }}>×</button>
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", padding: "0 18px" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+            <thead>
+              <tr style={{ textAlign: "left", color: "#6b7280", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                <th style={{ padding: "6px 4px" }}>Size</th>
+                <th style={{ padding: "6px 4px" }}>Barcode</th>
+                <th style={{ padding: "6px 4px", width: 90, textAlign: "right" }}>Copies</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((it, i) => (
+                <tr key={i} style={{ borderTop: "1px solid #f1f5f9" }}>
+                  <td style={{ padding: "8px 4px", fontWeight: 600, color: "#111827" }}>{it.label || "—"}</td>
+                  <td style={{ padding: "8px 4px", fontFamily: "monospace", color: it.barcode ? "#111827" : "#dc2626" }}>{it.barcode || "no barcode"}</td>
+                  <td style={{ padding: "8px 4px", textAlign: "right" }}>
+                    <input
+                      type="number"
+                      min={0}
+                      value={counts[i]}
+                      disabled={!it.barcode}
+                      onChange={(e) => setCounts((cur) => cur.map((c, j) => j === i ? Math.max(0, Math.floor(Number(e.target.value) || 0)) : c))}
+                      style={{ width: 70, textAlign: "right", border: "1px solid #d1d5db", borderRadius: 6, padding: "5px 8px", fontSize: 13, opacity: it.barcode ? 1 : 0.5 }}
+                    />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {anyMissing && <div style={{ fontSize: 12, color: "#b45309", padding: "8px 0" }}>Sizes without a barcode can&rsquo;t be printed — generate the SKU/barcode first.</div>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "12px 18px", borderTop: "1px solid #f1f5f9" }}>
+          <span style={{ fontSize: 12, color: "#6b7280" }}>{total} label{total === 1 ? "" : "s"}</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="button" onClick={onClose} style={{ background: "#f3f4f6", color: "#374151", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>Cancel</button>
+            <button type="button" disabled={total <= 0} onClick={() => printBarcodeLabels(title, items.map((it, i) => ({ ...it, count: counts[i] })))} style={{ background: total > 0 ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 8, padding: "8px 18px", fontSize: 13.5, fontWeight: 700, cursor: total > 0 ? "pointer" : "default" }}>🖨 Print</button>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 // Longest-prefix-match a product name against the styles in product info.
 // Returns the matched style name (e.g. "Corduroy Jacket" from "Corduroy
 // Jacket Black") or empty string when nothing matches. Used by the
@@ -15754,6 +15932,8 @@ function CollectionSpreadsheetPage({
   // shows a teal top border.
   const [dragRowIdx, setDragRowIdx] = useState<number | null>(null);
   const [dragOverRowIdx, setDragOverRowIdx] = useState<number | null>(null);
+  // Which row's "Print barcodes" popup is open (null = none).
+  const [printRowIdx, setPrintRowIdx] = useState<number | null>(null);
 
   const moveRow = (from: number, to: number) => {
     if (from === to) return;
@@ -16789,6 +16969,7 @@ function CollectionSpreadsheetPage({
                         return next;
                       })}
                       actions={[
+                        { label: "🏷️ Print barcodes…", onClick: () => setPrintRowIdx(rIdx) },
                         { label: "Delete row", danger: true, onClick: () => removeRow(rIdx) },
                       ]}
                     />
@@ -17117,6 +17298,13 @@ function CollectionSpreadsheetPage({
           );
         })()}
       </div>
+      {printRowIdx !== null && rows[printRowIdx] && (
+        <PrintBarcodesModal
+          title={rows[printRowIdx].name ?? rows[printRowIdx].title ?? "Product"}
+          items={collectionRowBarcodeItems(rows[printRowIdx])}
+          onClose={() => setPrintRowIdx(null)}
+        />
+      )}
       {/* Fabric bar: the fabric(s) attached to this collection. Starts empty —
           search + attach the correct fabric with "+ Pick fabric" (you can add
           several). Each shows its real on-hand stock, the meters used by the
@@ -25129,6 +25317,7 @@ function OrderRow({
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [splitOpen, setSplitOpen] = useState(false);
+  const [printOpen, setPrintOpen] = useState(false);
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
     acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
     return acc;
@@ -25206,10 +25395,18 @@ function OrderRow({
       {celebrating && <RowFireworks anchorRef={trRef} />}
       <tr ref={trRef} id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(destinationStamp ? { background: destinationStamp.rowBg } : {}) }}>
         <RowNumberCell rowNumber={rowIndex} actions={[
+          { label: "🏷️ Print barcodes…", onClick: () => setPrintOpen(true) },
           { label: "Split to destination…", onClick: () => setSplitOpen(true) },
           { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
+        {printOpen && (
+          <PrintBarcodesModal
+            title={order.productTitle ?? "Product"}
+            items={(order.lines as Array<{ variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }>).map((l) => ({ label: l.variantTitle, sku: l.sku ?? "", barcode: l.barcode ?? "", qty: l.qtyOrdered }))}
+            onClose={() => setPrintOpen(false)}
+          />
+        )}
         {splitOpen && (
           <RestockSplitModal
             productTitle={order.productTitle}
