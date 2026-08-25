@@ -16898,14 +16898,20 @@ function CollectionSpreadsheetPage({
                             threadCounts={threadCounts}
                           />
                         );
+                        // Name cell needs the table-cell "height: 1" trick so the
+                        // inner flex column can fill the FULL row height — that
+                        // pins the status chip to the very bottom of the cell.
+                        const nameTdStyle: React.CSSProperties = col.id === "name"
+                          ? { height: 1, verticalAlign: "top" }
+                          : noteTdStyle;
                         return (
-                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky} style={noteTdStyle}>
+                          <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky} style={nameTdStyle}>
                             {col.id === "name" ? (
-                              // Name cell = product name on top + a per-product workflow
-                              // status chip pinned to the bottom (editable options).
+                              // Name cell = product name (centred) with the per-product
+                              // workflow status chip pinned to the very bottom.
                               <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 72, gap: 6 }}>
                                 <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>{cellInner}</div>
-                                <div onClick={(e) => e.stopPropagation()} style={{ width: "100%" }}>
+                                <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", marginTop: "auto" }}>
                                   <CollectionChipDropdown
                                     value={row.__productStatus ?? ""}
                                     options={localProductStatusOptions}
