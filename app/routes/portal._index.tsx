@@ -1165,6 +1165,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       try { updated.pageAccess = JSON.parse(String(form.get("pageAccess"))); } catch { /* keep existing */ }
     }
     if (form.has("canLoadInventory")) updated.canLoadInventory = form.get("canLoadInventory") === "on";
+    if (form.has("canSeeProductStatus")) updated.canSeeProductStatus = form.get("canSeeProductStatus") === "on";
     await savePortalUsers(users.map((u) => u.id === userId ? updated : u));
     return null;
   }
@@ -6377,6 +6378,9 @@ type PortalUser = {
   active: boolean;
   canLoadInventory: boolean;
   pageAccess: Record<string, boolean>;
+  // When true (or for any admin), this account sees the per-product status
+  // chip in the Collections Name column. Off by default for regular users.
+  canSeeProductStatus?: boolean;
 };
 type ActivePortalUser = PortalUser & { initials: string; lastSeen: number };
 type RestockOption = { value: string; label: string; bg: string; color: string };
@@ -6502,6 +6506,7 @@ function normalizePortalUsers(value: unknown): PortalUser[] {
         role,
         admin: isAdmin,
         canLoadInventory: "canLoadInventory" in user ? Boolean(user.canLoadInventory) : isAdmin,
+        canSeeProductStatus: Boolean(user.canSeeProductStatus),
         active: user.active !== false,
         pageAccess: (user.pageAccess && typeof user.pageAccess === "object" && !Array.isArray(user.pageAccess))
           ? user.pageAccess as Record<string, boolean>
@@ -10867,6 +10872,7 @@ export default function PortalDashboard() {
                 etaByProductId={collectionEtaByProductId}
                 shipmentByProductId={collectionShipmentByProductId}
                 collectionGroups={collectionGroups}
+                canSeeProductStatus={Boolean(currentUser?.admin || currentUser?.canSeeProductStatus)}
               />
             </div>
           </div>
@@ -14718,7 +14724,7 @@ function useProgressiveReveal(total: number, resetKey: string, step = TILE_RENDE
   }, [limit, total, step]);
   return Math.min(limit, total);
 }
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [] }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[] }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], canSeeProductStatus = false }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; canSeeProductStatus?: boolean }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -14916,6 +14922,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         etaByProductId={etaByProductId}
         shipmentByProductId={shipmentByProductId}
         onBack={closeCollection}
+        canSeeProductStatus={canSeeProductStatus}
         hidePhotoShootToggle={hidePhotoShootToggle}
         costCurrency={costCurrency}
         thbPerAudCachedRate={thbPerAudCachedRate}
@@ -15619,6 +15626,7 @@ function CollectionSpreadsheetPage({
   hidePhotoShootToggle = false,
   costCurrency = "INR",
   thbPerAudCachedRate = null,
+  canSeeProductStatus = false,
 }: {
   listItem: CollectionListItem;
   collectionSettings: CollectionSettings;
@@ -15640,6 +15648,8 @@ function CollectionSpreadsheetPage({
   // "Price ₹" column label + the Unit A$ conversion to THB.
   costCurrency?: "INR" | "THB";
   thbPerAudCachedRate?: number | null;
+  // Whether the current account may see the per-product status chip.
+  canSeeProductStatus?: boolean;
 }) {
   const isThb = costCurrency === "THB";
   // Show "Price ฿" instead of "Price ₹" on the JJ New Products sheet.
@@ -15948,6 +15958,8 @@ function CollectionSpreadsheetPage({
   const [localStatusOptions, setLocalStatusOptions] = useState<CollectionChipOption[]>(restockSettings.statusOptions);
   const [localSampleOptions, setLocalSampleOptions] = useState(collectionSettings.sampleOptions);
   const [localProductStatusOptions, setLocalProductStatusOptions] = useState(collectionSettings.productStatusOptions);
+  // Gate the per-product status chip to accounts that were granted visibility.
+  const showProductStatusChip = canSeeProductStatus;
   useEffect(() => { setLocalStatusOptions(restockSettings.statusOptions); }, [restockSettings.statusOptions]);
   useEffect(() => { setLocalSampleOptions(collectionSettings.sampleOptions); }, [collectionSettings.sampleOptions]);
   useEffect(() => { setLocalProductStatusOptions(collectionSettings.productStatusOptions); }, [collectionSettings.productStatusOptions]);
@@ -16552,9 +16564,7 @@ function CollectionSpreadsheetPage({
         ) : (() => {
           // Freeze every column up to and including "name" so they
           // stay visible while the user scrolls right — same pattern
-          // as the restock page. Shopify column moves to the right
-          // of name and scrolls with the rest.
-          const SHOPIFY_COL_WIDTH = 140;
+          // as the restock page.
           // Hide auto-handled columns from the sheet (values are set at push).
           const visibleColumns = columns.filter((c) => !COLLECTION_HIDDEN_COLUMN_IDS.has(c.id));
           const nameIdx = visibleColumns.findIndex((c) => c.id === "name");
@@ -16570,7 +16580,7 @@ function CollectionSpreadsheetPage({
             frozenOffsets.push(cum);
             cum += collectionColWidth(c);
           }
-          const tableWidth = 48 + frozenCols.reduce((s, c) => s + collectionColWidth(c), 0) + SHOPIFY_COL_WIDTH + restCols.reduce((s, c) => s + collectionColWidth(c), 0);
+          const tableWidth = 48 + frozenCols.reduce((s, c) => s + collectionColWidth(c), 0) + restCols.reduce((s, c) => s + collectionColWidth(c), 0);
           return (
           <table
             style={{ ...s.table, width: tableWidth, minWidth: 900 }}
@@ -16581,7 +16591,6 @@ function CollectionSpreadsheetPage({
               {frozenCols.map((col) => (
                 <col key={col.id} style={{ width: collectionColWidth(col) }} />
               ))}
-              <col style={{ width: SHOPIFY_COL_WIDTH }} />
               {restCols.map((col) => (
                 <col key={col.id} style={{ width: collectionColWidth(col) }} />
               ))}
@@ -16620,7 +16629,6 @@ function CollectionSpreadsheetPage({
                     <CollectionColumnHeader col={displayCol(col)} />
                   </Th>
                 ))}
-                <th style={{ ...s.th, textAlign: "center" }}>Shopify</th>
                 {restCols.map((col) => (
                   <Th
                     key={col.id}
@@ -16712,11 +16720,34 @@ function CollectionSpreadsheetPage({
                       ]}
                     />
                     {(() => {
+                      const shopifyDirty = (row[COL_ROW_SHOPIFY_DIRTY] ?? "") === "1";
+                      // The Shopify action (Create / Linked status + Update) used to
+                      // be its own column; it now sits at the TOP of the Name cell.
+                      const shopifyContent = linked ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
+                          <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
+                          {shopifyDirty && (
+                            <button
+                              type="button"
+                              onClick={() => updateRowInShopify(rIdx)}
+                              disabled={isUpdatingShopify}
+                              style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer" }}
+                              title="You edited this row after it was created — push the changes (title, description, type, tags, SEO) to Shopify"
+                            >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
+                          )}
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => pushRow(rIdx)}
+                          disabled={isPushing}
+                          style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: isPushing ? "wait" : "pointer", width: "100%" }}
+                          title="Create a Shopify draft product from this row"
+                        >Create in Shopify</button>
+                      );
                       // Cell-renderer that wraps all the special-case
                       // branches. Called once per column; sticky props
-                      // applied for frozen cols (factoryNotes through
-                      // name). The Shopify "Create" cell is rendered
-                      // between the frozen group and the rest.
+                      // applied for frozen cols (factoryNotes through name).
                       const renderCol = (col: typeof columns[number], colIdx: number, frozenIdx: number) => {
                         const stickyLeft = frozenIdx >= 0 ? frozenOffsets[frozenIdx + 1] : undefined;
                         const isLastFrozen = frozenIdx >= 0 && frozenIdx === frozenCols.length - 1;
@@ -16950,66 +16981,38 @@ function CollectionSpreadsheetPage({
                         return (
                           <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky} style={nameTdStyle}>
                             {col.id === "name" ? (
-                              // Name cell = product name (centred) with the per-product
-                              // workflow status chip pinned to the very bottom.
-                              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 72, gap: 6 }}>
+                              // Name cell = Shopify action (top) · product name (centre) ·
+                              // per-product workflow status chip (bottom).
+                              <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 96, gap: 6 }}>
+                                <div onClick={(e) => e.stopPropagation()} style={{ width: "100%" }}>{shopifyContent}</div>
                                 <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>{cellInner}</div>
-                                <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", marginTop: "auto" }}>
-                                  <CollectionChipDropdown
-                                    value={row.__productStatus ?? ""}
-                                    options={localProductStatusOptions}
-                                    emptyLabel="Set status"
-                                    fullWidth
-                                    onChange={(v) => updateCell(rIdx, "__productStatus", v)}
-                                    onOptionsChange={(next) => saveChipOptions("productStatusOptions", next)}
-                                  />
-                                </div>
+                                {showProductStatusChip && (
+                                  <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", marginTop: "auto" }}>
+                                    <CollectionChipDropdown
+                                      value={row.__productStatus ?? ""}
+                                      options={localProductStatusOptions}
+                                      emptyLabel="Set status"
+                                      fullWidth
+                                      onChange={(v) => updateCell(rIdx, "__productStatus", v)}
+                                      onOptionsChange={(next) => saveChipOptions("productStatusOptions", next)}
+                                    />
+                                  </div>
+                                )}
                               </div>
                             ) : cellInner}
                           </Td>
                         );
                       };
-                      const shopifyDirty = (row[COL_ROW_SHOPIFY_DIRTY] ?? "") === "1";
-                      const shopifyCell = (
-                        <Td key="__shopify" rowIndex={rIdx} colIndex={-1} center>
-                          {linked ? (
-                            <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
-                              <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
-                              {shopifyDirty && (
-                                <button
-                                  type="button"
-                                  onClick={() => updateRowInShopify(rIdx)}
-                                  disabled={isUpdatingShopify}
-                                  style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer" }}
-                                  title="You edited this row after it was created — push the changes (title, description, type, tags, SEO) to Shopify"
-                                >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
-                              )}
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => pushRow(rIdx)}
-                              disabled={isPushing}
-                              style={{
-                                background: "#0d9488", color: "#fff", border: "none",
-                                borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600,
-                                cursor: isPushing ? "wait" : "pointer", width: "100%",
-                              }}
-                              title="Create a Shopify draft product from this row"
-                            >Create in Shopify</button>
-                          )}
-                        </Td>
-                      );
                       const frozenCells = frozenCols.map((col, i) => renderCol(col, i, i));
                       const restCells = restCols.map((col, i) => renderCol(col, frozenCols.length + i, -1));
-                      return <>{frozenCells}{shopifyCell}{restCells}</>;
+                      return <>{frozenCells}{restCells}</>;
                     })()}
                   </tr>
                 );
               })}
               {rows.length === 0 && (
                 <tr style={s.row}>
-                  <td colSpan={frozenCols.length + restCols.length + 2} style={{ ...s.td, padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
+                  <td colSpan={frozenCols.length + restCols.length + 1} style={{ ...s.td, padding: 32, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>
                     No rows yet. Click + Add row below to add one.
                   </td>
                 </tr>
@@ -22003,6 +22006,7 @@ function UserEditForm({
   const [role, setRole] = useState<PortalUserRole>(user.role);
   const [pageAccess, setPageAccess] = useState<Record<string, boolean>>(user.pageAccess ?? {});
   const [canLoadInventory, setCanLoadInventory] = useState(user.canLoadInventory);
+  const [canSeeProductStatus, setCanSeeProductStatus] = useState(Boolean(user.canSeeProductStatus));
   const allowedRoles: PortalUserRole[] = currentUser?.role === "superadmin" ? ["superadmin", "admin", "user"] : ["admin", "user"];
   const showPageAccess = role !== "superadmin";
   // Own fetcher so the Save button can show real Saving…/Saved ✓ state and
@@ -22054,6 +22058,11 @@ function UserEditForm({
         Can load Shopify inventory (Packing Lists)
       </label>
 
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+        <input type="checkbox" checked={canSeeProductStatus} onChange={(e) => { setJustSaved(false); setCanSeeProductStatus(e.target.checked); }} />
+        Can see the product status chip (Collections Name column)
+      </label>
+
       {showPageAccess && (
         <div>
           <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 8 }}>Page access</div>
@@ -22078,7 +22087,7 @@ function UserEditForm({
           disabled={saving}
           style={{ ...s.loginButton, flex: 1, ...(saving ? { opacity: 0.7, cursor: "wait" } : {}) }}
           onClick={() => {
-            const fields: Record<string, string> = { intent: "update_portal_user", userId: user.id, name, role, canLoadInventory: canLoadInventory ? "on" : "off", pageAccess: JSON.stringify(pageAccess) };
+            const fields: Record<string, string> = { intent: "update_portal_user", userId: user.id, name, role, canLoadInventory: canLoadInventory ? "on" : "off", canSeeProductStatus: canSeeProductStatus ? "on" : "off", pageAccess: JSON.stringify(pageAccess) };
             if (password) fields.password = password;
             setJustSaved(false);
             saveFetcher.submit(fields, { method: "post" });
