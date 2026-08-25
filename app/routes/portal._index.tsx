@@ -10222,13 +10222,14 @@ export default function PortalDashboard() {
   }, [searchTitle]);
   useEffect(() => {
     if (!isSearchFocused) return;
-    if (page === "restock") return;
+    if (page === "restock" || page === "usa-stock") return;
     const timer = window.setTimeout(() => {
       if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
     }, 350);
     return () => window.clearTimeout(timer);
   }, [searchTitleInput, isSearchFocused, page]);
   const restockSearch = page === "restock" ? searchTitleInput.trim().toLowerCase() : "";
+  const usaSearch = page === "usa-stock" ? searchTitleInput.trim().toLowerCase() : "";
   const visibleOrders = page === "restock" && restockSearch
     ? localRestockOrders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
     : localRestockOrders;
@@ -10543,7 +10544,7 @@ export default function PortalDashboard() {
           </div>
           <div style={s.headerControls}>
             <div style={s.utilityBar}>
-              {(page === "restock" || page === "packing" || page === "fabric" || page === "productinfo" || page === "samples") && (
+              {(page === "restock" || page === "usa-stock" || page === "packing" || page === "fabric" || page === "productinfo" || page === "samples") && (
                 <label style={s.filterLabel}>
                   Search
                   <input
@@ -10553,7 +10554,8 @@ export default function PortalDashboard() {
                     onFocus={() => setIsSearchFocused(true)}
                     onBlur={() => {
                       setIsSearchFocused(false);
-                      if (page !== "restock" && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
+                      // restock + usa-stock filter client-side (no server round-trip).
+                      if (page !== "restock" && page !== "usa-stock" && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
                     }}
                     style={s.searchInput}
                     placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : page === "productinfo" ? "Style name" : page === "samples" ? "Sample name" : "Product title"}
@@ -10799,7 +10801,7 @@ export default function PortalDashboard() {
         ) : page === "search" ? (
           <GlobalSearchPage query={globalSearchQuery} results={globalSearch} isAdmin={Boolean(currentUser?.admin)} shopDomain={shopDomain} />
         ) : page === "usa-stock" ? (
-          <UsaStockPanel orders={orders} shopDomain={shopDomain} />
+          <UsaStockPanel orders={orders} shopDomain={shopDomain} search={usaSearch} />
         ) : page === "jj-restock" ? (
           <JJRestockPanel
             orders={orders}
@@ -27012,13 +27014,14 @@ function usaAdminProductUrl(productId: string, shopDomain: string | null): strin
   const store = (shopDomain ?? "").replace(/\.myshopify\.com$/i, "").trim();
   return store ? `https://admin.shopify.com/store/${store}/products/${numeric}` : `https://admin.shopify.com/store/products/${numeric}`;
 }
-function UsaStockPanel({ orders, shopDomain }: { orders: Order[]; shopDomain: string | null }) {
+function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; shopDomain: string | null; search?: string }) {
   const [cols, setCols] = useState<number>(() => {
     if (typeof window === "undefined") return 6;
     const v = Number(window.localStorage.getItem(USA_COLS_KEY));
     return v >= 3 && v <= 6 ? v : 6;
   });
   const [typeFilter, setTypeFilter] = useState<string>("");
+  const [sortBy, setSortBy] = useState<string>("titleAsc");
   const setColsPersist = (n: number) => { setCols(n); try { window.localStorage.setItem(USA_COLS_KEY, String(n)); } catch { /* ignore */ } };
 
   // Aggregate USA-marked orders into one tile per product (group by productId
@@ -27044,7 +27047,19 @@ function UsaStockPanel({ orders, shopDomain }: { orders: Order[]; shopDomain: st
   }, [orders]);
 
   const types = useMemo(() => Array.from(new Set(tiles.map((t) => t.productType).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [tiles]);
-  const visible = typeFilter ? tiles.filter((t) => t.productType === typeFilter) : tiles;
+  const q = search.trim().toLowerCase();
+  const visible = useMemo(() => {
+    const totalOf = (t: { bySize: Record<string, number> }) => Object.values(t.bySize).reduce((s, n) => s + n, 0);
+    let list = typeFilter ? tiles.filter((t) => t.productType === typeFilter) : tiles.slice();
+    if (q) list = list.filter((t) => t.title.toLowerCase().includes(q));
+    list.sort((a, b) => {
+      if (sortBy === "titleDesc") return b.title.localeCompare(a.title);
+      if (sortBy === "qtyDesc") return totalOf(b) - totalOf(a) || a.title.localeCompare(b.title);
+      if (sortBy === "qtyAsc") return totalOf(a) - totalOf(b) || a.title.localeCompare(b.title);
+      return a.title.localeCompare(b.title);
+    });
+    return list;
+  }, [tiles, typeFilter, q, sortBy]);
   const orderSizes = (bySize: Record<string, number>) => {
     const idx = (v: string) => { const i = PACKING_SIZES.findIndex((p) => p.toUpperCase() === v.toUpperCase()); return i < 0 ? 999 : i; };
     return Object.keys(bySize).sort((a, b) => idx(a) - idx(b) || a.localeCompare(b));
@@ -27071,13 +27086,22 @@ function UsaStockPanel({ orders, shopDomain }: { orders: Order[]; shopDomain: st
           })}
         </div>
         <div style={s.usaStockColsRow}>
-          <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600 }}>Across</span>
+          <select value={sortBy} onChange={(e) => setSortBy(e.currentTarget.value)} style={s.productTypeFilter} title="Sort tiles">
+            <option value="titleAsc">Name A–Z</option>
+            <option value="titleDesc">Name Z–A</option>
+            <option value="qtyDesc">Most pieces</option>
+            <option value="qtyAsc">Fewest pieces</option>
+          </select>
+          <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 600, marginLeft: 8 }}>Across</span>
           {[3, 4, 5, 6].map((n) => (
             <button key={n} type="button" onClick={() => setColsPersist(n)} style={{ ...s.usaColButton, ...(cols === n ? s.usaColButtonActive : {}) }}>{n}</button>
           ))}
         </div>
       </div>
 
+      {visible.length === 0 && (
+        <div style={{ padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>No USA products match this search / filter.</div>
+      )}
       <div style={{ display: "grid", gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: 14, marginTop: 14 }}>
         {visible.map((t) => {
           const sizes = orderSizes(t.bySize);
