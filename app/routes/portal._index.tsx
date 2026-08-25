@@ -15718,6 +15718,48 @@ function CollectionSpreadsheetPage({
       return next;
     });
   };
+  // Row reorder via POINTER events (not HTML5 drag) — `draggable` on <tr> is
+  // unreliable across browsers (Safari especially), which is why grabbing the
+  // 6-dots grip appeared to do nothing. Pointer events work the same everywhere.
+  const dragFromRef = useRef<number | null>(null);
+  const dragOverRef = useRef<number | null>(null);
+  const startRowPointerDrag = (from: number) => {
+    dragFromRef.current = from;
+    dragOverRef.current = from;
+    setDragRowIdx(from);
+    setDragOverRowIdx(from);
+    const prevUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = "none";
+    const onMove = (e: PointerEvent) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      // Auto-scroll the table when dragging near its top/bottom edge so long
+      // collections can be reordered beyond the visible window.
+      const scroller = el?.closest(".portal-table-scroll") as HTMLElement | null;
+      if (scroller) {
+        const r = scroller.getBoundingClientRect();
+        if (e.clientY < r.top + 56) scroller.scrollTop -= 16;
+        else if (e.clientY > r.bottom - 56) scroller.scrollTop += 16;
+      }
+      const tr = el?.closest("tr[data-row-idx]") as HTMLElement | null;
+      const attr = tr?.getAttribute("data-row-idx");
+      if (attr == null) return;
+      const over = Number(attr);
+      if (dragOverRef.current !== over) { dragOverRef.current = over; setDragOverRowIdx(over); }
+    };
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = prevUserSelect;
+      const f = dragFromRef.current, o = dragOverRef.current;
+      if (f != null && o != null && f !== o) moveRow(f, o);
+      dragFromRef.current = null;
+      dragOverRef.current = null;
+      setDragRowIdx(null);
+      setDragOverRowIdx(null);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  };
 
   // Load the full rows. Wrapped so we can retry — the payload can be large
   // (rows carry image data), so a slow network or a server restart (deploy)
@@ -16671,39 +16713,22 @@ function CollectionSpreadsheetPage({
                 return (
                   <tr
                     key={rIdx}
-                    draggable
-                    onDragStart={(e) => {
+                    data-row-idx={rIdx}
+                    onPointerDown={(e) => {
                       // Reorder only starts when the grab began on the row
-                      // number's 6-dots grip — dragging from anywhere else
-                      // (cells, text, images) does nothing so it never
-                      // interferes with editing or text selection.
+                      // number's 6-dots grip — grabbing anywhere else (cells,
+                      // text, images) never starts a drag, so editing/selection
+                      // is unaffected.
+                      if (e.button !== 0) return;
                       const t = e.target as HTMLElement;
-                      if (!t.closest("[data-row-drag-handle]")) {
-                        e.preventDefault();
-                        return;
-                      }
-                      setDragRowIdx(rIdx);
-                      e.dataTransfer.effectAllowed = "move";
-                      try { e.dataTransfer.setData("text/plain", String(rIdx)); } catch { /* ok */ }
-                    }}
-                    onDragOver={(e) => {
-                      if (dragRowIdx === null || dragRowIdx === rIdx) return;
+                      if (!t.closest("[data-row-drag-handle]")) return;
                       e.preventDefault();
-                      if (dragOverRowIdx !== rIdx) setDragOverRowIdx(rIdx);
+                      startRowPointerDrag(rIdx);
                     }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      if (dragRowIdx !== null && dragRowIdx !== rIdx) {
-                        moveRow(dragRowIdx, rIdx);
-                      }
-                      setDragRowIdx(null);
-                      setDragOverRowIdx(null);
-                    }}
-                    onDragEnd={() => { setDragRowIdx(null); setDragOverRowIdx(null); }}
                     style={{
                       ...s.row,
                       ...(dragRowIdx === rIdx ? { opacity: 0.4 } : {}),
-                      ...(dragOverRowIdx === rIdx ? { boxShadow: "inset 0 3px 0 #0d9488" } : {}),
+                      ...(dragOverRowIdx === rIdx && dragRowIdx !== rIdx ? { boxShadow: "inset 0 3px 0 #0d9488" } : {}),
                     }}
                   >
                     <RowNumberCell
