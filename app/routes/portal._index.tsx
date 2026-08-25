@@ -836,7 +836,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Collections needs the fabric sheets too — the "Pick a fabric" picker and
   // fabric-cost lookups on the Collections detail table read from them. Without
   // this the picker is empty ("No fabrics match").
-  const needsFabricSheets = page === "fabric" || isRestockPage || page === "packing" || isCollectionsPage;
+  const needsFabricSheets = page === "fabric" || isRestockPage || page === "packing" || isCollectionsPage || page === "usa-stock";
   // Fetch the manual fabric sheets separately, image-stripped inside Postgres
   // (swatch is row cell index 2) so the ~35MB of images never crosses the wire
   // — except the Fabric page, which renders them.
@@ -890,7 +890,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         deletedSheetsValue: fabricDeletedSheetsSetting?.value,
       })
     : [];
-  const fabricStockIndex: FabricStockEntry[] = (isRestockPage || page === "packing" || isCollectionsPage)
+  const fabricStockIndex: FabricStockEntry[] = (isRestockPage || page === "packing" || isCollectionsPage || page === "usa-stock")
     ? buildFabricStockIndex(combinedFabricSheetsForIndex(manualFabricSheets))
     : [];
   if (page === "fabric") {
@@ -944,7 +944,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // FX rate: use the batched cache value when it's still fresh (no extra
   // round-trip); only fetch live when stale/missing (rare).
   let inrPerAudCachedRate: number | null = null;
-  if (isRestockPage || page === "packing" || isCollectionsPage) {
+  if (isRestockPage || page === "packing" || isCollectionsPage || page === "usa-stock") {
     const cachedFx = wrap(INR_AUD_CACHE_KEY)?.value as CachedFxRate | undefined;
     const fresh = cachedFx && typeof cachedFx.inrPerAud === "number" && cachedFx.inrPerAud > 0 && cachedFx.fetchedAt
       && (Date.now() - new Date(cachedFx.fetchedAt).getTime()) < FX_CACHE_TTL_MS;
