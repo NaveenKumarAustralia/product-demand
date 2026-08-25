@@ -10701,6 +10701,19 @@ export default function PortalDashboard() {
         {page === "jj-restock" && (
           <div style={s.restockFilterBar}>
             <label style={s.filterLabel}>
+              Product group
+              <select
+                value={selectedProductGroup}
+                onChange={(event) => updateParams({ productGroup: event.currentTarget.value, productType: "" })}
+                style={s.productTypeFilter}
+              >
+                <option value="">All groups</option>
+                {productGroups.map((group: string) => (
+                  <option key={group} value={group}>{group}</option>
+                ))}
+              </select>
+            </label>
+            <label style={s.filterLabel}>
               Status
               <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
                 <option value="">All statuses</option>
