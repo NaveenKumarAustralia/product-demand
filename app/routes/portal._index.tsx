@@ -862,7 +862,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ? packingLists.find((list) => list.id === packingId) ?? null
     : null;
   // Shop domain for "open in Shopify admin" links and per-row inventory loads.
-  const shopDomain = page === "packing" && selectedPackingList
+  // shopDomain (the store's myshopify domain) is needed to build "Open in
+  // Shopify" admin links. Fetch it on every page that renders one — without it
+  // the link is malformed and Shopify shows a "no permission" error.
+  const needsShopDomain = isCollectionsPage || page === "usa-stock" || isRestockPage || page === "search" || (page === "packing" && selectedPackingList);
+  const shopDomain = needsShopDomain
     ? (await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" }, select: { shop: true } }))?.shop ?? null
     : null;
   const productResults = page === "packing" && selectedPackingList && productSearch.trim().length >= 2
@@ -9440,22 +9444,19 @@ function extractStyleFromName(name: string, productInfo: ProductInfo): string {
   return "";
 }
 
-// Builds the Shopify ADMIN URL for a linked row — clicking opens the
-// edit page in Shopify admin. Prefers the row's `link` column when
-// it's already an admin URL (rows imported from the sheet already
-// have the right store handle baked in). Otherwise constructs from
-// shopDomain so the URL targets the right store and doesn't trip the
-// "Your account doesn't have permission" page.
+// Builds the Shopify ADMIN URL for a linked row. Uses the store's OWN admin
+// path (store.myshopify.com/admin/products/<id>) — Shopify resolves the correct
+// unified-admin store handle itself, which avoids the "your account doesn't
+// have permission" page that the hardcoded admin.shopify.com/store/<handle>
+// form caused (it guessed the wrong store handle).
 function shopifyAdminLinkForRow(row: Record<string, string>, shopDomain?: string | null): string {
-  const stored = (row.link ?? "").trim();
-  if (stored && /admin\.shopify\.com/i.test(stored)) return stored;
   const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
-  if (!pid) return "";
   const numeric = pid.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
-  if (!numeric) return "";
-  const handle = (shopDomain ?? "").replace(/\.myshopify\.com$/i, "").trim();
-  if (handle) return `https://admin.shopify.com/store/${handle}/products/${numeric}`;
-  return `https://admin.shopify.com/store/products/${numeric}`;
+  const domain = (shopDomain ?? "").trim();
+  if (numeric && domain) return `https://${domain}/admin/products/${numeric}`;
+  const stored = (row.link ?? "").trim();
+  if (stored && /myshopify\.com\/admin/i.test(stored)) return stored;
+  return numeric ? `https://admin.shopify.com/store/products/${numeric}` : "";
 }
 
 // Builds the PUBLIC STOREFRONT URL for a linked row — clicking opens
@@ -17770,15 +17771,14 @@ function CollectionChipDropdown({
 }
 
 function CollectionShopifyLinkedCell({ productId, status, shopDomain, linkOverride }: { productId: string; status: string; shopDomain?: string | null; linkOverride?: string }) {
-  // Prefer the row's stored Link (which is the actual Shopify admin
-  // URL imported from the sheet) so the click takes the user to the
-  // right store. Fallback to shopDomain-aware construction.
-  const stored = (linkOverride ?? "").trim();
+  // Use the store's own admin path (store.myshopify.com/admin/products/<id>) so
+  // Shopify resolves the correct store — avoids the "no permission" page.
   const numeric = productId.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
-  const handle = (shopDomain ?? "").replace(/\.myshopify\.com$/i, "").trim();
-  const href = stored && /admin\.shopify\.com/i.test(stored)
-    ? stored
-    : (numeric && handle ? `https://admin.shopify.com/store/${handle}/products/${numeric}` : (numeric ? `https://admin.shopify.com/store/products/${numeric}` : "#"));
+  const domain = (shopDomain ?? "").trim();
+  const stored = (linkOverride ?? "").trim();
+  const href = numeric && domain
+    ? `https://${domain}/admin/products/${numeric}`
+    : (stored && /myshopify\.com\/admin/i.test(stored) ? stored : (numeric ? `https://admin.shopify.com/store/products/${numeric}` : "#"));
   const dot = status === "ACTIVE" ? "#10b981" : "#9ca3af";
   return (
     <a
@@ -27673,8 +27673,9 @@ const USA_COLS_KEY = "usa-stock-cols-v1";
 function usaAdminProductUrl(productId: string, shopDomain: string | null): string {
   const numeric = productId.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
   if (!numeric) return "";
-  const store = (shopDomain ?? "").replace(/\.myshopify\.com$/i, "").trim();
-  return store ? `https://admin.shopify.com/store/${store}/products/${numeric}` : `https://admin.shopify.com/store/products/${numeric}`;
+  const domain = (shopDomain ?? "").trim();
+  // store.myshopify.com/admin lets Shopify resolve the correct store itself.
+  return domain ? `https://${domain}/admin/products/${numeric}` : `https://admin.shopify.com/store/products/${numeric}`;
 }
 function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; shopDomain: string | null; search?: string }) {
   const [cols, setCols] = useState<number>(() => {
