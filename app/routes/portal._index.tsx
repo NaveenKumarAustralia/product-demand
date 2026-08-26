@@ -4211,7 +4211,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // ownership (CollectionImage.collectionId) and re-home their note
     // threads (PortalMessage) so nothing is orphaned.
     const sourceId = Number(form.get("collectionId"));
-    const targetId = Number(form.get("targetCollectionId"));
+    let targetId = Number(form.get("targetCollectionId"));
+    // "Take out to a NEW collection": create the destination on the fly (same
+    // kind as the source) and move the selected rows into it.
+    const newCollectionName = String(form.get("newCollectionName") ?? "").trim();
+    if (intent === "move_collection_rows" && !targetId && newCollectionName) {
+      const src = await prisma.collection.findUnique({ where: { id: sourceId }, select: { kind: true } });
+      const count = await prisma.collection.count();
+      const created = await prisma.collection.create({
+        data: {
+          name: newCollectionName.slice(0, 120),
+          kind: src?.kind === "jj-new" ? "jj-new" : "collection",
+          sortOrder: count,
+          columns: DEFAULT_COLLECTION_COLUMNS as unknown as object,
+          rows: [] as unknown as object,
+        },
+        select: { id: true },
+      });
+      targetId = created.id;
+    }
     if (!sourceId || !targetId || sourceId === targetId) return jsonResponse({ ok: false, error: "bad_ids" });
     const [source, target] = await Promise.all([
       prisma.collection.findUnique({ where: { id: sourceId }, select: { rows: true } }),
@@ -16450,6 +16468,20 @@ function CollectionSpreadsheetPage({
       { method: "post" },
     );
   };
+  // Take the selected rows OUT into a brand-new collection (a new tile). The
+  // rows leave this collection; the server creates the destination.
+  const moveSelectedToNew = (name: string) => {
+    if (!selectedRowIdxs.size || moveFetcher.state !== "idle") return;
+    moveFetcher.submit(
+      {
+        intent: "move_collection_rows",
+        collectionId: String(listItem.id),
+        newCollectionName: name,
+        rowIndices: JSON.stringify(Array.from(selectedRowIdxs)),
+      },
+      { method: "post" },
+    );
+  };
   // Merge this entire collection into another, then delete this one.
   const combineInto = (targetId: number) => {
     if (moveFetcher.state !== "idle") return;
@@ -16880,15 +16912,25 @@ function CollectionSpreadsheetPage({
               ))}
             </select>
           </label>
-          {otherCollections.length > 0 && selectedRowIdxs.size > 0 && (
+          {selectedRowIdxs.size > 0 && (
             <select
               value=""
               disabled={moveFetcher.state !== "idle"}
-              onChange={(e) => { const t = Number(e.target.value); if (t) moveSelectedTo(t); e.currentTarget.value = ""; }}
+              onChange={(e) => {
+                const v = e.currentTarget.value;
+                e.currentTarget.value = "";
+                if (v === "__new") {
+                  const name = window.prompt("Name the new collection for these products:", "")?.trim();
+                  if (name) moveSelectedToNew(name);
+                } else if (v) {
+                  moveSelectedTo(Number(v));
+                }
+              }}
               style={{ fontSize: 12, fontWeight: 600, padding: "6px 8px", border: "1px solid #0d9488", borderRadius: 6, background: "#0d9488", color: "#fff", cursor: "pointer", outline: "none" }}
-              title="Move the selected products into another collection"
+              title="Take the selected products out into a new collection, or move them into another one"
             >
               <option value="">{moveFetcher.state !== "idle" ? "Moving…" : `Move ${selectedRowIdxs.size} to…`}</option>
+              <option value="__new" style={{ color: "#111827", background: "#fff" }}>＋ New collection (own tile)…</option>
               {otherCollections.map((c) => (
                 <option key={c.id} value={c.id} style={{ color: "#111827", background: "#fff" }}>{c.name}</option>
               ))}
