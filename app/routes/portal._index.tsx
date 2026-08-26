@@ -9451,6 +9451,25 @@ function deriveCategoryFromProductType(productType: string): string {
   return productType;
 }
 
+// Product metafield definition types for the "custom" namespace, keyed by
+// metafield key (e.g. { colour: "single_line_text_field", categories:
+// "list.single_line_text_field" }). A store may define a metafield as a LIST,
+// and Shopify rejects a create/update that sends the wrong type — so we read
+// the real definition and match it. Cached briefly per shop (definitions rarely
+// change) so batch pushes don't re-query per row.
+async function getProductMetafieldTypes(shop: string, accessToken: string): Promise<Record<string, string>> {
+  const cache = getProductMetafieldTypes as typeof getProductMetafieldTypes & { _shop?: string; _at?: number; _map?: Record<string, string> };
+  if (cache._shop === shop && cache._at && Date.now() - cache._at < 5 * 60 * 1000 && cache._map) return cache._map;
+  const json = await shopifyGraphql<{ data?: { metafieldDefinitions?: { nodes?: Array<{ key?: string; type?: { name?: string } }> } } }>(
+    shop, accessToken,
+    `query { metafieldDefinitions(first: 100, ownerType: PRODUCT, namespace: "custom") { nodes { key type { name } } } }`,
+  ).catch(() => null);
+  const map: Record<string, string> = {};
+  for (const n of json?.data?.metafieldDefinitions?.nodes ?? []) { if (n.key) map[n.key] = n.type?.name ?? ""; }
+  cache._shop = shop; cache._at = Date.now(); cache._map = map;
+  return map;
+}
+
 async function createShopifyProductFromRow(
   shop: string,
   accessToken: string,
@@ -9606,14 +9625,28 @@ async function createShopifyProductFromRow(
     };
   }
 
-  // Metafields: colour + categories live as custom metafields. Strings
-  // for now — the next push can introduce typed (list.single_line, etc).
+  // Metafields: colour + categories live as custom metafields. A store may
+  // define either one as a LIST (list.single_line_text_field); Shopify rejects
+  // a mismatched type, so read the real definition and format the value to
+  // match (list types take a JSON array; comma-separated values become items).
   const colour = (row.colour ?? "").trim();
   // Categories: use the typed value, else derive from the (auto) product type.
   const categories = (row.categories ?? "").trim() || deriveCategoryFromProductType(productType);
   const metafields: Array<{ namespace: string; key: string; type: string; value: string }> = [];
-  if (colour) metafields.push({ namespace: "custom", key: "colour", type: "single_line_text_field", value: colour });
-  if (categories) metafields.push({ namespace: "custom", key: "categories", type: "single_line_text_field", value: categories });
+  if (colour || categories) {
+    const mfTypes = await getProductMetafieldTypes(shop, accessToken).catch(() => ({} as Record<string, string>));
+    const pushMf = (key: string, value: string) => {
+      const defType = mfTypes[key] || "single_line_text_field";
+      if (defType.startsWith("list.")) {
+        const arr = value.split(",").map((s) => s.trim()).filter(Boolean);
+        metafields.push({ namespace: "custom", key, type: defType, value: JSON.stringify(arr.length ? arr : [value]) });
+      } else {
+        metafields.push({ namespace: "custom", key, type: defType || "single_line_text_field", value });
+      }
+    };
+    if (colour) pushMf("colour", colour);
+    if (categories) pushMf("categories", categories);
+  }
   if (metafields.length) input.metafields = metafields;
 
   const json = await shopifyGraphql<any>(shop, accessToken, `
