@@ -3357,6 +3357,52 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "backfill_collection_prices") {
+    // Recompute every collection row's stored Price ₹ with the CURRENT cost
+    // formula — but only rows that still hold an AUTO-computed price (i.e. the
+    // stored value equals what the OLD formula produced). Manually-typed prices
+    // and titles with a manual override are left untouched.
+    if (!currentUser?.admin) return jsonResponse({ ok: false, error: "admin_only" });
+    const productInfo = await loadProductInfoForAction();
+    const manualFabricSheets = await loadManualFabricSheetsForAction();
+    const fabricStockIndex = buildFabricStockIndex(combinedFabricSheetsForIndex(manualFabricSheets));
+    const lookup = buildStyleCostLookup(productInfo, fabricStockIndex);
+    const overrides = productInfo.titlePriceOverrides ?? {};
+    const collections = await prisma.collection.findMany({ select: { id: true, rows: true } });
+    let updatedRows = 0, updatedCollections = 0, scanned = 0;
+    for (const col of collections) {
+      const rows = Array.isArray(col.rows) ? (col.rows as unknown as Array<Record<string, unknown>>) : [];
+      let changed = false;
+      for (const row of rows) {
+        if (!row || typeof row !== "object") continue;
+        scanned++;
+        const name = String(row.name ?? row.title ?? "").trim();
+        if (!name) continue;
+        if ((overrides[name.toLowerCase()] ?? 0) > 0) continue; // manual override → leave
+        const storedNum = Math.round(Number(row.priceRupees ?? "") || 0);
+        if (!storedNum) continue; // empty auto-fills live; nothing to backfill
+        const overrideId = String(row.styleOverrideId ?? "").trim();
+        const bd = lookup.fabricBreakdownForTitle(name, overrideId || undefined);
+        if (!bd) continue;
+        // Old formula total from the (formula-independent) components.
+        const oldSubtotal = bd.fabricCost + bd.stitching + 100 + bd.zipButtons + bd.liningTrim;
+        const oldTotal = Math.round((oldSubtotal * (1 + factoryProfitPct(oldSubtotal))) / 10) * 10;
+        if (storedNum !== oldTotal) continue; // manually-typed price → leave
+        const newTotal = bd.total; // breakdown already uses the current formula
+        if (newTotal > 0 && newTotal !== storedNum) {
+          (row as Record<string, unknown>).priceRupees = String(newTotal);
+          changed = true;
+          updatedRows++;
+        }
+      }
+      if (changed) {
+        await prisma.collection.update({ where: { id: col.id }, data: { rows: rows as unknown as object } });
+        updatedCollections++;
+      }
+    }
+    return jsonResponse({ ok: true, scanned, updatedRows, updatedCollections });
+  }
+
   if (intent === "set_title_style_override") {
     // Link a product title (case-insensitive) to an explicit style id
     // so future cost lookups skip the prefix matcher. Empty styleId
@@ -11193,6 +11239,7 @@ export default function PortalDashboard() {
             selectedCategoryId={searchParams.get("category") ?? ""}
             search={searchTitleInput}
             updateParams={updateParams}
+            isAdmin={Boolean(currentUser?.admin)}
           />
         ) : page === "samples" ? (
           <SamplesPanel
@@ -19770,13 +19817,16 @@ function ProductInformationPanel({
   selectedCategoryId,
   search,
   updateParams,
+  isAdmin = false,
 }: {
   productInfo: ProductInfo;
   selectedCategoryId: string;
   search: string;
   updateParams: (updates: Record<string, string>) => void;
+  isAdmin?: boolean;
 }) {
   const fetcher = useFetcher();
+  const priceBackfillFetcher = useFetcher<{ ok?: boolean; updatedRows?: number; updatedCollections?: number; error?: string }>();
   const [showHidden, setShowHidden] = useState(false);
   const [addStyleModal, setAddStyleModal] = useState<{ categoryId: string; name: string } | null>(null);
   const [styleChoice, setStyleChoice] = useState<ProductInfoStyle | null>(null);
@@ -19969,6 +20019,21 @@ function ProductInformationPanel({
               </button>
             ))}
           </div>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => { if (window.confirm("Recompute every collection's auto ₹ price with the current cost formula? Manually-typed prices and overrides are left as-is.")) priceBackfillFetcher.submit({ intent: "backfill_collection_prices" }, { method: "post" }); }}
+              disabled={priceBackfillFetcher.state !== "idle"}
+              style={{ ...s.primaryActionButton, background: "#0e7490" }}
+              title="Update all stored ₹ prices to the current cost formula (auto-priced rows only)"
+            >
+              {priceBackfillFetcher.state !== "idle"
+                ? "Recomputing…"
+                : priceBackfillFetcher.data?.ok
+                  ? `✓ ${priceBackfillFetcher.data.updatedRows ?? 0} updated`
+                  : "Recompute all ₹ prices"}
+            </button>
+          )}
           <button type="button" style={s.primaryActionButton} onClick={addStyle} disabled={isSubmitting}>
             Add Style
           </button>
