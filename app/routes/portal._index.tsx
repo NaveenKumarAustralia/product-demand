@@ -6038,6 +6038,14 @@ const FABRIC_WASTAGE_PCT = 0.05;
 // it). Factory profit is tier-based on the pre-profit subtotal so the
 // margin shrinks as styles get more expensive.
 const FACTORY_COST_FIXED = 100;
+// Factory cost is tier-based on the fabric cost, and is added AFTER the factory
+// profit (so profit is not earned on the factory cost):
+//   fabric cost ≤ ₹200 → ₹50 · ≤ ₹400 → ₹100 · above → ₹125.
+function factoryCostForFabric(fabricCost: number): number {
+  if (fabricCost <= 200) return 50;
+  if (fabricCost <= 400) return 100;
+  return 125;
+}
 function factoryProfitPct(subtotal: number): number {
   if (subtotal <= 250) return 0.225;
   if (subtotal <= 500) return 0.20;
@@ -7055,24 +7063,29 @@ function buildStyleCostLookup(
   // Cost / breakdown computation shared by the title-based and the
   // override-based paths — same formula, only the style-resolution
   // step differs.
+  // Profit is charged on everything EXCEPT the factory cost; the (tier-based)
+  // factory cost is then added on top. The profit-tier % is judged on the full
+  // product cost (profit base + factory cost) so the margin still shrinks as
+  // styles get more expensive.
   const costFromResolved = (r: Resolved): number => {
     if (r.fabricCost <= 0 || !isFilled(r.style.stitchingCost)) return 0;
     const stitching = r.style.stitchingCost ?? 0;
     const zipButtons = r.style.zipButtonsCost ?? 0;
     const liningTrim = r.style.liningTrimCost ?? 0;
-    const subtotal = r.fabricCost + stitching + FACTORY_COST_FIXED + zipButtons + liningTrim;
-    const factoryProfit = subtotal * factoryProfitPct(subtotal);
-    return Math.round((subtotal + factoryProfit) / 10) * 10;
+    const factoryCost = factoryCostForFabric(r.fabricCost);
+    const profitBase = r.fabricCost + stitching + zipButtons + liningTrim;
+    const factoryProfit = profitBase * factoryProfitPct(profitBase + factoryCost);
+    return Math.round((profitBase + factoryProfit + factoryCost) / 10) * 10;
   };
   const breakdownFromResolved = (r: Resolved): CostBreakdown => {
     const stitching = r.style.stitchingCost ?? 0;
-    const factoryCost = FACTORY_COST_FIXED;
+    const factoryCost = factoryCostForFabric(r.fabricCost);
     const zipButtons = r.style.zipButtonsCost ?? 0;
     const liningTrim = r.style.liningTrimCost ?? 0;
-    const subtotal = r.fabricCost + stitching + factoryCost + zipButtons + liningTrim;
-    const profitPct = factoryProfitPct(subtotal);
-    const factoryProfit = subtotal * profitPct;
-    const rawTotal = subtotal + factoryProfit;
+    const profitBase = r.fabricCost + stitching + zipButtons + liningTrim;
+    const profitPct = factoryProfitPct(profitBase + factoryCost);
+    const factoryProfit = profitBase * profitPct;
+    const rawTotal = profitBase + factoryProfit + factoryCost;
     const total = Math.round(rawTotal / 10) * 10;
     return {
       styleName: r.style.name ?? "",
@@ -12590,11 +12603,12 @@ function CostBreakdownMenu({
     { label: "Fabric wastage (5%)", value: fmt(breakdown.fabricWastage), faint: true },
     { label: "Fabric cost", value: fmt(breakdown.fabricCost) },
     { label: "Stitching", value: fmt(breakdown.stitching) },
-    { label: "Factory cost", value: fmt(breakdown.factoryCost) },
-    { label: `Factory profit (${Math.round(breakdown.factoryProfitPct * 1000) / 10}%)`, value: fmt(breakdown.factoryProfit) },
   ];
   if (breakdown.zipButtons > 0) lines.push({ label: "Zip / buttons", value: fmt(breakdown.zipButtons) });
   if (breakdown.liningTrim > 0) lines.push({ label: "Lining / trim", value: fmt(breakdown.liningTrim) });
+  // Profit is charged on the above; the tiered factory cost is added after it.
+  lines.push({ label: `Factory profit (${Math.round(breakdown.factoryProfitPct * 1000) / 10}%)`, value: fmt(breakdown.factoryProfit) });
+  lines.push({ label: "Factory cost", value: fmt(breakdown.factoryCost) });
 
   const panel = (
     <div
@@ -20189,13 +20203,12 @@ function ProductInformationPanel({
                 />
               </label>
               <label style={s.productInfoDetailsField}>
-                Factory cost (₹/piece)
+                Factory cost (₹/piece, auto)
                 <input
                   type="text"
-                  inputMode="decimal"
-                  value={String(FACTORY_COST_FIXED)}
+                  value="₹50 / ₹100 / ₹125"
                   readOnly
-                  title="Fixed at ₹100 for every style."
+                  title="By fabric cost: ≤₹200 → ₹50, ≤₹400 → ₹100, above → ₹125. Added after the factory profit."
                   style={{ ...s.productInfoDetailsInput, background: "#f3f4f6", color: "#6b7280", cursor: "not-allowed" }}
                 />
               </label>
