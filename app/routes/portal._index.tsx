@@ -3359,9 +3359,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "backfill_collection_prices") {
     // Recompute every collection row's stored Price ₹ with the CURRENT cost
-    // formula — but only rows that still hold an AUTO-computed price (i.e. the
-    // stored value equals what the OLD formula produced). Manually-typed prices
-    // and titles with a manual override are left untouched.
+    // formula. Rows that resolve to a computed cost are set to it; only titles
+    // with an explicit manual price OVERRIDE (set via the cost-breakdown popup)
+    // are left untouched — those already win at display/push time anyway.
     if (!currentUser?.admin) return jsonResponse({ ok: false, error: "admin_only" });
     const productInfo = await loadProductInfoForAction();
     const manualFabricSheets = await loadManualFabricSheetsForAction();
@@ -3378,19 +3378,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         scanned++;
         const name = String(row.name ?? row.title ?? "").trim();
         if (!name) continue;
-        if ((overrides[name.toLowerCase()] ?? 0) > 0) continue; // manual override → leave
-        const storedNum = Math.round(Number(row.priceRupees ?? "") || 0);
-        if (!storedNum) continue; // empty auto-fills live; nothing to backfill
+        if ((overrides[name.toLowerCase()] ?? 0) > 0) continue; // explicit override → leave
         const overrideId = String(row.styleOverrideId ?? "").trim();
-        const bd = lookup.fabricBreakdownForTitle(name, overrideId || undefined);
-        if (!bd) continue;
-        // Old formula total from the (formula-independent) components.
-        const oldSubtotal = bd.fabricCost + bd.stitching + 100 + bd.zipButtons + bd.liningTrim;
-        const oldTotal = Math.round((oldSubtotal * (1 + factoryProfitPct(oldSubtotal))) / 10) * 10;
-        if (storedNum !== oldTotal) continue; // manually-typed price → leave
-        const newTotal = bd.total; // breakdown already uses the current formula
-        if (newTotal > 0 && newTotal !== storedNum) {
-          (row as Record<string, unknown>).priceRupees = String(newTotal);
+        const newTotal = overrideId
+          ? lookup.costForOverride(name, overrideId)
+          : lookup.costForTitle(name);
+        if (!(newTotal > 0)) continue; // can't resolve a cost → leave as-is
+        const next = String(Math.round(newTotal));
+        if (String(row.priceRupees ?? "") !== next) {
+          (row as Record<string, unknown>).priceRupees = next;
           changed = true;
           updatedRows++;
         }
