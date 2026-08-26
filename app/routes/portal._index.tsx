@@ -11605,7 +11605,7 @@ function RowNumberCell({
       <td
         tabIndex={0}
         {...(dragHandle ? { "data-row-drag-handle": "" } : {})}
-        style={dragHandle ? { ...s.rowNumberCell, cursor: "grab" } : s.rowNumberCell}
+        style={dragHandle ? { ...s.rowNumberCell, paddingTop: 15, cursor: "grab" } : s.rowNumberCell}
         onContextMenu={(event) => {
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
@@ -11613,41 +11613,30 @@ function RowNumberCell({
         title={dragHandle ? "Drag to move this row up or down · right-click for actions" : "Right click for row actions"}
       >
         {dragHandle ? (
-          // Checkbox on the LEFT, six-dots drag grip on the RIGHT (side by side,
-          // not overlapping), with the row number below.
-          <>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 2, marginBottom: 2 }}>
-              {onToggleSelect ? (
-                <input
-                  type="checkbox"
-                  checked={!!selected}
-                  onChange={onToggleSelect}
-                  onClick={(e) => e.stopPropagation()}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  style={{ width: 14, height: 14, margin: 0, cursor: "pointer", flexShrink: 0 }}
-                  title="Select row"
-                />
-              ) : <span style={{ width: 14 }} />}
-              <span aria-hidden title="Drag to move this row up or down" style={{ color: "#b6bcc4", fontSize: 11, lineHeight: 1, letterSpacing: 1, cursor: "grab", userSelect: "none", flexShrink: 0 }}>⠿</span>
-            </div>
-            <div style={{ textAlign: "center" }}>{rowNumber}</div>
-          </>
-        ) : (
-          <>
-            {onToggleSelect ? (
-              <input
-                type="checkbox"
-                checked={!!selected}
-                onChange={onToggleSelect}
-                onClick={(e) => e.stopPropagation()}
-                onMouseDown={(e) => e.stopPropagation()}
-                style={{ width: 15, height: 15, marginRight: 5, cursor: "pointer", verticalAlign: "middle" }}
-                title="Select row"
-              />
-            ) : null}
-            {rowNumber}
-          </>
-        )}
+          <span
+            aria-hidden
+            title="Drag to move this row up or down"
+            style={{
+              position: "absolute", top: 1, left: 0, right: 0,
+              textAlign: "center", lineHeight: 1, letterSpacing: 1,
+              color: "#b6bcc4", fontSize: 11, cursor: "grab", userSelect: "none",
+            }}
+          >
+            ⠿
+          </span>
+        ) : null}
+        {onToggleSelect ? (
+          <input
+            type="checkbox"
+            checked={!!selected}
+            onChange={onToggleSelect}
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{ width: 15, height: 15, marginRight: 5, cursor: "pointer", verticalAlign: "middle" }}
+            title="Select row"
+          />
+        ) : null}
+        {rowNumber}
         {heightKey ? <span style={s.rowResizeHandle} onMouseDown={startRowResize} title="Drag to resize row" /> : null}
       </td>
       {menu && typeof document !== "undefined" && createPortal(
@@ -15858,7 +15847,7 @@ function CollectionCard({
         <div
           onClick={(e) => { e.stopPropagation(); onToggleSelected?.(); }}
           title="Select to group"
-          style={{ position: "absolute", top: 8, left: 8, zIndex: 5, width: 24, height: 24, borderRadius: 6, background: selected ? "#0d9488" : "rgba(255,255,255,0.92)", border: "1px solid rgba(0,0,0,0.15)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }}
+          style={{ position: "absolute", top: 8, left: 44, zIndex: 5, width: 24, height: 24, borderRadius: 6, background: selected ? "#0d9488" : "rgba(255,255,255,0.92)", border: "1px solid rgba(0,0,0,0.15)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }}
         >
           {selected && <span style={{ color: "#fff", fontSize: 15, fontWeight: 900, lineHeight: 1 }}>✓</span>}
         </div>
