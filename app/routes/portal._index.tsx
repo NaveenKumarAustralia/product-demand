@@ -17043,6 +17043,8 @@ function CollectionSpreadsheetPage({
                 .map(({ row, rIdx }) => {
                 const linkedProductId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
                 const linked = Boolean(linkedProductId);
+                // A linked row with edits not yet pushed to Shopify — highlight it.
+                const rowDirty = linked && (row[COL_ROW_SHOPIFY_DIRTY] ?? "") === "1";
                 const totalOrdered = sumCollectionRowQuantity(row);
                 const adminLink = shopifyAdminLinkForRow(row, shopDomain);
                 const storefrontLink = shopifyStorefrontLinkForRow(row, shopDomain);
@@ -17075,6 +17077,9 @@ function CollectionSpreadsheetPage({
                     }}
                     style={{
                       ...s.row,
+                      // Unpushed edits: tint the row + amber left border so it's
+                      // obvious it needs an "Update in Shopify" push.
+                      ...(rowDirty ? { background: "#fffbeb", boxShadow: "inset 3px 0 0 #f59e0b" } : {}),
                       ...(dragRowIdx === rIdx ? { opacity: 0.4 } : {}),
                       ...(dragOverRowIdx === rIdx && dragRowIdx !== rIdx ? { boxShadow: "inset 0 3px 0 #0d9488" } : {}),
                     }}
@@ -17298,20 +17303,10 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
-                        const isSpecialRender =
-                          col.type === "readonly"
-                          || col.type === "tickbox"
-                          || col.type === "chip"
-                          || col.type === "release"
-                          || col.id === "totalOrdered"
-                          || col.id === "modelPicture"
-                          || col.id === "fabric"
-                          || col.id === "maniPicsTaken"
-                          // Tags stay editable even after the product is created —
-                          // add/remove/search tags then "Update in Shopify" pushes
-                          // them (updateCell flags the row dirty automatically).
-                          || col.id === "tags";
-                        const lockedDisplay = linked && !isSpecialRender;
+                        // Everything stays editable after the product is created —
+                        // edit any cell, the row highlights + the "Update in Shopify"
+                        // button appears, and you can push again whenever you want.
+                        const lockedDisplay = false;
                         // Notes cells need the table-layout "height: 1"
                         // trick + zero padding so the inner wrap can
                         // fill the cell exactly (height:100% works
