@@ -19809,7 +19809,7 @@ function CollectionImageCell({
 // ─── Fabric Sheets ───────────────────────────────────────────────────────────
 
 function ProductInformationPanel({
-  productInfo,
+  productInfo: productInfoProp,
   selectedCategoryId,
   search,
   updateParams,
@@ -19821,6 +19821,11 @@ function ProductInformationPanel({
   updateParams: (updates: Record<string, string>) => void;
   isAdmin?: boolean;
 }) {
+  // Optimistic local copy: the product-info blob is large, so revalidating it
+  // after a save is slow — without this, reopening a just-saved style shows the
+  // stale value until the reload lands (the "had to save twice" bug).
+  const [productInfo, setProductInfo] = useState(productInfoProp);
+  useEffect(() => { setProductInfo(productInfoProp); }, [productInfoProp]);
   const fetcher = useFetcher();
   const priceBackfillFetcher = useFetcher<{ ok?: boolean; updatedRows?: number; updatedCollections?: number; error?: string }>();
   const [showHidden, setShowHidden] = useState(false);
@@ -19958,6 +19963,29 @@ function ProductInformationPanel({
       styleId: detailStyle.id,
       ...detailDraft,
     });
+    // Optimistically apply to the local copy so reopening the style shows the
+    // new values immediately (before the slow product-info revalidation lands).
+    const num = (v: string | undefined) => { const t = (v ?? "").trim(); if (!t) return undefined; const n = Number(t); return Number.isFinite(n) ? n : undefined; };
+    const styleId = detailStyle.id;
+    const draft = detailDraft;
+    setProductInfo((cur) => ({
+      ...cur,
+      categories: cur.categories.map((c) => c.id !== categoryId ? c : {
+        ...c,
+        styles: c.styles.map((st) => st.id !== styleId ? st : {
+          ...st,
+          ...((draft.name ?? "").trim() ? { name: draft.name.trim() } : {}),
+          averageMeters: num(draft.averageMeters),
+          averageTrimMeters: num(draft.averageTrimMeters),
+          stitchingCost: num(draft.stitchingCost),
+          zipButtonsCost: num(draft.zipButtonsCost),
+          liningTrimCost: num(draft.liningTrimCost),
+          sheetCount: num(draft.sheetCount),
+          zipButtonType: (draft.zipButtonType ?? "").trim(),
+          costingNotes: (draft.costingNotes ?? "").trim(),
+        }),
+      }),
+    }));
     setDetailStyle(null);
   };
 
