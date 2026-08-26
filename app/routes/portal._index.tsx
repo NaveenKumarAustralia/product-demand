@@ -27754,7 +27754,6 @@ function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; s
     }
     return Array.from(byKey.values()).filter((t) => Object.keys(t.bySize).length > 0).sort((a, b) => a.title.localeCompare(b.title));
   }, [orders]);
-  const [printTileKey, setPrintTileKey] = useState<string | null>(null);
 
   const types = useMemo(() => Array.from(new Set(tiles.map((t) => t.productType).filter(Boolean))).sort((a, b) => a.localeCompare(b)), [tiles]);
   const q = search.trim().toLowerCase();
@@ -27836,17 +27835,10 @@ function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; s
                 ))}
               </div>
               <div style={s.usaCardTotal}>{total} pcs</div>
-              <button type="button" onClick={() => setPrintTileKey(t.key)} style={s.usaCardPrintBtn} title="Print barcodes for this product">🏷️ Print barcodes</button>
             </div>
           );
         })}
       </div>
-      {printTileKey !== null && (() => {
-        const t = tiles.find((x) => x.key === printTileKey);
-        if (!t) return null;
-        const items = orderSizes(t.bySize).map((k) => ({ label: k, sku: t.codes[k]?.sku ?? "", barcode: t.codes[k]?.barcode ?? "", qty: t.bySize[k] }));
-        return <PrintBarcodesModal title={t.title} productId={t.productId} items={items} onClose={() => setPrintTileKey(null)} />;
-      })()}
     </div>
   );
 }
