@@ -2550,15 +2550,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!since || !until) return jsonResponse({ ok: false, error: "bad_input" });
     const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
     if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
-    const [stockProducts, soldDirect, soldDashboard, sellingDaysByProd] = await Promise.all([
+    const [stockProducts, soldDirect, soldDashboard, sellingDaysDirect, sellingDaysDashboard] = await Promise.all([
       getAllShopifyProductsWithInventory(session.shop, session.accessToken, refresh).catch(() => [] as ReorderStockProduct[]),
       // Query the store directly (high LIMIT, nothing truncated) as the primary
       // source; fall back to the dashboard bulk if the direct query fails.
       fetchReorderSalesAllVariantsDirect(session.shop, session.accessToken, since, until),
       fetchReorderSalesAllVariants(since, until),
+      fetchReorderSellingDaysDirect(session.shop, session.accessToken, since, until),
       fetchReorderSellingDays(since, until),
     ]);
     const soldByProduct = soldDirect ?? soldDashboard;
+    const sellingDaysByProd = sellingDaysDirect ?? sellingDaysDashboard;
     const lookbackDays = Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000));
     // Rate denominator: days the product has been selling in the window, floored
     // at 14 (or the window if shorter) so brand-new items don't get a jumpy rate.
@@ -2579,7 +2581,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       // matched — otherwise a variant-label mismatch shows 0 sold even when the
       // product genuinely sold. Per-size stays best-effort for the suggestion.
       const totalSold = Math.max(soldTotalAll, sizes.reduce((a, s) => a + s.unitsSold, 0));
-      const effectiveDays = Math.max(rateFloor, Math.min(lookbackDays, sellingDaysByProd?.[numId(p.id)] ?? lookbackDays));
+      // Rate denominator = days since the product started selling (its first
+      // sale in the window), so a newly released item isn't divided by the whole
+      // window. Prefer the measured first-sale day; else fall back to the
+      // product's Shopify publish/release date; else the whole window.
+      const daysSincePublish = (() => {
+        const t = p.publishedAt ? new Date(p.publishedAt).getTime() : NaN;
+        if (!Number.isFinite(t)) return null;
+        return Math.max(1, Math.round((new Date(until).getTime() - t) / 86400000) + 1);
+      })();
+      const sellDaysRaw = sellingDaysByProd?.[numId(p.id)] ?? daysSincePublish ?? lookbackDays;
+      const effectiveDays = Math.max(rateFloor, Math.min(lookbackDays, sellDaysRaw));
       const rate = totalSold / effectiveDays;
       const weeksCover = rate > 0 ? totalStock / (rate * 7) : Infinity;
       return { id: p.id, title: p.title, productType: p.productType, vendor: p.vendor, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, effectiveDays, weeksCover };
@@ -8612,12 +8624,40 @@ async function fetchReorderSellingDays(since: string, until: string): Promise<Re
   }
 }
 
+// Days each product has been SELLING in the window — from its first sale date,
+// queried directly from the store (per-day ShopifyQL, high LIMIT) so a newly
+// released product isn't averaged over the whole window. This is what makes
+// "sold/day" divide by ~days-since-release instead of the full 90 days.
+// { "<numericProductId>": sellingDays } (until − first sale day + 1), or null.
+async function fetchReorderSellingDaysDirect(shop: string, token: string, since: string, until: string): Promise<Record<string, number> | null> {
+  try {
+    const rows = await runReorderShopifyQL(shop, token, `FROM sales SHOW net_items_sold GROUP BY product_id, day SINCE ${since} UNTIL ${until} LIMIT 100000`);
+    const firstMs: Record<string, number> = {};
+    for (const r of rows) {
+      const pid = (r.product_id || "").replace(/[^0-9]/g, "");
+      const units = parseInt(r.net_items_sold || "0", 10) || 0;
+      const t = new Date((r.day || "").trim()).getTime();
+      if (!pid || units <= 0 || !Number.isFinite(t)) continue;
+      if (firstMs[pid] == null || t < firstMs[pid]) firstMs[pid] = t;
+    }
+    const untilMs = new Date(until).getTime();
+    const out: Record<string, number> = {};
+    for (const [pid, t] of Object.entries(firstMs)) {
+      out[pid] = Math.max(1, Math.round((untilMs - t) / 86400000) + 1);
+    }
+    return Object.keys(out).length ? out : null;
+  } catch (e) {
+    console.warn("[reorder selling-days direct]", e);
+    return null;
+  }
+}
+
 // ─── All-products stock snapshot for the Reorder Planner overview ─────────────
 // Pages the entire catalogue once (per-variant on-hand via inventoryQuantity)
 // and caches it, so ranking every product by weeks-of-cover doesn't cost one
 // Shopify call per product. Size labels reuse the same logic as the packing
 // list so they line up with the sell-through variant labels.
-type ReorderStockProduct = { id: string; title: string; imageUrl: string | null; productType: string; vendor: string; tags: string[]; sizes: Array<{ size: string; stock: number }> };
+type ReorderStockProduct = { id: string; title: string; imageUrl: string | null; productType: string; vendor: string; tags: string[]; publishedAt: string | null; sizes: Array<{ size: string; stock: number }> };
 let _reorderStockCache: { at: number; shop: string; products: ReorderStockProduct[] } | null = null;
 const REORDER_STOCK_TTL_MS = 10 * 60 * 1000;
 async function getAllShopifyProductsWithInventory(shop: string, accessToken: string, force = false): Promise<ReorderStockProduct[]> {
@@ -8635,6 +8675,8 @@ async function getAllShopifyProductsWithInventory(shop: string, accessToken: str
             productType
             vendor
             tags
+            publishedAt
+            createdAt
             featuredImage { url }
             variants(first: 100) {
               nodes { title sku inventoryQuantity selectedOptions { name value } }
@@ -8664,7 +8706,7 @@ async function getAllShopifyProductsWithInventory(shop: string, accessToken: str
         sizes.push({ size, stock: Math.max(0, Number(v.inventoryQuantity ?? 0) || 0) });
       }
       if (!sizes.length) continue;   // no size-bearing variants → not reorder-planned here
-      products.push({ id: String(node.id), title: String(node.title ?? ""), productType: String(node.productType ?? "").trim(), vendor: String(node.vendor ?? "").trim(), tags: Array.isArray(node.tags) ? node.tags.map((t: unknown) => String(t)) : [], imageUrl: node.featuredImage?.url ?? null, sizes });
+      products.push({ id: String(node.id), title: String(node.title ?? ""), productType: String(node.productType ?? "").trim(), vendor: String(node.vendor ?? "").trim(), tags: Array.isArray(node.tags) ? node.tags.map((t: unknown) => String(t)) : [], publishedAt: node.publishedAt ?? node.createdAt ?? null, imageUrl: node.featuredImage?.url ?? null, sizes });
     }
     if (!conn.pageInfo?.hasNextPage) break;
     cursor = conn.pageInfo.endCursor ?? null;
