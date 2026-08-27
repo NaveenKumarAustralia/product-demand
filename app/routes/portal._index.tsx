@@ -28535,67 +28535,54 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
 
   return (
     <div style={{ ...s.productInfoPage, alignContent: "start", overflowY: "auto", padding: 16, background: "#eef2f6" }}>
-      {/* Toolbar — a distinct card with the grey background showing around it */}
-      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, boxShadow: "0 1px 3px rgba(15,23,42,0.06)", padding: "14px 16px", marginBottom: 16 }}>
-        <h2 style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 800 }}>Reorder Planner</h2>
-        <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>Every active product, most urgent first. Set the sales window, then tune “sell until” and lead time — the suggested order fills in per size. Expand a row for the size breakdown.</div>
-
-        {/* Filters — all in one line, same height */}
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <div style={{ display: "flex", flexDirection: "column" }}>
-            <span style={labelStyle}>Sell-through window</span>
-            <select value={lookback} onChange={(e) => { setLookback(e.target.value); persistWindow({ lookback: e.target.value }); }} style={{ ...ctrl, width: 180 }}>
+      {/* Toolbar — one compact line (title lives in the page header already) */}
+      <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, boxShadow: "0 1px 3px rgba(15,23,42,0.06)", padding: "9px 12px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        {(() => { const inlineLabel: React.CSSProperties = { fontSize: 11, fontWeight: 700, color: "#94a3b8", whiteSpace: "nowrap" }; const compact: React.CSSProperties = { ...ctrl, height: 32, padding: "0 8px", fontSize: 13 }; return <>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span style={inlineLabel}>Window</span>
+            <select value={lookback} onChange={(e) => { setLookback(e.target.value); persistWindow({ lookback: e.target.value }); }} style={{ ...compact, width: 150 }}>
               <option value="30">Last 30 days</option>
               <option value="60">Last 60 days</option>
               <option value="90">Last 90 days</option>
               <option value="lastyear">Same period last year</option>
               <option value="custom">Custom range…</option>
             </select>
-          </div>
+          </label>
           {lookback === "custom" && <>
-            <div style={{ display: "flex", flexDirection: "column" }}><span style={labelStyle}>From</span><input type="date" value={customFrom} onChange={(e) => { setCustomFrom(e.target.value); persistWindow({ customFrom: e.target.value }); }} style={{ ...ctrl, width: 150 }} /></div>
-            <div style={{ display: "flex", flexDirection: "column" }}><span style={labelStyle}>To</span><input type="date" value={customUntil} onChange={(e) => { setCustomUntil(e.target.value); persistWindow({ customUntil: e.target.value }); }} style={{ ...ctrl, width: 150 }} /></div>
+            <input type="date" value={customFrom} onChange={(e) => { setCustomFrom(e.target.value); persistWindow({ customFrom: e.target.value }); }} style={{ ...compact, width: 140 }} title="From" />
+            <input type="date" value={customUntil} onChange={(e) => { setCustomUntil(e.target.value); persistWindow({ customUntil: e.target.value }); }} style={{ ...compact, width: 140 }} title="To" />
           </>}
-          <div style={{ display: "flex", flexDirection: "column" }}>
-            <span style={labelStyle}>Growth %</span>
-            <input type="text" inputMode="numeric" value={growth} onChange={(e) => setGrowth(e.target.value.replace(/[^0-9-]/g, ""))} style={{ ...ctrl, width: 90 }} title="Plan for this much more (or less, if negative) than the baseline period — e.g. 20 orders 20% above last year" />
-          </div>
-          <div style={{ display: "flex", flexDirection: "column" }}>
-            <span style={labelStyle}>Product type</span>
-            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ ...ctrl, width: 190 }}>
-              <option value="">All product types</option>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span style={inlineLabel}>Growth %</span>
+            <input type="text" inputMode="numeric" value={growth} onChange={(e) => setGrowth(e.target.value.replace(/[^0-9-]/g, ""))} style={{ ...compact, width: 60 }} title="Plan for this much more (or less, if negative) than the baseline period — e.g. 20 orders 20% above last year" />
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span style={inlineLabel}>Type</span>
+            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ ...compact, width: 160 }}>
+              <option value="">All types</option>
               {productTypeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", justifyContent: "flex-end" }}>
-            <button
-              type="button"
-              onClick={() => setHideSale((v) => !v)}
-              title="Hide products whose type is Sale or that have a tag containing “sale” — you never reorder these"
-              style={{ ...ctrl, display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", width: "auto", fontWeight: 700, color: hideSale ? "#0f766e" : "#6b7280", background: hideSale ? "#ecfdf5" : "#fff", borderColor: hideSale ? "#5eead4" : "#cbd5e1" }}
-            >
-              <span style={{ display: "inline-flex", width: 30, height: 18, borderRadius: 999, background: hideSale ? "#0d9488" : "#cbd5e1", position: "relative", transition: "background 120ms" }}>
-                <span style={{ position: "absolute", top: 2, left: hideSale ? 14 : 2, width: 14, height: 14, borderRadius: "50%", background: "#fff", transition: "left 120ms" }} />
-              </span>
-              Hide Sale items
-            </button>
-          </div>
+          </label>
+          <button
+            type="button"
+            onClick={() => setHideSale((v) => !v)}
+            title="Hide products whose type is Sale or that have a tag containing “sale” — you never reorder these"
+            style={{ ...compact, display: "inline-flex", alignItems: "center", gap: 7, cursor: "pointer", width: "auto", fontWeight: 700, color: hideSale ? "#0f766e" : "#6b7280", background: hideSale ? "#ecfdf5" : "#fff", borderColor: hideSale ? "#5eead4" : "#cbd5e1" }}
+          >
+            <span style={{ display: "inline-flex", width: 28, height: 16, borderRadius: 999, background: hideSale ? "#0d9488" : "#cbd5e1", position: "relative", transition: "background 120ms" }}>
+              <span style={{ position: "absolute", top: 2, left: hideSale ? 14 : 2, width: 12, height: 12, borderRadius: "50%", background: "#fff", transition: "left 120ms" }} />
+            </span>
+            Hide Sale
+          </button>
           <span style={{ flex: 1 }} />
-        </div>
-
-        {/* Status row */}
-        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 12, borderTop: "1px solid #f1f5f9", paddingTop: 12 }}>
-          <span style={{ fontSize: 13, color: "#6b7280" }}>{firstLoad ? "Loading…" : totalProducts === 0 ? "No products" : `Showing ${firstIdx}–${lastIdx} of ${totalProducts}`}</span>
+          <span style={{ fontSize: 12, color: "#6b7280", whiteSpace: "nowrap" }}>{firstLoad ? "Loading…" : totalProducts === 0 ? "No products" : `${firstIdx}–${lastIdx} of ${totalProducts}`}</span>
           {loading && !firstLoad && <span style={{ fontSize: 12, color: "#94a3b8" }}>updating…</span>}
-          {!salesAvailable && <span style={{ color: "#b45309", fontSize: 12, fontWeight: 700 }}>Analytics unavailable — check the dashboard connection.</span>}
-          <span style={{ flex: 1 }} />
-          <button type="button" style={smallBtn} onClick={() => submitOverview({ refresh: true })} title="Re-scan live Shopify stock (cached ~10 min)">↻ Refresh stock</button>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <button type="button" style={{ ...smallBtn, opacity: page <= 1 ? 0.4 : 1, cursor: page <= 1 ? "default" : "pointer" }} disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>‹ Prev</button>
-            <span style={{ fontSize: 12, color: "#6b7280", minWidth: 70, textAlign: "center" }}>Page {page}/{pageCount}</span>
-            <button type="button" style={{ ...smallBtn, opacity: page >= pageCount ? 0.4 : 1, cursor: page >= pageCount ? "default" : "pointer" }} disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>Next ›</button>
-          </div>
-        </div>
+          {!salesAvailable && <span style={{ color: "#b45309", fontSize: 12, fontWeight: 700 }}>Analytics unavailable</span>}
+          <button type="button" style={smallBtn} onClick={() => submitOverview({ refresh: true })} title="Re-scan live Shopify stock (cached ~10 min)">↻ Refresh</button>
+          <button type="button" style={{ ...smallBtn, opacity: page <= 1 ? 0.4 : 1, cursor: page <= 1 ? "default" : "pointer" }} disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>‹</button>
+          <span style={{ fontSize: 12, color: "#6b7280", minWidth: 42, textAlign: "center", whiteSpace: "nowrap" }}>{page}/{pageCount}</span>
+          <button type="button" style={{ ...smallBtn, opacity: page >= pageCount ? 0.4 : 1, cursor: page >= pageCount ? "default" : "pointer" }} disabled={page >= pageCount} onClick={() => setPage((p) => Math.min(pageCount, p + 1))}>›</button>
+        </>; })()}
       </div>
 
       {/* Product table */}
