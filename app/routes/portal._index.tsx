@@ -28197,7 +28197,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
           </>}
           <div style={{ display: "flex", flexDirection: "column" }}>
             <span style={labelStyle}>Growth %</span>
-            <input type="number" value={growth} onChange={(e) => setGrowth(e.target.value)} style={{ ...ctrl, width: 90 }} title="Plan for this much more (or less, if negative) than the baseline period — e.g. 20 orders 20% above last year" />
+            <input type="text" inputMode="numeric" value={growth} onChange={(e) => setGrowth(e.target.value.replace(/[^0-9-]/g, ""))} style={{ ...ctrl, width: 90 }} title="Plan for this much more (or less, if negative) than the baseline period — e.g. 20 orders 20% above last year" />
           </div>
           <div style={{ display: "flex", flexDirection: "column" }}>
             <span style={labelStyle}>Product type</span>
@@ -28294,7 +28294,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                       </td>
                       <td style={cell}>
                         <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
-                          <input type="number" min={0} value={effLead(p.id)} onChange={(e) => setLead(p.id, e.target.value)} style={{ ...cellInput, width: 52 }} />
+                          <input type="text" inputMode="numeric" value={effLead(p.id)} onChange={(e) => setLead(p.id, e.target.value.replace(/[^0-9]/g, ""))} style={{ ...cellInput, width: 52 }} />
                           <button type="button" onClick={() => togglePinLead(p.id)} title={pinnedLead.has(p.id) ? "Lead set for this product only — click to follow all products again" : "This lead time applies to every product — click to set it just for this one"} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0, opacity: pinnedLead.has(p.id) ? 1 : 0.3, filter: pinnedLead.has(p.id) ? "none" : "grayscale(1)" }}>📌</button>
                         </div>
                       </td>
