@@ -17305,7 +17305,6 @@ function CollectionSpreadsheetPage({
                         return next;
                       })}
                       actions={[
-                        { label: "🏷️ Print barcodes…", onClick: () => setPrintRowIdx(rIdx) },
                         { label: "Delete row", danger: true, onClick: () => removeRow(rIdx) },
                       ]}
                     />
@@ -25782,7 +25781,6 @@ function OrderRow({
       {celebrating && <RowFireworks anchorRef={trRef} />}
       <tr ref={trRef} id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(destinationStamp ? { background: destinationStamp.rowBg } : {}) }}>
         <RowNumberCell rowNumber={rowIndex} actions={[
-          { label: "🏷️ Print barcodes…", onClick: () => setPrintOpen(true) },
           { label: "Split to destination…", onClick: () => setSplitOpen(true) },
           { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
