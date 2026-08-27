@@ -11045,20 +11045,22 @@ export default function PortalDashboard() {
              removed) or the unread count hits zero. */
           @keyframes portal-msg-bell-shake {
             0%   { transform: scale(1) rotate(0); }
-            8%   { transform: scale(4) rotate(-18deg); }
-            16%  { transform: scale(4) rotate(15deg); }
-            24%  { transform: scale(4) rotate(-13deg); }
-            32%  { transform: scale(4) rotate(11deg); }
-            40%  { transform: scale(4) rotate(-8deg); }
-            48%  { transform: scale(4) rotate(6deg); }
-            56%  { transform: scale(4) rotate(-3deg); }
-            64%  { transform: scale(4) rotate(0); }
+            8%   { transform: scale(2) rotate(-16deg); }
+            16%  { transform: scale(2) rotate(13deg); }
+            24%  { transform: scale(2) rotate(-11deg); }
+            32%  { transform: scale(2) rotate(9deg); }
+            40%  { transform: scale(2) rotate(-6deg); }
+            48%  { transform: scale(2) rotate(4deg); }
+            56%  { transform: scale(2) rotate(-2deg); }
+            64%  { transform: scale(2) rotate(0); }
             80%  { transform: scale(1) rotate(0); }
             100% { transform: scale(1) rotate(0); }
           }
           .portal-msg-bell-shake {
             animation: portal-msg-bell-shake 2s ease-in-out infinite;
-            transform-origin: center center;
+            /* Grow DOWNWARD from the top edge so it never pushes up behind the
+               browser toolbar; the swing also reads like a hanging bell. */
+            transform-origin: top center;
             position: relative;
             z-index: 60;
           }
