@@ -19765,9 +19765,13 @@ function CollectionDuplicateFromCell({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(styleHint || currentName.trim().split(/\s+/).slice(0, -1).join(" "));
   const [pickedLabelPending, setPickedLabelPending] = useState<string | null>(null);
-  // When true, the next search result set is auto-applied (most recent match)
-  // — the "auto-pick latest same-style product" one-click flow.
-  const [autoPicking, setAutoPicking] = useState(false);
+  // The most-recent same-style product, pre-selected automatically so the row
+  // already has a source to duplicate from without the user searching. Applying
+  // it (which runs the AI description swap) only happens when the user clicks —
+  // so opening the page doesn't fire an AI call per row.
+  const suggestFetcher = useFetcher<{ products?: DuplicateProductSummary[] }>();
+  const [suggestion, setSuggestion] = useState<DuplicateProductSummary | null>(null);
+  const suggestTriedRef = useRef(false);
 
   const runSearch = (q: string) => {
     const params = new URLSearchParams();
@@ -19807,50 +19811,68 @@ function CollectionDuplicateFromCell({
   const isFetching = pickFetcher.state !== "idle";
   const products = searchFetcher.data?.products ?? [];
 
-  // Auto-pick: kick off a search by the style, then apply the most recent
-  // (first) result as soon as it arrives — no browsing.
-  const autoPick = () => {
-    const q = styleHint || currentName.trim().split(/\s+/).slice(0, -1).join(" ");
-    if (!q.trim()) return;
-    setAutoPicking(true);
-    setQuery(q);
-    runSearch(q);
-  };
+  // Pre-select (don't apply) the most recent same-style product on mount, so
+  // the row shows a ready-to-use source. Runs once, only for empty rows.
   useEffect(() => {
-    if (!autoPicking || searchFetcher.state !== "idle") return;
-    const list = searchFetcher.data?.products ?? [];
-    if (list.length > 0) pick(list[0]);
-    setAutoPicking(false);
+    if (value || suggestTriedRef.current) return;
+    const q = (styleHint || currentName.trim().split(/\s+/).slice(0, -1).join(" ")).trim();
+    if (!q) return;
+    suggestTriedRef.current = true;
+    suggestFetcher.load(`/api/collection-duplicate-search?${new URLSearchParams({ q }).toString()}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoPicking, searchFetcher.state, searchFetcher.data]);
+  }, [value, styleHint, currentName]);
+  useEffect(() => {
+    if (suggestFetcher.state !== "idle") return;
+    const list = suggestFetcher.data?.products ?? [];
+    if (list.length > 0) setSuggestion(list[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggestFetcher.state, suggestFetcher.data]);
 
+  // Cell shows: an applied source (value), else a pre-selected suggestion the
+  // user can apply in one click, else a plain browse button. "change" always
+  // opens the picker to choose a different product.
+  const applyingSuggestion = isFetching && !!suggestion && pickedLabelPending === suggestion.title;
+  const isSuggested = !value && !!suggestion;
+  const mainLabel = value ? value : suggestion ? `⤵ ${suggestion.title}` : "+ Duplicate from…";
+  const mainClick = () => {
+    if (value) { setOpen(true); return; }
+    if (suggestion) { pick(suggestion); return; }
+    setOpen(true);
+  };
   return (
     <>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch", width: "100%" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 3, alignItems: "stretch", width: "100%" }}>
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={mainClick}
+          disabled={isFetching}
           style={{
             width: "100%", textAlign: "left",
-            background: "transparent", border: "1px dashed #d1d5db",
+            background: isSuggested ? "#ecfdf5" : "transparent",
+            border: isSuggested ? "1px solid #6ee7b7" : "1px dashed #d1d5db",
             borderRadius: 5, padding: "5px 8px", fontSize: 12,
-            color: value ? "#111827" : "#6b7280",
-            cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            color: value ? "#111827" : isSuggested ? "#065f46" : "#6b7280",
+            cursor: isFetching ? "wait" : "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           }}
-          title="Browse / pick a Shopify product to duplicate from"
+          title={value
+            ? "Duplicated from this product — click to change"
+            : isSuggested
+              ? `Duplicate from ${suggestion!.title} (most recent ${styleHint || "match"}). Click to apply, or Change to pick another.`
+              : "Browse / pick a Shopify product to duplicate from"}
         >
-          {value || "+ Duplicate from…"}
+          {applyingSuggestion ? "Duplicating…" : mainLabel}
         </button>
-        {/* Auto-pick button sits at the bottom-right of the cell. */}
-        {!value && (styleHint || currentName.trim()) && (
-          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        {(value || suggestion) && (
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 10, color: isSuggested ? "#059669" : "#9ca3af", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {value ? "duplicated" : "suggested — click to apply"}
+            </span>
             <button
               type="button"
-              onClick={autoPick}
-              disabled={autoPicking || isFetching}
-              title={`Auto-pick the latest ${styleHint || "same-style"} product from Shopify`}
-              style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "4px 10px", fontSize: 12, fontWeight: 600, cursor: autoPicking || isFetching ? "wait" : "pointer" }}
-            >{autoPicking || isFetching ? "…" : "⚡ Auto"}</button>
+              onClick={() => setOpen(true)}
+              disabled={isFetching}
+              style={{ background: "none", border: "none", color: "#2563eb", cursor: isFetching ? "wait" : "pointer", fontSize: 11, textDecoration: "underline", padding: 0, flexShrink: 0 }}
+            >change</button>
           </div>
         )}
       </div>
