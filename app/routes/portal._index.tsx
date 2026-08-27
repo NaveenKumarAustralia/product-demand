@@ -3388,24 +3388,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "reorder_fabric") {
     // For the Reorder Planner's expanded row: which fabric(s) is this product
-    // made from, how much is in stock / on order, and which one is pinned.
-    // A print (e.g. "Peacock") can exist in several fabric types — all matching
-    // fabrics are returned so the user can pick, and the pick is remembered via
-    // titleFabricOverrides (same mechanism as the Collections page).
+    // made from, how much is in stock / on order, plus the FULL fabric-in-stock
+    // list so the user can always search and pick a fabric manually when the
+    // auto-match can't find one. The pick is remembered per product via
+    // titleFabricOverrides (same store the Collections page uses).
     const title = String(form.get("title") ?? "").trim();
-    if (!title) return jsonResponse({ ok: false, candidates: [] });
+    if (!title) return jsonResponse({ ok: false, candidates: [], all: [] });
     const productInfo = await loadProductInfoForAction();
     const manualFabricSheets = await loadManualFabricSheetsForAction();
     const titleLower = title.toLowerCase();
+    const keyFor = (sheetName: string, name: string) => `${sheetName.trim().toLowerCase()}::${name.trim().toLowerCase()}`;
 
-    // In-stock fabrics: use the SAME combined+padded index the price/cost engine
-    // uses, so fabrics that only surface through the combined view are found
-    // (the "Candy bug"). buildStyleCostLookup gives both the auto-resolver
-    // (metersDiagForTitle) and the full fabric list with per-entry stock meters.
+    // Same combined+padded index the price/cost engine uses, so fabrics that only
+    // surface through the combined view are still found (the "Candy bug").
     const stockIndex = buildFabricStockIndex(combinedFabricSheetsForIndex(manualFabricSheets));
-    const lookup = buildStyleCostLookup(productInfo, stockIndex);
-    const allFabrics = lookup.allFabrics(); // {key, sheetName, fabricName, fabricType, stockMeters, costPerMeter}
-
     // On-order meters by fabric name — from the raw order sheets (kind order /
     // wide-order), which the combined view folds into "stock".
     const orderIndex = buildFabricStockIndex(manualFabricSheets.filter((s) => s.kind === "order" || s.kind === "wide-order"));
@@ -3416,39 +3412,58 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       onOrderByName.set(n, (onOrderByName.get(n) ?? 0) + (Number(e.meters) || 0));
     }
 
-    // Candidates = every known fabric whose NAME appears as a whole word in the
-    // product title (the print). Same print in several fabric types → several
-    // candidates. Merge duplicate rows of the same sheet+fabric (occurrence-keyed
-    // ::N) into one entry, summing their stock.
-    const distinctNames = Array.from(new Set(allFabrics.map((f) => f.fabricName.trim().toLowerCase()).filter((n) => n.length >= 3)));
-    const matched = new Set<string>();
+    // Merge every in-stock fabric row by sheet+name into one entry (summing stock
+    // and collecting which product styles it's linked to via the Products popup).
+    type Merged = { key: string; name: string; fabricType: string; inStock: number; onOrder: number; styleIds: Set<string> };
+    const merged = new Map<string, Merged>();
+    for (const e of stockIndex) {
+      if (e.kind !== "stock") continue;
+      const nameLower = e.name.trim().toLowerCase();
+      if (!nameLower) continue;
+      const key = keyFor(e.sheetName, e.name);
+      let c = merged.get(key);
+      if (!c) { c = { key, name: e.name, fabricType: e.fabricType ?? "", inStock: 0, onOrder: onOrderByName.get(nameLower) ?? 0, styleIds: new Set() }; merged.set(key, c); }
+      if (!c.fabricType && e.fabricType) c.fabricType = e.fabricType;
+      c.inStock += Number(e.meters) || 0;
+      if (e.styleMeters) for (const sid of Object.keys(e.styleMeters)) c.styleIds.add(sid);
+    }
+
+    // Resolve the product's style from its title (style name is a prefix of the
+    // title; longest match wins) — so we can match by the fabric↔product link.
+    const styleList: Array<{ n: string; id: string }> = [];
+    for (const cat of productInfo.categories) for (const st of cat.styles) { const n = st.name?.trim().toLowerCase(); if (n) styleList.push({ n, id: st.id }); }
+    styleList.sort((a, b) => b.n.length - a.n.length);
+    const overrideStyleId = (productInfo.titleStyleOverrides ?? {})[titleLower];
+    const style = (overrideStyleId ? styleList.find((s) => s.id === overrideStyleId) : null)
+      ?? styleList.find((s) => titleLower === s.n || titleLower.startsWith(s.n + " ")) ?? null;
+    const styleId = style?.id ?? null;
+
+    // Fabric names that appear as a whole word in the title (the print).
+    const distinctNames = Array.from(new Set([...merged.values()].map((c) => c.name.trim().toLowerCase()).filter((n) => n.length >= 3)));
+    const nameMatched = new Set<string>();
     for (const n of distinctNames) {
       const escaped = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      if (new RegExp(`\\b${escaped}\\b`, "i").test(titleLower)) matched.add(n);
+      if (new RegExp(`\\b${escaped}\\b`, "i").test(titleLower)) nameMatched.add(n);
     }
-    const mergeKeyOf = (key: string) => key.replace(/::\d+$/, "");
-    const byKey = new Map<string, { key: string; name: string; fabricType: string; inStock: number; onOrder: number }>();
-    for (const f of allFabrics) {
-      const nameLower = f.fabricName.trim().toLowerCase();
-      if (!matched.has(nameLower)) continue;
-      const key = mergeKeyOf(f.key);
-      let c = byKey.get(key);
-      if (!c) { c = { key, name: f.fabricName, fabricType: f.fabricType ?? "", inStock: 0, onOrder: onOrderByName.get(nameLower) ?? 0 }; byKey.set(key, c); }
-      if (!c.fabricType && f.fabricType) c.fabricType = f.fabricType;
-      c.inStock += Number(f.stockMeters) || 0;
-    }
-    const candidates = Array.from(byKey.values()).sort((a, b) => (b.inStock + b.onOrder) - (a.inStock + a.onOrder));
 
-    // Auto-resolve the fabric the way the cost engine does (unambiguous match or
-    // a stored pin). Fall back to the sole candidate.
-    const pinnedKey = mergeKeyOf((productInfo.titleFabricOverrides ?? {})[titleLower] ?? "");
-    const diag = lookup.metersDiagForTitle(title);
-    const diagKey = diag.ok && diag.fabricKey ? mergeKeyOf(diag.fabricKey) : "";
+    // Candidate = a fabric linked to this product's style (via Products popup) OR
+    // whose name is in the title. Linked matches rank first.
+    const candidates = [...merged.values()]
+      .map((c) => ({ key: c.key, name: c.name, fabricType: c.fabricType, inStock: c.inStock, onOrder: c.onOrder, linked: !!(styleId && c.styleIds.has(styleId)) || nameMatched.has(c.name.trim().toLowerCase()) }))
+      .filter((c) => c.linked)
+      .sort((a, b) => (b.inStock + b.onOrder) - (a.inStock + a.onOrder))
+      .map(({ linked: _l, ...c }) => c);
+
+    // Full list so the user can always search + pick manually.
+    const all = [...merged.values()]
+      .map((c) => ({ key: c.key, name: c.name, fabricType: c.fabricType, inStock: c.inStock, onOrder: c.onOrder }))
+      .sort((a, b) => a.name.localeCompare(b.name) || a.fabricType.localeCompare(b.fabricType));
+
+    const pinnedKey = ((productInfo.titleFabricOverrides ?? {})[titleLower] ?? "").replace(/::\d+$/, "");
     let chosenKey = "";
-    if (pinnedKey && byKey.has(pinnedKey)) chosenKey = pinnedKey;
-    else if (diagKey && byKey.has(diagKey)) chosenKey = diagKey;
+    if (pinnedKey && merged.has(pinnedKey)) chosenKey = pinnedKey;
     else if (candidates.length === 1) chosenKey = candidates[0].key;
-    return jsonResponse({ ok: true, candidates, chosenKey, pinned: Boolean(pinnedKey && byKey.has(pinnedKey)) });
+    return jsonResponse({ ok: true, candidates, all, chosenKey, pinned: Boolean(pinnedKey && merged.has(pinnedKey)) });
   }
 
   if (intent === "set_title_price_override") {
@@ -28251,7 +28266,9 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   const [countrySales, setCountrySales] = useState<Record<string, { loading?: boolean; rows?: Array<{ variant: string; country: string; units: number }>; countries?: string[] }>>({});
   // Fabric-in-stock / on-order for the product's fabric, fetched on expand.
   type FabricCand = { key: string; name: string; fabricType: string; inStock: number; onOrder: number };
-  const [fabricInfo, setFabricInfo] = useState<Record<string, { loading?: boolean; candidates?: FabricCand[]; chosenKey?: string; pinned?: boolean }>>({});
+  const [fabricInfo, setFabricInfo] = useState<Record<string, { loading?: boolean; candidates?: FabricCand[]; all?: FabricCand[]; chosenKey?: string; pinned?: boolean }>>({});
+  // Per-product search text for the manual "pick a fabric from stock" box.
+  const [fabricSearch, setFabricSearch] = useState<Record<string, string>>({});
   // "Sold/day" explainer popover: which product + where to anchor it.
   const [ratePopover, setRatePopover] = useState<{ id: string; top: number; left: number } | null>(null);
   const [pushedFor, setPushedFor] = useState<Record<string, string>>({});
@@ -28487,9 +28504,9 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
     setFabricInfo((cur) => (cur[id]?.candidates || cur[id]?.loading ? cur : { ...cur, [id]: { loading: true } }));
     fetch("/portal", { method: "POST", body: new URLSearchParams({ intent: "reorder_fabric", title }) })
       .then((r) => r.json())
-      .then((d: { candidates?: FabricCand[]; chosenKey?: string; pinned?: boolean }) =>
-        setFabricInfo((cur) => ({ ...cur, [id]: { candidates: Array.isArray(d?.candidates) ? d.candidates : [], chosenKey: d?.chosenKey ?? "", pinned: Boolean(d?.pinned) } })))
-      .catch(() => setFabricInfo((cur) => ({ ...cur, [id]: { candidates: [], chosenKey: "" } })));
+      .then((d: { candidates?: FabricCand[]; all?: FabricCand[]; chosenKey?: string; pinned?: boolean }) =>
+        setFabricInfo((cur) => ({ ...cur, [id]: { candidates: Array.isArray(d?.candidates) ? d.candidates : [], all: Array.isArray(d?.all) ? d.all : [], chosenKey: d?.chosenKey ?? "", pinned: Boolean(d?.pinned) } })))
+      .catch(() => setFabricInfo((cur) => ({ ...cur, [id]: { candidates: [], all: [], chosenKey: "" } })));
   };
   const pickFabric = (id: string, title: string, fabricKey: string) => {
     // Optimistically reflect the choice, then persist + refetch exact amounts.
@@ -28768,39 +28785,58 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                               </tbody>
                             </table>
                           </div>
-                          {/* Fabric: in stock vs on order, with a picker when the print
-                              exists in more than one fabric type. Pick is remembered. */}
+                          {/* Fabric: in-stock vs on-order for the product's fabric. Auto-
+                              matched when possible; ALWAYS searchable so any fabric from the
+                              Fabric-in-stock page can be picked. Pick is remembered. */}
                           {(() => {
                             const fi = fabricInfo[p.id];
                             const wrap = { marginTop: 12, paddingTop: 10, borderTop: "1px dashed #cbd5e1" } as const;
                             if (!fi || fi.loading) return <div style={{ ...wrap, fontSize: 12, color: "#94a3b8" }}>Checking fabric…</div>;
                             const cands = fi.candidates ?? [];
-                            if (cands.length === 0) return <div style={{ ...wrap, fontSize: 12, color: "#94a3b8" }}>No matching fabric found for this print.</div>;
-                            const chosen = cands.find((c) => c.key === fi.chosenKey) ?? null;
+                            const all = fi.all ?? [];
+                            const chosen = (all.find((c) => c.key === fi.chosenKey) ?? cands.find((c) => c.key === fi.chosenKey)) ?? null;
                             const amt = (n: number) => `${Math.round(n)}m`;
+                            const q = (fabricSearch[p.id] ?? "").trim().toLowerCase();
+                            const setQ = (v: string) => setFabricSearch((cur) => ({ ...cur, [p.id]: v }));
+                            const filtered = (q ? all.filter((c) => (c.name + " " + c.fabricType).toLowerCase().includes(q)) : all).slice(0, 40);
+                            const candRow = (c: FabricCand, highlight?: boolean) => (
+                              <button key={c.key} onClick={() => { pickFabric(p.id, p.title, c.key); setQ(""); }} style={{ border: `1px solid ${highlight ? "#6ee7b7" : "#cbd5e1"}`, borderRadius: 8, padding: "6px 11px", background: highlight ? "#ecfdf5" : "#fff", cursor: "pointer", textAlign: "left" }}>
+                                <div style={{ fontWeight: 800, fontSize: 12.5, color: "#0f172a" }}>{c.name}{c.fabricType ? ` · ${c.fabricType}` : ""}</div>
+                                <div style={{ color: "#64748b", fontSize: 11, marginTop: 1 }}>In stock <strong style={{ color: c.inStock > 0 ? "#0f766e" : "#94a3b8" }}>{amt(c.inStock)}</strong> · On order <strong style={{ color: c.onOrder > 0 ? "#7c3aed" : "#94a3b8" }}>{amt(c.onOrder)}</strong></div>
+                              </button>
+                            );
                             return (
                               <div style={wrap}>
                                 <div style={{ fontSize: 11, fontWeight: 800, color: "#475569", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>Fabric{fi.pinned ? " · pinned 📌" : ""}</div>
-                                {chosen ? (
-                                  <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+                                {chosen && (
+                                  <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", marginBottom: 8 }}>
                                     <span style={{ fontWeight: 800, fontSize: 13, color: "#0f172a" }}>{chosen.name}{chosen.fabricType ? ` · ${chosen.fabricType}` : ""}</span>
                                     <span style={{ fontSize: 12.5, color: "#64748b" }}>In stock <strong style={{ color: chosen.inStock > 0 ? "#0f766e" : "#94a3b8" }}>{amt(chosen.inStock)}</strong></span>
                                     <span style={{ fontSize: 12.5, color: "#64748b" }}>On order <strong style={{ color: chosen.onOrder > 0 ? "#7c3aed" : "#94a3b8" }}>{amt(chosen.onOrder)}</strong></span>
-                                    {cands.length > 1 && <button onClick={() => pickFabric(p.id, p.title, "")} style={{ border: "none", background: "none", color: "#2563eb", cursor: "pointer", fontSize: 12, textDecoration: "underline", padding: 0 }}>change fabric</button>}
-                                  </div>
-                                ) : (
-                                  <div>
-                                    <div style={{ fontSize: 12, color: "#b45309", marginBottom: 6, fontWeight: 600 }}>This print is made in {cands.length} fabrics — pick the one this product uses:</div>
-                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                                      {cands.map((c) => (
-                                        <button key={c.key} onClick={() => pickFabric(p.id, p.title, c.key)} style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 11px", background: "#fff", cursor: "pointer", textAlign: "left" }}>
-                                          <div style={{ fontWeight: 800, fontSize: 12.5, color: "#0f172a" }}>{c.name}{c.fabricType ? ` · ${c.fabricType}` : ""}</div>
-                                          <div style={{ color: "#64748b", fontSize: 11, marginTop: 1 }}>In stock <strong style={{ color: c.inStock > 0 ? "#0f766e" : "#94a3b8" }}>{amt(c.inStock)}</strong> · On order <strong style={{ color: c.onOrder > 0 ? "#7c3aed" : "#94a3b8" }}>{amt(c.onOrder)}</strong></div>
-                                        </button>
-                                      ))}
-                                    </div>
+                                    <button onClick={() => pickFabric(p.id, p.title, "")} style={{ border: "none", background: "none", color: "#2563eb", cursor: "pointer", fontSize: 12, textDecoration: "underline", padding: 0 }}>clear</button>
                                   </div>
                                 )}
+                                {!chosen && cands.length > 0 && (
+                                  <div style={{ marginBottom: 8 }}>
+                                    <div style={{ fontSize: 12, color: "#b45309", marginBottom: 6, fontWeight: 600 }}>{cands.length === 1 ? "Suggested fabric for this product:" : `This print is made in ${cands.length} fabrics — pick the one this product uses:`}</div>
+                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>{cands.map((c) => candRow(c, true))}</div>
+                                  </div>
+                                )}
+                                {/* Always-available manual search over the Fabric-in-stock list. */}
+                                <div>
+                                  {!chosen && cands.length === 0 && <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 6 }}>No fabric auto-matched — search the fabric-in-stock list and pick one:</div>}
+                                  <input
+                                    value={fabricSearch[p.id] ?? ""}
+                                    onChange={(e) => setQ(e.target.value)}
+                                    placeholder={chosen ? "Search to change fabric…" : "Search fabric name or type…"}
+                                    style={{ width: "100%", maxWidth: 340, boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 10px", fontSize: 13 }}
+                                  />
+                                  {q && (
+                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+                                      {filtered.length ? filtered.map((c) => candRow(c, c.key === fi.chosenKey)) : <span style={{ fontSize: 12, color: "#94a3b8" }}>No fabric matches “{fabricSearch[p.id]}”.</span>}
+                                    </div>
+                                  )}
+                                </div>
                               </div>
                             );
                           })()}
