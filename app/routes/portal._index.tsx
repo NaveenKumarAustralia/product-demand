@@ -5083,6 +5083,110 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, scanned, updated });
   }
 
+  if (intent === "backfill_collection_from_shopify") {
+    // Pull product details FROM Shopify INTO one collection's linked rows —
+    // the reverse of "push". For collections imported from a spreadsheet where
+    // the rows are missing info that already exists in Shopify (tags, product
+    // type, description, HS code, etc.), this recovers it WITHOUT pushing (which
+    // would overwrite Shopify with the incomplete row). Non-destructive: only
+    // fills EMPTY row fields, and MERGES tags (union) so partial tags complete.
+    if (!currentUser) return jsonResponse({ ok: false, error: "forbidden" });
+    const collectionId = Number(form.get("collectionId"));
+    if (!collectionId) return jsonResponse({ ok: false, error: "no_collection" });
+    const collection = await prisma.collection.findUnique({ where: { id: collectionId } }).catch(() => null);
+    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
+    const session = await prisma.session.findFirst({
+      where: { accessToken: { not: "" } },
+      orderBy: { isOnline: "asc" },
+    }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+
+    const rows = normalizeCollectionRows(collection.rows);
+    // Group row indexes by their Shopify product GID (a product can be on >1 row).
+    const idxByGid = new Map<string, number[]>();
+    rows.forEach((row, i) => {
+      const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+      if (!pid) return;
+      const numeric = pid.replace(/[^0-9]/g, "");
+      const gid = pid.startsWith("gid://") ? pid : (numeric ? `gid://shopify/Product/${numeric}` : "");
+      if (!gid) return;
+      const arr = idxByGid.get(gid) ?? [];
+      arr.push(i);
+      idxByGid.set(gid, arr);
+    });
+    const gids = [...idxByGid.keys()];
+    if (gids.length === 0) return jsonResponse({ ok: true, updatedRows: 0, filledFields: 0, linked: 0 });
+
+    // Fields we mirror from Shopify (same set the "Duplicate from" picker copies).
+    const SINGLE_FIELDS = ["description", "productType", "vendor", "seoTitle", "seoDescription", "compareAtPrice", "hsCode", "countryOfOrigin"] as const;
+    let updatedRows = 0;
+    let filledFields = 0;
+    for (let i = 0; i < gids.length; i += 50) {
+      const batch = gids.slice(i, i + 50);
+      const data = await shopifyGraphql<{ data?: { nodes?: Array<{
+        id?: string; descriptionHtml?: string; productType?: string; tags?: string[]; vendor?: string;
+        seo?: { title?: string; description?: string };
+        variants?: { nodes?: Array<{ compareAtPrice?: string | null; inventoryItem?: { harmonizedSystemCode?: string | null; countryCodeOfOrigin?: string | null } }> };
+      } | null> } }>(session.shop, session.accessToken, `
+        query BackfillProducts($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on Product {
+              id
+              descriptionHtml
+              productType
+              tags
+              vendor
+              seo { title description }
+              variants(first: 1) { nodes { compareAtPrice inventoryItem { harmonizedSystemCode countryCodeOfOrigin } } }
+            }
+          }
+        }
+      `, { ids: batch });
+      for (const node of data?.data?.nodes ?? []) {
+        if (!node?.id) continue;
+        const v0 = node.variants?.nodes?.[0] ?? {};
+        const shopFields: Record<string, string> = {
+          description: String(node.descriptionHtml ?? ""),
+          productType: String(node.productType ?? ""),
+          vendor: String(node.vendor ?? ""),
+          seoTitle: String(node.seo?.title ?? ""),
+          seoDescription: String(node.seo?.description ?? ""),
+          compareAtPrice: v0.compareAtPrice ? String(v0.compareAtPrice) : "",
+          hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
+          countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
+        };
+        const shopTags = Array.isArray(node.tags) ? node.tags.map((t) => String(t).trim()).filter(Boolean) : [];
+        for (const rowIdx of idxByGid.get(node.id) ?? []) {
+          const row = rows[rowIdx];
+          let rowChanged = false;
+          // Tags: union existing + Shopify so partial tags complete.
+          if (shopTags.length) {
+            const existing = String(row.tags ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+            const seen = new Set(existing.map((t) => t.toLowerCase()));
+            const merged = [...existing];
+            for (const t of shopTags) if (!seen.has(t.toLowerCase())) { merged.push(t); seen.add(t.toLowerCase()); }
+            const next = merged.join(", ");
+            if (next !== String(row.tags ?? "")) { row.tags = next; filledFields++; rowChanged = true; }
+          }
+          // Single-value fields: only fill when the row's field is empty.
+          for (const field of SINGLE_FIELDS) {
+            const val = shopFields[field];
+            if (!val) continue;
+            if (String(row[field] ?? "").trim()) continue;
+            row[field] = val;
+            filledFields++;
+            rowChanged = true;
+          }
+          if (rowChanged) updatedRows++;
+        }
+      }
+    }
+    if (updatedRows > 0) {
+      await prisma.collection.update({ where: { id: collectionId }, data: { rows: rows as unknown as object, updatedAt: new Date() } });
+    }
+    return jsonResponse({ ok: true, updatedRows, filledFields, linked: gids.length });
+  }
+
   if (intent === "duplicate_from_shopify_product") {
     // For the Collections "Duplicate From" picker: given a Shopify
     // product GID, return the fields we want to copy into a row:
@@ -16413,6 +16517,7 @@ function CollectionSpreadsheetPage({
   const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
   // "Update in Shopify" for already-linked rows whose info was edited.
   const updateShopifyFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; productId?: string }>; error?: string }>();
+  const backfillFetcher = useFetcher<{ ok?: boolean; updatedRows?: number; filledFields?: number; linked?: number; error?: string }>();
   // Move/combine: selected row indices + a fetcher for the move action.
   const moveFetcher = useFetcher<{ ok?: boolean; moved?: number; targetId?: number; deletedSource?: boolean; error?: string }>();
   const sendShootFetcher = useFetcher<{ ok?: boolean; shootId?: number; added?: number; error?: string }>();
@@ -17039,6 +17144,28 @@ function CollectionSpreadsheetPage({
     fd.set("status", "DRAFT");
     pushFetcher.submit(fd, { method: "post" });
   };
+  // Backfill: pull details FROM Shopify INTO the linked rows (the reverse of
+  // push). Recovers info that exists in Shopify but is missing from imported
+  // rows, WITHOUT pushing (which would overwrite Shopify). Non-destructive.
+  const isBackfilling = backfillFetcher.state !== "idle";
+  const backfillFromShopify = () => {
+    const linked = rows.filter((r) => (r[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()).length;
+    if (linked === 0) { setPushStatus({ msg: "No rows are linked to Shopify yet — nothing to backfill.", tone: "err" }); return; }
+    if (!window.confirm(`Pull product details from Shopify into ${linked} linked row(s)?\n\nThis only fills EMPTY fields (tags are merged in), never overwrites what you've entered, and does NOT push anything to Shopify.`)) return;
+    setPushStatus(null);
+    backfillFetcher.submit({ intent: "backfill_collection_from_shopify", collectionId: String(listItem.id) }, { method: "post" });
+  };
+  useEffect(() => {
+    const data = backfillFetcher.data;
+    if (!data) return;
+    if (data.ok) {
+      setPushStatus({ msg: `Backfilled from Shopify — filled ${data.filledFields ?? 0} field(s) across ${data.updatedRows ?? 0} row(s).`, tone: "ok" });
+      if ((data.updatedRows ?? 0) > 0) { setLoaded(false); loadFullRows(); }
+    } else if (data.error) {
+      setPushStatus({ msg: `Backfill failed — ${data.error}`, tone: "err" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backfillFetcher.data]);
   // Push info edits for an already-linked row to its Shopify product.
   const updateRowInShopify = (idx: number) => {
     const row = rows[idx];
@@ -17312,6 +17439,20 @@ function CollectionSpreadsheetPage({
               >Remove {emptyCount} empty row{emptyCount === 1 ? "" : "s"}</button>
             );
           })()}
+          <button
+            type="button"
+            onClick={backfillFromShopify}
+            disabled={isBackfilling || !loaded}
+            style={{
+              background: "transparent", color: "#0d9488",
+              border: "1px solid #5eead4", borderRadius: 6,
+              padding: "6px 12px", fontSize: 13, fontWeight: 600,
+              cursor: isBackfilling ? "wait" : "pointer",
+            }}
+            title="Pull tags, description, product type, HS code, etc. FROM Shopify INTO the linked rows. Fills empty fields only (tags merged); never pushes."
+          >
+            {isBackfilling ? "Backfilling…" : "⤓ Backfill from Shopify"}
+          </button>
           <button
             type="button"
             onClick={pushAllUnsynced}
