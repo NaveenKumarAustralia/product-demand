@@ -27985,6 +27985,8 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   // otherwise, and is cleared for a product when its sell-until/lead change.
   const [manualQty, setManualQty] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Per-country sold breakdown, fetched lazily when a product row is expanded.
+  const [countrySales, setCountrySales] = useState<Record<string, { loading?: boolean; rows?: Array<{ variant: string; country: string; units: number }>; countries?: string[] }>>({});
   const [pushedFor, setPushedFor] = useState<Record<string, string>>({});
   const pushTargetRef = useRef<{ id: string; label: string } | null>(null);
   // Focusable "Suggested" inputs, keyed by `${productId}:${size}`, for arrow-key
@@ -28004,6 +28006,27 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   else if (lookback === "lastyear") { since = fmtISO(addYears(today, -1)); until = fmtISO(addYears(addDays(today, 90), -1)); }
   else { const n = Number(lookback) || 90; since = fmtISO(addDays(today, -n)); until = fmtISO(today); }
   const lookbackDays = overviewFetcher.data?.lookbackDays ?? ((since && until) ? Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000)) : 90);
+  // The window changed → drop cached per-country data so it refetches.
+  useEffect(() => { setCountrySales({}); }, [since, until]);
+  // Fetch per-country sold for any newly-expanded product (one at a time).
+  useEffect(() => {
+    if (!since || !until) return;
+    for (const id of expanded) {
+      if (countrySales[id]) continue;
+      setCountrySales((cur) => (cur[id] ? cur : { ...cur, [id]: { loading: true } }));
+      fetch(`/api/reorder-country-sales?productId=${encodeURIComponent(id)}&since=${since}&until=${until}`)
+        .then((r) => r.json())
+        .then((data: { rows?: Array<{ variant: string; country: string; units: number }> }) => {
+          const rows = Array.isArray(data?.rows) ? data.rows : [];
+          const totals = new Map<string, number>();
+          for (const r of rows) totals.set(r.country, (totals.get(r.country) ?? 0) + (Number(r.units) || 0));
+          const countries = Array.from(totals.keys()).sort((a, b) => (totals.get(b)! - totals.get(a)!) || a.localeCompare(b));
+          setCountrySales((cur) => ({ ...cur, [id]: { rows, countries } }));
+        })
+        .catch(() => setCountrySales((cur) => ({ ...cur, [id]: { rows: [], countries: [] } })));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, since, until]);
   // Growth: scale the sell rate up/down so orders plan for more/less than the baseline.
   const growthFactor = Math.max(0, 1 + (Number(growth) || 0) / 100);
 
@@ -28329,6 +28352,35 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                                   {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13 }}>{c.unitsSold}</td>)}
                                   <td style={{ ...totCell, fontWeight: 700 }}>{calc.rows.reduce((s, c) => s + c.unitsSold, 0)}</td>
                                 </tr>
+                                {/* Sold per country (each shipping country, per size). Fetched on expand. */}
+                                {(() => {
+                                  const cs = countrySales[p.id];
+                                  const labelTd = (text: string, color = "#64748b") => <td style={{ padding: "3px 12px 3px 18px", fontSize: 11.5, color, fontWeight: 600, textAlign: "right", whiteSpace: "nowrap" }}>{text}</td>;
+                                  if (!cs || cs.loading) {
+                                    return <tr>{labelTd("Countries…", "#94a3b8")}{calc.rows.map((c) => <td key={c.key} style={{ padding: "3px 8px", textAlign: "center", fontSize: 12, color: "#cbd5e1" }}>·</td>)}<td style={{ ...totCell, fontWeight: 600, color: "#cbd5e1" }}>·</td></tr>;
+                                  }
+                                  const single = calc.rows.length === 1;
+                                  const perCountrySize: Record<string, Record<string, number>> = {};
+                                  for (const r of cs.rows ?? []) {
+                                    const size = single ? calc.rows[0].size : normalizeVariantSizeLabel(r.variant);
+                                    (perCountrySize[r.country] ??= {});
+                                    perCountrySize[r.country][size] = (perCountrySize[r.country][size] ?? 0) + (Number(r.units) || 0);
+                                  }
+                                  if ((cs.countries ?? []).length === 0) {
+                                    return <tr>{labelTd("By country", "#94a3b8")}{calc.rows.map((c) => <td key={c.key} style={{ padding: "3px 8px", textAlign: "center", fontSize: 12, color: "#cbd5e1" }}>—</td>)}<td style={{ ...totCell, fontWeight: 600, color: "#cbd5e1" }}>—</td></tr>;
+                                  }
+                                  return (cs.countries ?? []).map((country) => {
+                                    const bySize = perCountrySize[country] ?? {};
+                                    const ctotal = Object.values(bySize).reduce((s, n) => s + n, 0);
+                                    return (
+                                      <tr key={`ctry-${country}`}>
+                                        {labelTd(country)}
+                                        {calc.rows.map((c) => { const u = bySize[c.size] ?? 0; return <td key={c.key} style={{ padding: "3px 8px", textAlign: "center", fontSize: 12.5, color: u > 0 ? "#475569" : "#cbd5e1" }}>{u}</td>; })}
+                                        <td style={{ ...totCell, fontWeight: 700, color: "#475569" }}>{ctotal}</td>
+                                      </tr>
+                                    );
+                                  });
+                                })()}
                                 {/* Already on order — each open order with its destination, then the total */}
                                 {(p.onOrder?.entries?.length ?? 0) === 0 ? (
                                   <tr>
