@@ -7500,7 +7500,7 @@ function normalizeProductInfo(value: unknown): ProductInfo {
     : { ...structuredClone(DEFAULT_PRODUCT_INFO), titleStyleOverrides, titleFabricOverrides, titlePriceOverrides };
 }
 
-export async function loadProductInfoForAction() {
+async function loadProductInfoForAction() {
   const setting = await prisma.portalSetting.findUnique({
     where: { key: PRODUCT_INFO_KEY },
     select: { value: true },
@@ -7508,7 +7508,7 @@ export async function loadProductInfoForAction() {
   return normalizeProductInfo(setting?.value);
 }
 
-export async function saveProductInfo(productInfo: ProductInfo) {
+async function saveProductInfo(productInfo: ProductInfo) {
   const value = normalizeProductInfo(productInfo);
   await prisma.portalSetting.upsert({
     where: { key: PRODUCT_INFO_KEY },
@@ -7919,7 +7919,7 @@ type FabricStockEntry = {
 // Costing must index THESE (not the raw manual sheets) so what you see on the
 // page is exactly what the cost matcher uses — otherwise a fabric can look
 // in-stock on the page yet be invisible to costing (the "Candy" bug).
-export function combinedFabricSheetsForIndex(manualFabricSheets: FabricStockSheet[]): FabricSheetData[] {
+function combinedFabricSheetsForIndex(manualFabricSheets: FabricStockSheet[]): FabricSheetData[] {
   // manualFabricSheets is already the fully-resolved saved state, so we can
   // filter + pad it directly instead of re-running the heavier getFabricSheets
   // pipeline on every loader/revalidation — that overhead was adding latency to
@@ -7927,7 +7927,7 @@ export function combinedFabricSheetsForIndex(manualFabricSheets: FabricStockShee
   return manualFabricSheets.filter(isCombinedFabricSource).map(padCombinedFabricSheet);
 }
 
-export function buildFabricStockIndex(sheets: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>): FabricStockEntry[] {
+function buildFabricStockIndex(sheets: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>): FabricStockEntry[] {
   const out: FabricStockEntry[] = [];
   for (const sheet of sheets) {
     // Treat every in-stock source the same way the Fabric-in-stock display
@@ -8050,7 +8050,7 @@ async function getManualFabricSheets({
   return legacySheets;
 }
 
-export async function loadManualFabricSheetsForAction() {
+async function loadManualFabricSheetsForAction() {
   const [
     manualSheetsSetting,
     customSheetsSetting,
@@ -28515,7 +28515,9 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   const pickFabric = (id: string, title: string, fabricKey: string) => {
     // Optimistically reflect the choice, then persist + refetch exact amounts.
     setFabricInfo((cur) => ({ ...cur, [id]: { ...(cur[id] ?? {}), chosenKey: fabricKey, pinned: Boolean(fabricKey) } }));
-    fetch("/api/reorder-fabric", { method: "POST", body: new URLSearchParams({ title, fabricKey }) })
+    // The write persists through the /portal action even though its HTML
+    // response is ignored; the read comes from the JSON resource route.
+    fetch("/portal", { method: "POST", body: new URLSearchParams({ intent: "set_title_fabric_override", title, fabricKey }) })
       .then(() => { setFabricInfo((cur) => { const n = { ...cur }; delete n[id]; return n; }); loadFabric(id, title); })
       .catch(() => {});
   };
