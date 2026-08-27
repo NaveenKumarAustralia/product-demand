@@ -19226,23 +19226,20 @@ function CollectionImageManagerModal({
   fileRef: React.RefObject<HTMLInputElement | null>;
 }) {
   const [dropboxOpen, setDropboxOpen] = useState(false);
-  // Flatten productInfo into a searchable style list (name + imageUrl).
-  const allStyles = useMemo(() => {
-    if (!productInfo) return [];
-    const out: Array<{ id: string; name: string; imageUrl: string }> = [];
-    for (const cat of productInfo.categories ?? []) {
-      for (const s of cat.styles ?? []) {
-        if (s.imageUrl && s.name) out.push({ id: s.id, name: s.name, imageUrl: s.imageUrl });
-      }
-    }
-    return out;
-  }, [productInfo]);
   const [piSearch, setPiSearch] = useState("");
-  const piMatches = useMemo(() => {
-    const q = piSearch.trim().toLowerCase();
-    if (!q) return allStyles.slice(0, 24);
-    return allStyles.filter((s) => s.name.toLowerCase().includes(q)).slice(0, 24);
-  }, [piSearch, allStyles]);
+  // Product-info style images are fetched on demand (the Collections page ships
+  // an image-stripped product-info for speed). Search runs server-side, and the
+  // list refreshes on open + as the user types.
+  const styleFetcher = useFetcher<{ styles: Array<{ id: string; name: string; categoryName: string; imageUrl: string }> }>();
+  useEffect(() => {
+    const q = piSearch.trim();
+    const t = window.setTimeout(() => { styleFetcher.load(`/api/product-info-styles?q=${encodeURIComponent(q)}`); }, q ? 250 : 0);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [piSearch]);
+  const piMatches = styleFetcher.data?.styles ?? [];
+  const piLoading = styleFetcher.state !== "idle";
+  void productInfo;
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   void fileRef;
@@ -19410,7 +19407,7 @@ function CollectionImageManagerModal({
             </div>
           )}
 
-          {allStyles.length > 0 && (
+          {productInfo && (
             <div style={{ marginTop: 22, paddingTop: 18, borderTop: "1px solid #e5e7eb" }}>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>Pick from Product Information</div>
@@ -19419,10 +19416,12 @@ function CollectionImageManagerModal({
               <input
                 value={piSearch}
                 onChange={(e) => setPiSearch(e.target.value)}
-                placeholder={`Search ${allStyles.length} styles by name…`}
+                placeholder="Search styles by name…"
                 style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 10px", fontSize: 13, boxSizing: "border-box", marginBottom: 10 }}
               />
-              {piMatches.length === 0 ? (
+              {piLoading && piMatches.length === 0 ? (
+                <div style={{ fontSize: 12, color: "#9ca3af", textAlign: "center", padding: 10 }}>Loading styles…</div>
+              ) : piMatches.length === 0 ? (
                 <div style={{ fontSize: 12, color: "#9ca3af", textAlign: "center", padding: 10 }}>No styles match.</div>
               ) : (
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10 }}>
