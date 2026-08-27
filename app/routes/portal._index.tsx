@@ -28152,6 +28152,9 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   const th: React.CSSProperties = { position: "sticky", top: 0, zIndex: 3, background: "#f1f5f9", borderBottom: "2px solid #e2e8f0", padding: "9px 10px", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: "0.03em", whiteSpace: "nowrap", textAlign: "center" };
   const cell: React.CSSProperties = { padding: "8px 10px", fontSize: 13, borderBottom: "1px solid #eef2f7", verticalAlign: "middle", textAlign: "center" };
   const cellInput: React.CSSProperties = { height: 30, boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 6, padding: "0 6px", fontSize: 12, background: "#fff", textAlign: "center" };
+  // "Total" column at the right of the expanded breakdown (sums each row).
+  const totHead: React.CSSProperties = { padding: "4px 12px 4px 14px", textAlign: "center", fontWeight: 800, fontSize: 13, borderBottom: "2px solid #cbd5e1", borderLeft: "2px solid #cbd5e1", minWidth: 64, color: "#334155" };
+  const totCell: React.CSSProperties = { padding: "4px 12px 4px 14px", textAlign: "center", fontSize: 13, fontWeight: 800, borderLeft: "2px solid #cbd5e1", color: "#334155" };
   const daysColor = (d: number | null) => d == null ? "#94a3b8" : d < 30 ? "#dc2626" : d < 60 ? "#b45309" : "#0f172a";
   const daysBg = (d: number | null) => d == null ? "#f1f5f9" : d < 30 ? "#fee2e2" : d < 60 ? "#fef3c7" : "#ecfdf5";
   const daysBadge = (d: number | null) => (
@@ -28314,20 +28317,24 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                                 <tr>
                                   <td style={{ padding: "4px 12px 4px 0", fontSize: 11, fontWeight: 700, color: "#94a3b8", textAlign: "right", whiteSpace: "nowrap" }} />
                                   {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontWeight: 800, fontSize: 13, borderBottom: "2px solid #e2e8f0", minWidth: 74 }}>{c.size}</td>)}
+                                  <td style={totHead}>Total</td>
                                 </tr>
                                 <tr>
                                   <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>In stock</td>
                                   {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13, fontWeight: 700 }}>{c.stock}</td>)}
+                                  <td style={totCell}>{calc.rows.reduce((s, c) => s + c.stock, 0)}</td>
                                 </tr>
                                 <tr>
                                   <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Sold ({lookbackDays}d)</td>
                                   {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13 }}>{c.unitsSold}</td>)}
+                                  <td style={{ ...totCell, fontWeight: 700 }}>{calc.rows.reduce((s, c) => s + c.unitsSold, 0)}</td>
                                 </tr>
                                 {/* Already on order — each open order with its destination, then the total */}
                                 {(p.onOrder?.entries?.length ?? 0) === 0 ? (
                                   <tr>
                                     <td style={{ padding: "6px 12px 4px 0", fontSize: 12, color: "#94a3b8", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap", borderTop: "1px solid #e2e8f0" }}>On order</td>
                                     {calc.rows.map((c) => <td key={c.key} style={{ padding: "6px 8px 4px", textAlign: "center", fontSize: 13, color: "#cbd5e1", borderTop: "1px solid #e2e8f0" }}>—</td>)}
+                                    <td style={{ ...totCell, color: "#cbd5e1", borderTop: "1px solid #e2e8f0" }}>—</td>
                                   </tr>
                                 ) : <>
                                   {p.onOrder!.entries.map((e, i) => (
@@ -28336,12 +28343,14 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                                         On order → {e.label}{e.destination ? ` · ${e.destination}` : ""} <span style={{ color: "#a78bda", fontWeight: 700 }}>({e.total})</span>
                                       </td>
                                       {calc.rows.map((c) => <td key={c.key} style={{ padding: i === 0 ? "6px 8px 3px" : "3px 8px", textAlign: "center", fontSize: 13, color: (e.bySize[c.size] ?? 0) > 0 ? "#7c3aed" : "#cbd5e1", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>{e.bySize[c.size] ?? 0}</td>)}
+                                      <td style={{ ...totCell, color: "#7c3aed", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>{e.total}</td>
                                     </tr>
                                   ))}
                                   {p.onOrder!.entries.length > 1 && (
                                     <tr>
                                       <td style={{ padding: "3px 12px 4px 0", fontSize: 12, color: "#6d28d9", fontWeight: 800, textAlign: "right", whiteSpace: "nowrap" }}>Total on order</td>
                                       {calc.rows.map((c) => <td key={c.key} style={{ padding: "3px 8px 4px", textAlign: "center", fontSize: 13, fontWeight: 800, color: (p.onOrder!.bySize[c.size] ?? 0) > 0 ? "#6d28d9" : "#cbd5e1" }}>{p.onOrder!.bySize[c.size] ?? 0}</td>)}
+                                      <td style={{ ...totCell, color: "#6d28d9" }}>{calc.rows.reduce((s, c) => s + (p.onOrder!.bySize[c.size] ?? 0), 0)}</td>
                                     </tr>
                                   )}
                                 </>}
@@ -28357,15 +28366,18 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                                       else if (ev.key === "ArrowLeft" && el.selectionStart === 0 && i > 0) { ev.preventDefault(); const pv = suggestRefs.current[calc.rows[i - 1].key]; if (pv) { pv.focus(); pv.select(); } }
                                     }}
                                     style={{ ...cellInput, width: 56, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#94a3b8", borderColor: c.qty > 0 ? "#5eead4" : "#cbd5e1" }} /></td>)}
+                                  <td style={{ ...totCell, color: calc.total > 0 ? "#0f766e" : "#94a3b8", borderTop: "1px solid #e2e8f0" }}>{calc.total}</td>
                                 </tr>
                                 {/* After ordering: projected total position and how long it covers */}
                                 <tr>
                                   <td style={{ padding: "6px 12px 3px 0", fontSize: 12, color: "#334155", fontWeight: 800, textAlign: "right", whiteSpace: "nowrap", borderTop: "1px solid #e2e8f0" }}>Total (stock + on order + order)</td>
                                   {calc.rows.map((c) => <td key={c.key} style={{ padding: "6px 8px 3px", textAlign: "center", fontSize: 13, fontWeight: 800, color: "#334155", borderTop: "1px solid #e2e8f0" }}>{c.stock + c.onOrder + c.qty}</td>)}
+                                  <td style={{ ...totCell, borderTop: "1px solid #e2e8f0" }}>{calc.rows.reduce((s, c) => s + c.stock + c.onOrder + c.qty, 0)}</td>
                                 </tr>
                                 <tr>
                                   <td style={{ padding: "3px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>Days cover</td>
                                   {calc.rows.map((c) => { const tot = c.stock + c.onOrder + c.qty; const d = c.rate > 0 ? Math.round(tot / c.rate) : null; return <td key={c.key} style={{ padding: "3px 8px 4px", textAlign: "center", fontSize: 13, fontWeight: 700, color: daysColor(d) }}>{d == null ? "—" : `${d}d`}</td>; })}
+                                  {(() => { const pos = calc.rows.reduce((s, c) => s + c.stock + c.onOrder + c.qty, 0); const rate = calc.rows.reduce((s, c) => s + c.rate, 0); const d = rate > 0 ? Math.round(pos / rate) : null; return <td style={{ ...totCell, color: daysColor(d) }}>{d == null ? "—" : `${d}d`}</td>; })()}
                                 </tr>
                               </tbody>
                             </table>
