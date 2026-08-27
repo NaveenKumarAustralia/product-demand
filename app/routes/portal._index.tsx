@@ -885,6 +885,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         return [] as PortalMessageItem[];
       })
     : [];
+  // The "All Notes" page (?page=notes): every note/message in the system, so a
+  // user can filter to ones they wrote or ones that mention them.
+  const allNotes = (page === "notes" && currentUser)
+    ? await prisma.portalMessage.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 1500,
+        select: { id: true, fromName: true, userName: true, body: true, productTitle: true, entityType: true, orderId: true, entityKey: true, field: true, createdAt: true, readAt: true },
+      }).catch(() => [] as Array<{ id: number; fromName: string | null; userName: string; body: string; productTitle: string | null; entityType: string; orderId: number; entityKey: string | null; field: string; createdAt: Date; readAt: Date | null }>)
+    : [];
   // Collections needs the fabric sheets too — the "Pick a fabric" picker and
   // fabric-cost lookups on the Collections detail table read from them. Without
   // this the picker is empty ("No fabrics match").
@@ -1095,6 +1104,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     currentUser,
     activeUsers,
     messages,
+    allNotes,
     messageOrderId,
     loginBlocked: !currentUser,
     activityLogs,
@@ -10454,6 +10464,7 @@ export default function PortalDashboard() {
     currentUser,
     activeUsers,
     messages,
+    allNotes,
     messageOrderId,
     loginBlocked,
     activityLogs,
@@ -10736,6 +10747,7 @@ export default function PortalDashboard() {
     : page === "jj-new-products" ? "JJ New Products"
     : page === "reorder" ? "Reorder Planner"
     : page === "usa-stock" ? "USA Stock"
+    : page === "notes" ? "All Notes"
     : page === "search" ? "Search"
     : page === "dropbox" ? "Dropbox"
     : page === "photoshoot" ? "Photo Shoots"
@@ -11312,6 +11324,8 @@ export default function PortalDashboard() {
           <GlobalSearchPage query={globalSearchQuery} results={globalSearch} isAdmin={Boolean(currentUser?.admin)} shopDomain={shopDomain} />
         ) : page === "usa-stock" ? (
           <UsaStockPanel orders={orders} shopDomain={shopDomain} search={usaSearch} />
+        ) : page === "notes" ? (
+          <AllNotesPage notes={allNotes} currentUserName={currentUser?.name ?? ""} />
         ) : page === "jj-restock" ? (
           <JJRestockPanel
             orders={orders}
@@ -12289,8 +12303,105 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
           )) : (
             <div style={s.messageEmpty}>No messages for you.</div>
           )}
+          <a
+            href="/portal?page=notes"
+            onClick={() => setOpen(false)}
+            style={{ display: "block", textAlign: "center", padding: "11px", borderTop: "1px solid #eef2f7", color: "#0f766e", fontWeight: 700, fontSize: 13, textDecoration: "none", background: "#f8fafc" }}
+          >📋 View all notes →</a>
         </div>,
         document.body,
+      )}
+    </div>
+  );
+}
+
+// ─── All Notes page ──────────────────────────────────────────────────────────
+type AllNoteItem = { id: number; fromName: string | null; userName: string; body: string; productTitle: string | null; entityType: string; orderId: number; entityKey: string | null; field: string; createdAt: string; readAt: string | null };
+function noteThreadHref(n: AllNoteItem): string {
+  const entityType = n.entityType || "supplier_order";
+  const threadKey = `${entityType}:${n.orderId}:${n.entityKey ?? ""}:${n.field}`;
+  const page = entityType === "collection_row" ? "collections"
+    : entityType === "sample_iteration" ? "samples"
+    : entityType === "fabric_row" ? "fabric"
+    : "restock";
+  const params = new URLSearchParams({ page, thread: threadKey });
+  if (entityType === "collection_row") params.set("collectionId", String(n.orderId));
+  return `/portal?${params.toString()}`;
+}
+function noteFieldLabel(f: string): string {
+  return f === "factoryNotes" ? "Factory notes"
+    : f === "loadingNotes" ? "Loading notes"
+    : f === "sample_notes" ? "Sample notes"
+    : "Notes";
+}
+function AllNotesPage({ notes, currentUserName }: { notes: AllNoteItem[]; currentUserName: string }) {
+  const [filter, setFilter] = useState<"all" | "mine" | "mentioning">("all");
+  const [search, setSearch] = useState("");
+  const me = currentUserName.trim().toLowerCase();
+  const q = search.trim().toLowerCase();
+  const counts = useMemo(() => {
+    let mine = 0, mentioning = 0;
+    for (const n of notes) {
+      if ((n.fromName ?? "").trim().toLowerCase() === me) mine++;
+      const forMe = (n.userName ?? "").trim().toLowerCase() === me;
+      const inBody = !!me && (n.body ?? "").toLowerCase().includes(me);
+      if (forMe || inBody) mentioning++;
+    }
+    return { all: notes.length, mine, mentioning };
+  }, [notes, me]);
+  const filtered = useMemo(() => notes.filter((n) => {
+    if (filter === "mine" && (n.fromName ?? "").trim().toLowerCase() !== me) return false;
+    if (filter === "mentioning") {
+      const forMe = (n.userName ?? "").trim().toLowerCase() === me;
+      const inBody = !!me && (n.body ?? "").toLowerCase().includes(me);
+      if (!forMe && !inBody) return false;
+    }
+    if (q) {
+      const hay = `${n.body} ${n.fromName ?? ""} ${n.userName ?? ""} ${n.productTitle ?? ""}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  }), [notes, filter, me, q]);
+  const chip = (key: "all" | "mine" | "mentioning", label: string, n: number) => (
+    <button type="button" onClick={() => setFilter(key)} style={{ background: filter === key ? "#0d9488" : "#fff", color: filter === key ? "#fff" : "#374151", border: "1px solid " + (filter === key ? "#0d9488" : "#d1d5db"), borderRadius: 999, padding: "7px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{label} ({n})</button>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14, padding: "4px 2px 40px", maxWidth: 900 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+        {chip("all", "All notes", counts.all)}
+        {chip("mentioning", "Mentioning me", counts.mentioning)}
+        {chip("mine", "Written by me", counts.mine)}
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search notes, or type a name…"
+          style={{ flex: 1, minWidth: 200, border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 12px", fontSize: 13.5, outline: "none" }}
+        />
+      </div>
+      {filtered.length === 0 ? (
+        <div style={{ padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>No notes match.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {filtered.map((n) => {
+            const when = (() => { const d = new Date(n.createdAt); return Number.isNaN(d.getTime()) ? "" : d.toLocaleString(undefined, { day: "2-digit", month: "short", year: "2-digit", hour: "2-digit", minute: "2-digit" }); })();
+            const forMe = (n.userName ?? "").trim().toLowerCase() === me;
+            return (
+              <a key={n.id} href={noteThreadHref(n)} style={{ display: "block", textDecoration: "none", color: "inherit", background: "#fff", border: "1px solid #e5e7eb", borderLeft: forMe ? "3px solid #0d9488" : "1px solid #e5e7eb", borderRadius: 10, padding: "12px 14px", boxShadow: "0 1px 2px rgba(16,24,40,0.04)" }}>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
+                  <div style={{ fontSize: 12.5, color: "#6b7280" }}>
+                    <strong style={{ color: "#111827" }}>{n.fromName || "Someone"}</strong>
+                    {n.userName ? <> → <strong style={{ color: "#0f766e" }}>{n.userName}</strong></> : null}
+                    <span style={{ color: "#9ca3af" }}> · {noteFieldLabel(n.field)}</span>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "#9ca3af", whiteSpace: "nowrap" }}>{when}</div>
+                </div>
+                <div style={{ fontSize: 14, color: "#111827", lineHeight: 1.4, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{n.body}</div>
+                {n.productTitle ? <div style={{ fontSize: 12, color: "#6b7280", marginTop: 5 }}>on <strong>{n.productTitle}</strong> · open →</div> : <div style={{ fontSize: 12, color: "#6b7280", marginTop: 5 }}>open →</div>}
+              </a>
+            );
+          })}
+        </div>
       )}
     </div>
   );
