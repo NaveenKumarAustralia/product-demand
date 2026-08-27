@@ -185,6 +185,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .map((c) => ({ key: c.key, name: c.name, fabricType: c.fabricType, inStock: c.inStock, onOrder: c.onOrder }))
       .sort((a, b) => a.name.localeCompare(b.name) || a.fabricType.localeCompare(b.fabricType));
 
+    const dbgName = (new URL(request.url).searchParams.get("dbgname") ?? "").trim().toLowerCase();
+    if (dbgName) return Response.json({ dbg: dbgName, onOrderRows: onOrderRowsByName.get(dbgName) ?? [], stockTypes: [...merged.values()].filter((c) => c.name.trim().toLowerCase() === dbgName).map((c) => c.fabricType) });
+
     const pinnedKey = (tfo[titleLower] ?? "").replace(/::\d+$/, "");
     let chosenKey = "";
     if (pinnedKey && merged.has(pinnedKey)) chosenKey = pinnedKey;
