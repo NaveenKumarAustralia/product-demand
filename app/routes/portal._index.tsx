@@ -2560,7 +2560,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       fetchReorderSellingDays(since, until),
     ]);
     const soldByProduct = soldDirect ?? soldDashboard;
-    const sellingDaysByProd = sellingDaysDirect ?? sellingDaysDashboard;
+    // Direct query carries the measured first-sale day + date; dashboard fallback
+    // is just a days number. Flatten to a plain days map for the rate math, and
+    // keep the direct first-sale timestamps for the "days counting" popover.
+    const sellingDaysByProd: Record<string, number> | null = sellingDaysDirect
+      ? Object.fromEntries(Object.entries(sellingDaysDirect).map(([k, v]) => [k, v.days]))
+      : sellingDaysDashboard;
     const lookbackDays = Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000));
     const numId = (id: string) => id.replace(/[^0-9]/g, "");
     const enriched = stockProducts.map((p) => {
@@ -2591,7 +2596,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const effectiveDays = Math.max(1, Math.min(lookbackDays, sellDaysRaw));
       const rate = totalSold / effectiveDays;
       const weeksCover = rate > 0 ? totalStock / (rate * 7) : Infinity;
-      return { id: p.id, title: p.title, productType: p.productType, vendor: p.vendor, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, effectiveDays, weeksCover };
+      // What the rate divides by, so the user can see it: measured first sale
+      // (best), else the product's release/publish date, else the whole window.
+      const measuredFirstMs = sellingDaysDirect?.[numId(p.id)]?.firstMs ?? null;
+      let firstSoldDate: string | null;
+      let daysSource: "sold" | "release" | "window";
+      if (measuredFirstMs != null) { firstSoldDate = new Date(measuredFirstMs).toISOString(); daysSource = "sold"; }
+      else if (daysSincePublish != null && p.publishedAt) { firstSoldDate = p.publishedAt; daysSource = "release"; }
+      else { firstSoldDate = null; daysSource = "window"; }
+      return { id: p.id, title: p.title, productType: p.productType, vendor: p.vendor, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, effectiveDays, weeksCover, firstSoldDate, daysSource };
     });
     // Distinct product types across the whole catalogue (for the filter dropdown),
     // computed before the type filter so the list stays stable.
@@ -8697,7 +8710,7 @@ async function fetchReorderSellingDays(since: string, until: string): Promise<Re
 // released product isn't averaged over the whole window. This is what makes
 // "sold/day" divide by ~days-since-release instead of the full 90 days.
 // { "<numericProductId>": sellingDays } (until − first sale day + 1), or null.
-async function fetchReorderSellingDaysDirect(shop: string, token: string, since: string, until: string): Promise<Record<string, number> | null> {
+async function fetchReorderSellingDaysDirect(shop: string, token: string, since: string, until: string): Promise<Record<string, { days: number; firstMs: number }> | null> {
   try {
     const rows = await runReorderShopifyQL(shop, token, `FROM sales SHOW net_items_sold GROUP BY product_id, day SINCE ${since} UNTIL ${until} LIMIT 100000`);
     const firstMs: Record<string, number> = {};
@@ -8709,9 +8722,9 @@ async function fetchReorderSellingDaysDirect(shop: string, token: string, since:
       if (firstMs[pid] == null || t < firstMs[pid]) firstMs[pid] = t;
     }
     const untilMs = new Date(until).getTime();
-    const out: Record<string, number> = {};
+    const out: Record<string, { days: number; firstMs: number }> = {};
     for (const [pid, t] of Object.entries(firstMs)) {
-      out[pid] = Math.max(1, Math.round((untilMs - t) / 86400000) + 1);
+      out[pid] = { days: Math.max(1, Math.round((untilMs - t) / 86400000) + 1), firstMs: t };
     }
     return Object.keys(out).length ? out : null;
   } catch (e) {
@@ -28203,7 +28216,7 @@ function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; s
 // Products Restock or JJ On Order based on the product's vendor. Stock is live
 // Shopify; sell-through comes from the analytics dashboard.
 type ReorderOnOrderEntry = { label: string; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number };
-type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; effectiveDays?: number; weeksCover: number | null; onOrder?: { entries: ReorderOnOrderEntry[]; bySize: Record<string, number> } };
+type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; effectiveDays?: number; weeksCover: number | null; firstSoldDate?: string | null; daysSource?: "sold" | "release" | "window"; onOrder?: { entries: ReorderOnOrderEntry[]; bySize: Record<string, number> } };
 function ReorderPlannerPage({ search = "" }: { search?: string }) {
   const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
   const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
@@ -28239,6 +28252,8 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   // Fabric-in-stock / on-order for the product's fabric, fetched on expand.
   type FabricCand = { key: string; name: string; fabricType: string; inStock: number; onOrder: number };
   const [fabricInfo, setFabricInfo] = useState<Record<string, { loading?: boolean; candidates?: FabricCand[]; chosenKey?: string; pinned?: boolean }>>({});
+  // "Sold/day" explainer popover: which product + where to anchor it.
+  const [ratePopover, setRatePopover] = useState<{ id: string; top: number; left: number } | null>(null);
   const [pushedFor, setPushedFor] = useState<Record<string, string>>({});
   const pushTargetRef = useRef<{ id: string; label: string } | null>(null);
   // Focusable "Suggested" inputs, keyed by `${productId}:${size}`, for arrow-key
@@ -28613,7 +28628,14 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                       <td style={cell}>{daysBadge(productDaysStock)}</td>
                       <td style={{ ...cell, fontWeight: 700 }}>{p.totalStock}</td>
                       <td style={cell}>{p.totalSold}</td>
-                      <td style={{ ...cell, color: "#64748b" }}>{productRate.toFixed(2)}</td>
+                      <td
+                        style={{ ...cell, color: "#0f766e", cursor: "pointer", textDecoration: "underline dotted", textUnderlineOffset: 3 }}
+                        title="Click to see the first-sold date and how many days this rate divides by"
+                        onClick={(e) => {
+                          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                          setRatePopover((cur) => (cur?.id === p.id ? null : { id: p.id, top: r.bottom + 6, left: r.left }));
+                        }}
+                      >{productRate.toFixed(2)}</td>
                       <td style={{ ...cell, color: "#64748b" }} title="Days from today until your ‘sell until’ date">{calc.valid ? `${calc.dtt}d` : "—"}</td>
                       <td style={cell}>
                         <div style={{ display: "flex", alignItems: "center", gap: 4, justifyContent: "center" }}>
@@ -28793,8 +28815,38 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
         </div>
       </div>
       <div style={{ fontSize: 12, color: "#6b7280", margin: "12px 2px 24px" }}>
-        Changing a “Sell until” date or lead time moves every product; click the 📌 beside it to set (and keep) that product on its own. Expand a row and use ← → to move across the Suggested boxes. Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (min 14), not the whole window, so new releases aren’t understated. Growth % scales the sell rate up/down, so e.g. 20% plans the order for 20% more than the baseline period. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
+        Changing a “Sell until” date or lead time moves every product; click the 📌 beside it to set (and keep) that product on its own. Expand a row and use ← → to move across the Suggested boxes. Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (not the whole window), so new releases aren’t understated — click any Sold/day number to see the first-sold date and the days it’s counting. Growth % scales the sell rate up/down, so e.g. 20% plans the order for 20% more than the baseline period. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
       </div>
+      {/* Sold/day explainer: first-sold date + how many days the rate divides by. */}
+      {ratePopover && typeof document !== "undefined" && (() => {
+        const p = products.find((x) => x.id === ratePopover.id);
+        if (!p) return null;
+        const days = p.effectiveDays || lookbackDays;
+        const rate = (p.totalSold / days) * growthFactor;
+        const firstStr = (() => {
+          if (!p.firstSoldDate) return null;
+          const d = new Date(p.firstSoldDate);
+          return Number.isFinite(d.getTime()) ? d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : null;
+        })();
+        const sourceLabel = p.daysSource === "sold" ? "its first sale in this window"
+          : p.daysSource === "release" ? "the product’s release date (no sales yet in this window)"
+          : "the whole selected window (no first-sale date found)";
+        const rowStyle = { display: "flex", justifyContent: "space-between", gap: 16, padding: "3px 0" } as const;
+        return createPortal(
+          <>
+            <div onClick={() => setRatePopover(null)} style={{ position: "fixed", inset: 0, zIndex: 4000 }} />
+            <div style={{ position: "fixed", top: ratePopover.top, left: ratePopover.left, zIndex: 4001, background: "#fff", border: "1px solid #cbd5e1", borderRadius: 10, boxShadow: "0 18px 40px rgba(15,23,42,0.24)", padding: 14, width: 306, fontSize: 12.5, color: "#334155" }}>
+              <div style={{ fontWeight: 800, fontSize: 13, marginBottom: 8, color: "#0f172a" }}>{p.title}</div>
+              <div style={rowStyle}><span>Units sold</span><strong>{p.totalSold}</strong></div>
+              <div style={rowStyle}><span>First sold</span><strong>{firstStr ?? "—"}</strong></div>
+              <div style={rowStyle}><span>Days counting</span><strong>{days} {days === 1 ? "day" : "days"}</strong></div>
+              <div style={{ ...rowStyle, borderTop: "1px solid #eef2f7", marginTop: 4, paddingTop: 6 }}><span>Sold / day</span><strong style={{ color: "#0f766e" }}>{rate.toFixed(2)}</strong></div>
+              <div style={{ marginTop: 8, fontSize: 11, color: "#94a3b8", lineHeight: 1.45 }}>{p.totalSold} ÷ {days} {days === 1 ? "day" : "days"}{growthFactor !== 1 ? ` × ${growthFactor.toFixed(2)} growth` : ""}. Counting from {sourceLabel}.</div>
+            </div>
+          </>,
+          document.body,
+        );
+      })()}
     </div>
   );
 }
