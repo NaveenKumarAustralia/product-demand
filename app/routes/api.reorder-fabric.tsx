@@ -103,24 +103,42 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const stockSheets = sheets.filter((s) => !HIDDEN_FABRIC_SHEET_NAMES.has(normName(s.name)));
     const stockIndex = buildFabricStockIndex(stockSheets);
 
-    // On-order meters by fabric name. Read the order / wide-order sheets AND the
-    // combined "On Order" sheet directly — buildFabricStockIndex forces the
-    // combined gid to "stock" and only matches "…ordered" columns, so it misses
-    // both the On Order tab's Quantity Ordered and the wide-order tab's "Meters".
-    const onOrderByName = new Map<string, number>();
+    // On-order meters, per fabric name + type. Read the order / wide-order sheets
+    // AND the combined "On Order" sheet directly — buildFabricStockIndex forces
+    // the combined gid to "stock" and only matches "…ordered" columns, so it
+    // misses both the On Order tab's Quantity Ordered and the wide-order "Meters".
+    // Keyed by name+type (not name alone) so a generic name like "Black", which
+    // exists in many fabric types, doesn't show the same on-order on every one.
+    const onOrderRowsByName = new Map<string, Array<{ type: string; meters: number }>>();
     for (const sheet of sheets) {
       const isOrderSheet = sheet.kind === "order" || sheet.kind === "wide-order" || sheet.gid === COMBINED_FABRIC_ON_ORDER_GID;
       if (!isOrderSheet) continue;
       const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
       const qtyIdx = sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered|^meters?$/i.test(h));
+      const typeIdx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h) || /^type$/i.test(h));
       if (nameIdx < 0 || qtyIdx < 0) continue;
       for (const row of sheet.rows) {
         const n = (row[nameIdx] ?? "").trim().toLowerCase();
         if (!n || n.length < 2) continue;
         const m = Number((row[qtyIdx] ?? "").toString().split(/[^0-9.]/)[0]) || 0;
-        if (m > 0) onOrderByName.set(n, (onOrderByName.get(n) ?? 0) + m);
+        if (m <= 0) continue;
+        const type = typeIdx >= 0 ? (row[typeIdx] ?? "").toString().trim() : "";
+        const arr = onOrderRowsByName.get(n) ?? [];
+        arr.push({ type, meters: m });
+        onOrderRowsByName.set(n, arr);
       }
     }
+    const normType = (t: string) => t.trim().toLowerCase().replace(/\s+/g, " ");
+    const typesMatch = (a: string, b: string) => !a || !b || a === b || a.includes(b) || b.includes(a);
+    const onOrderFor = (name: string, fabricType: string) => {
+      const rows = onOrderRowsByName.get(name.trim().toLowerCase());
+      if (!rows?.length) return 0;
+      const ct = normType(fabricType);
+      const matched = rows.filter((r) => typesMatch(normType(r.type), ct));
+      // If nothing matched on type but there's only ONE distinct fabric type in
+      // stock for this name, the on-order is unambiguous — count it all.
+      return (matched.length ? matched : []).reduce((s, r) => s + r.meters, 0);
+    };
 
     type Merged = { key: string; name: string; fabricType: string; inStock: number; onOrder: number; styleIds: Set<string> };
     const merged = new Map<string, Merged>();
@@ -130,11 +148,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (!nameLower) continue;
       const key = keyFor(e.sheetName, e.name);
       let c = merged.get(key);
-      if (!c) { c = { key, name: e.name, fabricType: e.fabricType ?? "", inStock: 0, onOrder: onOrderByName.get(nameLower) ?? 0, styleIds: new Set() }; merged.set(key, c); }
+      if (!c) { c = { key, name: e.name, fabricType: e.fabricType ?? "", inStock: 0, onOrder: 0, styleIds: new Set() }; merged.set(key, c); }
       if (!c.fabricType && e.fabricType) c.fabricType = e.fabricType;
       c.inStock += Number(e.meters) || 0;
       if (e.styleMeters) for (const sid of Object.keys(e.styleMeters)) c.styleIds.add(sid);
     }
+    // On-order per entry, matched by name + fabric type (now that type is final).
+    for (const c of merged.values()) c.onOrder = onOrderFor(c.name, c.fabricType);
 
     // Resolve the product's style from its title (longest style-name prefix wins).
     const pi = piRows[0] ?? { categories: [], tfo: {}, tso: {} };
