@@ -3373,6 +3373,46 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  if (intent === "reorder_fabric") {
+    // For the Reorder Planner's expanded row: which fabric(s) is this product
+    // made from, how much is in stock / on order, and which one is pinned.
+    // A print (e.g. "Peacock") can exist in several fabric types — all matching
+    // fabrics are returned so the user can pick, and the pick is remembered via
+    // titleFabricOverrides (same mechanism as the Collections page).
+    const title = String(form.get("title") ?? "").trim();
+    if (!title) return jsonResponse({ ok: false, candidates: [] });
+    const productInfo = await loadProductInfoForAction();
+    const manualFabricSheets = await loadManualFabricSheetsForAction();
+    // Index the RAW sheets (not the combined view) so the sheet's own kind
+    // survives: stock/simple-stock → in stock, order/wide-order → on order.
+    // Exclude the combined on-order aggregation (it re-lists order rows AS stock,
+    // which would both double-count and mislabel them as in-stock).
+    const index = buildFabricStockIndex(manualFabricSheets.filter((s) => s.gid !== COMBINED_FABRIC_ON_ORDER_GID));
+    const titleLower = title.toLowerCase();
+    const keyFor = (sheetName: string, name: string) => `${sheetName.trim().toLowerCase()}::${name.trim().toLowerCase()}`;
+    // Distinct fabric names (≥3 chars), longest first, matched as whole words.
+    const names = Array.from(new Set(index.map((e) => e.name.trim().toLowerCase()).filter((n) => n.length >= 3))).sort((a, b) => b.length - a.length);
+    const matched = new Set<string>();
+    for (const name of names) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp(`\\b${escaped}\\b`, "i").test(titleLower)) matched.add(name);
+    }
+    const byKey = new Map<string, { key: string; name: string; fabricType: string; inStock: number; onOrder: number }>();
+    for (const e of index) {
+      if (!matched.has(e.name.trim().toLowerCase())) continue;
+      const key = keyFor(e.sheetName, e.name);
+      let c = byKey.get(key);
+      if (!c) { c = { key, name: e.name, fabricType: e.fabricType ?? "", inStock: 0, onOrder: 0 }; byKey.set(key, c); }
+      if (!c.fabricType && e.fabricType) c.fabricType = e.fabricType;
+      if (e.kind === "order") c.onOrder += Number(e.meters) || 0;
+      else c.inStock += Number(e.meters) || 0;
+    }
+    const candidates = Array.from(byKey.values()).sort((a, b) => (b.inStock + b.onOrder) - (a.inStock + a.onOrder));
+    const pinnedKey = (productInfo.titleFabricOverrides ?? {})[titleLower] ?? "";
+    const chosenKey = (pinnedKey && byKey.has(pinnedKey)) ? pinnedKey : (candidates.length === 1 ? candidates[0].key : "");
+    return jsonResponse({ ok: true, candidates, chosenKey, pinned: Boolean(pinnedKey) });
+  }
+
   if (intent === "set_title_price_override") {
     // Manual rupees override for a title. Used as the per-piece cost
     // directly; skips fabric/style resolution. Empty / 0 clears.
@@ -28079,6 +28119,9 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   // Per-country sold breakdown, fetched lazily when a product row is expanded.
   const [countrySales, setCountrySales] = useState<Record<string, { loading?: boolean; rows?: Array<{ variant: string; country: string; units: number }>; countries?: string[] }>>({});
+  // Fabric-in-stock / on-order for the product's fabric, fetched on expand.
+  type FabricCand = { key: string; name: string; fabricType: string; inStock: number; onOrder: number };
+  const [fabricInfo, setFabricInfo] = useState<Record<string, { loading?: boolean; candidates?: FabricCand[]; chosenKey?: string; pinned?: boolean }>>({});
   const [pushedFor, setPushedFor] = useState<Record<string, string>>({});
   const pushTargetRef = useRef<{ id: string; label: string } | null>(null);
   // Focusable "Suggested" inputs, keyed by `${productId}:${size}`, for arrow-key
@@ -28305,6 +28348,33 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
     else { setSortCol(col); setSortDir(col === "product" ? "asc" : "desc"); }
   };
   const sortArrow = (col: typeof sortCol) => (sortCol === col ? (sortDir === "asc" ? " ▲" : " ▼") : "");
+  // Load fabric stock/on-order for a product (which fabric is it made from, how
+  // much in stock vs on order, and — when the print exists in several fabric
+  // types — the candidates to pick from). Pick is remembered server-side.
+  const loadFabric = (id: string, title: string) => {
+    setFabricInfo((cur) => (cur[id]?.candidates || cur[id]?.loading ? cur : { ...cur, [id]: { loading: true } }));
+    fetch("/portal", { method: "POST", body: new URLSearchParams({ intent: "reorder_fabric", title }) })
+      .then((r) => r.json())
+      .then((d: { candidates?: FabricCand[]; chosenKey?: string; pinned?: boolean }) =>
+        setFabricInfo((cur) => ({ ...cur, [id]: { candidates: Array.isArray(d?.candidates) ? d.candidates : [], chosenKey: d?.chosenKey ?? "", pinned: Boolean(d?.pinned) } })))
+      .catch(() => setFabricInfo((cur) => ({ ...cur, [id]: { candidates: [], chosenKey: "" } })));
+  };
+  const pickFabric = (id: string, title: string, fabricKey: string) => {
+    // Optimistically reflect the choice, then persist + refetch exact amounts.
+    setFabricInfo((cur) => ({ ...cur, [id]: { ...(cur[id] ?? {}), chosenKey: fabricKey, pinned: Boolean(fabricKey) } }));
+    fetch("/portal", { method: "POST", body: new URLSearchParams({ intent: "set_title_fabric_override", title, fabricKey }) })
+      .then(() => { setFabricInfo((cur) => { const n = { ...cur }; delete n[id]; return n; }); loadFabric(id, title); })
+      .catch(() => {});
+  };
+  // Fetch fabric for any newly-expanded product.
+  useEffect(() => {
+    for (const id of expanded) {
+      if (fabricInfo[id]) continue;
+      const p = products.find((x) => x.id === id);
+      if (p) loadFabric(id, p.title);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, products]);
   const salesAvailable = data?.salesAvailable !== false;
   const loading = overviewFetcher.state !== "idle";
   const firstLoad = loading && !data;
@@ -28553,6 +28623,42 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                               </tbody>
                             </table>
                           </div>
+                          {/* Fabric: in stock vs on order, with a picker when the print
+                              exists in more than one fabric type. Pick is remembered. */}
+                          {(() => {
+                            const fi = fabricInfo[p.id];
+                            const wrap = { marginTop: 12, paddingTop: 10, borderTop: "1px dashed #cbd5e1" } as const;
+                            if (!fi || fi.loading) return <div style={{ ...wrap, fontSize: 12, color: "#94a3b8" }}>Checking fabric…</div>;
+                            const cands = fi.candidates ?? [];
+                            if (cands.length === 0) return <div style={{ ...wrap, fontSize: 12, color: "#94a3b8" }}>No matching fabric found for this print.</div>;
+                            const chosen = cands.find((c) => c.key === fi.chosenKey) ?? null;
+                            const amt = (n: number) => `${Math.round(n)}m`;
+                            return (
+                              <div style={wrap}>
+                                <div style={{ fontSize: 11, fontWeight: 800, color: "#475569", textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>Fabric{fi.pinned ? " · pinned 📌" : ""}</div>
+                                {chosen ? (
+                                  <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+                                    <span style={{ fontWeight: 800, fontSize: 13, color: "#0f172a" }}>{chosen.name}{chosen.fabricType ? ` · ${chosen.fabricType}` : ""}</span>
+                                    <span style={{ fontSize: 12.5, color: "#64748b" }}>In stock <strong style={{ color: chosen.inStock > 0 ? "#0f766e" : "#94a3b8" }}>{amt(chosen.inStock)}</strong></span>
+                                    <span style={{ fontSize: 12.5, color: "#64748b" }}>On order <strong style={{ color: chosen.onOrder > 0 ? "#7c3aed" : "#94a3b8" }}>{amt(chosen.onOrder)}</strong></span>
+                                    {cands.length > 1 && <button onClick={() => pickFabric(p.id, p.title, "")} style={{ border: "none", background: "none", color: "#2563eb", cursor: "pointer", fontSize: 12, textDecoration: "underline", padding: 0 }}>change fabric</button>}
+                                  </div>
+                                ) : (
+                                  <div>
+                                    <div style={{ fontSize: 12, color: "#b45309", marginBottom: 6, fontWeight: 600 }}>This print is made in {cands.length} fabrics — pick the one this product uses:</div>
+                                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                                      {cands.map((c) => (
+                                        <button key={c.key} onClick={() => pickFabric(p.id, p.title, c.key)} style={{ border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 11px", background: "#fff", cursor: "pointer", textAlign: "left" }}>
+                                          <div style={{ fontWeight: 800, fontSize: 12.5, color: "#0f172a" }}>{c.name}{c.fabricType ? ` · ${c.fabricType}` : ""}</div>
+                                          <div style={{ color: "#64748b", fontSize: 11, marginTop: 1 }}>In stock <strong style={{ color: c.inStock > 0 ? "#0f766e" : "#94a3b8" }}>{amt(c.inStock)}</strong> · On order <strong style={{ color: c.onOrder > 0 ? "#7c3aed" : "#94a3b8" }}>{amt(c.onOrder)}</strong></div>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </td>
                       </tr>
                     )}
