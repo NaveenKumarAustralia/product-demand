@@ -28632,9 +28632,15 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                                     return <tr>{labelTd("Countries…", "#94a3b8")}{calc.rows.map((c) => <td key={c.key} style={{ padding: "3px 8px", textAlign: "center", fontSize: 12, color: "#cbd5e1" }}>·</td>)}<td style={{ ...totCell, fontWeight: 600, color: "#cbd5e1" }}>·</td></tr>;
                                   }
                                   const single = calc.rows.length === 1;
+                                  // Map a variant's normalized size back to the ACTUAL size label used
+                                  // by the columns (calc.rows[].size). Keying perCountrySize by the raw
+                                  // normalized label made every cell read 0 (the lookup below uses
+                                  // c.size), even though the country total was right.
+                                  const normToActual = new Map(calc.rows.map((c) => [normalizeVariantSizeLabel(c.size), c.size]));
                                   const perCountrySize: Record<string, Record<string, number>> = {};
                                   for (const r of cs.rows ?? []) {
-                                    const size = single ? calc.rows[0].size : normalizeVariantSizeLabel(r.variant);
+                                    const norm = normalizeVariantSizeLabel(r.variant);
+                                    const size = single ? calc.rows[0].size : (normToActual.get(norm) ?? norm);
                                     (perCountrySize[r.country] ??= {});
                                     perCountrySize[r.country][size] = (perCountrySize[r.country][size] ?? 0) + (Number(r.units) || 0);
                                   }
