@@ -2562,9 +2562,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const soldByProduct = soldDirect ?? soldDashboard;
     const sellingDaysByProd = sellingDaysDirect ?? sellingDaysDashboard;
     const lookbackDays = Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000));
-    // Rate denominator: days the product has been selling in the window, floored
-    // at 14 (or the window if shorter) so brand-new items don't get a jumpy rate.
-    const rateFloor = Math.min(14, lookbackDays);
     const numId = (id: string) => id.replace(/[^0-9]/g, "");
     const enriched = stockProducts.map((p) => {
       const soldMap = soldByProduct?.[numId(p.id)] ?? {};
@@ -2591,7 +2588,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         return Math.max(1, Math.round((new Date(until).getTime() - t) / 86400000) + 1);
       })();
       const sellDaysRaw = sellingDaysByProd?.[numId(p.id)] ?? daysSincePublish ?? lookbackDays;
-      const effectiveDays = Math.max(rateFloor, Math.min(lookbackDays, sellDaysRaw));
+      const effectiveDays = Math.max(1, Math.min(lookbackDays, sellDaysRaw));
       const rate = totalSold / effectiveDays;
       const weeksCover = rate > 0 ? totalStock / (rate * 7) : Infinity;
       return { id: p.id, title: p.title, productType: p.productType, vendor: p.vendor, imageUrl: p.imageUrl, shop: session.shop, sizes, totalStock, totalSold, effectiveDays, weeksCover };
@@ -28077,6 +28074,9 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   // otherwise, and is cleared for a product when its sell-until/lead change.
   const [manualQty, setManualQty] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Click a column header to sort ("" = default server order, most urgent first).
+  const [sortCol, setSortCol] = useState<"" | "product" | "daysStock" | "inStock" | "sold" | "rate">("");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   // Per-country sold breakdown, fetched lazily when a product row is expanded.
   const [countrySales, setCountrySales] = useState<Record<string, { loading?: boolean; rows?: Array<{ variant: string; country: string; units: number }>; countries?: string[] }>>({});
   const [pushedFor, setPushedFor] = useState<Record<string, string>>({});
@@ -28278,6 +28278,33 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
 
   const data = overviewFetcher.data;
   const products = data?.products ?? [];
+  // Client-side column sort of the loaded products. Growth scales every rate by
+  // the same factor, so it doesn't change the sort order.
+  const rateOfP = (p: ReorderOverviewProduct) => (p.totalSold / (p.effectiveDays || lookbackDays)) * growthFactor;
+  const sortedProducts = useMemo(() => {
+    if (!sortCol) return products;
+    const val = (p: ReorderOverviewProduct): number | string => {
+      switch (sortCol) {
+        case "product": return (p.title || "").toLowerCase();
+        case "inStock": return p.totalStock;
+        case "sold": return p.totalSold;
+        case "rate": return rateOfP(p);
+        case "daysStock": { const r = rateOfP(p); return r > 0 ? p.totalStock / r : Number.POSITIVE_INFINITY; }
+        default: return 0;
+      }
+    };
+    return [...products].sort((a, b) => {
+      const va = val(a), vb = val(b);
+      const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [products, sortCol, sortDir, growthFactor, lookbackDays]);
+  const clickSort = (col: typeof sortCol) => {
+    if (sortCol === col) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortCol(col); setSortDir(col === "product" ? "asc" : "desc"); }
+  };
+  const sortArrow = (col: typeof sortCol) => (sortCol === col ? (sortDir === "asc" ? " ▲" : " ▼") : "");
   const salesAvailable = data?.salesAvailable !== false;
   const loading = overviewFetcher.state !== "idle";
   const firstLoad = loading && !data;
@@ -28360,11 +28387,11 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
           <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 1060 }}>
             <thead>
               <tr>
-                <th style={{ ...th, textAlign: "left", minWidth: 260 }}>Product</th>
-                <th style={th}>Days stock</th>
-                <th style={th}>In stock</th>
-                <th style={th}>Sold</th>
-                <th style={th}>Sold/day</th>
+                <th style={{ ...th, textAlign: "left", minWidth: 260, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("product")} title="Sort by name">Product{sortArrow("product")}</th>
+                <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("daysStock")} title="Sort by days of stock left">Days stock{sortArrow("daysStock")}</th>
+                <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("inStock")} title="Sort by in stock">In stock{sortArrow("inStock")}</th>
+                <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("sold")} title="Sort by units sold">Sold{sortArrow("sold")}</th>
+                <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("rate")} title="Sort by sold per day">Sold/day{sortArrow("rate")}</th>
                 <th style={th}>Days cover</th>
                 <th style={th}>Sell until</th>
                 <th style={th}>Lead</th>
@@ -28375,7 +28402,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
             <tbody>
               {firstLoad && <tr><td colSpan={10} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>Loading products…</td></tr>}
               {!firstLoad && products.length === 0 && <tr><td colSpan={10} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>No products match.</td></tr>}
-              {products.map((p) => {
+              {sortedProducts.map((p) => {
                 const calc = calcProduct(p);
                 const productRate = (p.totalSold / (p.effectiveDays || lookbackDays)) * growthFactor;
                 const productDaysStock = productRate > 0 ? Math.round(p.totalStock / productRate) : null;
