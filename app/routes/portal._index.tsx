@@ -3383,34 +3383,59 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!title) return jsonResponse({ ok: false, candidates: [] });
     const productInfo = await loadProductInfoForAction();
     const manualFabricSheets = await loadManualFabricSheetsForAction();
-    // Index the RAW sheets (not the combined view) so the sheet's own kind
-    // survives: stock/simple-stock → in stock, order/wide-order → on order.
-    // Exclude the combined on-order aggregation (it re-lists order rows AS stock,
-    // which would both double-count and mislabel them as in-stock).
-    const index = buildFabricStockIndex(manualFabricSheets.filter((s) => s.gid !== COMBINED_FABRIC_ON_ORDER_GID));
     const titleLower = title.toLowerCase();
-    const keyFor = (sheetName: string, name: string) => `${sheetName.trim().toLowerCase()}::${name.trim().toLowerCase()}`;
-    // Distinct fabric names (≥3 chars), longest first, matched as whole words.
-    const names = Array.from(new Set(index.map((e) => e.name.trim().toLowerCase()).filter((n) => n.length >= 3))).sort((a, b) => b.length - a.length);
-    const matched = new Set<string>();
-    for (const name of names) {
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      if (new RegExp(`\\b${escaped}\\b`, "i").test(titleLower)) matched.add(name);
+
+    // In-stock fabrics: use the SAME combined+padded index the price/cost engine
+    // uses, so fabrics that only surface through the combined view are found
+    // (the "Candy bug"). buildStyleCostLookup gives both the auto-resolver
+    // (metersDiagForTitle) and the full fabric list with per-entry stock meters.
+    const stockIndex = buildFabricStockIndex(combinedFabricSheetsForIndex(manualFabricSheets));
+    const lookup = buildStyleCostLookup(productInfo, stockIndex);
+    const allFabrics = lookup.allFabrics(); // {key, sheetName, fabricName, fabricType, stockMeters, costPerMeter}
+
+    // On-order meters by fabric name — from the raw order sheets (kind order /
+    // wide-order), which the combined view folds into "stock".
+    const orderIndex = buildFabricStockIndex(manualFabricSheets.filter((s) => s.kind === "order" || s.kind === "wide-order"));
+    const onOrderByName = new Map<string, number>();
+    for (const e of orderIndex) {
+      if (e.kind !== "order") continue;
+      const n = e.name.trim().toLowerCase();
+      onOrderByName.set(n, (onOrderByName.get(n) ?? 0) + (Number(e.meters) || 0));
     }
+
+    // Candidates = every known fabric whose NAME appears as a whole word in the
+    // product title (the print). Same print in several fabric types → several
+    // candidates. Merge duplicate rows of the same sheet+fabric (occurrence-keyed
+    // ::N) into one entry, summing their stock.
+    const distinctNames = Array.from(new Set(allFabrics.map((f) => f.fabricName.trim().toLowerCase()).filter((n) => n.length >= 3)));
+    const matched = new Set<string>();
+    for (const n of distinctNames) {
+      const escaped = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp(`\\b${escaped}\\b`, "i").test(titleLower)) matched.add(n);
+    }
+    const mergeKeyOf = (key: string) => key.replace(/::\d+$/, "");
     const byKey = new Map<string, { key: string; name: string; fabricType: string; inStock: number; onOrder: number }>();
-    for (const e of index) {
-      if (!matched.has(e.name.trim().toLowerCase())) continue;
-      const key = keyFor(e.sheetName, e.name);
+    for (const f of allFabrics) {
+      const nameLower = f.fabricName.trim().toLowerCase();
+      if (!matched.has(nameLower)) continue;
+      const key = mergeKeyOf(f.key);
       let c = byKey.get(key);
-      if (!c) { c = { key, name: e.name, fabricType: e.fabricType ?? "", inStock: 0, onOrder: 0 }; byKey.set(key, c); }
-      if (!c.fabricType && e.fabricType) c.fabricType = e.fabricType;
-      if (e.kind === "order") c.onOrder += Number(e.meters) || 0;
-      else c.inStock += Number(e.meters) || 0;
+      if (!c) { c = { key, name: f.fabricName, fabricType: f.fabricType ?? "", inStock: 0, onOrder: onOrderByName.get(nameLower) ?? 0 }; byKey.set(key, c); }
+      if (!c.fabricType && f.fabricType) c.fabricType = f.fabricType;
+      c.inStock += Number(f.stockMeters) || 0;
     }
     const candidates = Array.from(byKey.values()).sort((a, b) => (b.inStock + b.onOrder) - (a.inStock + a.onOrder));
-    const pinnedKey = (productInfo.titleFabricOverrides ?? {})[titleLower] ?? "";
-    const chosenKey = (pinnedKey && byKey.has(pinnedKey)) ? pinnedKey : (candidates.length === 1 ? candidates[0].key : "");
-    return jsonResponse({ ok: true, candidates, chosenKey, pinned: Boolean(pinnedKey) });
+
+    // Auto-resolve the fabric the way the cost engine does (unambiguous match or
+    // a stored pin). Fall back to the sole candidate.
+    const pinnedKey = mergeKeyOf((productInfo.titleFabricOverrides ?? {})[titleLower] ?? "");
+    const diag = lookup.metersDiagForTitle(title);
+    const diagKey = diag.ok && diag.fabricKey ? mergeKeyOf(diag.fabricKey) : "";
+    let chosenKey = "";
+    if (pinnedKey && byKey.has(pinnedKey)) chosenKey = pinnedKey;
+    else if (diagKey && byKey.has(diagKey)) chosenKey = diagKey;
+    else if (candidates.length === 1) chosenKey = candidates[0].key;
+    return jsonResponse({ ok: true, candidates, chosenKey, pinned: Boolean(pinnedKey && byKey.has(pinnedKey)) });
   }
 
   if (intent === "set_title_price_override") {
