@@ -5634,6 +5634,12 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // needs the (heavy) fabric-page loader to re-run. Rapid fabric editing was a
   // prime trigger for the cascading "Load failed".
   if (intent === "update_fabric_cell" || intent === "upload_fabric_image") return false;
+  // Product Information style image: the tile updates optimistically (local
+  // setProductInfo). The product-info blob is large, so re-running the loader
+  // just to see the image you already applied would re-download all of it and
+  // make the upload feel like it "didn't come up". The small write persists in
+  // the background.
+  if (intent === "update_product_style_image") return false;
   // Linking a restock row to a packing list updates one column on one
   // row — local optimistic state handles the badge.
   if (intent === "update_packing_list_link") return false;
@@ -20115,6 +20121,9 @@ function ProductInformationPanel({
   const [detailDraft, setDetailDraft] = useState<Record<string, string>>({});
   const [dragStyleId, setDragStyleId] = useState<string | null>(null);
   const [dragOverStyleId, setDragOverStyleId] = useState<string | null>(null);
+  // Style ids currently having an image converted/uploaded (shows a spinner on
+  // the tile so the user knows it's working — HEIC conversion isn't instant).
+  const [uploadingStyleIds, setUploadingStyleIds] = useState<Set<string>>(new Set());
   // "all" is the sentinel for the cross-category view. Default on
   // first open is "all" so staff see every style without having to
   // pick a category first — they're usually looking for a name across
@@ -20189,6 +20198,16 @@ function ProductInformationPanel({
   const updateStyleImage = (style: ProductInfoStyle, imageUrl: string) => {
     const categoryId = categoryIdForStyle(style);
     if (!categoryId) return;
+    // Show the new image on the tile INSTANTLY (optimistic) — the loader
+    // revalidation for this page pulls the whole product-info blob, which is
+    // slow, so don't make the user wait for it to see their own upload.
+    setProductInfo((cur) => ({
+      ...cur,
+      categories: cur.categories.map((c) =>
+        c.id === categoryId
+          ? { ...c, styles: c.styles.map((st) => (st.id === style.id ? { ...st, imageUrl } : st)) }
+          : c),
+    }));
     submitProductInfo({
       intent: "update_product_style_image",
       categoryId,
@@ -20197,11 +20216,20 @@ function ProductInformationPanel({
     });
   };
 
-  const replaceStyleImage = (style: ProductInfoStyle, file: File | null) => {
+  const replaceStyleImage = async (style: ProductInfoStyle, file: File | null) => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => updateStyleImage(style, String(reader.result ?? ""));
-    reader.readAsDataURL(file);
+    setUploadingStyleIds((cur) => new Set(cur).add(style.id));
+    try {
+      // Convert to a small, displayable JPEG first. Handles Apple HEIC/HEIF
+      // (AirDrop / iPhone) — which browsers can't show — via the server, and
+      // keeps the stored blob small so the save is fast and reliable.
+      const dataUrl = await toDisplayableImageDataUrl(file);
+      updateStyleImage(style, dataUrl);
+    } catch {
+      window.alert("Couldn't read that image. If it's an Apple HEIC photo (from AirDrop), it should still convert — please try again, or use a JPEG/PNG.");
+    } finally {
+      setUploadingStyleIds((cur) => { const n = new Set(cur); n.delete(style.id); return n; });
+    }
   };
 
   const updateGridColumns = (nextColumns: 3 | 4 | 5 | 6) => {
@@ -20425,7 +20453,9 @@ function ProductInformationPanel({
                 style={s.productStyleImageButton}
                 onClick={() => openStyleDetails(style)}
               >
-                {style.imageUrl ? (
+                {uploadingStyleIds.has(style.id) ? (
+                  <div style={s.productStyleImageEmpty}>Uploading…</div>
+                ) : style.imageUrl ? (
                   <img src={style.imageUrl} alt={style.name} style={s.productStyleImage} loading="lazy" />
                 ) : (
                   <div style={s.productStyleImageEmpty}>No image</div>
@@ -21485,6 +21515,37 @@ async function resizeImageForFabricUpload(file: File): Promise<File> {
     type: "image/webp",
     lastModified: Date.now(),
   });
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Turn any picked image file into a small, browser-DISPLAYABLE data URL.
+// Fast path: resize on a <canvas> (JPEG/PNG/WebP). HEIC/HEIF (Apple AirDrop /
+// iPhone photos) can't be decoded by the browser, so <canvas> fails and we fall
+// back to the server (sharp), which decodes HEIC and returns a resized JPEG.
+async function toDisplayableImageDataUrl(file: File): Promise<string> {
+  const isHeic = /heic|heif/i.test(file.type) || /\.(heic|heif)$/i.test(file.name);
+  if (!isHeic) {
+    try {
+      const processed = await resizeImageForFabricUpload(file);
+      return await blobToDataUrl(processed);
+    } catch {
+      /* decode failed (odd format) — fall through to the server converter */
+    }
+  }
+  const fd = new FormData();
+  fd.set("file", file);
+  const res = await fetch("/api/image-normalize", { method: "POST", body: fd });
+  const json = await res.json().catch(() => null);
+  if (json?.ok && json.dataUrl) return String(json.dataUrl);
+  throw new Error(json?.error || "image_convert_failed");
 }
 
 function isNumericFabricCell(header: string, value: string) {
