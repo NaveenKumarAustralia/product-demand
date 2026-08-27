@@ -102,13 +102,24 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const sheets = normalizeSheets(fabricRow?.value);
     const stockSheets = sheets.filter((s) => !HIDDEN_FABRIC_SHEET_NAMES.has(normName(s.name)));
     const stockIndex = buildFabricStockIndex(stockSheets);
-    const orderIndex = buildFabricStockIndex(sheets.filter((s) => s.kind === "order" || s.kind === "wide-order"));
 
+    // On-order meters by fabric name. Read the order / wide-order sheets AND the
+    // combined "On Order" sheet directly — buildFabricStockIndex forces the
+    // combined gid to "stock" and only matches "…ordered" columns, so it misses
+    // both the On Order tab's Quantity Ordered and the wide-order tab's "Meters".
     const onOrderByName = new Map<string, number>();
-    for (const e of orderIndex) {
-      if (e.kind !== "order") continue;
-      const n = e.name.trim().toLowerCase();
-      onOrderByName.set(n, (onOrderByName.get(n) ?? 0) + (Number(e.meters) || 0));
+    for (const sheet of sheets) {
+      const isOrderSheet = sheet.kind === "order" || sheet.kind === "wide-order" || sheet.gid === COMBINED_FABRIC_ON_ORDER_GID;
+      if (!isOrderSheet) continue;
+      const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
+      const qtyIdx = sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered|^meters?$/i.test(h));
+      if (nameIdx < 0 || qtyIdx < 0) continue;
+      for (const row of sheet.rows) {
+        const n = (row[nameIdx] ?? "").trim().toLowerCase();
+        if (!n || n.length < 2) continue;
+        const m = Number((row[qtyIdx] ?? "").toString().split(/[^0-9.]/)[0]) || 0;
+        if (m > 0) onOrderByName.set(n, (onOrderByName.get(n) ?? 0) + m);
+      }
     }
 
     type Merged = { key: string; name: string; fabricType: string; inStock: number; onOrder: number; styleIds: Set<string> };
