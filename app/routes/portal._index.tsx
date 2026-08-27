@@ -10984,21 +10984,30 @@ export default function PortalDashboard() {
             appearance: textfield;
             -moz-appearance: textfield;
           }
-          /* Message bell shake — runs every 4s so it's noticeable
-             but not seizure-inducing. Stops when the user opens the
-             menu (class is removed) or the unread count hits zero. */
+          /* Message bell alert — every ~2s the bell balloons up huge and
+             wiggles hard so an unread message is impossible to miss, then
+             shrinks back so it doesn't permanently cover the header. Scale
+             is via transform (no reflow) and z-index lifts it over its
+             neighbours during the burst. Stops when the menu opens (class
+             removed) or the unread count hits zero. */
           @keyframes portal-msg-bell-shake {
-            0%, 70%, 100% { transform: rotate(0); }
-            72% { transform: rotate(-12deg); }
-            74% { transform: rotate(10deg); }
-            76% { transform: rotate(-8deg); }
-            78% { transform: rotate(6deg); }
-            80% { transform: rotate(-4deg); }
-            82% { transform: rotate(0); }
+            0%   { transform: scale(1) rotate(0); }
+            8%   { transform: scale(4) rotate(-18deg); }
+            16%  { transform: scale(4) rotate(15deg); }
+            24%  { transform: scale(4) rotate(-13deg); }
+            32%  { transform: scale(4) rotate(11deg); }
+            40%  { transform: scale(4) rotate(-8deg); }
+            48%  { transform: scale(4) rotate(6deg); }
+            56%  { transform: scale(4) rotate(-3deg); }
+            64%  { transform: scale(4) rotate(0); }
+            80%  { transform: scale(1) rotate(0); }
+            100% { transform: scale(1) rotate(0); }
           }
           .portal-msg-bell-shake {
-            animation: portal-msg-bell-shake 4s ease-in-out infinite;
-            transform-origin: top center;
+            animation: portal-msg-bell-shake 2s ease-in-out infinite;
+            transform-origin: center center;
+            position: relative;
+            z-index: 60;
           }
           /* Excel-style cell focus: a teal outline around the focused
              grid cell so the user knows exactly where they're typing.
