@@ -2550,11 +2550,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!since || !until) return jsonResponse({ ok: false, error: "bad_input" });
     const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
     if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
-    const [stockProducts, soldByProduct, sellingDaysByProd] = await Promise.all([
+    const [stockProducts, soldDirect, soldDashboard, sellingDaysByProd] = await Promise.all([
       getAllShopifyProductsWithInventory(session.shop, session.accessToken, refresh).catch(() => [] as ReorderStockProduct[]),
+      // Query the store directly (high LIMIT, nothing truncated) as the primary
+      // source; fall back to the dashboard bulk if the direct query fails.
+      fetchReorderSalesAllVariantsDirect(session.shop, session.accessToken, since, until),
       fetchReorderSalesAllVariants(since, until),
       fetchReorderSellingDays(since, until),
     ]);
+    const soldByProduct = soldDirect ?? soldDashboard;
     const lookbackDays = Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000));
     // Rate denominator: days the product has been selling in the window, floored
     // at 14 (or the window if shorter) so brand-new items don't get a jumpy rate.
@@ -2571,7 +2575,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       // product's sales.
       const sizes = p.sizes.map((s) => ({ size: s.size, stock: s.stock, unitsSold: p.sizes.length === 1 ? soldTotalAll : (soldBySize.get(normalizeVariantSizeLabel(s.size)) ?? 0) }));
       const totalStock = sizes.reduce((a, s) => a + s.stock, 0);
-      const totalSold = sizes.reduce((a, s) => a + s.unitsSold, 0);
+      // Use the TRUE total from the data (soldTotalAll), not just the sizes that
+      // matched — otherwise a variant-label mismatch shows 0 sold even when the
+      // product genuinely sold. Per-size stays best-effort for the suggestion.
+      const totalSold = Math.max(soldTotalAll, sizes.reduce((a, s) => a + s.unitsSold, 0));
       const effectiveDays = Math.max(rateFloor, Math.min(lookbackDays, sellingDaysByProd?.[numId(p.id)] ?? lookbackDays));
       const rate = totalSold / effectiveDays;
       const weeksCover = rate > 0 ? totalStock / (rate * 7) : Infinity;
@@ -8542,6 +8549,49 @@ async function fetchReorderSalesAllVariants(since: string, until: string): Promi
     const json = await res.json() as { ok?: boolean; byProduct?: Record<string, Record<string, number>> };
     return json.byProduct && typeof json.byProduct === "object" ? json.byProduct : null;
   } catch {
+    return null;
+  }
+}
+
+// Run a ShopifyQL query against the store's analytics (read_reports scope).
+async function runReorderShopifyQL(shop: string, token: string, shopifyql: string): Promise<Array<Record<string, string>>> {
+  const graphql = `{ shopifyqlQuery(query: ${JSON.stringify(shopifyql)}) { tableData { columns { name } rows } parseErrors } }`;
+  const res = await fetch(`https://${shop}/admin/api/unstable/graphql.json`, {
+    method: "POST",
+    headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" },
+    body: JSON.stringify({ query: graphql }),
+  });
+  if (!res.ok) throw new Error(`ShopifyQL HTTP ${res.status}`);
+  const json = await res.json() as { data?: { shopifyqlQuery?: { tableData?: { columns?: Array<{ name: string }>; rows?: unknown[] }; parseErrors?: unknown[] } } };
+  const result = json.data?.shopifyqlQuery;
+  if (result?.parseErrors?.length) throw new Error(`ShopifyQL parse error: ${JSON.stringify(result.parseErrors)}`);
+  const cols = (result?.tableData?.columns ?? []).map((c) => c.name);
+  return (result?.tableData?.rows ?? []).map((row) => {
+    const obj: Record<string, string> = {};
+    if (Array.isArray(row)) cols.forEach((name, i) => { obj[name] = String((row as unknown[])[i] ?? ""); });
+    else Object.assign(obj, row as Record<string, string>);
+    return obj;
+  });
+}
+
+// Bulk sell-through queried DIRECTLY from the store (not via the dashboard),
+// with a high LIMIT so nothing is truncated — the dashboard's default row cap
+// was silently dropping products (they showed 0 sold). Returns the same shape
+// { "<numericProductId>": { "<variant>": unitsSold } }, or null on failure.
+async function fetchReorderSalesAllVariantsDirect(shop: string, token: string, since: string, until: string): Promise<Record<string, Record<string, number>> | null> {
+  try {
+    const rows = await runReorderShopifyQL(shop, token, `FROM sales SHOW net_items_sold GROUP BY product_id, product_variant_title SINCE ${since} UNTIL ${until} LIMIT 100000`);
+    const out: Record<string, Record<string, number>> = {};
+    for (const r of rows) {
+      const pid = (r.product_id || "").replace(/[^0-9]/g, "");
+      const variant = (r.product_variant_title || "").trim();
+      const units = Math.max(0, parseInt(r.net_items_sold || "0", 10) || 0);
+      if (!pid || units <= 0) continue;
+      (out[pid] ??= {})[variant] = (out[pid][variant] ?? 0) + units;
+    }
+    return out;
+  } catch (e) {
+    console.warn("[reorder sold direct]", e);
     return null;
   }
 }
