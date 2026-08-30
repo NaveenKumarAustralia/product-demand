@@ -3383,7 +3383,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (fabricKey) productInfo.titleFabricOverrides[title] = fabricKey;
     else delete productInfo.titleFabricOverrides[title];
     await saveProductInfo(productInfo);
+    // Keep the fabric "Products" column in sync with the pick automatically.
+    await withFabricSheetsLock(async () => {
+      const sheets = await loadManualFabricSheetsForAction();
+      if (applyFabricProductAutofill(sheets, productInfo) > 0) await saveManualFabricSheets(sheets);
+    }).catch((e) => console.warn("[fabric products autofill]", e));
     return null;
+  }
+
+  if (intent === "sync_fabric_products") {
+    // One-shot backfill: fill the Products column on every fabric row from the
+    // existing fabric picks (kept in sync automatically thereafter).
+    if (!currentUser) return jsonResponse({ ok: false, error: "forbidden" });
+    return withFabricSheetsLock(async () => {
+      const productInfo = await loadProductInfoForAction();
+      const sheets = await loadManualFabricSheetsForAction();
+      const changed = applyFabricProductAutofill(sheets, productInfo);
+      if (changed > 0) await saveManualFabricSheets(sheets);
+      return jsonResponse({ ok: true, changed });
+    });
   }
 
   if (intent === "reorder_fabric") {
@@ -21292,6 +21310,17 @@ function CombinedFabricStockPanel({
               Clear filter
             </button>
           )}
+          <button
+            type="button"
+            style={s.secondaryButton}
+            disabled={fetcher.state !== "idle" && String(fetcher.formData?.get("intent") ?? "") === "sync_fabric_products"}
+            title="Fill each fabric row's Products column from the fabric picks (the fabric chosen for each product's price). Keeps anything you typed by hand."
+            onClick={() => fetcher.submit({ intent: "sync_fabric_products" }, { method: "post" })}
+          >
+            {fetcher.state !== "idle" && String(fetcher.formData?.get("intent") ?? "") === "sync_fabric_products"
+              ? "Filling…"
+              : "⟳ Auto-fill Products"}
+          </button>
         </div>
         <div style={s.fabricToolbarMeta}>
           <span><strong>{filteredRows.length}</strong> rows</span>
@@ -22550,6 +22579,10 @@ type FabricStyleUsage = {
   styleId: string;
   styleName: string;
   meters: string;
+  // Auto-added from a fabric pick (this style is assigned to this fabric for
+  // pricing). Regenerated on each sync; hand-added rows have auto=false and are
+  // never touched. Meters typed on an auto row promote it to manual.
+  auto?: boolean;
 };
 
 function productInfoStyleSearchOptions(productInfo: ProductInfo) {
@@ -22576,6 +22609,7 @@ function parseFabricStyleUsage(value: string): FabricStyleUsage[] {
           styleId: String(item.styleId ?? slugForOption(String(item.styleName ?? ""))),
           styleName: String(item.styleName ?? "").trim(),
           meters: String(item.meters ?? "").trim(),
+          auto: item.auto === true,
         }))
         .filter((item) => item.styleName);
     }
@@ -22597,6 +22631,7 @@ function serializeFabricStyleUsage(items: FabricStyleUsage[]) {
       styleId: item.styleId || slugForOption(item.styleName),
       styleName: item.styleName.trim(),
       meters: item.meters.trim(),
+      ...(item.auto ? { auto: true } : {}),
     }))
     .filter((item) => item.styleName);
   return styles.length ? JSON.stringify({ styles }) : "";
@@ -22616,6 +22651,71 @@ function compareFabricStyleUsage(a: FabricStyleUsage, b: FabricStyleUsage) {
   const groupDiff = fabricStyleSortGroup(a.styleName) - fabricStyleSortGroup(b.styleName);
   if (groupDiff !== 0) return groupDiff;
   return a.styleName.localeCompare(b.styleName, undefined, { sensitivity: "base" });
+}
+
+// ─── Auto-fill the fabric "Products" column from fabric picks ─────────────────
+// A fabric pick (titleFabricOverrides: product title → fabric row key, chosen to
+// set the correct price) is the same thing as "this style is made in this
+// fabric". So we can fill each fabric row's Products column automatically from
+// the picks instead of by hand. Assignments are keyed by the fabric row key
+// (sheetName::fabricName, occurrence suffix stripped).
+function computeFabricPinAssignments(productInfo: ProductInfo): Map<string, Array<{ styleId: string; styleName: string; meters: string }>> {
+  const pins = productInfo.titleFabricOverrides ?? {};
+  const styleOv = productInfo.titleStyleOverrides ?? {};
+  const styles: Array<{ n: string; id: string; name: string; avg: number }> = [];
+  for (const cat of productInfo.categories) for (const st of cat.styles) {
+    const n = (st.name ?? "").trim().toLowerCase();
+    if (n) styles.push({ n, id: st.id, name: st.name, avg: Number(st.averageMeters) || 0 });
+  }
+  styles.sort((a, b) => b.n.length - a.n.length);
+  const mergeKeyOf = (k: string) => k.replace(/::\d+$/, "");
+  const out = new Map<string, Array<{ styleId: string; styleName: string; meters: string }>>();
+  const seenPerKey = new Map<string, Set<string>>();
+  for (const [titleRaw, fabricKeyRaw] of Object.entries(pins)) {
+    const title = String(titleRaw).trim().toLowerCase();
+    const fabricKey = mergeKeyOf(String(fabricKeyRaw).trim().toLowerCase());
+    if (!title || !fabricKey) continue;
+    const ovId = styleOv[title];
+    const st = (ovId ? styles.find((s) => s.id === ovId) : null)
+      ?? styles.find((s) => title === s.n || title.startsWith(s.n + " ")) ?? null;
+    if (!st) continue;
+    const seen = seenPerKey.get(fabricKey) ?? new Set<string>();
+    if (seen.has(st.id)) continue;
+    seen.add(st.id); seenPerKey.set(fabricKey, seen);
+    const arr = out.get(fabricKey) ?? [];
+    arr.push({ styleId: st.id, styleName: st.name, meters: st.avg > 0 ? String(st.avg) : "" });
+    out.set(fabricKey, arr);
+  }
+  return out;
+}
+
+// Rewrites every stock sheet row's Products cell: keep hand-added (auto!==true)
+// entries untouched, and (re)generate the auto entries from the current fabric
+// picks. Returns the number of cells changed. Mutates the sheets in place.
+function applyFabricProductAutofill(fabricSheets: FabricStockSheet[], productInfo: ProductInfo): number {
+  const assignments = computeFabricPinAssignments(productInfo);
+  const keyFor = (sheetName: string, name: string) => `${sheetName.trim().toLowerCase()}::${name.trim().toLowerCase()}`;
+  let changed = 0;
+  for (const sheet of fabricSheets) {
+    const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
+    const prodIdx = sheet.headers.findIndex((h) => /^products?$/i.test(h));
+    if (nameIdx < 0 || prodIdx < 0) continue;
+    for (const row of sheet.rows) {
+      const name = (row[nameIdx] ?? "").trim();
+      if (!name) continue;
+      const assigned = assignments.get(keyFor(sheet.name, name)) ?? [];
+      const existing = parseFabricStyleUsage(row[prodIdx] ?? "");
+      const manual = existing.filter((e) => e.auto !== true);
+      const manualIds = new Set(manual.map((e) => e.styleId));
+      const autoEntries = assigned
+        .filter((a) => !manualIds.has(a.styleId))
+        .map((a) => ({ styleId: a.styleId, styleName: a.styleName, meters: a.meters, auto: true }));
+      const next = serializeFabricStyleUsage([...manual, ...autoEntries]);
+      while (row.length <= prodIdx) row.push("");
+      if (next !== (row[prodIdx] ?? "")) { row[prodIdx] = next; changed++; }
+    }
+  }
+  return changed;
 }
 
 function FabricProductsCell({
