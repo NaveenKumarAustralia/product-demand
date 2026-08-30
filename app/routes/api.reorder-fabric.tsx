@@ -84,12 +84,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   try {
     // Fabric sheets (small blob). Product-info: pull ONLY style id/name + the two
     // override maps via jsonb, so the 33MB image blob never crosses into JS.
-    const [fabricRow, piRows] = await Promise.all([
+    const [fabricRow, piRows, openOrders] = await Promise.all([
       prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } }),
       prisma.$queryRawUnsafe<Array<{ categories: unknown; tfo: unknown; tso: unknown }>>(
         `SELECT
            (SELECT jsonb_agg(jsonb_build_object('styles',
-              COALESCE((SELECT jsonb_agg(jsonb_build_object('id', s->'id', 'name', s->'name'))
+              COALESCE((SELECT jsonb_agg(jsonb_build_object('id', s->'id', 'name', s->'name', 'averageMeters', s->'averageMeters'))
                         FROM jsonb_array_elements(cat->'styles') s), '[]'::jsonb)))
             FROM jsonb_array_elements(value->'categories') cat) AS categories,
            value->'titleFabricOverrides' AS tfo,
@@ -97,6 +97,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
          FROM "PortalSetting" WHERE key = $1`,
         PRODUCT_INFO_KEY,
       ).catch(() => []),
+      // Open orders NOT yet cut (fabricConsumed=false) reserve fabric. on_order
+      // orders reduce Available; once On Production they'll be deducted from
+      // physical stock (Phase 4) and drop out of this set.
+      prisma.supplierOrder.findMany({
+        where: { status: "open", supplierStatus: "on_order", fabricConsumed: false },
+        select: { productTitle: true, totalQty: true, lines: { select: { qtyOrdered: true } } },
+      }).catch(() => [] as Array<{ productTitle: string; totalQty: number; lines: Array<{ qtyOrdered: number }> }>),
     ]);
 
     const sheets = normalizeSheets(fabricRow?.value);
@@ -140,7 +147,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       return (matched.length ? matched : []).reduce((s, r) => s + r.meters, 0);
     };
 
-    type Merged = { key: string; name: string; fabricType: string; inStock: number; onOrder: number; styleIds: Set<string> };
+    type Merged = { key: string; name: string; fabricType: string; inStock: number; onOrder: number; reserved: number; styleIds: Set<string>; styleMetersMap: Record<string, number> };
     const merged = new Map<string, Merged>();
     for (const e of stockIndex) {
       if (e.kind !== "stock") continue;
@@ -148,10 +155,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (!nameLower) continue;
       const key = keyFor(e.sheetName, e.name);
       let c = merged.get(key);
-      if (!c) { c = { key, name: e.name, fabricType: e.fabricType ?? "", inStock: 0, onOrder: 0, styleIds: new Set() }; merged.set(key, c); }
+      if (!c) { c = { key, name: e.name, fabricType: e.fabricType ?? "", inStock: 0, onOrder: 0, reserved: 0, styleIds: new Set(), styleMetersMap: {} }; merged.set(key, c); }
       if (!c.fabricType && e.fabricType) c.fabricType = e.fabricType;
       c.inStock += Number(e.meters) || 0;
-      if (e.styleMeters) for (const sid of Object.keys(e.styleMeters)) c.styleIds.add(sid);
+      if (e.styleMeters) for (const [sid, m] of Object.entries(e.styleMeters)) { c.styleIds.add(sid); if (c.styleMetersMap[sid] == null) c.styleMetersMap[sid] = Number(m) || 0; }
     }
     // On-order per entry, matched by name + fabric type (now that type is final).
     for (const c of merged.values()) c.onOrder = onOrderFor(c.name, c.fabricType);
@@ -169,20 +176,69 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ?? styleList.find((s) => titleLower === s.n || titleLower.startsWith(s.n + " ")) ?? null;
     const styleId = style?.id ?? null;
 
+    // Style → average meters (fallback when a fabric row has no per-style meters).
+    const styleAvg = new Map<string, number>();
+    for (const cat of cats) for (const st of (cat.styles ?? []) as Array<{ id?: string; averageMeters?: unknown }>) {
+      const sid = String(st?.id ?? "");
+      const av = Number(st?.averageMeters);
+      if (sid && Number.isFinite(av) && av > 0) styleAvg.set(sid, av);
+    }
+    const mergeKeyOf = (k: string) => k.replace(/::\d+$/, "");
+    const nameInTitle = (name: string, tl: string) => {
+      const n = name.trim().toLowerCase();
+      if (n.length < 3) return false;
+      const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return new RegExp(`\\b${esc}\\b`, "i").test(tl);
+    };
+    // Resolve an arbitrary order title → { fabric mergeKey, meters per piece },
+    // the same way pricing does: pinned fabric wins, else the sole name/style
+    // match. null when ambiguous/unknown (can't attribute the reservation).
+    const resolveTitleFabric = (t: string): { key: string; metersPerPiece: number } | null => {
+      const tl = t.trim().toLowerCase();
+      if (!tl) return null;
+      const ovId = tso[tl];
+      const st = (ovId ? styleList.find((s) => s.id === ovId) : null) ?? styleList.find((s) => tl === s.n || tl.startsWith(s.n + " ")) ?? null;
+      const sid = st?.id ?? null;
+      let key = "";
+      const pin = mergeKeyOf(tfo[tl] ?? "");
+      if (pin && merged.has(pin)) key = pin;
+      else {
+        const cands = [...merged.values()].filter((c) => (sid && c.styleIds.has(sid)) || nameInTitle(c.name, tl));
+        if (cands.length === 1) key = cands[0].key;
+      }
+      if (!key) return null;
+      const fab = merged.get(key)!;
+      const mpp = (sid && fab.styleMetersMap[sid] > 0) ? fab.styleMetersMap[sid] : (sid ? (styleAvg.get(sid) ?? 0) : 0);
+      if (!(mpp > 0)) return null;
+      return { key, metersPerPiece: mpp };
+    };
+    // Reserved meters per fabric = Σ over open on_order products of qty×meters.
+    for (const o of openOrders) {
+      const r = resolveTitleFabric(o.productTitle ?? "");
+      if (!r) continue;
+      const qty = (Number(o.totalQty) || 0) > 0 ? Number(o.totalQty) : (o.lines ?? []).reduce((s, l) => s + (Number(l.qtyOrdered) || 0), 0);
+      if (qty <= 0) continue;
+      const fab = merged.get(r.key);
+      if (fab) fab.reserved += qty * r.metersPerPiece;
+    }
+
     const nameMatched = new Set<string>();
     for (const nm of new Set([...merged.values()].map((c) => c.name.trim().toLowerCase()).filter((n) => n.length >= 3))) {
       const escaped = nm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       if (new RegExp(`\\b${escaped}\\b`, "i").test(titleLower)) nameMatched.add(nm);
     }
 
+    // Available to commit = physical in stock − reserved (fabric already spoken
+    // for by on-order products). Rounded to whole meters.
+    const shape = (c: Merged) => ({ key: c.key, name: c.name, fabricType: c.fabricType, inStock: c.inStock, onOrder: c.onOrder, reserved: Math.round(c.reserved), available: Math.round(c.inStock - c.reserved) });
     const candidates = [...merged.values()]
-      .map((c) => ({ key: c.key, name: c.name, fabricType: c.fabricType, inStock: c.inStock, onOrder: c.onOrder, linked: !!(styleId && c.styleIds.has(styleId)) || nameMatched.has(c.name.trim().toLowerCase()) }))
+      .map((c) => ({ ...shape(c), linked: !!(styleId && c.styleIds.has(styleId)) || nameMatched.has(c.name.trim().toLowerCase()) }))
       .filter((c) => c.linked)
       .sort((a, b) => (b.inStock + b.onOrder) - (a.inStock + a.onOrder))
       .map(({ linked: _l, ...c }) => c);
 
     const all = [...merged.values()]
-      .map((c) => ({ key: c.key, name: c.name, fabricType: c.fabricType, inStock: c.inStock, onOrder: c.onOrder }))
+      .map(shape)
       .sort((a, b) => a.name.localeCompare(b.name) || a.fabricType.localeCompare(b.fabricType));
 
     const pinnedKey = (tfo[titleLower] ?? "").replace(/::\d+$/, "");

@@ -28408,7 +28408,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   // Per-country sold breakdown, fetched lazily when a product row is expanded.
   const [countrySales, setCountrySales] = useState<Record<string, { loading?: boolean; rows?: Array<{ variant: string; country: string; units: number }>; countries?: string[] }>>({});
   // Fabric-in-stock / on-order for the product's fabric, fetched on expand.
-  type FabricCand = { key: string; name: string; fabricType: string; inStock: number; onOrder: number };
+  type FabricCand = { key: string; name: string; fabricType: string; inStock: number; onOrder: number; reserved?: number; available?: number };
   const [fabricInfo, setFabricInfo] = useState<Record<string, { loading?: boolean; candidates?: FabricCand[]; all?: FabricCand[]; chosenKey?: string; pinned?: boolean }>>({});
   // Per-product search text for the manual "pick a fabric from stock" box.
   const [fabricSearch, setFabricSearch] = useState<Record<string, string>>({});
@@ -28933,10 +28933,15 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                             const q = (fabricSearch[p.id] ?? "").trim().toLowerCase();
                             const setQ = (v: string) => setFabricSearch((cur) => ({ ...cur, [p.id]: v }));
                             const filtered = (q ? all.filter((c) => (c.name + " " + c.fabricType).toLowerCase().includes(q)) : all).slice(0, 40);
+                            const availOf = (c: FabricCand) => c.available ?? c.inStock;
                             const candRow = (c: FabricCand, highlight?: boolean) => (
                               <button key={c.key} onClick={() => { pickFabric(p.id, p.title, c.key); setQ(""); }} style={{ border: `1px solid ${highlight ? "#6ee7b7" : "#cbd5e1"}`, borderRadius: 8, padding: "6px 11px", background: highlight ? "#ecfdf5" : "#fff", cursor: "pointer", textAlign: "left" }}>
                                 <div style={{ fontWeight: 800, fontSize: 12.5, color: "#0f172a" }}>{c.name}{c.fabricType ? ` · ${c.fabricType}` : ""}</div>
-                                <div style={{ color: "#64748b", fontSize: 11, marginTop: 1 }}>In stock <strong style={{ color: c.inStock > 0 ? "#0f766e" : "#94a3b8" }}>{amt(c.inStock)}</strong> · On order <strong style={{ color: c.onOrder > 0 ? "#7c3aed" : "#94a3b8" }}>{amt(c.onOrder)}</strong></div>
+                                <div style={{ color: "#64748b", fontSize: 11, marginTop: 1 }}>
+                                  Available <strong style={{ color: availOf(c) > 0 ? "#0f766e" : "#dc2626" }}>{amt(availOf(c))}</strong>
+                                  {(c.reserved ?? 0) > 0 && <span style={{ color: "#94a3b8" }}> ({amt(c.inStock)} − {amt(c.reserved!)} on order)</span>}
+                                  {c.onOrder > 0 && <> · incoming <strong style={{ color: "#7c3aed" }}>{amt(c.onOrder)}</strong></>}
+                                </div>
                               </button>
                             );
                             return (
@@ -28945,8 +28950,10 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                                 {chosen && (
                                   <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap", marginBottom: 8 }}>
                                     <span style={{ fontWeight: 800, fontSize: 13, color: "#0f172a" }}>{chosen.name}{chosen.fabricType ? ` · ${chosen.fabricType}` : ""}</span>
-                                    <span style={{ fontSize: 12.5, color: "#64748b" }}>In stock <strong style={{ color: chosen.inStock > 0 ? "#0f766e" : "#94a3b8" }}>{amt(chosen.inStock)}</strong></span>
-                                    <span style={{ fontSize: 12.5, color: "#64748b" }}>On order <strong style={{ color: chosen.onOrder > 0 ? "#7c3aed" : "#94a3b8" }}>{amt(chosen.onOrder)}</strong></span>
+                                    <span style={{ fontSize: 13, color: "#64748b" }}>Available <strong style={{ color: availOf(chosen) > 0 ? "#0f766e" : "#dc2626", fontSize: 14 }}>{amt(availOf(chosen))}</strong></span>
+                                    <span style={{ fontSize: 12.5, color: "#94a3b8" }}>In stock {amt(chosen.inStock)}</span>
+                                    {(chosen.reserved ?? 0) > 0 && <span style={{ fontSize: 12.5, color: "#94a3b8" }}>On order (reserved) <strong style={{ color: "#b45309" }}>{amt(chosen.reserved!)}</strong></span>}
+                                    {chosen.onOrder > 0 && <span style={{ fontSize: 12.5, color: "#94a3b8" }}>Incoming <strong style={{ color: "#7c3aed" }}>{amt(chosen.onOrder)}</strong></span>}
                                     <button onClick={() => pickFabric(p.id, p.title, "")} style={{ border: "none", background: "none", color: "#2563eb", cursor: "pointer", fontSize: 12, textDecoration: "underline", padding: 0 }}>clear</button>
                                   </div>
                                 )}
