@@ -8129,16 +8129,29 @@ function buildFabricStockIndex(sheets: Array<{ gid: string; kind: string; name: 
 // Find every stock entry whose fabric name appears as a whole word in the product title.
 // Multiple sheets may have the same fabric name (e.g. Morialta in 60x60 and Voil) — return
 // them all so the UI can show them separately rather than misleadingly summing.
-function findFabricStockMatches(title: string, index: FabricStockEntry[]): FabricStockEntry[] {
+function findFabricStockMatches(title: string, index: FabricStockEntry[], pinnedFabricKey?: string): FabricStockEntry[] {
   if (!title) return [];
   const lower = title.toLowerCase();
   const names = Array.from(new Set(index.map((i) => i.name))).sort((a, b) => b.length - a.length);
+  const keyFor = (sn: string, nm: string) => `${(sn ?? "").trim().toLowerCase()}::${(nm ?? "").trim().toLowerCase()}`;
   for (const name of names) {
     if (name.length < 3) continue;
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`\\b${escaped}\\b`, "i");
     if (re.test(lower)) {
-      return index.filter((i) => i.name.toLowerCase() === name.toLowerCase());
+      const matches = index.filter((i) => i.name.toLowerCase() === name.toLowerCase());
+      // If the user has PICKED a fabric for this product, show only that one
+      // (plus any same-type on-order rows) — not the other same-named fabrics.
+      const pinned = (pinnedFabricKey ?? "").replace(/::\d+$/, "");
+      if (pinned) {
+        const pinnedEntry = matches.find((m) => keyFor(m.sheetName, m.name) === pinned);
+        if (pinnedEntry) {
+          const t = (pinnedEntry.fabricType ?? "").trim().toLowerCase();
+          const only = matches.filter((m) => keyFor(m.sheetName, m.name) === pinned || (!!t && (m.fabricType ?? "").trim().toLowerCase() === t));
+          if (only.length) return only;
+        }
+      }
+      return matches;
     }
   }
   return [];
@@ -26412,7 +26425,8 @@ function OrderRow({
   const costAudCol = totalCol + 7;
   const fabricStockCol = totalCol + 8;
   const barcodeCol = totalCol + 9;
-  const fabricMatches = findFabricStockMatches(order.productTitle, fabricStockIndex);
+  const pinnedFabricKey = (productInfo.titleFabricOverrides ?? {})[(order.productTitle ?? "").trim().toLowerCase()];
+  const fabricMatches = findFabricStockMatches(order.productTitle, fabricStockIndex, pinnedFabricKey);
   const rowHeightKey = `restock:${order.id}`;
   const shouldSkipDeleteConfirm = () => {
     if (typeof window === "undefined") return false;
