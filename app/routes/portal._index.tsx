@@ -22015,8 +22015,9 @@ function FabricCell({
     );
   }
 
+  const hasUsedBadge = isInStockCell && !!pending && pending.reserved > 0;
   return (
-    <>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", width: "100%" }}>
       <AutoGrowTextarea
         value={draft}
         onChange={setDraft}
@@ -22041,15 +22042,19 @@ function FabricCell({
           </button>
         </div>
       )}
-      {isInStockCell && pending && pending.reserved > 0 && (
-        <button
-          type="button"
-          onClick={() => setPendingOpen(true)}
-          title="Meters used by products on order in this fabric that still need to be made. Click for the list."
-          style={{ marginTop: 3, border: "1px solid #fcd34d", background: "#fffbeb", color: "#b45309", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}
-        >
-          Used {pending.reserved}m
-        </button>
+      {hasUsedBadge && (
+        <>
+          {/* Spacer pushes the badge to the bottom of the cell. */}
+          <div style={{ flex: 1, minHeight: 4 }} />
+          <button
+            type="button"
+            onClick={() => setPendingOpen(true)}
+            title="Meters used by products on order in this fabric that still need to be made. Click for the list."
+            style={{ alignSelf: "center", border: "1px solid #fcd34d", background: "#fffbeb", color: "#b45309", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}
+          >
+            Used {pending!.reserved}m
+          </button>
+        </>
       )}
       {pendingOpen && pending && typeof document !== "undefined" && createPortal(
         <div onClick={() => setPendingOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
@@ -22078,7 +22083,7 @@ function FabricCell({
         </div>,
         document.body,
       )}
-    </>
+    </div>
   );
 }
 
