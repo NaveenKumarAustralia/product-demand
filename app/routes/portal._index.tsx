@@ -4256,6 +4256,27 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             if (barNow !== barPrev && !barNow.includes("\n")) data.barcodeBase = barNow || null;
             if (Object.keys(data).length) await prisma.supplierOrder.update({ where: { id: jjOid }, data }).catch(() => {});
           }
+          // Collection status → linked supplier order(s): mirror the row's STATUS
+          // onto its order (JJ order, or a seeded restock order matched by product
+          // id) and run the fabric-consumption reconcile — so changing a product
+          // to On Production on the collection page deducts fabric too.
+          const statusNow = (row.status ?? "").trim();
+          const statusPrev = (prev.status ?? "").trim();
+          if (statusNow && statusNow !== statusPrev) {
+            const linkedIds = new Set<number>();
+            if (jjOid) linkedIds.add(jjOid);
+            const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+            if (pid) {
+              const numeric = pid.replace(/[^0-9]/g, "");
+              const candidates = Array.from(new Set([pid, numeric, numeric ? `gid://shopify/Product/${numeric}` : ""].filter(Boolean)));
+              const orders = await prisma.supplierOrder.findMany({ where: { status: "open", productId: { in: candidates } }, select: { id: true } }).catch(() => [] as Array<{ id: number }>);
+              for (const o of orders) linkedIds.add(o.id);
+            }
+            for (const oid of linkedIds) {
+              await prisma.supplierOrder.update({ where: { id: oid }, data: { supplierStatus: statusNow } }).catch(() => {});
+              await reconcileOrderFabricConsumption(oid);
+            }
+          }
         }
       } catch (e) {
         console.warn("[collection mention sync] failed:", e);
