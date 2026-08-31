@@ -5719,6 +5719,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (Object.keys(updates).length) {
     await prisma.supplierOrder.update({ where: { id: orderId }, data: updates });
+    // Fabric consumption: entering "On Production" (etc.) deducts the order's
+    // fabric from physical stock; leaving it restores. Reversible + idempotent.
+    if (intent === "update_status") {
+      await reconcileOrderFabricConsumption(orderId);
+    }
     if (intent === "update_factory_notes" || intent === "update_notes") {
       await syncOrderNoteMessages({
         orderId,
@@ -22687,6 +22692,72 @@ function computeFabricPinAssignments(productInfo: ProductInfo): Map<string, Arra
     out.set(fabricKey, arr);
   }
   return out;
+}
+
+// ─── Fabric consumption on production (Phase 4) ───────────────────────────────
+// Supplier statuses at which an order's fabric is considered cut/used and so
+// deducted from PHYSICAL stock. on_order/cancelled keep it in stock (reserved
+// only). Entering a consumed status deducts; leaving it restores.
+const FABRIC_CONSUMED_STATUSES = new Set(["on_production", "ready", "in_shipment"]);
+
+// Adjust the "Meters in Stock" of the fabric row identified by fabricKey by
+// deltaMeters (negative deducts, positive restores). Only real stock rows (with
+// a Meters-in-Stock column) are touched. Returns true if a row was adjusted.
+function adjustFabricStockMeters(sheets: FabricStockSheet[], fabricKey: string, deltaMeters: number): boolean {
+  const target = fabricKey.replace(/::\d+$/, "");
+  const keyFor = (sn: string, nm: string) => `${sn.trim().toLowerCase()}::${nm.trim().toLowerCase()}`;
+  for (const sheet of sheets) {
+    const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h));
+    const metersIdx = sheet.headers.findIndex((h) => /meters?\s*in\s*stock|in\s*stock|meters?\s*available|^meters?$/i.test(h));
+    if (nameIdx < 0 || metersIdx < 0) continue;
+    for (const row of sheet.rows) {
+      const nm = (row[nameIdx] ?? "").trim();
+      if (!nm || keyFor(sheet.name, nm) !== target) continue;
+      const cur = Number((row[metersIdx] ?? "").toString().split(/[^0-9.]/)[0]) || 0;
+      while (row.length <= metersIdx) row.push("");
+      row[metersIdx] = String(Math.round((cur + deltaMeters) * 100) / 100);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Reconcile one order's fabric consumption against its CURRENT supplierStatus.
+// Deducts from physical stock when it enters a consumed status; restores the
+// exact deducted amount when it leaves. Idempotent — keyed on fabricConsumed, so
+// repeated calls / flip-flopping never double-deduct. Never throws to the caller.
+async function reconcileOrderFabricConsumption(orderId: number): Promise<void> {
+  try {
+    const order = await prisma.supplierOrder.findUnique({
+      where: { id: orderId },
+      select: { id: true, productTitle: true, totalQty: true, supplierStatus: true, fabricConsumed: true, fabricConsumedMeters: true, fabricKey: true, lines: { select: { qtyOrdered: true } } },
+    });
+    if (!order) return;
+    const shouldConsume = FABRIC_CONSUMED_STATUSES.has(order.supplierStatus);
+    if (shouldConsume === order.fabricConsumed) return; // already reconciled
+    await withFabricSheetsLock(async () => {
+      const sheets = await loadManualFabricSheetsForAction();
+      if (shouldConsume) {
+        const productInfo = await loadProductInfoForAction();
+        const lookup = buildStyleCostLookup(productInfo, buildFabricStockIndex(combinedFabricSheetsForIndex(sheets)));
+        const diag = lookup.metersDiagForTitle(order.productTitle ?? "");
+        const mpp = diag.ok ? (diag.metersPerPiece ?? 0) : 0;
+        if (!diag.ok || !diag.fabricKey || !(mpp > 0)) return; // fabric unknown → leave in stock
+        const qty = (order.totalQty ?? 0) > 0 ? order.totalQty : (order.lines ?? []).reduce((s, l) => s + (l.qtyOrdered || 0), 0);
+        if (qty <= 0) return;
+        const meters = qty * mpp;
+        if (adjustFabricStockMeters(sheets, diag.fabricKey, -meters)) await saveManualFabricSheets(sheets);
+        await prisma.supplierOrder.update({ where: { id: orderId }, data: { fabricConsumed: true, fabricConsumedMeters: meters, fabricKey: diag.fabricKey.replace(/::\d+$/, ""), fabricName: diag.fabricName ?? null, metersPerPiece: mpp } });
+      } else {
+        const meters = order.fabricConsumedMeters ?? 0;
+        const key = order.fabricKey ?? "";
+        if (meters > 0 && key && adjustFabricStockMeters(sheets, key, meters)) await saveManualFabricSheets(sheets);
+        await prisma.supplierOrder.update({ where: { id: orderId }, data: { fabricConsumed: false, fabricConsumedMeters: null } });
+      }
+    });
+  } catch (e) {
+    console.warn("[fabric consume reconcile]", e);
+  }
 }
 
 // Rewrites every stock sheet row's Products cell: keep hand-added (auto!==true)
