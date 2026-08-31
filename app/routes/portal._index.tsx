@@ -22032,10 +22032,10 @@ function FabricCell({
         <button
           type="button"
           onClick={() => setPendingOpen(true)}
-          title="Products on order in this fabric that still need to be made (fabric reserved, not yet cut). Click for details."
-          style={{ marginTop: 3, border: "1px solid #fcd34d", background: "#fffbeb", color: "#b45309", borderRadius: 999, padding: "1px 7px", fontSize: 10.5, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}
+          title="Meters used by products on order in this fabric that still need to be made. Click for the list."
+          style={{ marginTop: 3, border: "1px solid #fcd34d", background: "#fffbeb", color: "#b45309", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}
         >
-          ⏳ {pending.items.length} on order · {pending.reserved}m
+          Used {pending.reserved}m
         </button>
       )}
       {pendingOpen && pending && typeof document !== "undefined" && createPortal(
