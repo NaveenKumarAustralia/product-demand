@@ -31511,6 +31511,10 @@ const s: Record<string, React.CSSProperties> = {
     borderRight: "1px solid #e5e7eb",
     borderBottom: "1px solid #e5e7eb",
     verticalAlign: "top",
+    // height:100% resolves to the row's height, so full-height cell content
+    // (the note wrap's 💬 button, the in-stock "Used" badge) can sit flush at
+    // the cell's real bottom instead of the top of their min-height box.
+    height: "100%",
     color: "var(--portal-table-text-color, #1f2937)",
     fontWeight: 600,
     minWidth: 60,
