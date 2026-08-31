@@ -22049,10 +22049,10 @@ function FabricCell({
           <button
             type="button"
             onClick={() => setPendingOpen(true)}
-            title="Meters used by products on order in this fabric that still need to be made. Click for the list."
+            title="Products on order in this fabric (fabric reserved, deducted from stock once they go On Production). Click for the list."
             style={{ alignSelf: "center", border: "1px solid #fcd34d", background: "#fffbeb", color: "#b45309", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}
           >
-            Used {pending!.reserved}m
+            {pending!.items.length} on order · {pending!.reserved}m
           </button>
         </>
       )}
@@ -22820,7 +22820,10 @@ async function reconcileOrderFabricConsumption(orderId: number): Promise<void> {
         const qty = (order.totalQty ?? 0) > 0 ? order.totalQty : (order.lines ?? []).reduce((s, l) => s + (l.qtyOrdered || 0), 0);
         if (qty <= 0) return;
         const meters = qty * mpp;
-        if (adjustFabricStockMeters(sheets, diag.fabricKey, -meters)) await saveManualFabricSheets(sheets);
+        // Only mark consumed if we actually found the fabric row and deducted —
+        // otherwise leave it un-consumed so it stays reserved and can retry.
+        if (!adjustFabricStockMeters(sheets, diag.fabricKey, -meters)) return;
+        await saveManualFabricSheets(sheets);
         await prisma.supplierOrder.update({ where: { id: orderId }, data: { fabricConsumed: true, fabricConsumedMeters: meters, fabricKey: diag.fabricKey.replace(/::\d+$/, ""), fabricName: diag.fabricName ?? null, metersPerPiece: mpp } });
       } else {
         const meters = order.fabricConsumedMeters ?? 0;
