@@ -21272,6 +21272,10 @@ function CombinedFabricStockPanel({
   // we set it to the sum of the column widths (matches packing/restock).
   const fabricTableWidth = 48 + localColumns.reduce((sum, column) => sum + widthFor(column.key), 0);
 
+  // Styles assigned to each fabric row (sheetName::fabricName → styles) from the
+  // fabric picks — used to auto-fill a row's Products popup.
+  const pinAssignments = useMemo(() => computeFabricPinAssignments(productInfo), [productInfo]);
+
   const totalInStock = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.inStock?.value), 0);
   const totalOnOrder = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.onOrder?.value), 0);
   const totalCostInr = filteredRows.reduce((sum, entry) => {
@@ -21315,17 +21319,6 @@ function CombinedFabricStockPanel({
               Clear filter
             </button>
           )}
-          <button
-            type="button"
-            style={s.secondaryButton}
-            disabled={fetcher.state !== "idle" && String(fetcher.formData?.get("intent") ?? "") === "sync_fabric_products"}
-            title="Fill each fabric row's Products column from the fabric picks (the fabric chosen for each product's price). Keeps anything you typed by hand."
-            onClick={() => fetcher.submit({ intent: "sync_fabric_products" }, { method: "post" })}
-          >
-            {fetcher.state !== "idle" && String(fetcher.formData?.get("intent") ?? "") === "sync_fabric_products"
-              ? "Filling…"
-              : "⟳ Auto-fill Products"}
-          </button>
         </div>
         <div style={s.fabricToolbarMeta}>
           <span><strong>{filteredRows.length}</strong> rows</span>
@@ -21421,6 +21414,7 @@ function CombinedFabricStockPanel({
                   rowHeights={rowHeights}
                   sheets={sheets}
                   threadCounts={threadCounts}
+                  pinAssignments={pinAssignments}
                   onMarkDeleted={markRowDeleted}
                 />
               ))}
@@ -21483,6 +21477,7 @@ function CombinedFabricRow({
   rowHeights,
   sheets,
   threadCounts,
+  pinAssignments,
   onMarkDeleted,
 }: {
   entry: UnifiedFabricRowEntry;
@@ -21495,6 +21490,7 @@ function CombinedFabricRow({
   rowHeights: Record<string, number>;
   sheets: FabricSheetData[];
   threadCounts: Map<string, { total: number; unread: number }>;
+  pinAssignments: Map<string, Array<{ styleId: string; styleName: string; meters: string }>>;
   onMarkDeleted: (gid: string, rowIndex: number) => void;
 }) {
   const primaryGid = entry.primarySheet.gid;
@@ -21502,6 +21498,9 @@ function CombinedFabricRow({
   const rowHeightKey = `fabric:${primaryGid}:${primaryRowIndex}`;
   const fabricImageUrl = entry.cells.fabricImage?.value ?? "";
   const fabricName = entry.cells.name?.value ?? "";
+  // Styles the fabric picks have assigned to THIS row (for the Products popup).
+  const rowFabricKey = `${(entry.primarySheet.name ?? "").trim().toLowerCase()}::${fabricName.trim().toLowerCase()}`;
+  const autoStyles = pinAssignments.get(rowFabricKey) ?? [];
   const moveTargets = sheets.filter((item) => item.gid !== primaryGid && !isHiddenFabricSheet(item.name));
   return (
     <tr style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
@@ -21559,6 +21558,7 @@ function CombinedFabricRow({
                 fabricSettings={fabricSettings}
                 productInfo={productInfo}
                 users={users}
+                autoStyles={autoStyles}
               />
             ) : column.key === "fabricType" ? (
               // Source sheet has no Fabric Type column — still offer the chip
@@ -21829,6 +21829,7 @@ function FabricCell({
   fabricSettings,
   productInfo,
   users,
+  autoStyles,
 }: {
   gid: string;
   rowIndex: number;
@@ -21842,6 +21843,7 @@ function FabricCell({
   fabricSettings: FabricSettings;
   productInfo: ProductInfo;
   users: PortalUser[];
+  autoStyles?: Array<{ styleId: string; styleName: string; meters: string }>;
 }) {
   // Each cell gets its OWN fetcher. A single shared fetcher (the old prop)
   // meant editing one cell aborted the still-in-flight save of the previous
@@ -21928,6 +21930,7 @@ function FabricCell({
         fabricImageUrl={fabricImageUrl}
         fabricName={fabricName}
         productInfo={productInfo}
+        autoStyles={autoStyles}
         onDraftChange={setDraft}
         onSave={save}
       />
@@ -22795,6 +22798,7 @@ function FabricProductsCell({
   fabricImageUrl,
   fabricName,
   productInfo,
+  autoStyles,
   onDraftChange,
   onSave,
 }: {
@@ -22803,6 +22807,7 @@ function FabricProductsCell({
   fabricImageUrl: string;
   fabricName: string;
   productInfo: ProductInfo;
+  autoStyles?: Array<{ styleId: string; styleName: string; meters: string }>;
   onDraftChange: (value: string) => void;
   onSave: (value: string) => void;
 }) {
@@ -22811,6 +22816,19 @@ function FabricProductsCell({
   const [items, setItems] = useState<FabricStyleUsage[]>(() => parseFabricStyleUsage(value));
   useEffect(() => setItems(parseFabricStyleUsage(value)), [value]);
   const options = productInfoStyleSearchOptions(productInfo);
+  // Add the products assigned to this fabric (by the fabric picks) that aren't
+  // already listed, defaulting meters to the style average. Never overwrites a
+  // hand-typed entry. Saves immediately.
+  const assigned = autoStyles ?? [];
+  const missingAssigned = assigned.filter((a) => !items.some((it) => it.styleId === a.styleId));
+  const autofillFromPicks = () => {
+    if (!missingAssigned.length) return;
+    const next = [...items, ...missingAssigned.map((a) => ({ styleId: a.styleId, styleName: a.styleName, meters: a.meters, auto: true }))];
+    setItems(next);
+    const nextValue = serializeFabricStyleUsage(next);
+    onDraftChange(nextValue);
+    onSave(nextValue);
+  };
   const normalizedQuery = query.trim().toLowerCase();
   const searchResults = normalizedQuery
     ? options
@@ -22877,9 +22895,22 @@ function FabricProductsCell({
                 <div style={s.fabricStyleUsageHeader}>
                   <div>
                     <h2 style={s.productInfoModalTitle}>Styles for this fabric</h2>
-                    <p style={s.productInfoModalText}>Search Product Information styles and enter meters for this fabric.</p>
+                    <p style={s.productInfoModalText}>Auto-filled from the fabric picks; search to add more or enter meters for this fabric.</p>
                   </div>
-                  <button type="button" style={s.secondaryButton} onClick={() => setOpen(false)}>Close</button>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                    {assigned.length > 0 && (
+                      <button
+                        type="button"
+                        style={{ ...s.secondaryButton, ...(missingAssigned.length ? { background: "#ecfdf5", color: "#0d9488", borderColor: "#5eead4" } : {}) }}
+                        disabled={!missingAssigned.length}
+                        title="Add the products assigned to this fabric (from the fabric picks that set each product's price). Keeps anything you typed."
+                        onClick={autofillFromPicks}
+                      >
+                        {missingAssigned.length ? `⟳ Auto-fill ${missingAssigned.length} from picks` : "✓ Up to date with picks"}
+                      </button>
+                    )}
+                    <button type="button" style={s.secondaryButton} onClick={() => setOpen(false)}>Close</button>
+                  </div>
                 </div>
                 <div style={s.fabricStyleSearchWrap}>
                   <input
