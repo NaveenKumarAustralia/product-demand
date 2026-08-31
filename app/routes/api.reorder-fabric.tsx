@@ -76,8 +76,13 @@ function normalizeSheets(raw: unknown): Array<{ gid: string; kind: string; name:
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const title = (new URL(request.url).searchParams.get("title") ?? "").trim();
-  if (!title) return Response.json({ ok: false, candidates: [], all: [] });
+  const url = new URL(request.url);
+  const title = (url.searchParams.get("title") ?? "").trim();
+  // pending=1 → return per-fabric reserved + the list of on-order products
+  // consuming each fabric (for the Fabric-in-Stock page click-through), instead
+  // of the per-title candidate picker.
+  const pendingMode = url.searchParams.get("pending") === "1";
+  if (!title && !pendingMode) return Response.json({ ok: false, candidates: [], all: [] });
   const titleLower = title.toLowerCase();
   const keyFor = (sheetName: string, name: string) => `${sheetName.trim().toLowerCase()}::${name.trim().toLowerCase()}`;
 
@@ -213,6 +218,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       return { key, metersPerPiece: mpp };
     };
     // Reserved meters per fabric = Σ over open on_order products of qty×meters.
+    // Also keep the item list per fabric for the pending-items view.
+    const itemsByKey = new Map<string, Array<{ title: string; qty: number; meters: number }>>();
     for (const o of openOrders) {
       const r = resolveTitleFabric(o.productTitle ?? "");
       if (!r) continue;
@@ -220,6 +227,26 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (qty <= 0) continue;
       const fab = merged.get(r.key);
       if (fab) fab.reserved += qty * r.metersPerPiece;
+      const arr = itemsByKey.get(r.key) ?? [];
+      arr.push({ title: o.productTitle ?? "", qty, meters: Math.round(qty * r.metersPerPiece) });
+      itemsByKey.set(r.key, arr);
+    }
+
+    if (pendingMode) {
+      // One entry per fabric that has any pending on-order product.
+      const byKey: Record<string, { name: string; fabricType: string; inStock: number; reserved: number; available: number; items: Array<{ title: string; qty: number; meters: number }> }> = {};
+      for (const [key, items] of itemsByKey) {
+        const fab = merged.get(key);
+        if (!fab) continue;
+        const merged2 = new Map<string, { title: string; qty: number; meters: number }>();
+        for (const it of items) {
+          const ex = merged2.get(it.title);
+          if (ex) { ex.qty += it.qty; ex.meters += it.meters; } else merged2.set(it.title, { ...it });
+        }
+        const list = [...merged2.values()].sort((a, b) => b.meters - a.meters);
+        byKey[key] = { name: fab.name, fabricType: fab.fabricType, inStock: Math.round(fab.inStock), reserved: Math.round(fab.reserved), available: Math.round(fab.inStock - fab.reserved), items: list };
+      }
+      return Response.json({ ok: true, byKey });
     }
 
     const nameMatched = new Set<string>();

@@ -21063,6 +21063,8 @@ function parseFabricNumberCell(value: string | undefined) {
   return Number.isFinite(n) ? n : 0;
 }
 
+type FabricPendingInfo = { name: string; fabricType: string; inStock: number; reserved: number; available: number; items: Array<{ title: string; qty: number; meters: number }> };
+
 function CombinedFabricStockPanel({
   sheets,
   fabricSettings,
@@ -21275,6 +21277,11 @@ function CombinedFabricStockPanel({
   // Styles assigned to each fabric row (sheetName::fabricName → styles) from the
   // fabric picks — used to auto-fill a row's Products popup.
   const pinAssignments = useMemo(() => computeFabricPinAssignments(productInfo), [productInfo]);
+  // Pending on-order products per fabric (reserved meters + item list), fetched
+  // once — powers the "N on order" click-through badge on each row.
+  const pendingFetcher = useFetcher<{ ok?: boolean; byKey?: Record<string, FabricPendingInfo> }>();
+  useEffect(() => { pendingFetcher.load("/api/reorder-fabric?pending=1"); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+  const pendingByKey = pendingFetcher.data?.byKey ?? {};
 
   const totalInStock = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.inStock?.value), 0);
   const totalOnOrder = filteredRows.reduce((sum, entry) => sum + parseFabricNumberCell(entry.cells.onOrder?.value), 0);
@@ -21415,6 +21422,7 @@ function CombinedFabricStockPanel({
                   sheets={sheets}
                   threadCounts={threadCounts}
                   pinAssignments={pinAssignments}
+                  pendingByKey={pendingByKey}
                   onMarkDeleted={markRowDeleted}
                 />
               ))}
@@ -21478,6 +21486,7 @@ function CombinedFabricRow({
   sheets,
   threadCounts,
   pinAssignments,
+  pendingByKey,
   onMarkDeleted,
 }: {
   entry: UnifiedFabricRowEntry;
@@ -21491,6 +21500,7 @@ function CombinedFabricRow({
   sheets: FabricSheetData[];
   threadCounts: Map<string, { total: number; unread: number }>;
   pinAssignments: Map<string, Array<{ styleId: string; styleName: string; meters: string }>>;
+  pendingByKey: Record<string, FabricPendingInfo>;
   onMarkDeleted: (gid: string, rowIndex: number) => void;
 }) {
   const primaryGid = entry.primarySheet.gid;
@@ -21501,6 +21511,7 @@ function CombinedFabricRow({
   // Styles the fabric picks have assigned to THIS row (for the Products popup).
   const rowFabricKey = `${(entry.primarySheet.name ?? "").trim().toLowerCase()}::${fabricName.trim().toLowerCase()}`;
   const autoStyles = pinAssignments.get(rowFabricKey) ?? [];
+  const rowPending = pendingByKey[rowFabricKey];
   const moveTargets = sheets.filter((item) => item.gid !== primaryGid && !isHiddenFabricSheet(item.name));
   return (
     <tr style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}) }}>
@@ -21559,6 +21570,7 @@ function CombinedFabricRow({
                 productInfo={productInfo}
                 users={users}
                 autoStyles={autoStyles}
+                pending={rowPending}
               />
             ) : column.key === "fabricType" ? (
               // Source sheet has no Fabric Type column — still offer the chip
@@ -21830,6 +21842,7 @@ function FabricCell({
   productInfo,
   users,
   autoStyles,
+  pending,
 }: {
   gid: string;
   rowIndex: number;
@@ -21844,6 +21857,7 @@ function FabricCell({
   productInfo: ProductInfo;
   users: PortalUser[];
   autoStyles?: Array<{ styleId: string; styleName: string; meters: string }>;
+  pending?: FabricPendingInfo;
 }) {
   // Each cell gets its OWN fetcher. A single shared fetcher (the old prop)
   // meant editing one cell aborted the still-in-flight save of the previous
@@ -21854,8 +21868,10 @@ function FabricCell({
   const revalidator = useRevalidator();
   const [draft, setDraft] = useState(value);
   const [imageHover, setImageHover] = useState(false);
+  const [pendingOpen, setPendingOpen] = useState(false);
   useEffect(() => setDraft(value), [value]);
   const trimmed = draft.trim();
+  const isInStockCell = /meters?\s*in\s*stock|in\s*stock|meters?\s*available|^meters?$/i.test(header);
   const imageValue = isFabricImageValue(trimmed);
   const normalizedHeader = header.trim().toLowerCase();
   const imageColumn = /picture|image/i.test(header) || normalizedHeader === "fabric" || imageValue || isFabricImageValue(originalValue);
@@ -22011,6 +22027,43 @@ function FabricCell({
             Restore
           </button>
         </div>
+      )}
+      {isInStockCell && pending && pending.reserved > 0 && (
+        <button
+          type="button"
+          onClick={() => setPendingOpen(true)}
+          title="Products on order in this fabric that still need to be made (fabric reserved, not yet cut). Click for details."
+          style={{ marginTop: 3, border: "1px solid #fcd34d", background: "#fffbeb", color: "#b45309", borderRadius: 999, padding: "1px 7px", fontSize: 10.5, fontWeight: 800, cursor: "pointer", whiteSpace: "nowrap" }}
+        >
+          ⏳ {pending.items.length} on order · {pending.reserved}m
+        </button>
+      )}
+      {pendingOpen && pending && typeof document !== "undefined" && createPortal(
+        <div onClick={() => setPendingOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 12, width: 460, maxWidth: "100%", maxHeight: "80vh", overflow: "auto", boxShadow: "0 24px 60px rgba(15,23,42,0.3)" }}>
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid #eef2f7" }}>
+              <div style={{ fontWeight: 800, fontSize: 15, color: "#0f172a" }}>{pending.name}{pending.fabricType ? ` · ${pending.fabricType}` : ""}</div>
+              <div style={{ display: "flex", gap: 16, marginTop: 6, fontSize: 12.5, flexWrap: "wrap" }}>
+                <span style={{ color: "#64748b" }}>In stock <strong style={{ color: "#0f172a" }}>{pending.inStock}m</strong></span>
+                <span style={{ color: "#64748b" }}>On order (reserved) <strong style={{ color: "#b45309" }}>{pending.reserved}m</strong></span>
+                <span style={{ color: "#64748b" }}>Available <strong style={{ color: pending.available >= 0 ? "#0f766e" : "#dc2626" }}>{pending.available}m</strong></span>
+              </div>
+            </div>
+            <div style={{ padding: "6px 8px 12px" }}>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", letterSpacing: 0.4, padding: "8px 10px 4px" }}>Pending on order — still to be made</div>
+              {pending.items.map((it, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "6px 10px", borderTop: i > 0 ? "1px solid #f1f5f9" : undefined, fontSize: 13 }}>
+                  <span style={{ color: "#0f172a", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.title}</span>
+                  <span style={{ color: "#64748b", whiteSpace: "nowrap", flexShrink: 0 }}>{it.qty} pcs · <strong style={{ color: "#b45309" }}>{it.meters}m</strong></span>
+                </div>
+              ))}
+            </div>
+            <div style={{ padding: "10px 18px", borderTop: "1px solid #eef2f7", textAlign: "right" }}>
+              <button type="button" onClick={() => setPendingOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Close</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
     </>
   );
