@@ -26708,30 +26708,35 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={fabricStockCol} center>
           {fabricMatches.length === 0 ? (
             <span style={{ color: "#111827", fontWeight: 600, fontSize: 12 }}>Fabric not found</span>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
-              {fabricMatches.filter((m) => m.kind === "stock").map((match, idx) => (
-                <span key={`s-${idx}`} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12, color: "#111827" }}>
-                  {match.meters === 0 ? (
-                    <span style={{ color: "#dc2626", fontWeight: 600 }}>Out of stock</span>
-                  ) : (
-                    <>
-                      <span style={{ fontWeight: 600 }}>{Math.round(match.meters).toLocaleString()}</span>
-                      <span style={{ marginLeft: 3, fontWeight: 500 }}>m</span>
-                    </>
-                  )}
-                  <span style={{ marginLeft: 4, fontWeight: 500 }}>({match.sheetName})</span>
-                </span>
-              ))}
-              {fabricMatches.filter((m) => m.kind === "order").map((match, idx) => (
-                <span key={`o-${idx}`} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12, color: "#0369a1" }}>
-                  <span style={{ fontWeight: 600 }}>{Math.round(match.meters).toLocaleString()}</span>
-                  <span style={{ marginLeft: 3, fontWeight: 500 }}>m on order</span>
-                  <span style={{ marginLeft: 4, fontWeight: 500 }}>({match.sheetName})</span>
-                </span>
-              ))}
-            </div>
-          )}
+          ) : (() => {
+            // Only show fabric rows that actually have meters. The 0-meter rows
+            // come from the combined "On Order" sheet (no Meters-in-Stock
+            // column), which was showing a spurious "Out of stock (On Order)".
+            // Real on-order rows (kind "order", >0) still show "on order".
+            const inStock = fabricMatches.filter((m) => m.kind === "stock" && m.meters > 0);
+            const onOrder = fabricMatches.filter((m) => m.kind === "order" && m.meters > 0);
+            if (inStock.length === 0 && onOrder.length === 0) {
+              return <span style={{ color: "#dc2626", fontWeight: 600, fontSize: 12 }}>Out of stock</span>;
+            }
+            return (
+              <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
+                {inStock.map((match, idx) => (
+                  <span key={`s-${idx}`} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12, color: "#111827" }}>
+                    <span style={{ fontWeight: 600 }}>{Math.round(match.meters).toLocaleString()}</span>
+                    <span style={{ marginLeft: 3, fontWeight: 500 }}>m</span>
+                    <span style={{ marginLeft: 4, fontWeight: 500 }}>({match.sheetName})</span>
+                  </span>
+                ))}
+                {onOrder.map((match, idx) => (
+                  <span key={`o-${idx}`} title={`${match.name} — ${match.sheetName}`} style={{ fontSize: 12, color: "#0369a1" }}>
+                    <span style={{ fontWeight: 600 }}>{Math.round(match.meters).toLocaleString()}</span>
+                    <span style={{ marginLeft: 3, fontWeight: 500 }}>m on order</span>
+                    <span style={{ marginLeft: 4, fontWeight: 500 }}>({match.sheetName})</span>
+                  </span>
+                ))}
+              </div>
+            );
+          })()}
         </Td>
 
         {/* Barcode — its own column at the end, pulled from the order lines
@@ -31511,10 +31516,11 @@ const s: Record<string, React.CSSProperties> = {
     borderRight: "1px solid #e5e7eb",
     borderBottom: "1px solid #e5e7eb",
     verticalAlign: "top",
-    // height:100% resolves to the row's height, so full-height cell content
-    // (the note wrap's 💬 button, the in-stock "Used" badge) can sit flush at
-    // the cell's real bottom instead of the top of their min-height box.
-    height: "100%",
+    // A definite 1px height (NOT 100%, which stays indeterminate on an auto
+    // row) lets height:100% cell content resolve to the row's real height — so
+    // the note wrap's 💬 button and the in-stock "Used" badge sit flush at the
+    // cell's true bottom. Same trick the restock notes cell uses.
+    height: 1,
     color: "var(--portal-table-text-color, #1f2937)",
     fontWeight: 600,
     minWidth: 60,
