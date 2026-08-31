@@ -22817,6 +22817,59 @@ function adjustFabricStockMeters(sheets: FabricStockSheet[], fabricKey: string, 
   return false;
 }
 
+// Resolve an order title → { fabricKey, metersPerPiece } using the SAME logic
+// as the reserved-fabric chip (/api/reorder-fabric): pinned fabric wins, else a
+// fabric linked to the product's style (via the fabric row's Products) or whose
+// name is in the title, when unambiguous. Meters = the fabric's per-style meters
+// else the style's average. This guarantees the deduction agrees with what the
+// chip showed as reserved (metersDiagForTitle matched fabric by NAME only, so it
+// missed products linked via Products and never deducted them).
+function resolveOrderFabricForDeduction(productInfo: ProductInfo, sheets: FabricStockSheet[], title: string): { fabricKey: string; metersPerPiece: number } | null {
+  const tl = (title ?? "").trim().toLowerCase();
+  if (!tl) return null;
+  const keyFor = (sn: string, nm: string) => `${sn.trim().toLowerCase()}::${nm.trim().toLowerCase()}`;
+  const mergeKeyOf = (k: string) => k.replace(/::\d+$/, "");
+  const stockIndex = buildFabricStockIndex(combinedFabricSheetsForIndex(sheets));
+  const merged = new Map<string, { name: string; styleIds: Set<string>; styleMetersMap: Record<string, number> }>();
+  for (const e of stockIndex) {
+    if (e.kind !== "stock") continue;
+    const nm = e.name.trim().toLowerCase();
+    if (!nm) continue;
+    const key = keyFor(e.sheetName, e.name);
+    let c = merged.get(key);
+    if (!c) { c = { name: e.name, styleIds: new Set(), styleMetersMap: {} }; merged.set(key, c); }
+    if (e.styleMeters) for (const [sid, m] of Object.entries(e.styleMeters)) { c.styleIds.add(sid); if (c.styleMetersMap[sid] == null) c.styleMetersMap[sid] = Number(m) || 0; }
+  }
+  const styleList: Array<{ n: string; id: string }> = [];
+  const styleAvg = new Map<string, number>();
+  for (const cat of productInfo.categories) for (const st of cat.styles) {
+    const n = (st.name ?? "").trim().toLowerCase();
+    if (!n) continue;
+    styleList.push({ n, id: st.id });
+    const av = Number(st.averageMeters);
+    if (Number.isFinite(av) && av > 0) styleAvg.set(st.id, av);
+  }
+  styleList.sort((a, b) => b.n.length - a.n.length);
+  const tso = productInfo.titleStyleOverrides ?? {};
+  const tfo = productInfo.titleFabricOverrides ?? {};
+  const ovId = tso[tl];
+  const st = (ovId ? styleList.find((s) => s.id === ovId) : null) ?? styleList.find((s) => tl === s.n || tl.startsWith(s.n + " ")) ?? null;
+  const sid = st?.id ?? null;
+  let key = "";
+  const pin = mergeKeyOf(tfo[tl] ?? "");
+  if (pin && merged.has(pin)) key = pin;
+  else {
+    const nameInTitle = (name: string) => { const n = name.trim().toLowerCase(); if (n.length < 3) return false; const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); return new RegExp(`\\b${esc}\\b`, "i").test(tl); };
+    const cands = [...merged.entries()].filter(([, c]) => (sid && c.styleIds.has(sid)) || nameInTitle(c.name));
+    if (cands.length === 1) key = cands[0][0];
+  }
+  if (!key) return null;
+  const fab = merged.get(key)!;
+  const mpp = (sid && fab.styleMetersMap[sid] > 0) ? fab.styleMetersMap[sid] : (sid ? (styleAvg.get(sid) ?? 0) : 0);
+  if (!(mpp > 0)) return null;
+  return { fabricKey: key, metersPerPiece: mpp };
+}
+
 // Reconcile one order's fabric consumption against its CURRENT supplierStatus.
 // Deducts from physical stock when it enters a consumed status; restores the
 // exact deducted amount when it leaves. Idempotent — keyed on fabricConsumed, so
@@ -22834,18 +22887,16 @@ async function reconcileOrderFabricConsumption(orderId: number): Promise<void> {
       const sheets = await loadManualFabricSheetsForAction();
       if (shouldConsume) {
         const productInfo = await loadProductInfoForAction();
-        const lookup = buildStyleCostLookup(productInfo, buildFabricStockIndex(combinedFabricSheetsForIndex(sheets)));
-        const diag = lookup.metersDiagForTitle(order.productTitle ?? "");
-        const mpp = diag.ok ? (diag.metersPerPiece ?? 0) : 0;
-        if (!diag.ok || !diag.fabricKey || !(mpp > 0)) return; // fabric unknown → leave in stock
+        const resolved = resolveOrderFabricForDeduction(productInfo, sheets, order.productTitle ?? "");
+        if (!resolved) return; // fabric unknown → leave in stock (stays reserved)
         const qty = (order.totalQty ?? 0) > 0 ? order.totalQty : (order.lines ?? []).reduce((s, l) => s + (l.qtyOrdered || 0), 0);
         if (qty <= 0) return;
-        const meters = qty * mpp;
+        const meters = qty * resolved.metersPerPiece;
         // Only mark consumed if we actually found the fabric row and deducted —
         // otherwise leave it un-consumed so it stays reserved and can retry.
-        if (!adjustFabricStockMeters(sheets, diag.fabricKey, -meters)) return;
+        if (!adjustFabricStockMeters(sheets, resolved.fabricKey, -meters)) return;
         await saveManualFabricSheets(sheets);
-        await prisma.supplierOrder.update({ where: { id: orderId }, data: { fabricConsumed: true, fabricConsumedMeters: meters, fabricKey: diag.fabricKey.replace(/::\d+$/, ""), fabricName: diag.fabricName ?? null, metersPerPiece: mpp } });
+        await prisma.supplierOrder.update({ where: { id: orderId }, data: { fabricConsumed: true, fabricConsumedMeters: meters, fabricKey: resolved.fabricKey, metersPerPiece: resolved.metersPerPiece } });
       } else {
         const meters = order.fabricConsumedMeters ?? 0;
         const key = order.fabricKey ?? "";
