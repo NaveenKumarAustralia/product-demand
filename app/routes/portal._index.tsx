@@ -99,51 +99,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // makes them load noticeably faster.
   const needsActivityLogs = page === "settings" || isRestockPage || page === "packing";
 
-  // Defensive: the SupplierOrder schema gained `destination` recently. If
-  // this environment hasn't run the migration yet, Prisma's findMany
-  // (which selects every modelled column) would throw and the whole page
-  // would crash. ADD COLUMN IF NOT EXISTS makes the query safe on a
-  // stale DB. Only attempted when we actually need the orders.
-  if (needsOrders) {
-    try {
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "destination" TEXT`);
-    } catch (e) {
-      console.warn("[destination] column ensure failed:", e);
-    }
-    try {
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "packingListId" INTEGER`);
-    } catch (e) {
-      console.warn("[packingListId] column ensure failed:", e);
-    }
-    try {
-      await prisma.$executeRawUnsafe(`ALTER TABLE "OrderLine" ADD COLUMN IF NOT EXISTS "barcode" TEXT`);
-    } catch (e) {
-      console.warn("[barcode] column ensure failed:", e);
-    }
-    // JJ Restock per-order fields. Safe on a stale DB that hasn't run the
-    // migration yet; no-op once the columns exist.
-    try {
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "colourCode" TEXT`);
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "styleCode" TEXT`);
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "costBaht" DOUBLE PRECISION`);
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "skuBase" TEXT`);
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "barcodeBase" TEXT`);
-    } catch (e) {
-      console.warn("[jj-restock] column ensure failed:", e);
-    }
-    // Backfill: fold the old packed / ready_to_send statuses into the new
-    // unified `ready`. updateMany is a no-op when no rows match, so this
-    // is cheap to run on every load.
-    try {
-      await prisma.supplierOrder.updateMany({
-        where: { supplierStatus: { in: ["packed", "ready_to_send"] } },
-        data: { supplierStatus: "ready" },
-      });
-    } catch (e) {
-      console.warn("[supplierStatus] migration to 'ready' failed:", e);
-    }
-  }
-
+  // Schema compatibility is handled by Prisma migrations; do not run DDL on staff page loads.
   type ActivityLogRow = { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date };
   const activityLogsSince = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const [settingsRows, allOrders, packingLists, activityLogs] = await retryAsync(() => Promise.all([
