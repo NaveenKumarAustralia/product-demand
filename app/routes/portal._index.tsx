@@ -11173,6 +11173,7 @@ export default function PortalDashboard() {
         "--portal-footer-actions": "44px",
       } as React.CSSProperties}
     >
+      <PortalToaster />
       <style>
         {`
           .no-number-spinner::-webkit-outer-spin-button,
@@ -12539,8 +12540,61 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
 function renderBodyWithMentions(body: string): React.ReactNode {
   const parts = body.split(/(@[a-z0-9._-]+)/gi);
   return parts.map((part, i) => /^@[a-z0-9._-]+$/i.test(part)
-    ? <strong key={i} style={{ color: "#0d9488" }}>{part}</strong>
+    ? <strong key={i} style={{ color: "#1d4ed8" }}>{part}</strong>
     : <Fragment key={i}>{part}</Fragment>);
+}
+
+// ─── @mention "message sent" toast ───────────────────────────────────────────
+// When a note gains a new @mention, the server DMs that user. Confirm it to the
+// author with a 3s bottom-right toast (and the mention renders blue elsewhere)
+// so it's obvious the message went out.
+function escapeRegExpPortal(s: string) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function mentionedActiveUsers(users: PortalUser[], text: string): PortalUser[] {
+  const t = text ?? "";
+  const seen = new Set<string>();
+  return users.filter((u) => {
+    if (!u.active) return false;
+    const first = (u.name ?? "").trim().split(/\s+/)[0];
+    if (!first || seen.has(u.id)) return false;
+    if (new RegExp(`(^|\\s)@${escapeRegExpPortal(first)}\\b`, "i").test(t)) { seen.add(u.id); return true; }
+    return false;
+  });
+}
+function showPortalToast(message: string) {
+  if (typeof document === "undefined" || !message) return;
+  document.dispatchEvent(new CustomEvent("portal-toast", { detail: { message } }));
+}
+// Toast only for mentions ADDED between oldText and newText.
+function notifyNewMentions(users: PortalUser[], oldText: string, newText: string) {
+  const before = new Set(mentionedActiveUsers(users, oldText).map((u) => u.id));
+  const added = mentionedActiveUsers(users, newText).filter((u) => !before.has(u.id));
+  if (added.length) showPortalToast(`Message sent to ${added.map((u) => u.name).join(", ")}`);
+}
+function PortalToaster() {
+  const [toasts, setToasts] = useState<Array<{ id: number; message: string }>>([]);
+  const seq = useRef(0);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const message = (e as CustomEvent<{ message: string }>).detail?.message ?? "";
+      if (!message) return;
+      const id = ++seq.current;
+      setToasts((cur) => [...cur, { id, message }]);
+      window.setTimeout(() => setToasts((cur) => cur.filter((t) => t.id !== id)), 3000);
+    };
+    document.addEventListener("portal-toast", handler);
+    return () => document.removeEventListener("portal-toast", handler);
+  }, []);
+  if (typeof document === "undefined" || toasts.length === 0) return null;
+  return createPortal(
+    <div style={{ position: "fixed", bottom: 20, right: 20, zIndex: 7000, display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-end", pointerEvents: "none" }}>
+      {toasts.map((t) => (
+        <div key={t.id} style={{ background: "#1d4ed8", color: "#fff", padding: "10px 16px", borderRadius: 10, boxShadow: "0 12px 32px rgba(29,78,216,0.35)", fontSize: 13, fontWeight: 700, maxWidth: 360, display: "flex", alignItems: "center", gap: 8 }}>
+          <span aria-hidden>✉️</span><span>{t.message}</span>
+        </div>
+      ))}
+    </div>,
+    document.body,
+  );
 }
 
 function formatFieldLabel(field: string): string {
@@ -23192,6 +23246,7 @@ function FabricMentionCell({
           onFocus={() => setFocused(true)}
           onBlur={(event) => {
             window.setTimeout(() => setFocused(false), 120);
+            if (event.currentTarget.value !== originalValue) notifyNewMentions(users, originalValue, event.currentTarget.value);
             onSave(event.currentTarget.value);
           }}
           rows={3}
@@ -27639,7 +27694,7 @@ function MentionableTextarea({
         onFocus={() => setFocused(true)}
         onBlur={(e) => {
           window.setTimeout(() => setFocused(false), 120);
-          if (e.currentTarget.value !== value) onCommit(e.currentTarget.value);
+          if (e.currentTarget.value !== value) { notifyNewMentions(users, value, e.currentTarget.value); onCommit(e.currentTarget.value); }
         }}
         rows={rows}
         style={{ ...textareaBase, ...(textareaStyle ?? {}) }}
