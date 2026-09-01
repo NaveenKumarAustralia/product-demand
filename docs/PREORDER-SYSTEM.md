@@ -43,6 +43,36 @@ Behaviour:
 - If destination changes AUS <-> USA: do not silently move existing customer allocations between markets; flag/reconcile them.
 - Existing customer reservations must not be automatically cancelled by these state changes.
 
+## Staff permission for preorder activation
+
+`Preorder Enabled` is a restricted control.
+
+- Only staff selected in **Pre-orders -> Settings -> Staff Permissions** may see and use the Preorder Enabled / Pause Preorder controls.
+- The authorised-user list should use the Production Portal's existing staff/user identities where possible rather than creating a second staff directory.
+- Unauthorised staff must not see an actionable preorder activation button.
+- If appropriate for context, unauthorised staff may still see read-only preorder status such as Active, Paused, Remaining Capacity, and ETA.
+- Permission must be enforced server-side as well as hidden in the UI. Hiding the button alone is not sufficient.
+- Settings changes to authorised preorder staff must themselves be restricted to an admin/owner permission group.
+- All enable, pause, destination-sensitive changes, and permission changes should be written to the existing ActivityLog/audit mechanism where possible.
+
+Initial settings UI:
+
+**Pre-orders -> Settings -> Staff Permissions**
+
+- Can manage preorder availability
+  - [ ] Staff member A
+  - [ ] Staff member B
+  - [ ] Staff member C
+
+Later this can expand into separate permissions such as:
+
+- Manage preorder availability
+- Change preorder ETA/lead days
+- Send customer delay notifications
+- Change safety buffer
+- Manage back-in-stock notifications
+- View preorder reports
+
 ## Safety requirements
 
 1. Do not modify existing Production Portal behaviour unless required for a reviewed preorder hook.
@@ -54,6 +84,7 @@ Behaviour:
 7. Never reduce physical stock receipts by the number of preorder reservations.
 8. Never combine inventory across Shopify locations when determining AU/USA availability.
 9. Capacity updates/reservations must eventually be transactional/idempotent to prevent overselling.
+10. Permission checks for preorder activation must be enforced on the server.
 
 ## Recommended first implementation phases
 
@@ -62,7 +93,8 @@ Behaviour:
 - Add preorder database/settings models via a new Prisma migration.
 - Add pure eligibility and capacity services.
 - Add read-only preorder dashboard/routes.
-- Add explicit batch enable/disable API.
+- Add explicit batch enable/disable API with server-side staff permission checks.
+- Add Pre-orders Settings staff-permission storage using the existing portal user identities where practical.
 - No storefront selling plans.
 - No Shopify inventory mutation.
 - No changes to existing staff production workflows beyond an isolated preorder control.
@@ -108,4 +140,4 @@ For the first safe phase, Dashboard and Products & Batches can be implemented fi
 
 It does NOT mean **preorder automatically enabled**.
 
-The explicit `Preorder Enabled` control is the final activation gate.
+The explicit `Preorder Enabled` control is the final activation gate, and only authorised staff may operate it.
