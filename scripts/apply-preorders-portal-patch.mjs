@@ -18,6 +18,23 @@ function replaceOnce(label, before, after) {
   console.log(`[portal patch] ${label}: applied`);
 }
 
+function replaceExact(label, before, after, expectedCount) {
+  const count = source.split(before).length - 1;
+  if (count === 0) {
+    const appliedCount = source.split(after).length - 1;
+    if (appliedCount === expectedCount) {
+      console.log(`[portal patch] ${label}: already applied (${appliedCount})`);
+      return;
+    }
+    throw new Error(`[portal patch] ${label}: target not found; applied count=${appliedCount}`);
+  }
+  if (count !== expectedCount) {
+    throw new Error(`[portal patch] ${label}: expected ${expectedCount} targets, found ${count}`);
+  }
+  source = source.split(before).join(after);
+  console.log(`[portal patch] ${label}: applied (${count})`);
+}
+
 replaceOnce(
   "imports",
   'import { VisionBoardV2Panel } from "../portal-vision-board";\nimport { unauthenticated } from "../shopify.server";',
@@ -42,16 +59,11 @@ replaceOnce(
   '  const currentUser = getCurrentPortalUser(request, usersWithSeed);\n  // Pre-orders uses the portal\'s existing per-page permission model. The menu\n  // is hidden client-side for users without pageAccess.preorders, and this\n  // server-side redirect also blocks direct URL access. Only the superadmin\n  // bypasses the explicit page grant.\n  const canViewPreorders = Boolean(currentUser && (currentUser.role === "superadmin" || currentUser.pageAccess?.preorders));\n  if (page === "preorders" && currentUser && !canViewPreorders) {\n    const fallbackId = DEFAULT_NAV_ORDER.find((id) => Boolean(currentUser.pageAccess?.[id])) ?? "restock";\n    const fallbackHref = fallbackId === "restock" ? "/portal" : `/portal?page=${fallbackId}`;\n    return new Response(null, { status: 302, headers: { Location: fallbackHref } });\n  }\n  const preorderDashboard = page === "preorders" && canViewPreorders\n    ? await loadPreorderDashboardData()\n    : null;\n  // JJ-only supplier lockdown: a non-admin user whose ONLY granted page is',
 );
 
-replaceOnce(
-  "loader return preorder data",
+replaceExact(
+  "loader return + client destructure preorder data",
   '    activityLogs,\n    navOrder,\n    fabricSheets,',
   '    activityLogs,\n    navOrder,\n    preorderDashboard,\n    fabricSheets,',
-);
-
-replaceOnce(
-  "client loader destructure preorder data",
-  '    activityLogs,\n    navOrder,\n    fabricSheets,',
-  '    activityLogs,\n    navOrder,\n    preorderDashboard,\n    fabricSheets,',
+  2,
 );
 
 replaceOnce(
