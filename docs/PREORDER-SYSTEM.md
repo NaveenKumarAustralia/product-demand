@@ -43,30 +43,38 @@ Behaviour:
 - If destination changes AUS <-> USA: do not silently move existing customer allocations between markets; flag/reconcile them.
 - Existing customer reservations must not be automatically cancelled by these state changes.
 
-## Staff permission for preorder activation
+## Staff permissions
 
-`Preorder Enabled` is a restricted control.
+Pre-orders are a restricted area of the Production Portal.
 
-- Only staff selected in **Pre-orders -> Settings -> Staff Permissions** may see and use the Preorder Enabled / Pause Preorder controls.
-- The authorised-user list should use the Production Portal's existing staff/user identities where possible rather than creating a second staff directory.
-- Unauthorised staff must not see an actionable preorder activation button.
-- If appropriate for context, unauthorised staff may still see read-only preorder status such as Active, Paused, Remaining Capacity, and ETA.
-- Permission must be enforced server-side as well as hidden in the UI. Hiding the button alone is not sufficient.
-- Settings changes to authorised preorder staff must themselves be restricted to an admin/owner permission group.
+- The entire **Pre-orders** sidebar/menu section is visible only to staff selected in **Pre-orders -> Settings -> Staff Permissions -> Pre-orders access**.
+- A user without Pre-orders access must not see the Pre-orders menu or any of its submenu items.
+- Direct URLs and API/resource routes must also enforce permission server-side. Hiding the menu is not sufficient security.
+- Existing Production Portal staff/user identities should be reused rather than creating a second staff directory.
+- Portal admins retain emergency/admin access.
+- Settings changes to preorder permissions must be restricted to an admin/owner permission group.
+
+`Preorder Enabled` is an additional restricted action inside the Pre-orders area:
+
+- Only staff selected under **Can manage preorder availability** may see and use Preorder Enabled / Pause Preorder controls.
+- Staff may be given access to the Pre-orders menu without necessarily being allowed to activate or pause preorder selling.
 - All enable, pause, destination-sensitive changes, and permission changes should be written to the existing ActivityLog/audit mechanism where possible.
 
 Initial settings UI:
 
 **Pre-orders -> Settings -> Staff Permissions**
 
+- Pre-orders access
+  - [ ] Staff member A
+  - [ ] Staff member B
+  - [ ] Staff member C
 - Can manage preorder availability
   - [ ] Staff member A
   - [ ] Staff member B
   - [ ] Staff member C
 
-Later this can expand into separate permissions such as:
+Additional permissions can include:
 
-- Manage preorder availability
 - Change preorder ETA/lead days
 - Send customer delay notifications
 - Change safety buffer
@@ -84,7 +92,7 @@ Later this can expand into separate permissions such as:
 7. Never reduce physical stock receipts by the number of preorder reservations.
 8. Never combine inventory across Shopify locations when determining AU/USA availability.
 9. Capacity updates/reservations must eventually be transactional/idempotent to prevent overselling.
-10. Permission checks for preorder activation must be enforced on the server.
+10. All preorder menu/action/API permission checks must be enforced on the server.
 
 ## Recommended first implementation phases
 
@@ -92,12 +100,12 @@ Later this can expand into separate permissions such as:
 
 - Add preorder database/settings models via a new Prisma migration.
 - Add pure eligibility and capacity services.
-- Add read-only preorder dashboard/routes.
+- Add permission-controlled preorder dashboard/routes.
 - Add explicit batch enable/disable API with server-side staff permission checks.
-- Add Pre-orders Settings staff-permission storage using the existing portal user identities where practical.
+- Add Pre-orders Settings staff-permission storage using the existing portal user identities.
 - No storefront selling plans.
 - No Shopify inventory mutation.
-- No changes to existing staff production workflows beyond an isolated preorder control.
+- No changes to existing staff production workflows beyond isolated preorder controls.
 
 ### Phase 2 — Shopify location awareness
 
@@ -121,7 +129,7 @@ Later this can expand into separate permissions such as:
 
 ## Initial UI
 
-Production Portal sidebar:
+For authorised users only, Production Portal sidebar:
 
 - PRE-ORDERS
   - Dashboard
