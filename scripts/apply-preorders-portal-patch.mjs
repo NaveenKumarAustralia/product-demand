@@ -1,5 +1,6 @@
 import fs from "node:fs";
 
+// Deterministic, fail-closed patch for the oversized legacy portal route.
 const path = "app/routes/portal._index.tsx";
 let source = fs.readFileSync(path, "utf8");
 
