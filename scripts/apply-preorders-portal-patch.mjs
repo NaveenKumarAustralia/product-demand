@@ -35,6 +35,27 @@ function replaceExact(label, before, after, expectedCount) {
   console.log(`[portal patch] ${label}: applied (${count})`);
 }
 
+function removeRuntimeMaintenance() {
+  const alreadyApplied = source.includes("Schema compatibility is handled by Prisma migrations; do not run DDL on staff page loads.");
+  if (alreadyApplied) {
+    console.log("[portal patch] request-time schema maintenance: already removed");
+    return;
+  }
+  const startMarker = "  // Defensive: the SupplierOrder schema gained `destination` recently.";
+  const endMarker = "  type ActivityLogRow =";
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start);
+  if (start < 0 || end < 0 || end <= start) {
+    throw new Error("[portal patch] request-time schema maintenance: markers not found");
+  }
+  const removed = source.slice(start, end);
+  if (!removed.includes("ALTER TABLE") || !removed.includes("supplierOrder.updateMany")) {
+    throw new Error("[portal patch] request-time schema maintenance: expected DDL/backfill operations not found in target block");
+  }
+  source = `${source.slice(0, start)}  // Schema compatibility is handled by Prisma migrations; do not run DDL on staff page loads.\n${source.slice(end)}`;
+  console.log("[portal patch] request-time schema maintenance: removed");
+}
+
 replaceOnce(
   "imports",
   'import { VisionBoardV2Panel } from "../portal-vision-board";\nimport { unauthenticated } from "../shopify.server";',
@@ -77,6 +98,8 @@ replaceOnce(
   '        ) : page === "dropbox" ? (\n          <DropboxPanel />\n        ) : page === "reorder" ? (\n          <ReorderPlannerPage search={reorderSearch} />',
   '        ) : page === "dropbox" ? (\n          <DropboxPanel />\n        ) : page === "preorders" && preorderDashboard ? (\n          <PreordersDashboard data={preorderDashboard} />\n        ) : page === "reorder" ? (\n          <ReorderPlannerPage search={reorderSearch} />',
 );
+
+removeRuntimeMaintenance();
 
 fs.writeFileSync(path, source);
 console.log("[portal patch] complete");
