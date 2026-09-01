@@ -18,7 +18,21 @@ jobs:
         with:
           ref: preorder-foundation
       - name: Apply deterministic patch
-        run: node scripts/apply-preorders-portal-patch.mjs
+        id: apply
+        shell: bash
+        run: |
+          set +e
+          node scripts/apply-preorders-portal-patch.mjs > patch.log 2>&1
+          code=$?
+          cat patch.log
+          exit $code
+      - name: Upload patch diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preorder-portal-patch-log
+          path: patch.log
+          retention-days: 1
       - name: Commit portal integration
         shell: bash
         run: |
