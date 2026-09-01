@@ -3,8 +3,11 @@ import { normalizePortalMessageUsers, PORTAL_USERS_KEY, type PortalMessageUser }
 
 export const PREORDER_PERMISSIONS_KEY = "preorder-permissions-v1";
 
+// Menu/page visibility deliberately does NOT live here. The Production Portal's
+// existing user.pageAccess.preorders permission is the single authority for
+// whether a staff member can see/open the Pre-orders area. These permissions
+// are for sensitive actions inside that area.
 export type PreorderPermissionSettings = {
-  viewPreorderMenuUserIds: string[];
   managePreorderUserIds: string[];
   manageEtaUserIds: string[];
   manageSafetyBufferUserIds: string[];
@@ -13,7 +16,6 @@ export type PreorderPermissionSettings = {
 };
 
 const EMPTY_PERMISSIONS: PreorderPermissionSettings = {
-  viewPreorderMenuUserIds: [],
   managePreorderUserIds: [],
   manageEtaUserIds: [],
   manageSafetyBufferUserIds: [],
@@ -30,7 +32,6 @@ export function normalizePreorderPermissionSettings(value: unknown): PreorderPer
   if (!value || typeof value !== "object" || Array.isArray(value)) return { ...EMPTY_PERMISSIONS };
   const settings = value as Record<string, unknown>;
   return {
-    viewPreorderMenuUserIds: normalizeIds(settings.viewPreorderMenuUserIds),
     managePreorderUserIds: normalizeIds(settings.managePreorderUserIds),
     manageEtaUserIds: normalizeIds(settings.manageEtaUserIds),
     manageSafetyBufferUserIds: normalizeIds(settings.manageSafetyBufferUserIds),
@@ -55,13 +56,9 @@ function hasPermission(
   permittedUserIds: string[],
 ) {
   if (!user || user.active === false) return false;
-  // Existing portal admins retain emergency/admin access.
+  // Existing portal admins retain emergency/admin access for sensitive actions.
   if (user.admin === true) return true;
   return permittedUserIds.includes(user.id);
-}
-
-export function canViewPreorderMenu(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
-  return hasPermission(user, permissions.viewPreorderMenuUserIds);
 }
 
 export function canManagePreorders(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
