@@ -1,0 +1,33 @@
+name: Apply Preorder Portal Patch
+
+on:
+  push:
+    branches:
+      - preorder-foundation
+    paths:
+      - scripts/apply-preorders-portal-patch.mjs
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: preorder-foundation
+      - name: Apply deterministic patch
+        run: node scripts/apply-preorders-portal-patch.mjs
+      - name: Commit portal integration
+        shell: bash
+        run: |
+          if git diff --quiet -- app/routes/portal._index.tsx; then
+            echo "No portal changes required"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/routes/portal._index.tsx
+          git commit -m "feat: integrate permission-controlled preorder portal page"
+          git push origin HEAD:preorder-foundation
