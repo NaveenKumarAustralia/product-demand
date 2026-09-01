@@ -19,15 +19,24 @@ jobs:
             echo "=== FILE STATS ==="
             wc -l -c "$FILE"
             echo
-            echo "=== SESSION / USER REFERENCES ==="
-            grep -n -E "getSession|commitSession|destroySession|currentUser|activeUser|userId|userName|PORTAL_USERS_KEY|PORTAL_ACTIVE_USERS_KEY" "$FILE" | head -n 250 || true
+            echo "=== LOADER USER/PAGE ACCESS 500-560 ==="
+            sed -n '500,560p' "$FILE"
             echo
-            echo "=== NAV / PAGE REFERENCES ==="
-            grep -n -E "NAV|nav|sidebar|menu|Reorder|reorder|Settings|settings|page ===|setPage|searchParams" "$FILE" | head -n 500 || true
+            echo "=== PORTAL USER TYPES/CONSTANTS 6650-6950 ==="
+            sed -n '6650,6950p' "$FILE"
+            echo
+            echo "=== COOKIE CURRENT USER 8440-8550 ==="
+            sed -n '8440,8550p' "$FILE"
+            echo
+            echo "=== LOADER RETURN / CLIENT NAV 10780-11150 ==="
+            sed -n '10780,11150p' "$FILE"
+            echo
+            echo "=== SETTINGS USER PERMISSIONS 23420-23720 ==="
+            sed -n '23420,23720p' "$FILE"
           } > portal-inspection.txt
       - name: Upload inspection artifact
         uses: actions/upload-artifact@v4
         with:
-          name: portal-inspection
+          name: portal-inspection-ranges
           path: portal-inspection.txt
           retention-days: 1
