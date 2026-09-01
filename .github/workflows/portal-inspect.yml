@@ -22,14 +22,20 @@ jobs:
             echo "=== LOADER USER/PAGE ACCESS 500-560 ==="
             sed -n '500,560p' "$FILE"
             echo
+            echo "=== LOADER RETURN 1020-1130 ==="
+            sed -n '1020,1130p' "$FILE"
+            echo
             echo "=== PORTAL USER TYPES/CONSTANTS 6650-6950 ==="
             sed -n '6650,6950p' "$FILE"
             echo
             echo "=== COOKIE CURRENT USER 8440-8550 ==="
             sed -n '8440,8550p' "$FILE"
             echo
-            echo "=== LOADER RETURN / CLIENT NAV 10780-11150 ==="
-            sed -n '10780,11150p' "$FILE"
+            echo "=== CLIENT NAV 10780-11220 ==="
+            sed -n '10780,11220p' "$FILE"
+            echo
+            echo "=== SIDEBAR AND PAGE RENDERER 11220-11820 ==="
+            sed -n '11220,11820p' "$FILE"
             echo
             echo "=== SETTINGS USER PERMISSIONS 23420-23720 ==="
             sed -n '23420,23720p' "$FILE"
