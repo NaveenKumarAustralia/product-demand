@@ -1,6 +1,6 @@
 # Preorder System — Foundation
 
-Status: design/foundation only. This branch must not be deployed to production until reviewed and tested.
+Status: development foundation. Do not enable customer-facing preorder selling until the Shopify selling-plan and reservation phases are complete and verified.
 
 ## Core eligibility rule
 
@@ -45,102 +45,107 @@ Behaviour:
 
 ## Staff permissions
 
-Pre-orders are a restricted area of the Production Portal.
+Pre-orders are a restricted area of the Production Portal and reuse the portal's existing user and page-permission system.
 
-- The entire **Pre-orders** sidebar/menu section is visible only to staff selected in **Pre-orders -> Settings -> Staff Permissions -> Pre-orders access**.
-- A user without Pre-orders access must not see the Pre-orders menu or any of its submenu items.
-- Direct URLs and API/resource routes must also enforce permission server-side. Hiding the menu is not sufficient security.
-- Existing Production Portal staff/user identities should be reused rather than creating a second staff directory.
-- Portal admins retain emergency/admin access.
-- Settings changes to preorder permissions must be restricted to an admin/owner permission group.
+### Menu/page access
 
-`Preorder Enabled` is an additional restricted action inside the Pre-orders area:
+- **Pre-orders** is an ordinary permission-controlled portal page.
+- Admins manage access from **Production Portal -> Settings -> Users -> Page access -> Pre-orders**.
+- If `Pre-orders` is not enabled for a user, that user does not see the Pre-orders menu item.
+- A logged-in user without that permission who manually enters `?page=preorders` is redirected to a page they are allowed to access.
+- Superadmins retain access for administration/recovery.
+- There is no second staff directory and no separate duplicate "Pre-orders access" list inside the preorder module.
 
-- Only staff selected under **Can manage preorder availability** may see and use Preorder Enabled / Pause Preorder controls.
-- Staff may be given access to the Pre-orders menu without necessarily being allowed to activate or pause preorder selling.
-- All enable, pause, destination-sensitive changes, and permission changes should be written to the existing ActivityLog/audit mechanism where possible.
+### Sensitive actions inside Pre-orders
 
-Initial settings UI:
+Page access and action access are separate concepts. A staff member can be allowed to see the Pre-orders area without necessarily being allowed to change selling behaviour.
 
-**Pre-orders -> Settings -> Staff Permissions**
+Additional action permissions can include:
 
-- Pre-orders access
-  - [ ] Staff member A
-  - [ ] Staff member B
-  - [ ] Staff member C
-- Can manage preorder availability
-  - [ ] Staff member A
-  - [ ] Staff member B
-  - [ ] Staff member C
-
-Additional permissions can include:
-
+- Manage preorder availability / enable / pause
 - Change preorder ETA/lead days
-- Send customer delay notifications
 - Change safety buffer
+- Send customer delay notifications
 - Manage back-in-stock notifications
-- View preorder reports
+- View sensitive preorder reports
+
+These action permissions reuse existing portal staff identities, must be checked server-side, and should be editable only by an admin/owner permission group.
+
+All enable, pause, destination-sensitive changes, and permission changes should be written to the existing ActivityLog/audit mechanism where possible.
 
 ## Safety requirements
 
-1. Do not modify existing Production Portal behaviour unless required for a reviewed preorder hook.
-2. Do not deploy this development branch to Railway production.
-3. Do not modify `main` while building/testing the preorder foundation.
-4. Keep preorder business logic in separate modules/routes; do not add large blocks of logic to `portal._index.tsx`.
-5. Preorder capacity must be variant-level and destination/location-level.
-6. Shopify physical inventory and preorder reservations are separate concepts.
-7. Never reduce physical stock receipts by the number of preorder reservations.
-8. Never combine inventory across Shopify locations when determining AU/USA availability.
-9. Capacity updates/reservations must eventually be transactional/idempotent to prevent overselling.
-10. All preorder menu/action/API permission checks must be enforced on the server.
+1. Keep preorder business logic in separate modules/routes; do not add large blocks of business logic to `portal._index.tsx`.
+2. Preorder capacity must be variant-level and destination/location-level.
+3. Shopify physical inventory and preorder reservations are separate concepts.
+4. Never reduce physical stock receipts by the number of preorder reservations.
+5. Never combine inventory across Shopify locations when determining AU/USA availability.
+6. Capacity updates/reservations must eventually be transactional/idempotent to prevent overselling.
+7. All preorder menu/action/API permission checks must be enforced on the server.
+8. Customer-facing preorder selling must remain off until selling-plan access, reservation allocation, cancellation/release logic and storefront behaviour are implemented and tested.
 
-## Recommended first implementation phases
+## Implementation phases
 
 ### Phase 1 — isolated foundation
 
-- Add preorder database/settings models via a new Prisma migration.
-- Add pure eligibility and capacity services.
-- Add permission-controlled preorder dashboard/routes.
-- Add explicit batch enable/disable API with server-side staff permission checks.
-- Add Pre-orders Settings staff-permission storage using the existing portal user identities.
-- No storefront selling plans.
-- No Shopify inventory mutation.
-- No changes to existing staff production workflows beyond isolated preorder controls.
+Implemented/under validation:
+
+- Preorder batch settings attached to existing SupplierOrder production batches.
+- Pure eligibility and capacity services.
+- Permission-controlled preorder dashboard integrated into the Production Portal.
+- Existing portal Page access permissions control Pre-orders menu visibility.
+- Server-side direct-page access guard.
+- Server service for explicit batch enable/disable with action permission checks.
+- AU/USA Shopify location mapping foundation.
+- No storefront selling plans yet.
+- No Shopify inventory mutation by the preorder module.
+- Reservation totals remain zero until the real customer allocation ledger is implemented; the system must never invent reservation numbers.
 
 ### Phase 2 — Shopify location awareness
 
-- Map AU and USA destinations to Shopify location IDs.
-- Refactor preorder inventory reads to be location-specific.
-- Do not change existing portal inventory calculations until separately reviewed.
+- Map AU and USA destinations to actual Shopify location IDs.
+- Use location-specific inventory reads for preorder selling state.
+- Existing product inventory resource now supports an optional Shopify `locationId` while retaining backwards-compatible all-location behaviour for existing portal callers.
 
 ### Phase 3 — Shopify preorder integration
 
 - Verify/obtain Shopify purchase-option/selling-plan permissions.
 - Create/sync selling plans only for explicitly enabled eligible batches.
 - Add required order/cancellation/refund webhooks.
-- Add reservation allocation and release logic.
+- Add transactional reservation allocation and release logic.
+- Allocate customers FIFO to the earliest eligible region-matching production batch with safe capacity.
 
 ### Phase 4 — customer experience
 
 - Product-page preorder messaging.
-- Expected dispatch date.
+- Expected dispatch date/window.
+- Mixed-cart communication.
 - Back-in-stock/waitlist.
+- Customer preorder account section.
 - Customer-order/admin reporting and notifications.
 
-## Initial UI
+## Initial portal UI
 
-For authorised users only, Production Portal sidebar:
+For authorised users, Production Portal contains one permission-controlled **Pre-orders** sidebar item. Inside the page are tabs for:
 
-- PRE-ORDERS
-  - Dashboard
-  - Products & Batches
-  - Customer Orders
-  - Back in Stock
-  - Notifications
-  - Reports
-  - Settings
+- Dashboard
+- Products & Batches
+- Customer Orders
+- Back in Stock
+- Notifications
+- Reports
+- Settings
 
-For the first safe phase, Dashboard and Products & Batches can be implemented first; remaining pages may be placeholders until their backend behaviour exists.
+Dashboard and Products & Batches are the first functional views; later tabs can be filled as their backend phases are completed.
+
+## Performance work completed alongside the foundation
+
+- Reorder Planner country/variant sales remain on-demand per expanded product rather than loading the whole Shopify report up front.
+- Identical Reorder Planner ShopifyQL requests are briefly cached to avoid repeated calls during expand/collapse/reload usage.
+- Product inventory reads are briefly cached and now support optional Shopify location filtering for future AU/USA separation.
+- Repeated request-time `ALTER TABLE` checks were removed from normal Production Portal page loads because the corresponding Prisma migrations already exist.
+- The legacy supplier-status cleanup was moved to a one-time migration rather than running an `updateMany` on ordinary staff navigation.
+- Continue extracting heavy portal areas gradually rather than rewriting the 33,000-line portal route in one risky change.
 
 ## Important implementation principle
 
