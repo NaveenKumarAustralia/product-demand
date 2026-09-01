@@ -4,6 +4,7 @@ import { normalizePortalMessageUsers, PORTAL_USERS_KEY, type PortalMessageUser }
 export const PREORDER_PERMISSIONS_KEY = "preorder-permissions-v1";
 
 export type PreorderPermissionSettings = {
+  viewPreorderMenuUserIds: string[];
   managePreorderUserIds: string[];
   manageEtaUserIds: string[];
   manageSafetyBufferUserIds: string[];
@@ -12,6 +13,7 @@ export type PreorderPermissionSettings = {
 };
 
 const EMPTY_PERMISSIONS: PreorderPermissionSettings = {
+  viewPreorderMenuUserIds: [],
   managePreorderUserIds: [],
   manageEtaUserIds: [],
   manageSafetyBufferUserIds: [],
@@ -28,6 +30,7 @@ export function normalizePreorderPermissionSettings(value: unknown): PreorderPer
   if (!value || typeof value !== "object" || Array.isArray(value)) return { ...EMPTY_PERMISSIONS };
   const settings = value as Record<string, unknown>;
   return {
+    viewPreorderMenuUserIds: normalizeIds(settings.viewPreorderMenuUserIds),
     managePreorderUserIds: normalizeIds(settings.managePreorderUserIds),
     manageEtaUserIds: normalizeIds(settings.manageEtaUserIds),
     manageSafetyBufferUserIds: normalizeIds(settings.manageSafetyBufferUserIds),
@@ -47,33 +50,36 @@ export async function getPreorderPermissionContext() {
   return { users, permissions };
 }
 
-export function canManagePreorders(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
+function hasPermission(
+  user: PortalMessageUser | null | undefined,
+  permittedUserIds: string[],
+) {
   if (!user || user.active === false) return false;
   // Existing portal admins retain emergency/admin access.
   if (user.admin === true) return true;
-  return permissions.managePreorderUserIds.includes(user.id);
+  return permittedUserIds.includes(user.id);
+}
+
+export function canViewPreorderMenu(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
+  return hasPermission(user, permissions.viewPreorderMenuUserIds);
+}
+
+export function canManagePreorders(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
+  return hasPermission(user, permissions.managePreorderUserIds);
 }
 
 export function canManagePreorderEta(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
-  if (!user || user.active === false) return false;
-  if (user.admin === true) return true;
-  return permissions.manageEtaUserIds.includes(user.id);
+  return hasPermission(user, permissions.manageEtaUserIds);
 }
 
 export function canManageSafetyBuffer(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
-  if (!user || user.active === false) return false;
-  if (user.admin === true) return true;
-  return permissions.manageSafetyBufferUserIds.includes(user.id);
+  return hasPermission(user, permissions.manageSafetyBufferUserIds);
 }
 
 export function canSendPreorderNotifications(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
-  if (!user || user.active === false) return false;
-  if (user.admin === true) return true;
-  return permissions.sendNotificationUserIds.includes(user.id);
+  return hasPermission(user, permissions.sendNotificationUserIds);
 }
 
 export function canViewPreorderReports(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
-  if (!user || user.active === false) return false;
-  if (user.admin === true) return true;
-  return permissions.viewReportsUserIds.includes(user.id);
+  return hasPermission(user, permissions.viewReportsUserIds);
 }
