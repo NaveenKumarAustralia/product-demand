@@ -1,0 +1,33 @@
+name: Portal Structure Inspection
+
+on:
+  push:
+    branches:
+      - preorder-foundation
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract relevant portal sections
+        shell: bash
+        run: |
+          set -e
+          FILE="app/routes/portal._index.tsx"
+          {
+            echo "=== FILE STATS ==="
+            wc -l -c "$FILE"
+            echo
+            echo "=== SESSION / USER REFERENCES ==="
+            grep -n -E "getSession|commitSession|destroySession|currentUser|activeUser|userId|userName|PORTAL_USERS_KEY|PORTAL_ACTIVE_USERS_KEY" "$FILE" | head -n 250 || true
+            echo
+            echo "=== NAV / PAGE REFERENCES ==="
+            grep -n -E "NAV|nav|sidebar|menu|Reorder|reorder|Settings|settings|page ===|setPage|searchParams" "$FILE" | head -n 500 || true
+          } > portal-inspection.txt
+      - name: Upload inspection artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: portal-inspection
+          path: portal-inspection.txt
+          retention-days: 1
