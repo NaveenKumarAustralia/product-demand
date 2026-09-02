@@ -14,6 +14,7 @@ on:
       - preorder-phase8-shopify-readiness
       - preorder-phase9-selling-plan-foundation
       - preorder-phase10-batch-binding
+      - preorder-phase11-activation-service
   pull_request:
     branches:
       - main
