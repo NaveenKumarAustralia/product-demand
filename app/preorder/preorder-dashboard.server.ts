@@ -36,8 +36,31 @@ export type PreorderDashboardBatch = {
   variants: PreorderDashboardVariant[];
 };
 
+export type PreorderDashboardCustomerOrderLine = {
+  reservationId: number;
+  supplierOrderId: number;
+  productId: string | null;
+  variantId: string;
+  variantTitle: string | null;
+  sku: string | null;
+  quantity: number;
+  status: string;
+  expectedShipDate: string | null;
+};
+
+export type PreorderDashboardCustomerOrder = {
+  shopifyOrderId: string;
+  shopifyOrderName: string | null;
+  customerEmail: string | null;
+  market: string;
+  reservedAt: string;
+  totalQuantity: number;
+  lines: PreorderDashboardCustomerOrderLine[];
+};
+
 export type PreorderDashboardData = {
   batches: PreorderDashboardBatch[];
+  customerOrders: PreorderDashboardCustomerOrder[];
   totals: {
     activeBatches: number;
     eligibleBatches: number;
@@ -77,12 +100,27 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
     orderBy: [{ eta: "asc" }, { createdAt: "asc" }, { id: "asc" }],
   });
 
-  const settings = orders.length
-    ? await prisma.preorderBatchSetting.findMany({
-        where: { supplierOrderId: { in: orders.map((order) => order.id) } },
-      })
-    : [];
+  const orderIds = orders.map((order) => order.id);
+  const [settings, reservations] = await Promise.all([
+    orderIds.length
+      ? prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: orderIds } } })
+      : Promise.resolve([]),
+    orderIds.length
+      ? prisma.preorderReservation.findMany({
+          where: { supplierOrderId: { in: orderIds } },
+          orderBy: [{ reservedAt: "desc" }, { id: "desc" }],
+          take: 2000,
+        })
+      : Promise.resolve([]),
+  ]);
   const byOrder = new Map(settings.map((setting) => [setting.supplierOrderId, setting]));
+
+  const reservedByBatchVariant = new Map<string, number>();
+  for (const reservation of reservations) {
+    if (reservation.status !== "reserved") continue;
+    const key = `${reservation.supplierOrderId}:${reservation.variantId}`;
+    reservedByBatchVariant.set(key, (reservedByBatchVariant.get(key) ?? 0) + reservation.quantity);
+  }
 
   const batches: PreorderDashboardBatch[] = orders.map((order) => {
     const setting = byOrder.get(order.id);
@@ -93,9 +131,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
     });
 
     const variants = order.lines.map((line) => {
-      // Phase 1 has no customer allocation ledger yet. Keep this explicitly at
-      // zero rather than treating Shopify inventory as a reservation ledger.
-      const reservedQty = 0;
+      const reservedQty = reservedByBatchVariant.get(`${order.id}:${line.variantId}`) ?? 0;
       const incomingRemaining = Math.max(0, line.qtyOrdered - line.qtyReceived);
       const capacity = calculatePreorderCapacity({
         confirmedIncomingQty: incomingRemaining,
@@ -140,8 +176,41 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
     };
   });
 
+  const customerOrderMap = new Map<string, PreorderDashboardCustomerOrder>();
+  for (const reservation of reservations) {
+    let item = customerOrderMap.get(reservation.shopifyOrderId);
+    if (!item) {
+      item = {
+        shopifyOrderId: reservation.shopifyOrderId,
+        shopifyOrderName: reservation.shopifyOrderName,
+        customerEmail: reservation.customerEmail,
+        market: reservation.market,
+        reservedAt: reservation.reservedAt.toISOString(),
+        totalQuantity: 0,
+        lines: [],
+      };
+      customerOrderMap.set(reservation.shopifyOrderId, item);
+    }
+    item.totalQuantity += reservation.quantity;
+    item.lines.push({
+      reservationId: reservation.id,
+      supplierOrderId: reservation.supplierOrderId,
+      productId: reservation.productId,
+      variantId: reservation.variantId,
+      variantTitle: reservation.variantTitle,
+      sku: reservation.sku,
+      quantity: reservation.quantity,
+      status: reservation.status,
+      expectedShipDate: reservation.expectedShipDate?.toISOString() ?? null,
+    });
+  }
+  const customerOrders = Array.from(customerOrderMap.values()).sort(
+    (a, b) => new Date(b.reservedAt).getTime() - new Date(a.reservedAt).getTime(),
+  );
+
   return {
     batches,
+    customerOrders,
     totals: {
       activeBatches: batches.filter((batch) => batch.enabled && batch.eligible).length,
       eligibleBatches: batches.filter((batch) => batch.supplierStatus === "on_production").length,
