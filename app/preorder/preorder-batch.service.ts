@@ -2,13 +2,15 @@ import prisma from "../db.server";
 import type { PortalMessageUser } from "../portal-messages.server";
 import {
   canManagePreorders,
+  canManagePreorderEta,
+  canManageSafetyBuffer,
   type PreorderPermissionSettings,
 } from "./preorder-permissions.server";
 import { getPreorderEligibility } from "./preorder-rules.server";
 
 export class PreorderPermissionError extends Error {
-  constructor() {
-    super("You do not have permission to manage preorder availability.");
+  constructor(message = "You do not have permission to manage preorder availability.") {
+    super(message);
     this.name = "PreorderPermissionError";
   }
 }
@@ -28,17 +30,18 @@ export type SetPreorderEnabledInput = {
   pausedReason?: string | null;
 };
 
-/**
- * Final server-side gate for activating/pause preorder availability on one
- * production batch. UI visibility is never treated as security.
- */
-export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
-  if (!canManagePreorders(input.actor, input.permissions)) {
-    throw new PreorderPermissionError();
-  }
+export type UpdatePreorderBatchSettingsInput = {
+  supplierOrderId: number;
+  actor: PortalMessageUser;
+  permissions: PreorderPermissionSettings;
+  shipDate?: Date | null;
+  safetyBufferPercent?: number;
+  safetyBufferQty?: number | null;
+};
 
+async function getOrderForPreorder(supplierOrderId: number) {
   const order = await prisma.supplierOrder.findUnique({
-    where: { id: input.supplierOrderId },
+    where: { id: supplierOrderId },
     select: {
       id: true,
       shop: true,
@@ -48,6 +51,49 @@ export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
     },
   });
   if (!order) throw new PreorderEligibilityError("Production batch not found.");
+  return order;
+}
+
+async function audit({
+  actor,
+  orderId,
+  productTitle,
+  action,
+  field,
+  toValue,
+}: {
+  actor: PortalMessageUser;
+  orderId: number;
+  productTitle: string;
+  action: string;
+  field: string;
+  toValue: string | null;
+}) {
+  await prisma.activityLog.create({
+    data: {
+      userName: actor.name,
+      action,
+      entity: "supplier_order",
+      entityId: String(orderId),
+      entityName: productTitle,
+      field,
+      toValue,
+    },
+  }).catch((error) => {
+    console.warn("[preorder audit] failed:", error);
+  });
+}
+
+/**
+ * Final server-side gate for activating/pause preorder availability on one
+ * production batch. UI visibility is never treated as security.
+ */
+export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
+  if (!canManagePreorders(input.actor, input.permissions)) {
+    throw new PreorderPermissionError();
+  }
+
+  const order = await getOrderForPreorder(input.supplierOrderId);
 
   // Enabling must satisfy production/destination eligibility. Disabling is
   // always allowed so staff can immediately stop taking new reservations.
@@ -95,21 +141,95 @@ export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
     },
   });
 
-  await prisma.activityLog.create({
-    data: {
-      userName: input.actor.name,
-      action: input.enabled ? "preorder_enabled" : "preorder_paused",
-      entity: "supplier_order",
-      entityId: String(order.id),
-      entityName: order.productTitle,
-      field: "preorderEnabled",
-      toValue: input.enabled ? "true" : "false",
-    },
-  }).catch((error) => {
-    // Audit logging should not leave a successfully paused batch active if the
-    // legacy activity table has an unrelated issue. Surface it operationally.
-    console.warn("[preorder audit] failed:", error);
+  await audit({
+    actor: input.actor,
+    orderId: order.id,
+    productTitle: order.productTitle,
+    action: input.enabled ? "preorder_enabled" : "preorder_paused",
+    field: "preorderEnabled",
+    toValue: input.enabled ? "true" : "false",
   });
+
+  return setting;
+}
+
+export async function updatePreorderBatchSettings(input: UpdatePreorderBatchSettingsInput) {
+  const hasShipDateChange = Object.prototype.hasOwnProperty.call(input, "shipDate");
+  const hasBufferPercentChange = Object.prototype.hasOwnProperty.call(input, "safetyBufferPercent");
+  const hasBufferQtyChange = Object.prototype.hasOwnProperty.call(input, "safetyBufferQty");
+
+  if (hasShipDateChange && !canManagePreorderEta(input.actor, input.permissions)) {
+    throw new PreorderPermissionError("You do not have permission to change preorder ship dates.");
+  }
+  if ((hasBufferPercentChange || hasBufferQtyChange) && !canManageSafetyBuffer(input.actor, input.permissions)) {
+    throw new PreorderPermissionError("You do not have permission to change preorder safety buffers.");
+  }
+  if (!hasShipDateChange && !hasBufferPercentChange && !hasBufferQtyChange) {
+    throw new PreorderEligibilityError("No preorder settings were supplied.");
+  }
+
+  const order = await getOrderForPreorder(input.supplierOrderId);
+  const updateData: {
+    shipDate?: Date | null;
+    safetyBufferPercent?: number;
+    safetyBufferQty?: number | null;
+    updatedByUserId: string;
+    updatedByUserName: string;
+  } = {
+    updatedByUserId: input.actor.id,
+    updatedByUserName: input.actor.name,
+  };
+
+  if (hasShipDateChange) updateData.shipDate = input.shipDate ?? null;
+  if (hasBufferPercentChange) {
+    const value = Number(input.safetyBufferPercent);
+    if (!Number.isFinite(value) || value < 0 || value > 50) {
+      throw new PreorderEligibilityError("Safety buffer percentage must be between 0 and 50.");
+    }
+    updateData.safetyBufferPercent = value;
+  }
+  if (hasBufferQtyChange) {
+    const value = input.safetyBufferQty;
+    if (value != null && (!Number.isInteger(value) || value < 0)) {
+      throw new PreorderEligibilityError("Safety buffer quantity must be a whole number of zero or more.");
+    }
+    updateData.safetyBufferQty = value ?? null;
+  }
+
+  const setting = await prisma.preorderBatchSetting.upsert({
+    where: { supplierOrderId: order.id },
+    create: {
+      supplierOrderId: order.id,
+      shop: order.shop,
+      enabled: false,
+      ...updateData,
+    },
+    update: updateData,
+  });
+
+  if (hasShipDateChange) {
+    await audit({
+      actor: input.actor,
+      orderId: order.id,
+      productTitle: order.productTitle,
+      action: "preorder_ship_date_updated",
+      field: "shipDate",
+      toValue: input.shipDate?.toISOString() ?? null,
+    });
+  }
+  if (hasBufferPercentChange || hasBufferQtyChange) {
+    await audit({
+      actor: input.actor,
+      orderId: order.id,
+      productTitle: order.productTitle,
+      action: "preorder_buffer_updated",
+      field: "safetyBuffer",
+      toValue: JSON.stringify({
+        percent: setting.safetyBufferPercent,
+        qty: setting.safetyBufferQty,
+      }),
+    });
+  }
 
   return setting;
 }
