@@ -24,5 +24,19 @@ api_version = "2025-10"
 
   # Handled by: /app/routes/webhooks.app.scopes_update.tsx
   [[webhooks.subscriptions]]
-  topics = [ "app/scopes_update" ]
+  topics = ["app/scopes_update"]
   uri = "/webhooks/app/scopes_update"
+
+  # Preorder reservation lifecycle. These handlers ignore ordinary orders and
+  # only process line items using our Karma East preorder selling-plan prefix.
+  [[webhooks.subscriptions]]
+  topics = ["orders/create"]
+  uri = "/webhooks/app/orders-create"
+
+  [[webhooks.subscriptions]]
+  topics = ["orders/cancelled"]
+  uri = "/webhooks/app/orders-cancelled"
+
+  [[webhooks.subscriptions]]
+  topics = ["orders/fulfilled"]
+  uri = "/webhooks/app/orders-fulfilled"
