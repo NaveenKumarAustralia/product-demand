@@ -11,6 +11,7 @@ on:
       - preorder-phase5-waitlist
       - preorder-phase6-notifications
       - preorder-phase7-permissions
+      - preorder-phase8-shopify-readiness
   pull_request:
     branches:
       - main
