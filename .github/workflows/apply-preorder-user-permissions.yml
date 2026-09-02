@@ -1,0 +1,25 @@
+name: Apply Portal Preorder User Permissions
+on:
+  push:
+    branches: [preorder-phase6-notifications]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.event.head_commit.message != 'Apply preorder permissions to portal users'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: preorder-phase6-notifications
+      - name: Apply permission patches
+        run: |
+          node scripts/apply-preorder-user-permissions.mjs
+          node scripts/apply-preorder-permission-source.mjs
+      - name: Commit changes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add app/routes/portal._index.tsx app/preorder/preorder-permissions.server.ts app/preorder/preorder-operations-panels.tsx
+          git commit -m 'Apply preorder permissions to portal users'
+          git push origin HEAD:preorder-phase6-notifications
