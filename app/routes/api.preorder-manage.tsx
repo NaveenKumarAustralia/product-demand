@@ -5,10 +5,7 @@ import {
   setPreorderBatchEnabled,
   updatePreorderBatchSettings,
 } from "../preorder/preorder-batch.service";
-import {
-  getPreorderPermissionContext,
-  setPreorderPermissionSettings,
-} from "../preorder/preorder-permissions.server";
+import { getPreorderPermissionContext } from "../preorder/preorder-permissions.server";
 import { setPreorderLocationSettings } from "../preorder/preorder-locations.server";
 import {
   requirePreorderPortalUser,
@@ -53,12 +50,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         USA: String(payload.USA ?? "").trim() || null,
       }, actor.name);
       return Response.json({ ok: true, locations });
-    }
-
-    if (operation === "update-permissions") {
-      if (actor.admin !== true) return jsonError("Only a portal admin can change preorder permissions.", 403);
-      const next = await setPreorderPermissionSettings(payload.permissions, actor.name);
-      return Response.json({ ok: true, permissions: next });
     }
 
     const supplierOrderId = parseId(payload.supplierOrderId);
