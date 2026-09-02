@@ -5,7 +5,11 @@ import {
   setPreorderBatchEnabled,
   updatePreorderBatchSettings,
 } from "../preorder/preorder-batch.service";
-import { getPreorderPermissionContext } from "../preorder/preorder-permissions.server";
+import {
+  getPreorderPermissionContext,
+  setPreorderPermissionSettings,
+} from "../preorder/preorder-permissions.server";
+import { setPreorderLocationSettings } from "../preorder/preorder-locations.server";
 import {
   requirePreorderPortalUser,
   requireSameOrigin,
@@ -40,10 +44,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const payload = await request.json().catch(() => null) as Record<string, unknown> | null;
     if (!payload) return jsonError("Invalid request body.", 400);
 
+    const operation = String(payload.operation ?? "");
+
+    if (operation === "update-locations") {
+      if (actor.admin !== true) return jsonError("Only a portal admin can change preorder location settings.", 403);
+      const locations = await setPreorderLocationSettings({
+        AU: String(payload.AU ?? "").trim() || null,
+        USA: String(payload.USA ?? "").trim() || null,
+      }, actor.name);
+      return Response.json({ ok: true, locations });
+    }
+
+    if (operation === "update-permissions") {
+      if (actor.admin !== true) return jsonError("Only a portal admin can change preorder permissions.", 403);
+      const next = await setPreorderPermissionSettings(payload.permissions, actor.name);
+      return Response.json({ ok: true, permissions: next });
+    }
+
     const supplierOrderId = parseId(payload.supplierOrderId);
     if (!supplierOrderId) return jsonError("Invalid production batch.", 400);
 
-    const operation = String(payload.operation ?? "");
     if (operation === "set-enabled") {
       const setting = await setPreorderBatchEnabled({
         supplierOrderId,
