@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 const API_VERSION = "2025-10";
+const SHOPIFY_REQUEST_TIMEOUT_MS = 10000;
 
 const REQUIRED = [
   { topic: "ORDERS_CREATE", path: "/webhooks/app/orders-create" },
@@ -27,6 +28,7 @@ async function graphql(shop, accessToken, query, variables) {
       "X-Shopify-Access-Token": accessToken,
     },
     body: JSON.stringify({ query, variables }),
+    signal: AbortSignal.timeout(SHOPIFY_REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
     throw new Error(`Shopify GraphQL HTTP ${response.status} for ${shop}`);
@@ -114,8 +116,8 @@ async function main() {
     try {
       await ensureWebhooksForShop(shop, session.accessToken, origin);
     } catch (error) {
-      // Registration should not take the Production Portal offline if Shopify
-      // is temporarily unavailable. The next Railway deploy retries it.
+      // Registration should never take the Production Portal offline. A timeout,
+      // Shopify outage, or permission issue is logged and retried on a later deploy.
       console.error(`[preorder webhooks] ${shop}: registration failed`, error);
     }
   }
