@@ -46,20 +46,9 @@ export function PreorderCustomerOrdersPanel({ orders }: { orders: PreorderDashbo
   );
 }
 
-type PermissionKey = keyof PreorderDashboardData["configuration"]["permissions"];
-
-const PERMISSIONS: Array<{ key: PermissionKey; label: string; help: string }> = [
-  { key: "managePreorderUserIds", label: "Enable / pause preorder", help: "Can make eligible production batches available for customer preorder." },
-  { key: "manageEtaUserIds", label: "Expected dispatch date", help: "Can change the customer-facing expected dispatch date." },
-  { key: "manageSafetyBufferUserIds", label: "Safety buffer", help: "Can change percentage or fixed preorder safety buffers." },
-  { key: "sendNotificationUserIds", label: "Customer notifications", help: "Can send or approve preorder customer updates when notification tools are enabled." },
-  { key: "viewReportsUserIds", label: "Reports", help: "Can view preorder reporting and performance data." },
-];
-
 export function PreorderSettingsPanel({ configuration }: { configuration: PreorderDashboardData["configuration"] }) {
   const [au, setAu] = useState(configuration.locations.AU ?? "");
   const [usa, setUsa] = useState(configuration.locations.USA ?? "");
-  const [permissions, setPermissions] = useState(configuration.permissions);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
 
@@ -83,15 +72,6 @@ export function PreorderSettingsPanel({ configuration }: { configuration: Preord
     }
   }
 
-  function togglePermission(key: PermissionKey, userId: string) {
-    setPermissions((current) => {
-      const ids = current[key];
-      return {
-        ...current,
-        [key]: ids.includes(userId) ? ids.filter((id) => id !== userId) : [...ids, userId],
-      };
-    });
-  }
 
   return (
     <div style={s.stack}>
@@ -106,29 +86,9 @@ export function PreorderSettingsPanel({ configuration }: { configuration: Preord
         </div>
         <div style={s.actions}><button type="button" disabled={busy} style={s.primary} onClick={() => post({ operation: "update-locations", AU: au, USA: usa }, "Shopify preorder locations saved.")}>Save locations</button></div>
       </div>
-
       <div style={s.card}>
-        <div style={s.title}>Staff action permissions</div>
-        <div style={s.muted}>The Pre-orders menu itself is still controlled in Production Portal → Settings → Users → Page access. These permissions only control sensitive actions inside Pre-orders. Portal admins always retain access.</div>
-        <div style={s.permissionTable}>
-          <div style={s.permissionHeader}><div>Staff</div>{PERMISSIONS.map((permission) => <div key={permission.key}>{permission.label}</div>)}</div>
-          {configuration.users.map((user) => (
-            <div key={user.id} style={s.permissionRow}>
-              <div><strong>{user.name}</strong>{user.admin ? <div style={s.small}>Portal admin</div> : null}</div>
-              {PERMISSIONS.map((permission) => (
-                <div key={permission.key} style={s.checkboxCell} title={permission.help}>
-                  <input
-                    type="checkbox"
-                    checked={user.admin || permissions[permission.key].includes(user.id)}
-                    disabled={user.admin || busy}
-                    onChange={() => togglePermission(permission.key, user.id)}
-                  />
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-        <div style={s.actions}><button type="button" disabled={busy} style={s.primary} onClick={() => post({ operation: "update-permissions", permissions }, "Preorder staff permissions saved.")}>Save permissions</button></div>
+        <div style={s.title}>Staff permissions</div>
+        <div style={s.muted}>Manage Pre-orders page access and action permissions in Production Portal → Settings → Users. This page no longer keeps a second permission list.</div>
       </div>
     </div>
   );

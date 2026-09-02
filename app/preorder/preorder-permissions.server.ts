@@ -1,12 +1,6 @@
 import prisma from "../db.server";
-import { normalizePortalMessageUsers, PORTAL_USERS_KEY, type PortalMessageUser } from "../portal-messages.server";
+import { PORTAL_USERS_KEY, type PortalMessageUser } from "../portal-messages.server";
 
-export const PREORDER_PERMISSIONS_KEY = "preorder-permissions-v1";
-
-// Menu/page visibility deliberately does NOT live here. The Production Portal's
-// existing user.pageAccess.preorders permission is the single authority for
-// whether a staff member can see/open the Pre-orders area. These permissions
-// are for sensitive actions inside that area.
 export type PreorderPermissionSettings = {
   managePreorderUserIds: string[];
   manageEtaUserIds: string[];
@@ -15,69 +9,61 @@ export type PreorderPermissionSettings = {
   viewReportsUserIds: string[];
 };
 
-const EMPTY_PERMISSIONS: PreorderPermissionSettings = {
-  managePreorderUserIds: [],
-  manageEtaUserIds: [],
-  manageSafetyBufferUserIds: [],
-  sendNotificationUserIds: [],
-  viewReportsUserIds: [],
+export type PreorderPortalUser = PortalMessageUser & {
+  preorderAccess?: {
+    manage?: boolean;
+    eta?: boolean;
+    safetyBuffer?: boolean;
+    notifications?: boolean;
+    reports?: boolean;
+  };
 };
 
-function normalizeIds(value: unknown) {
+function activePortalUsers(value: unknown): PreorderPortalUser[] {
   if (!Array.isArray(value)) return [];
-  return Array.from(new Set(value.map((id) => String(id ?? "").trim()).filter(Boolean)));
-}
-
-export function normalizePreorderPermissionSettings(value: unknown): PreorderPermissionSettings {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return { ...EMPTY_PERMISSIONS };
-  const settings = value as Record<string, unknown>;
-  return {
-    managePreorderUserIds: normalizeIds(settings.managePreorderUserIds),
-    manageEtaUserIds: normalizeIds(settings.manageEtaUserIds),
-    manageSafetyBufferUserIds: normalizeIds(settings.manageSafetyBufferUserIds),
-    sendNotificationUserIds: normalizeIds(settings.sendNotificationUserIds),
-    viewReportsUserIds: normalizeIds(settings.viewReportsUserIds),
-  };
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const raw = item as Record<string, unknown>;
+    const id = String(raw.id ?? "").trim();
+    const name = String(raw.name ?? "").trim();
+    if (!id || !name || raw.active === false) return [];
+    const access = raw.preorderAccess && typeof raw.preorderAccess === "object" && !Array.isArray(raw.preorderAccess)
+      ? raw.preorderAccess as Record<string, unknown>
+      : {};
+    return [{
+      id,
+      name,
+      admin: Boolean(raw.admin) || raw.role === "admin" || raw.role === "superadmin",
+      active: true,
+      preorderAccess: {
+        manage: Boolean(access.manage),
+        eta: Boolean(access.eta),
+        safetyBuffer: Boolean(access.safetyBuffer),
+        notifications: Boolean(access.notifications),
+        reports: Boolean(access.reports),
+      },
+    }];
+  });
 }
 
 export async function getPreorderPermissionContext() {
-  const [usersSetting, permissionsSetting] = await Promise.all([
-    prisma.portalSetting.findUnique({ where: { key: PORTAL_USERS_KEY }, select: { value: true } }),
-    prisma.portalSetting.findUnique({ where: { key: PREORDER_PERMISSIONS_KEY }, select: { value: true } }),
-  ]);
-
-  const users = normalizePortalMessageUsers(usersSetting?.value).filter((user) => user.active !== false);
-  const permissions = normalizePreorderPermissionSettings(permissionsSetting?.value);
+  const usersSetting = await prisma.portalSetting.findUnique({
+    where: { key: PORTAL_USERS_KEY },
+    select: { value: true },
+  });
+  const users = activePortalUsers(usersSetting?.value);
+  const permissions: PreorderPermissionSettings = {
+    managePreorderUserIds: users.filter((user) => user.preorderAccess?.manage).map((user) => user.id),
+    manageEtaUserIds: users.filter((user) => user.preorderAccess?.eta).map((user) => user.id),
+    manageSafetyBufferUserIds: users.filter((user) => user.preorderAccess?.safetyBuffer).map((user) => user.id),
+    sendNotificationUserIds: users.filter((user) => user.preorderAccess?.notifications).map((user) => user.id),
+    viewReportsUserIds: users.filter((user) => user.preorderAccess?.reports).map((user) => user.id),
+  };
   return { users, permissions };
 }
 
-export async function setPreorderPermissionSettings(next: unknown, actorName: string) {
-  const normalized = normalizePreorderPermissionSettings(next);
-  await prisma.portalSetting.upsert({
-    where: { key: PREORDER_PERMISSIONS_KEY },
-    create: { key: PREORDER_PERMISSIONS_KEY, value: normalized },
-    update: { value: normalized },
-  });
-
-  await prisma.activityLog.create({
-    data: {
-      userName: actorName || "Unknown",
-      action: "preorder_permissions_updated",
-      entity: "preorder_settings",
-      field: "permissions",
-      toValue: JSON.stringify(normalized),
-    },
-  }).catch((error) => console.warn("[preorder permissions audit] failed:", error));
-
-  return normalized;
-}
-
-function hasPermission(
-  user: PortalMessageUser | null | undefined,
-  permittedUserIds: string[],
-) {
+function hasPermission(user: PortalMessageUser | null | undefined, permittedUserIds: string[]) {
   if (!user || user.active === false) return false;
-  // Existing portal admins retain emergency/admin access for sensitive actions.
   if (user.admin === true) return true;
   return permittedUserIds.includes(user.id);
 }
@@ -85,19 +71,15 @@ function hasPermission(
 export function canManagePreorders(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
   return hasPermission(user, permissions.managePreorderUserIds);
 }
-
 export function canManagePreorderEta(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
   return hasPermission(user, permissions.manageEtaUserIds);
 }
-
 export function canManageSafetyBuffer(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
   return hasPermission(user, permissions.manageSafetyBufferUserIds);
 }
-
 export function canSendPreorderNotifications(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
   return hasPermission(user, permissions.sendNotificationUserIds);
 }
-
 export function canViewPreorderReports(user: PortalMessageUser | null | undefined, permissions: PreorderPermissionSettings) {
   return hasPermission(user, permissions.viewReportsUserIds);
 }

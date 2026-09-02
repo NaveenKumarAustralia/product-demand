@@ -1168,7 +1168,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const role = allowedRoles.includes(roleRaw as PortalUserRole) ? (roleRaw as PortalUserRole) : "user";
     const passwordHash = await bcrypt.hash(password, 10);
     const isAdmin = role === "superadmin" || role === "admin";
-    await savePortalUsers([...users, { id: crypto.randomUUID(), name, username: name.toLowerCase(), passwordHash, role, admin: isAdmin, canLoadInventory: isAdmin, active: true, pageAccess: {} }]);
+    await savePortalUsers([...users, { id: crypto.randomUUID(), name, username: name.toLowerCase(), passwordHash, role, admin: isAdmin, canLoadInventory: isAdmin, active: true, pageAccess: {}, preorderAccess: { manage: false, eta: false, safetyBuffer: false, notifications: false, reports: false } }]);
     return null;
   }
 
@@ -1197,6 +1197,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     if (form.has("pageAccess")) {
       try { updated.pageAccess = JSON.parse(String(form.get("pageAccess"))); } catch { /* keep existing */ }
+    }
+    if (form.has("preorderAccess")) {
+      try {
+        const raw = JSON.parse(String(form.get("preorderAccess"))) as Record<string, unknown>;
+        updated.preorderAccess = {
+          manage: Boolean(raw.manage),
+          eta: Boolean(raw.eta),
+          safetyBuffer: Boolean(raw.safetyBuffer),
+          notifications: Boolean(raw.notifications),
+          reports: Boolean(raw.reports),
+        };
+      } catch { /* keep existing */ }
     }
     if (form.has("canLoadInventory")) updated.canLoadInventory = form.get("canLoadInventory") === "on";
     if (form.has("canSeeProductStatus")) updated.canSeeProductStatus = form.get("canSeeProductStatus") === "on";
@@ -6744,6 +6756,13 @@ type PortalUser = {
   active: boolean;
   canLoadInventory: boolean;
   pageAccess: Record<string, boolean>;
+  preorderAccess?: {
+    manage: boolean;
+    eta: boolean;
+    safetyBuffer: boolean;
+    notifications: boolean;
+    reports: boolean;
+  };
   // When true (or for any admin), this account sees the per-product status
   // chip in the Collections Name column. Off by default for regular users.
   canSeeProductStatus?: boolean;
@@ -6877,6 +6896,18 @@ function normalizePortalUsers(value: unknown): PortalUser[] {
         pageAccess: (user.pageAccess && typeof user.pageAccess === "object" && !Array.isArray(user.pageAccess))
           ? user.pageAccess as Record<string, boolean>
           : {},
+        preorderAccess: (() => {
+          const raw = user.preorderAccess && typeof user.preorderAccess === "object" && !Array.isArray(user.preorderAccess)
+            ? user.preorderAccess as Record<string, unknown>
+            : {};
+          return {
+            manage: Boolean(raw.manage),
+            eta: Boolean(raw.eta),
+            safetyBuffer: Boolean(raw.safetyBuffer),
+            notifications: Boolean(raw.notifications),
+            reports: Boolean(raw.reports),
+          };
+        })(),
       };
     })
     .filter(Boolean) as PortalUser[];
@@ -8521,6 +8552,7 @@ async function ensureSuperAdmin(users: PortalUser[]) {
     active: true,
     canLoadInventory: true,
     pageAccess: {},
+    preorderAccess: { manage: true, eta: true, safetyBuffer: true, notifications: true, reports: true },
   };
   const next = [...users, seed];
   await savePortalUsers(next);
@@ -23449,6 +23481,13 @@ function UserEditForm({
   const [showPassword, setShowPassword] = useState(false);
   const [role, setRole] = useState<PortalUserRole>(user.role);
   const [pageAccess, setPageAccess] = useState<Record<string, boolean>>(user.pageAccess ?? {});
+  const [preorderAccess, setPreorderAccess] = useState(() => ({
+    manage: Boolean(user.preorderAccess?.manage),
+    eta: Boolean(user.preorderAccess?.eta),
+    safetyBuffer: Boolean(user.preorderAccess?.safetyBuffer),
+    notifications: Boolean(user.preorderAccess?.notifications),
+    reports: Boolean(user.preorderAccess?.reports),
+  }));
   const [canLoadInventory, setCanLoadInventory] = useState(user.canLoadInventory);
   const [canSeeProductStatus, setCanSeeProductStatus] = useState(Boolean(user.canSeeProductStatus));
   const allowedRoles: PortalUserRole[] = currentUser?.role === "superadmin" ? ["superadmin", "admin", "user"] : ["admin", "user"];
@@ -23525,13 +23564,38 @@ function UserEditForm({
         </div>
       )}
 
+      {showPageAccess && (
+        <div style={{ borderTop: "1px solid #e5e7eb", paddingTop: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#374151", marginBottom: 3 }}>Pre-order permissions</div>
+          <div style={{ fontSize: 11, color: "#9ca3af", marginBottom: 8 }}>These controls apply inside the Pre-orders page. Page access above still controls whether the user can open Pre-orders.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 6 }}>
+            {[
+              ["manage", "Enable / pause pre-orders"],
+              ["eta", "Change expected dispatch date"],
+              ["safetyBuffer", "Change safety buffer"],
+              ["notifications", "Approve customer notifications"],
+              ["reports", "View pre-order reports"],
+            ].map(([key, label]) => (
+              <label key={key} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, cursor: "pointer", padding: "4px 0" }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(preorderAccess[key as keyof typeof preorderAccess])}
+                  onChange={(e) => { setJustSaved(false); setPreorderAccess((p) => ({ ...p, [key]: e.target.checked })); }}
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <button
           type="button"
           disabled={saving}
           style={{ ...s.loginButton, flex: 1, ...(saving ? { opacity: 0.7, cursor: "wait" } : {}) }}
           onClick={() => {
-            const fields: Record<string, string> = { intent: "update_portal_user", userId: user.id, name, role, canLoadInventory: canLoadInventory ? "on" : "off", canSeeProductStatus: canSeeProductStatus ? "on" : "off", pageAccess: JSON.stringify(pageAccess) };
+            const fields: Record<string, string> = { intent: "update_portal_user", userId: user.id, name, role, canLoadInventory: canLoadInventory ? "on" : "off", canSeeProductStatus: canSeeProductStatus ? "on" : "off", pageAccess: JSON.stringify(pageAccess), preorderAccess: JSON.stringify(preorderAccess) };
             if (password) fields.password = password;
             setJustSaved(false);
             saveFetcher.submit(fields, { method: "post" });
