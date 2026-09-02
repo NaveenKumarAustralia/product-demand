@@ -1,4 +1,6 @@
 import prisma from "../db.server";
+import { getPreorderLocationSettings } from "./preorder-locations.server";
+import { getPreorderPermissionContext } from "./preorder-permissions.server";
 import { calculatePreorderCapacity, getPreorderEligibility } from "./preorder-rules.server";
 
 export type PreorderDashboardVariant = {
@@ -61,6 +63,17 @@ export type PreorderDashboardCustomerOrder = {
 export type PreorderDashboardData = {
   batches: PreorderDashboardBatch[];
   customerOrders: PreorderDashboardCustomerOrder[];
+  configuration: {
+    locations: { AU: string | null; USA: string | null };
+    users: Array<{ id: string; name: string; admin: boolean }>;
+    permissions: {
+      managePreorderUserIds: string[];
+      manageEtaUserIds: string[];
+      manageSafetyBufferUserIds: string[];
+      sendNotificationUserIds: string[];
+      viewReportsUserIds: string[];
+    };
+  };
   totals: {
     activeBatches: number;
     eligibleBatches: number;
@@ -101,7 +114,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
   });
 
   const orderIds = orders.map((order) => order.id);
-  const [settings, reservations] = await Promise.all([
+  const [settings, reservations, permissionContext, locations] = await Promise.all([
     orderIds.length
       ? prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: orderIds } } })
       : Promise.resolve([]),
@@ -112,6 +125,8 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
           take: 2000,
         })
       : Promise.resolve([]),
+    getPreorderPermissionContext(),
+    getPreorderLocationSettings(),
   ]);
   const byOrder = new Map(settings.map((setting) => [setting.supplierOrderId, setting]));
 
@@ -211,6 +226,15 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
   return {
     batches,
     customerOrders,
+    configuration: {
+      locations,
+      users: permissionContext.users.map((user) => ({
+        id: user.id,
+        name: user.name,
+        admin: user.admin === true,
+      })),
+      permissions: permissionContext.permissions,
+    },
     totals: {
       activeBatches: batches.filter((batch) => batch.enabled && batch.eligible).length,
       eligibleBatches: batches.filter((batch) => batch.supplierStatus === "on_production").length,
