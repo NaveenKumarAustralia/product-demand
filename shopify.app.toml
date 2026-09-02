@@ -27,16 +27,7 @@ api_version = "2025-10"
   topics = ["app/scopes_update"]
   uri = "/webhooks/app/scopes_update"
 
-  # Preorder reservation lifecycle. These handlers ignore ordinary orders and
-  # only process line items using our Karma East preorder selling-plan prefix.
-  [[webhooks.subscriptions]]
-  topics = ["orders/create"]
-  uri = "/webhooks/app/orders-create"
-
-  [[webhooks.subscriptions]]
-  topics = ["orders/cancelled"]
-  uri = "/webhooks/app/orders-cancelled"
-
-  [[webhooks.subscriptions]]
-  topics = ["orders/fulfilled"]
-  uri = "/webhooks/app/orders-fulfilled"
+# Preorder order lifecycle subscriptions are shop-specific and are kept in
+# sync by scripts/register-preorder-webhooks.mjs during Railway startup. This
+# avoids duplicate app-specific subscriptions and does not require a separate
+# Shopify CLI deployment for these three order topics.
