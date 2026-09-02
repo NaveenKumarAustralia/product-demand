@@ -4,7 +4,7 @@ import {
   KARMA_EAST_PREORDER_PLAN_PREFIX,
   isKarmaEastPreorderLine,
   normalizeShopifyPreorderLines,
-} from "./preorder-shopify-order.server.ts";
+} from "./preorder-shopify-order-normalize.ts";
 
 test("only our Karma East preorder selling plan is treated as preorder", () => {
   assert.equal(isKarmaEastPreorderLine({
