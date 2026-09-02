@@ -7,6 +7,7 @@ import {
 } from "./preorder/preorder-operations-panels";
 import { PreorderWebhookStatusPanel } from "./preorder/preorder-webhook-status-panel";
 import { PreorderWaitlistPanel } from "./preorder/preorder-waitlist-panel";
+import { PreorderNotificationsPanel } from "./preorder/preorder-notifications-panel";
 
 type Props = {
   data: PreorderDashboardData;
@@ -188,6 +189,8 @@ export function PreordersDashboard({ data }: Props) {
         <PreorderCustomerOrdersPanel orders={data.customerOrders} />
       ) : tab === "waitlist" ? (
         <PreorderWaitlistPanel />
+      ) : tab === "notifications" ? (
+        <PreorderNotificationsPanel />
       ) : tab === "reports" ? (
         <PreorderReportsPanel />
       ) : tab === "settings" ? (
