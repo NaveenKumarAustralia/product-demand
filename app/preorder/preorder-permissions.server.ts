@@ -51,6 +51,27 @@ export async function getPreorderPermissionContext() {
   return { users, permissions };
 }
 
+export async function setPreorderPermissionSettings(next: unknown, actorName: string) {
+  const normalized = normalizePreorderPermissionSettings(next);
+  await prisma.portalSetting.upsert({
+    where: { key: PREORDER_PERMISSIONS_KEY },
+    create: { key: PREORDER_PERMISSIONS_KEY, value: normalized },
+    update: { value: normalized },
+  });
+
+  await prisma.activityLog.create({
+    data: {
+      userName: actorName || "Unknown",
+      action: "preorder_permissions_updated",
+      entity: "preorder_settings",
+      field: "permissions",
+      toValue: JSON.stringify(normalized),
+    },
+  }).catch((error) => console.warn("[preorder permissions audit] failed:", error));
+
+  return normalized;
+}
+
 function hasPermission(
   user: PortalMessageUser | null | undefined,
   permittedUserIds: string[],
