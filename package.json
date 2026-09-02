@@ -18,7 +18,7 @@
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit",
-    "test:preorder": "node --experimental-strip-types --test app/preorder/preorder-rules.test.ts"
+    "test:preorder": "node --experimental-strip-types --test app/preorder/*.test.ts"
   },
   "type": "module",
   "engines": {
