@@ -9,6 +9,7 @@ on:
       - preorder-phase4
       - preorder-phase4-fix
       - preorder-phase5-waitlist
+      - preorder-phase6-notifications
   pull_request:
     branches:
       - main
