@@ -8,6 +8,11 @@ import {
 import { getPreorderPermissionContext } from "../preorder/preorder-permissions.server";
 import { setPreorderLocationSettings } from "../preorder/preorder-locations.server";
 import {
+  PreorderSellingPlanError,
+  activatePreorderSellingPlan,
+  deactivatePreorderSellingPlan,
+} from "../preorder/preorder-selling-plan.service.server";
+import {
   requirePreorderPortalUser,
   requireSameOrigin,
 } from "../preorder/preorder-portal-auth.server";
@@ -55,10 +60,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const supplierOrderId = parseId(payload.supplierOrderId);
     if (!supplierOrderId) return jsonError("Invalid production batch.", 400);
 
+    if (operation === "activate-shopify") {
+      const result = await activatePreorderSellingPlan({ supplierOrderId, actor, permissions });
+      return Response.json({ ok: true, result });
+    }
+
+    if (operation === "remove-shopify") {
+      const result = await deactivatePreorderSellingPlan({ supplierOrderId, actor, permissions });
+      return Response.json({ ok: true, result });
+    }
+
     if (operation === "set-enabled") {
+      const enabled = payload.enabled === true;
+      if (!enabled) {
+        // Remove the Shopify purchase option first so a portal pause can never
+        // leave a customer-facing preorder selling plan accidentally active.
+        await deactivatePreorderSellingPlan({ supplierOrderId, actor, permissions });
+      }
       const setting = await setPreorderBatchEnabled({
         supplierOrderId,
-        enabled: payload.enabled === true,
+        enabled,
         pausedReason: String(payload.pausedReason ?? "").trim() || null,
         actor,
         permissions,
@@ -111,6 +132,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (error instanceof Response) return error;
     if (error instanceof PreorderPermissionError) return jsonError(error.message, 403);
     if (error instanceof PreorderEligibilityError) return jsonError(error.message, 400);
+    if (error instanceof PreorderSellingPlanError) return jsonError(error.message, 400);
     console.error("[preorder manage] failed:", error);
     return jsonError("Could not update preorder settings.", 500);
   }
