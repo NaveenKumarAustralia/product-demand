@@ -21,6 +21,7 @@ export type ReservePreorderLineInput = {
   market: PreorderMarket;
   quantity: number;
   customerEmail?: string | null;
+  preferredSupplierOrderId?: number | null;
 };
 
 function destinationForMarket(market: PreorderMarket) {
@@ -41,6 +42,9 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
   }
   if (!Number.isInteger(input.quantity) || input.quantity <= 0) {
     throw new PreorderCapacityError("Preorder quantity must be a positive whole number.");
+  }
+  if (input.preferredSupplierOrderId != null && (!Number.isInteger(input.preferredSupplierOrderId) || input.preferredSupplierOrderId <= 0)) {
+    throw new PreorderCapacityError("Invalid preorder production batch reference.");
   }
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -63,7 +67,11 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
         }
 
         const enabledSettings = await tx.preorderBatchSetting.findMany({
-          where: { shop: input.shop, enabled: true },
+          where: {
+            shop: input.shop,
+            enabled: true,
+            ...(input.preferredSupplierOrderId ? { supplierOrderId: input.preferredSupplierOrderId } : {}),
+          },
           select: {
             supplierOrderId: true,
             safetyBufferPercent: true,
@@ -72,6 +80,9 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
           },
         });
         if (!enabledSettings.length) {
+          if (input.preferredSupplierOrderId) {
+            throw new PreorderCapacityError(`Preorder batch #${input.preferredSupplierOrderId} is no longer enabled for new reservations.`);
+          }
           throw new PreorderCapacityError(`No active ${input.market} preorder production batches are available.`);
         }
         const settingByBatch = new Map(enabledSettings.map((setting) => [setting.supplierOrderId, setting]));
@@ -107,6 +118,7 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
         const orderedBatches = orders
           .filter((order) => order.lines.length > 0)
           .sort((a, b) => {
+            if (input.preferredSupplierOrderId) return a.id - b.id;
             const aSetting = settingByBatch.get(a.id);
             const bSetting = settingByBatch.get(b.id);
             return (
@@ -117,6 +129,11 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
           });
 
         if (!orderedBatches.length) {
+          if (input.preferredSupplierOrderId) {
+            throw new PreorderCapacityError(
+              `Preorder batch #${input.preferredSupplierOrderId} is not eligible for this ${input.market} variant. The order has not been moved to a later batch automatically.`,
+            );
+          }
           throw new PreorderCapacityError(`No eligible ${input.market} production batch contains this variant.`);
         }
 
@@ -170,6 +187,11 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
 
         if (remaining > 0) {
           const available = input.quantity - remaining;
+          if (input.preferredSupplierOrderId) {
+            throw new PreorderCapacityError(
+              `Preorder batch #${input.preferredSupplierOrderId} only has ${available} unit${available === 1 ? "" : "s"} available for this variant; ${input.quantity} requested. The order has not been moved to a later batch automatically.`,
+            );
+          }
           throw new PreorderCapacityError(
             `Only ${available} unit${available === 1 ? " is" : "s are"} available to preorder for this ${input.market} variant; ${input.quantity} requested.`,
           );
