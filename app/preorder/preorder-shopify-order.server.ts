@@ -22,6 +22,11 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
       if (!line.shopifyLineItemId || !line.variantId || !Number.isInteger(line.quantity) || line.quantity <= 0) {
         throw new PreorderCapacityError("Shopify preorder line is missing a valid line ID, variant ID or quantity.");
       }
+      if (!line.preferredSupplierOrderId) {
+        throw new PreorderCapacityError(
+          `Shopify preorder line ${line.shopifyLineItemId} is missing its production batch reference. The order has not been allocated automatically.`,
+        );
+      }
       const rows = await reservePreorderLine({
         shop,
         shopifyOrderId: normalized.shopifyOrderId,
@@ -34,6 +39,7 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
         market: normalized.market,
         quantity: line.quantity,
         customerEmail: normalized.customerEmail,
+        preferredSupplierOrderId: line.preferredSupplierOrderId,
       });
       reservations += rows.reduce((sum, row) => sum + row.quantity, 0);
     }
