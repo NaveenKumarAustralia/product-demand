@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { getStorefrontPreorderState } from "../preorder/preorder-storefront-state.server";
+import { getCustomerPreorders } from "../preorder/preorder-customer-account.server";
 import { authenticate } from "../shopify.server";
 
 function marketFrom(value: unknown) {
@@ -28,6 +29,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const context = await authenticate.public.appProxy(request);
     const url = new URL(request.url);
     const shop = proxyShop(context, request);
+
+    // Customer-account "My preorders" — Shopify signs the request (including the
+    // logged_in_customer_id it injects), so the customer is trusted. Read-only.
+    if (url.searchParams.get("op") === "my-preorders") {
+      const result = await getCustomerPreorders({ shop, customerId: url.searchParams.get("logged_in_customer_id") });
+      return Response.json(result, {
+        headers: { "Cache-Control": "no-store", "Content-Type": "application/json; charset=utf-8" },
+      });
+    }
+
     const variantId = text(url.searchParams.get("variantId"), 120);
     const market = marketFrom(url.searchParams.get("market"));
 
