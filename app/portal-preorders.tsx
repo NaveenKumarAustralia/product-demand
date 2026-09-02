@@ -1,6 +1,10 @@
 import { useMemo, useState } from "react";
 import type { PreorderDashboardBatch, PreorderDashboardData } from "./preorder/preorder-dashboard.server";
-import { PreorderCustomerOrdersPanel, PreorderSettingsPanel } from "./preorder/preorder-operations-panels";
+import {
+  PreorderCustomerOrdersPanel,
+  PreorderReportsPanel,
+  PreorderSettingsPanel,
+} from "./preorder/preorder-operations-panels";
 
 type Props = {
   data: PreorderDashboardData;
@@ -180,6 +184,8 @@ export function PreordersDashboard({ data }: Props) {
         </>
       ) : tab === "orders" ? (
         <PreorderCustomerOrdersPanel orders={data.customerOrders} />
+      ) : tab === "reports" ? (
+        <PreorderReportsPanel />
       ) : tab === "settings" ? (
         <PreorderSettingsPanel configuration={data.configuration} />
       ) : (
