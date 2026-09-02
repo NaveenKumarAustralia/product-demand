@@ -27,6 +27,22 @@ test("builds a 100 percent upfront Shopify preorder selling plan", () => {
   assert.match(plan.options, /10 Oct 2026/);
 });
 
+test("attaches to variants only — never the whole product — so preorder can't leak onto unrelated variants", () => {
+  const result = buildPreorderSellingPlanGroup({
+    batchId: 42,
+    productTitle: "Peacock Dress",
+    shipDate: null,
+    // Activation passes ONLY the batch's incoming variants (productIds omitted),
+    // so the selling plan group must NOT be associated with the whole product.
+    variantIds: ["100", "101"],
+  });
+  assert.deepEqual(result.resources.productIds, []);
+  assert.deepEqual(result.resources.productVariantIds, [
+    "gid://shopify/ProductVariant/100",
+    "gid://shopify/ProductVariant/101",
+  ]);
+});
+
 test("rejects selling plans with no Shopify product resources", () => {
   assert.throws(() => buildPreorderSellingPlanGroup({
     batchId: 1,

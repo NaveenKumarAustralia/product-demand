@@ -14,7 +14,9 @@ const REQUIRED_ACTIVATION_SCOPES = ["write_products", "write_purchase_options"] 
 type Actor = {
   id: string;
   name: string;
-  admin: boolean;
+  // Optional to match PortalMessageUser (the portal user shape passed in from
+  // the route). Absent = not an admin; every check here uses `=== true`.
+  admin?: boolean;
   active?: boolean;
 };
 
@@ -121,7 +123,7 @@ export async function activatePreorderSellingPlan(input: {
   });
 
   const eligibility = getPreorderEligibility({
-    productionStatus: order.supplierStatus,
+    supplierStatus: order.supplierStatus,
     destination: order.destination,
     preorderEnabled: setting?.enabled === true,
   });
@@ -145,7 +147,12 @@ export async function activatePreorderSellingPlan(input: {
     batchId: order.id,
     productTitle: order.productTitle,
     shipDate: setting?.shipDate ?? order.eta ?? null,
-    productIds: order.productId ? [order.productId] : [],
+    // Attach the selling plan to ONLY this batch's incoming variants — never the
+    // whole product. Passing productIds here (previously
+    // `order.productId ? [order.productId] : []`) associates the plan with the
+    // product's *entire* variant set, which would expose a preorder purchase
+    // option on variants that have no confirmed incoming capacity in this batch.
+    productIds: [],
     variantIds,
   });
 
