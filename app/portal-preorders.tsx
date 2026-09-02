@@ -6,6 +6,7 @@ import {
   PreorderSettingsPanel,
 } from "./preorder/preorder-operations-panels";
 import { PreorderWebhookStatusPanel } from "./preorder/preorder-webhook-status-panel";
+import { PreorderShopifyReadinessPanel } from "./preorder/preorder-shopify-readiness-panel";
 import { PreorderWaitlistPanel } from "./preorder/preorder-waitlist-panel";
 import { PreorderNotificationsPanel } from "./preorder/preorder-notifications-panel";
 
@@ -195,6 +196,7 @@ export function PreordersDashboard({ data }: Props) {
         <PreorderReportsPanel />
       ) : tab === "settings" ? (
         <>
+          <PreorderShopifyReadinessPanel />
           <PreorderWebhookStatusPanel />
           <PreorderSettingsPanel configuration={data.configuration} />
         </>
