@@ -12,7 +12,12 @@ redirect_urls = [
 ]
 
 [access_scopes]
-scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_reports,read_purchase_options,write_purchase_options,read_all_orders,read_customer_payment_methods,read_payment_mandate,write_payment_mandate"
+scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_reports,read_purchase_options,write_purchase_options,read_all_orders,read_customer_payment_methods,read_payment_mandate,write_payment_mandate,write_app_proxy"
+
+[app_proxy]
+url = "/preorder-proxy"
+prefix = "apps"
+subpath = "karma-east-preorder"
 
 [webhooks]
 api_version = "2025-10"
