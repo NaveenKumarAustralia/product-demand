@@ -13,6 +13,7 @@ on:
       - preorder-phase7-permissions
       - preorder-phase8-shopify-readiness
       - preorder-phase9-selling-plan-foundation
+      - preorder-phase10-batch-binding
   pull_request:
     branches:
       - main
