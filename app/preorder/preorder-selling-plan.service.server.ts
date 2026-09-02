@@ -4,6 +4,7 @@ import { getPreorderEligibility } from "./preorder-rules.server";
 import { buildPreorderSellingPlanGroup } from "./preorder-selling-plan";
 import {
   getPreorderSellingPlanRegistryEntry,
+  removePreorderSellingPlanRegistryEntry,
   savePreorderSellingPlanRegistryEntry,
 } from "./preorder-selling-plan-registry.server";
 
@@ -82,14 +83,18 @@ async function assertActivationScopes(shop: string, accessToken: string) {
   }
 }
 
+function assertManagePermission(actor: Actor, permissions: PreorderPermissionSettings) {
+  if (!canManagePreorders(actor, permissions)) {
+    throw new PreorderSellingPlanError("You do not have permission to manage Shopify preorders.");
+  }
+}
+
 export async function activatePreorderSellingPlan(input: {
   supplierOrderId: number;
   actor: Actor;
   permissions: PreorderPermissionSettings;
 }) {
-  if (!canManagePreorders(input.actor, input.permissions)) {
-    throw new PreorderSellingPlanError("You do not have permission to activate Shopify preorders.");
-  }
+  assertManagePermission(input.actor, input.permissions);
 
   const order = await prisma.supplierOrder.findUnique({
     where: { id: input.supplierOrderId },
@@ -192,4 +197,55 @@ export async function activatePreorderSellingPlan(input: {
   }).catch(() => undefined);
 
   return { created: true, registry };
+}
+
+export async function deactivatePreorderSellingPlan(input: {
+  supplierOrderId: number;
+  actor: Actor;
+  permissions: PreorderPermissionSettings;
+}) {
+  assertManagePermission(input.actor, input.permissions);
+
+  const order = await prisma.supplierOrder.findUnique({
+    where: { id: input.supplierOrderId },
+    select: { id: true, shop: true, productTitle: true },
+  });
+  if (!order) throw new PreorderSellingPlanError("Production batch was not found.");
+
+  const existing = await getPreorderSellingPlanRegistryEntry(order.shop, order.id);
+  if (!existing) return { removed: false };
+
+  const accessToken = await offlineAccessToken(order.shop);
+  await assertActivationScopes(order.shop, accessToken);
+
+  const data = await shopifyGraphql<{
+    sellingPlanGroupDelete?: { deletedSellingPlanGroupId?: string; userErrors?: Array<{ field?: string[]; message?: string }> };
+  }>(order.shop, accessToken, `#graphql
+    mutation DeleteKarmaEastPreorder($id: ID!) {
+      sellingPlanGroupDelete(id: $id) {
+        deletedSellingPlanGroupId
+        userErrors { field message }
+      }
+    }
+  `, { id: existing.sellingPlanGroupId });
+
+  const payload = data.sellingPlanGroupDelete;
+  if (payload?.userErrors?.length) {
+    throw new PreorderSellingPlanError(payload.userErrors.map((error) => error.message || "Shopify rejected preorder removal.").join("; "));
+  }
+
+  await removePreorderSellingPlanRegistryEntry(order.shop, order.id);
+  await prisma.activityLog.create({
+    data: {
+      userName: input.actor.name,
+      action: "preorder_selling_plan_removed",
+      entity: "supplier_order",
+      entityId: String(order.id),
+      entityName: order.productTitle,
+      field: "sellingPlanGroupId",
+      toValue: existing.sellingPlanGroupId,
+    },
+  }).catch(() => undefined);
+
+  return { removed: true };
 }
