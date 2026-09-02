@@ -6,6 +6,7 @@ on:
       - preorder-foundation
       - preorder-phase2
       - preorder-phase3
+      - preorder-phase4
   pull_request:
     branches:
       - main
