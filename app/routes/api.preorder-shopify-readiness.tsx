@@ -12,6 +12,7 @@ const REQUIRED_SCOPES = [
   { handle: "write_purchase_options", label: "Write purchase options", protected: false },
   { handle: "read_payment_mandate", label: "Read payment mandates", protected: true },
   { handle: "write_payment_mandate", label: "Write payment mandates", protected: true },
+  { handle: "write_app_proxy", label: "Storefront app proxy", protected: false },
 ] as const;
 
 async function queryScopes(shop: string, accessToken: string) {
@@ -98,7 +99,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ready: results.length > 0 && results.every((shop) => shop.ready),
       shops: results,
       requiredScopes: REQUIRED_SCOPES,
-      note: "Customer-facing preorder selling remains disabled until required Shopify purchase-option access is granted and activation is explicitly enabled.",
+      note: "Preorder selling plans and the storefront bridge remain explicitly controlled. Shopify readiness requires both purchase-option access and the storefront app-proxy scope.",
     });
   } catch (error) {
     if (error instanceof Response) return error;
