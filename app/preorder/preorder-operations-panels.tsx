@@ -46,11 +46,75 @@ export function PreorderCustomerOrdersPanel({ orders }: { orders: PreorderDashbo
   );
 }
 
+type ShopifyLocationOption = { id: string; name: string; city?: string | null; country?: string | null };
+
+// Dropdown of live Shopify locations (name · city, country) that stores the
+// exact location GID. Falls back to a free-text input when the location list
+// can't be loaded or the saved value isn't in the list, so an existing/raw
+// value is never lost.
+function LocationSelect({ label, value, onChange, locations, loaded, loadError }: {
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  locations: ShopifyLocationOption[];
+  loaded: boolean;
+  loadError: string | null;
+}) {
+  const MANUAL = "__manual__";
+  const inList = value !== "" && locations.some((l) => l.id === value);
+  const [manual, setManual] = useState(false);
+  const useText = !loaded || !!loadError || locations.length === 0 || manual;
+  const optionLabel = (l: ShopifyLocationOption) => `${l.name}${l.city || l.country ? ` · ${[l.city, l.country].filter(Boolean).join(", ")}` : ""}`;
+  return (
+    <label style={s.label}>
+      {label}
+      {useText ? (
+        <input value={value} onChange={(e) => onChange(e.target.value)} style={s.input} placeholder="gid://shopify/Location/..." />
+      ) : (
+        <select
+          value={inList ? value : (value ? "__current__" : "")}
+          onChange={(e) => { const v = e.target.value; if (v === MANUAL) { setManual(true); } else if (v !== "__current__") { onChange(v); } }}
+          style={s.input}
+        >
+          <option value="">— select a location —</option>
+          {value !== "" && !inList ? <option value="__current__">Current: {value}</option> : null}
+          {locations.map((l) => <option key={l.id} value={l.id}>{optionLabel(l)}</option>)}
+          <option value={MANUAL}>✎ Enter manually…</option>
+        </select>
+      )}
+      {loadError ? <span style={{ ...s.muted, fontSize: 11 }}>Couldn’t load Shopify locations ({loadError}) — enter the GID manually.</span> : null}
+      {useText && !loadError && loaded && locations.length > 0 ? (
+        <button type="button" style={{ ...s.muted, fontSize: 11, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left", color: "#2563eb" }} onClick={() => setManual(false)}>↩ pick from list</button>
+      ) : null}
+    </label>
+  );
+}
+
 export function PreorderSettingsPanel({ configuration }: { configuration: PreorderDashboardData["configuration"] }) {
   const [au, setAu] = useState(configuration.locations.AU ?? "");
   const [usa, setUsa] = useState(configuration.locations.USA ?? "");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const [locations, setLocations] = useState<ShopifyLocationOption[]>([]);
+  const [locLoaded, setLocLoaded] = useState(false);
+  const [locError, setLocError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/preorder-shopify-locations", { credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((data: { ok?: boolean; error?: string; shops?: Array<{ ok?: boolean; error?: string; locations?: Array<{ id: string; name: string; address?: { city?: string | null; country?: string | null } | null }> }> }) => {
+        if (cancelled) return;
+        if (!data?.ok) { setLocError(data?.error || "unavailable"); setLocLoaded(true); return; }
+        const flat: ShopifyLocationOption[] = [];
+        const firstErr = (data.shops ?? []).find((sh) => sh.ok === false)?.error ?? null;
+        for (const sh of data.shops ?? []) for (const l of sh.locations ?? []) flat.push({ id: l.id, name: l.name, city: l.address?.city ?? null, country: l.address?.country ?? null });
+        setLocations(flat);
+        if (!flat.length && firstErr) setLocError(firstErr);
+        setLocLoaded(true);
+      })
+      .catch(() => { if (!cancelled) { setLocError("network error"); setLocLoaded(true); } });
+    return () => { cancelled = true; };
+  }, []);
 
   async function post(payload: Record<string, unknown>, successText: string) {
     setBusy(true);
@@ -79,11 +143,12 @@ export function PreorderSettingsPanel({ configuration }: { configuration: Preord
 
       <div style={s.card}>
         <div style={s.title}>Shopify locations</div>
-        <div style={s.muted}>Keep AU and USA preorder capacity completely separate. Enter either the numeric Shopify location ID or the full gid.</div>
+        <div style={s.muted}>Keep AU and USA preorder capacity completely separate. Pick each region's Shopify location from the list (the exact location GID is stored){locLoaded && !locError && locations.length ? "" : "; or enter the numeric ID / full gid manually"}.</div>
         <div style={s.twoCols}>
-          <label style={s.label}>Australia location<input value={au} onChange={(e) => setAu(e.target.value)} style={s.input} placeholder="gid://shopify/Location/..." /></label>
-          <label style={s.label}>USA location<input value={usa} onChange={(e) => setUsa(e.target.value)} style={s.input} placeholder="gid://shopify/Location/..." /></label>
+          <LocationSelect label="Australia location" value={au} onChange={setAu} locations={locations} loaded={locLoaded} loadError={locError} />
+          <LocationSelect label="USA location" value={usa} onChange={setUsa} locations={locations} loaded={locLoaded} loadError={locError} />
         </div>
+        {au && usa && au === usa ? <div style={{ ...s.notice, ...s.noticeError }}>AU and USA are set to the SAME location — regional pools must be different.</div> : null}
         <div style={s.actions}><button type="button" disabled={busy} style={s.primary} onClick={() => post({ operation: "update-locations", AU: au, USA: usa }, "Shopify preorder locations saved.")}>Save locations</button></div>
       </div>
       <div style={s.card}>
