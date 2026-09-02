@@ -19,7 +19,7 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,6 +53,12 @@ jobs:
         run: |
           set -o pipefail
           npm run build 2>&1 | tee build.log
+
+      - name: Build production Docker image
+        run: docker build -t preorder-runtime-test .
+
+      - name: Verify runtime webhook script is packaged
+        run: docker run --rm --entrypoint sh preorder-runtime-test -c 'test -f /app/scripts/register-preorder-webhooks.mjs'
 
       - name: Report existing typecheck debt
         if: steps.typecheck.outcome == 'failure' && steps.build.outcome == 'success'
