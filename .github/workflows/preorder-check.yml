@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - preorder-foundation
+      - preorder-phase2
   pull_request:
     branches:
       - main
