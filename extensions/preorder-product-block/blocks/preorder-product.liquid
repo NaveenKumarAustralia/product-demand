@@ -1,0 +1,66 @@
+{% liquid
+  assign preorder_market = 'AU'
+  if localization.country.iso_code == 'US'
+    assign preorder_market = 'USA'
+  endif
+%}
+
+<div
+  class="ke-preorder-block"
+  data-ke-preorder-root
+  data-product-id="{{ product.id }}"
+  data-product-title="{{ product.title | escape }}"
+  data-market="{{ preorder_market }}"
+  data-proxy-path="/apps/karma-east-preorder"
+  hidden
+>
+  <div class="ke-preorder-card" data-ke-preorder-card>
+    <div class="ke-preorder-eyebrow" data-ke-preorder-eyebrow></div>
+    <div class="ke-preorder-title" data-ke-preorder-title></div>
+    <div class="ke-preorder-copy" data-ke-preorder-copy></div>
+
+    <button class="ke-preorder-button" type="button" data-ke-preorder-button hidden>PRE-ORDER</button>
+
+    <form class="ke-notify-form" data-ke-notify-form hidden>
+      <label class="ke-notify-label" for="ke-notify-email-{{ block.id }}">Email me when it is available</label>
+      <div class="ke-notify-row">
+        <input
+          id="ke-notify-email-{{ block.id }}"
+          class="ke-notify-input"
+          type="email"
+          name="email"
+          autocomplete="email"
+          required
+          placeholder="Email address"
+        >
+        <button class="ke-notify-button" type="submit">Notify me</button>
+      </div>
+      <div class="ke-notify-message" data-ke-notify-message aria-live="polite"></div>
+    </form>
+  </div>
+
+  <script type="application/json" data-ke-variants>
+    [
+      {% for variant in product.variants %}
+        {
+          "id": {{ variant.id | json }},
+          "title": {{ variant.title | json }},
+          "sku": {{ variant.sku | json }}
+        }{% unless forloop.last %},{% endunless %}
+      {% endfor %}
+    ]
+  </script>
+</div>
+
+{% schema %}
+{
+  "name": "Pre-order / Notify",
+  "target": "section",
+  "enabled_on": {
+    "templates": ["product"]
+  },
+  "stylesheet": "preorder-product.css",
+  "javascript": "preorder-product.js",
+  "settings": []
+}
+{% endschema %}
