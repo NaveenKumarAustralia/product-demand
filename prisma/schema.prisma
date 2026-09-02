@@ -107,6 +107,37 @@ model PreorderBatchSetting {
   @@index([supplierOrderId, enabled])
 }
 
+// One Shopify preorder line can be split across more than one incoming
+// production batch. This table is the reservation ledger; physical Shopify
+// inventory remains separate and is never used as the reservation record.
+model PreorderReservation {
+  id                Int       @id @default(autoincrement())
+  shop              String
+  shopifyOrderId    String
+  shopifyOrderName  String?
+  shopifyLineItemId String
+  supplierOrderId   Int
+  productId         String?
+  variantId         String
+  variantTitle      String?
+  sku               String?
+  market            String
+  quantity          Int
+  status            String    @default("reserved")
+  customerEmail     String?
+  expectedShipDate  DateTime?
+  reservedAt        DateTime  @default(now())
+  releasedAt        DateTime?
+  fulfilledAt       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([shop, shopifyLineItemId, supplierOrderId])
+  @@index([shop, shopifyOrderId, status])
+  @@index([supplierOrderId, variantId, status])
+  @@index([variantId, market, status])
+}
+
 model SupplierAccount {
   id           Int      @id @default(autoincrement())
   shop         String
@@ -226,8 +257,8 @@ model VisionBoard {
   id        Int              @id @default(autoincrement())
   name      String
   sortOrder Int              @default(0)
-  createdAt DateTime         @default(now())
-  updatedAt DateTime         @updatedAt
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
   items     VisionBoardItem[]
 }
 
