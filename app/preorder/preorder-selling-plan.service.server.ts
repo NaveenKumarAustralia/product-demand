@@ -13,8 +13,8 @@ const REQUIRED_ACTIVATION_SCOPES = ["write_products", "write_purchase_options"] 
 type Actor = {
   id: string;
   name: string;
-  role: "superadmin" | "admin" | "user";
   admin: boolean;
+  active?: boolean;
 };
 
 export class PreorderSellingPlanError extends Error {
@@ -105,18 +105,20 @@ export async function activatePreorderSellingPlan(input: {
       lines: {
         select: { variantId: true, qtyOrdered: true, qtyReceived: true },
       },
-      preorderSetting: {
-        select: { enabled: true, shipDate: true },
-      },
     },
   });
   if (!order) throw new PreorderSellingPlanError("Production batch was not found.");
   if (order.status !== "open") throw new PreorderSellingPlanError("Only an open production batch can be activated for preorder.");
 
+  const setting = await prisma.preorderBatchSetting.findUnique({
+    where: { supplierOrderId: order.id },
+    select: { enabled: true, shipDate: true },
+  });
+
   const eligibility = getPreorderEligibility({
     productionStatus: order.supplierStatus,
     destination: order.destination,
-    preorderEnabled: order.preorderSetting?.enabled === true,
+    preorderEnabled: setting?.enabled === true,
   });
   if (!eligibility.eligible) {
     throw new PreorderSellingPlanError(`Batch is not eligible for preorder (${eligibility.reason}).`);
@@ -137,7 +139,7 @@ export async function activatePreorderSellingPlan(input: {
   const variables = buildPreorderSellingPlanGroup({
     batchId: order.id,
     productTitle: order.productTitle,
-    shipDate: order.preorderSetting?.shipDate ?? order.eta ?? null,
+    shipDate: setting?.shipDate ?? order.eta ?? null,
     productIds: order.productId ? [order.productId] : [],
     variantIds,
   });
