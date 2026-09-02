@@ -20,6 +20,7 @@ on:
       - preorder-phase14-app-proxy
       - preorder-phase15-klaviyo
       - preorder-phase15-klaviyo-diagnostics
+      - preorder-phase16-klaviyo-test
   pull_request:
     branches:
       - main
