@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { PreorderDashboardBatch, PreorderDashboardData } from "./preorder/preorder-dashboard.server";
+import { PreorderCustomerOrdersPanel, PreorderSettingsPanel } from "./preorder/preorder-operations-panels";
 
 type Props = {
   data: PreorderDashboardData;
@@ -109,8 +110,8 @@ export function PreordersDashboard({ data }: Props) {
           <div style={s.cards}>
             <MetricCard label="Active batches" value={data.totals.activeBatches} hint="Enabled + eligible" />
             <MetricCard label="Incoming units" value={data.totals.incomingUnits} hint="AU + USA open production" />
-            <MetricCard label="Reserved" value={data.totals.reservedUnits} hint="Reservation ledger being connected" />
-            <MetricCard label="Available capacity" value={data.totals.availableCapacity} hint="After safety buffer" />
+            <MetricCard label="Reserved" value={data.totals.reservedUnits} hint="Live reservation ledger" />
+            <MetricCard label="Available capacity" value={data.totals.availableCapacity} hint="After reservations + safety buffer" />
             <MetricCard label="Overallocated" value={data.totals.overallocatedUnits} hint="Needs attention" danger={data.totals.overallocatedUnits > 0} />
           </div>
 
@@ -177,6 +178,10 @@ export function PreordersDashboard({ data }: Props) {
             ))}
           </div>
         </>
+      ) : tab === "orders" ? (
+        <PreorderCustomerOrdersPanel orders={data.customerOrders} />
+      ) : tab === "settings" ? (
+        <PreorderSettingsPanel configuration={data.configuration} />
       ) : (
         <Placeholder tab={tab} />
       )}
