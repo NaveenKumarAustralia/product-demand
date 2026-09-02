@@ -31,6 +31,15 @@ export async function getPreorderSellingPlanRegistryEntry(shop: string, supplier
   return normalize(setting?.value);
 }
 
+export async function getPreorderSellingPlanRegistryEntries(shop?: string) {
+  const prefix = shop ? `preorder-selling-plan-v1:${shop}:` : "preorder-selling-plan-v1:";
+  const rows = await prisma.portalSetting.findMany({
+    where: { key: { startsWith: prefix } },
+    select: { value: true },
+  });
+  return rows.map((row) => normalize(row.value)).filter(Boolean) as PreorderSellingPlanRegistryEntry[];
+}
+
 export async function savePreorderSellingPlanRegistryEntry(entry: Omit<PreorderSellingPlanRegistryEntry, "createdAt" | "updatedAt">) {
   const existing = await getPreorderSellingPlanRegistryEntry(entry.shop, entry.supplierOrderId);
   const now = new Date().toISOString();
@@ -45,4 +54,8 @@ export async function savePreorderSellingPlanRegistryEntry(entry: Omit<PreorderS
     update: { value },
   });
   return value;
+}
+
+export async function removePreorderSellingPlanRegistryEntry(shop: string, supplierOrderId: number) {
+  await prisma.portalSetting.delete({ where: { key: key(shop, supplierOrderId) } }).catch(() => undefined);
 }
