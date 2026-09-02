@@ -18,6 +18,7 @@ on:
       - preorder-phase12-working
       - preorder-phase13-storefront-state
       - preorder-phase14-app-proxy
+      - preorder-phase15-klaviyo
   pull_request:
     branches:
       - main
