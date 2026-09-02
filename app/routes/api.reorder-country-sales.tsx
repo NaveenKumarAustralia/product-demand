@@ -5,6 +5,35 @@ import prisma from "../db.server";
 // Reorder Planner's expanded breakdown. Uses ShopifyQL (same as the dashboard),
 // fetched on demand when a product row is expanded so nothing hangs.
 // Response: { ok, rows: [{ variant, country, units }] }.
+//
+// Re-opening the same product used to run the same ShopifyQL query every time.
+// Keep a short-lived in-process cache so normal expand/collapse/reload usage
+// doesn't repeatedly call Shopify for identical historical report data.
+type CountrySalesRow = { variant: string; country: string; units: number };
+type CacheEntry = { expiresAt: number; rows: CountrySalesRow[] };
+const COUNTRY_SALES_CACHE_TTL_MS = 10 * 60 * 1000;
+const COUNTRY_SALES_CACHE_MAX = 250;
+const countrySalesCache = new Map<string, CacheEntry>();
+
+function getCachedRows(key: string): CountrySalesRow[] | null {
+  const entry = countrySalesCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    countrySalesCache.delete(key);
+    return null;
+  }
+  return entry.rows;
+}
+
+function setCachedRows(key: string, rows: CountrySalesRow[]) {
+  // Bound the cache so a long-running Railway process can't grow indefinitely.
+  if (countrySalesCache.size >= COUNTRY_SALES_CACHE_MAX) {
+    const oldestKey = countrySalesCache.keys().next().value as string | undefined;
+    if (oldestKey) countrySalesCache.delete(oldestKey);
+  }
+  countrySalesCache.set(key, { expiresAt: Date.now() + COUNTRY_SALES_CACHE_TTL_MS, rows });
+}
+
 async function runShopifyQL(shop: string, token: string, shopifyql: string): Promise<Array<Record<string, string>>> {
   const graphql = `{ shopifyqlQuery(query: ${JSON.stringify(shopifyql)}) { tableData { columns { name } rows } parseErrors } }`;
   const res = await fetch(`https://${shop}/admin/api/unstable/graphql.json`, {
@@ -39,19 +68,32 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const numeric = productId.replace(/[^0-9]/g, "");
   if (!numeric) return Response.json({ ok: true, rows: [] });
 
+  const cacheKey = `${session.shop}:${numeric}:${since}:${until}`;
+  const cachedRows = getCachedRows(cacheKey);
+  if (cachedRows) {
+    return Response.json(
+      { ok: true, rows: cachedRows, cached: true },
+      { headers: { "Cache-Control": "private, max-age=60" } },
+    );
+  }
+
   try {
     const rows = await runShopifyQL(
       session.shop, session.accessToken,
       `FROM sales SHOW net_items_sold WHERE product_id = ${numeric} GROUP BY product_variant_title, shipping_country SINCE ${since} UNTIL ${until}`,
     );
-    const out = rows
+    const out: CountrySalesRow[] = rows
       .map((r) => ({
         variant: (r.product_variant_title || "").trim(),
         country: (r.shipping_country || "Unknown").trim() || "Unknown",
         units: Math.max(0, parseInt(r.net_items_sold || "0", 10) || 0),
       }))
       .filter((r) => r.units > 0);
-    return Response.json({ ok: true, rows: out });
+    setCachedRows(cacheKey, out);
+    return Response.json(
+      { ok: true, rows: out, cached: false },
+      { headers: { "Cache-Control": "private, max-age=60" } },
+    );
   } catch (e) {
     console.warn("[reorder-country-sales]", e);
     return Response.json({ ok: false, rows: [], error: "unavailable" });

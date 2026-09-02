@@ -83,6 +83,30 @@ model OrderLine {
   createdAt    DateTime      @default(now())
 }
 
+// Preorder-specific settings are intentionally kept separate from SupplierOrder
+// so the existing Production Portal workflow remains unchanged. supplierOrderId
+// is unique: each production batch can contribute to preorder capacity once.
+model PreorderBatchSetting {
+  id                  Int      @id @default(autoincrement())
+  supplierOrderId     Int      @unique
+  shop                String
+  enabled             Boolean  @default(false)
+  safetyBufferPercent Float    @default(5)
+  safetyBufferQty     Int?
+  shipDate            DateTime?
+  pausedReason        String?
+  enabledByUserId     String?
+  enabledByUserName   String?
+  enabledAt           DateTime?
+  updatedByUserId     String?
+  updatedByUserName   String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([shop, enabled])
+  @@index([supplierOrderId, enabled])
+}
+
 model SupplierAccount {
   id           Int      @id @default(autoincrement())
   shop         String

@@ -8,6 +8,8 @@ import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } 
 import { syncOrderNoteMessages, syncEntityNoteMessages, syncSampleIterationMessages, createReplyMessage, editPortalMessage, deletePortalMessage } from "../portal-messages.server";
 import { randomUUID } from "node:crypto";
 import { VisionBoardV2Panel } from "../portal-vision-board";
+import { PreordersDashboard } from "../portal-preorders";
+import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server";
 import { unauthenticated } from "../shopify.server";
 import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
 
@@ -97,51 +99,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // makes them load noticeably faster.
   const needsActivityLogs = page === "settings" || isRestockPage || page === "packing";
 
-  // Defensive: the SupplierOrder schema gained `destination` recently. If
-  // this environment hasn't run the migration yet, Prisma's findMany
-  // (which selects every modelled column) would throw and the whole page
-  // would crash. ADD COLUMN IF NOT EXISTS makes the query safe on a
-  // stale DB. Only attempted when we actually need the orders.
-  if (needsOrders) {
-    try {
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "destination" TEXT`);
-    } catch (e) {
-      console.warn("[destination] column ensure failed:", e);
-    }
-    try {
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "packingListId" INTEGER`);
-    } catch (e) {
-      console.warn("[packingListId] column ensure failed:", e);
-    }
-    try {
-      await prisma.$executeRawUnsafe(`ALTER TABLE "OrderLine" ADD COLUMN IF NOT EXISTS "barcode" TEXT`);
-    } catch (e) {
-      console.warn("[barcode] column ensure failed:", e);
-    }
-    // JJ Restock per-order fields. Safe on a stale DB that hasn't run the
-    // migration yet; no-op once the columns exist.
-    try {
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "colourCode" TEXT`);
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "styleCode" TEXT`);
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "costBaht" DOUBLE PRECISION`);
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "skuBase" TEXT`);
-      await prisma.$executeRawUnsafe(`ALTER TABLE "SupplierOrder" ADD COLUMN IF NOT EXISTS "barcodeBase" TEXT`);
-    } catch (e) {
-      console.warn("[jj-restock] column ensure failed:", e);
-    }
-    // Backfill: fold the old packed / ready_to_send statuses into the new
-    // unified `ready`. updateMany is a no-op when no rows match, so this
-    // is cheap to run on every load.
-    try {
-      await prisma.supplierOrder.updateMany({
-        where: { supplierStatus: { in: ["packed", "ready_to_send"] } },
-        data: { supplierStatus: "ready" },
-      });
-    } catch (e) {
-      console.warn("[supplierStatus] migration to 'ready' failed:", e);
-    }
-  }
-
+  // Schema compatibility is handled by Prisma migrations; do not run DDL on staff page loads.
   type ActivityLogRow = { id: number; userName: string; action: string; entity: string; entityId: string | null; entityName: string | null; field: string | null; toValue: string | null; createdAt: Date };
   const activityLogsSince = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const [settingsRows, allOrders, packingLists, activityLogs] = await retryAsync(() => Promise.all([
@@ -529,6 +487,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const productInfo = normalizeProductInfo(await productInfoValuePromise);
   const usersWithSeed = await ensureSuperAdmin(users);
   const currentUser = getCurrentPortalUser(request, usersWithSeed);
+  // Pre-orders uses the portal's existing per-page permission model. The menu
+  // is hidden client-side for users without pageAccess.preorders, and this
+  // server-side redirect also blocks direct URL access. Only the superadmin
+  // bypasses the explicit page grant.
+  const canViewPreorders = Boolean(currentUser && (currentUser.role === "superadmin" || currentUser.pageAccess?.preorders));
+  if (page === "preorders" && currentUser && !canViewPreorders) {
+    const fallbackId = DEFAULT_NAV_ORDER.find((id) => Boolean(currentUser.pageAccess?.[id])) ?? "restock";
+    const fallbackHref = fallbackId === "restock" ? "/portal" : `/portal?page=${fallbackId}`;
+    return new Response(null, { status: 302, headers: { Location: fallbackHref } });
+  }
+  const preorderDashboard = page === "preorders" && canViewPreorders
+    ? await loadPreorderDashboardData()
+    : null;
   // JJ-only supplier lockdown: a non-admin user whose ONLY granted page is
   // "jj-restock" can never leave that page (nav already hides everything
   // else; this blocks direct-URL access too). Deliberately narrow so it
@@ -1109,6 +1080,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     loginBlocked: !currentUser,
     activityLogs,
     navOrder,
+    preorderDashboard,
     fabricSheets,
     inrToAudRate,
     samples,
@@ -6693,6 +6665,7 @@ const ALL_NAV_ITEMS = [
   { id: "jj-restock", label: "JJ Order", href: "/portal?page=jj-restock" },
   { id: "jj-new-products", label: "JJ New Products", href: "/portal?page=jj-new-products" },
   { id: "reorder", label: "Reorder Planner", href: "/portal?page=reorder" },
+  { id: "preorders", label: "Pre-orders", href: "/portal?page=preorders" },
   { id: "fabric", label: "Fabric in stock", href: "/portal?page=fabric" },
   { id: "packing", label: "Packing Lists", href: "/portal?page=packing" },
   { id: "productinfo", label: "Product Information", href: "/portal?page=productinfo" },
@@ -6702,7 +6675,7 @@ const ALL_NAV_ITEMS = [
   { id: "dropbox", label: "Dropbox", href: "/portal?page=dropbox" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "reorder", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "reorder", "preorders", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -10818,6 +10791,7 @@ export default function PortalDashboard() {
     loginBlocked,
     activityLogs,
     navOrder,
+    preorderDashboard,
     fabricSheets,
     inrToAudRate,
     samples,
@@ -11095,6 +11069,7 @@ export default function PortalDashboard() {
     : page === "collections" ? "Collections"
     : page === "jj-new-products" ? "JJ New Products"
     : page === "reorder" ? "Reorder Planner"
+    : page === "preorders" ? "Pre-orders"
     : page === "usa-stock" ? "USA Stock"
     : page === "notes" ? "All Notes"
     : page === "search" ? "Search"
@@ -11679,6 +11654,8 @@ export default function PortalDashboard() {
           </div>
         ) : page === "dropbox" ? (
           <DropboxPanel />
+        ) : page === "preorders" && preorderDashboard ? (
+          <PreordersDashboard data={preorderDashboard} />
         ) : page === "reorder" ? (
           <ReorderPlannerPage search={reorderSearch} />
         ) : page === "search" ? (
