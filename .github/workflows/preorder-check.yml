@@ -17,6 +17,7 @@ on:
       - preorder-phase11-activation-service
       - preorder-phase12-working
       - preorder-phase13-storefront-state
+      - preorder-phase14-app-proxy
   pull_request:
     branches:
       - main
@@ -62,6 +63,13 @@ jobs:
         run: |
           set -o pipefail
           npm run build 2>&1 | tee build.log
+
+      - name: Verify preorder theme extension files
+        run: |
+          test -f extensions/preorder-product-block/shopify.extension.toml
+          test -f extensions/preorder-product-block/blocks/preorder-product.liquid
+          test -f extensions/preorder-product-block/assets/preorder-product.js
+          test -f extensions/preorder-product-block/assets/preorder-product.css
 
       - name: Build production Docker image
         run: docker build -t preorder-runtime-test .
