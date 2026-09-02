@@ -46,6 +46,20 @@ test("AU and USA preorder pools never cross", () => {
   assert.deepEqual(state, { state: "notify_me", physicalAvailable: 0 });
 });
 
+test("when a variant has BOTH an AU and a USA plan, each market gets only its own", () => {
+  const auPlan = { ...base, batchId: 1, market: "AU" as const, sellingPlanId: "gid://shopify/SellingPlan/AU" };
+  const usaPlan = { ...base, batchId: 2, market: "USA" as const, sellingPlanId: "gid://shopify/SellingPlan/USA" };
+  const candidates = [auPlan, usaPlan];
+
+  const au = resolveStorefrontVariantState({ market: "AU", physicalAvailable: 0, candidates });
+  const usa = resolveStorefrontVariantState({ market: "USA", physicalAvailable: 0, candidates });
+
+  assert.equal(au.state, "preorder");
+  assert.equal(usa.state, "preorder");
+  if (au.state === "preorder") assert.equal(au.sellingPlanId, "gid://shopify/SellingPlan/AU");
+  if (usa.state === "preorder") assert.equal(usa.sellingPlanId, "gid://shopify/SellingPlan/USA");
+});
+
 test("no capacity or no live Shopify selling plan falls back to notify me", () => {
   for (const candidate of [
     { ...base, batchId: 1, availableToPreorder: 0 },
