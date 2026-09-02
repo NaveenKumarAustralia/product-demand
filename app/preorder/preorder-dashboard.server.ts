@@ -2,6 +2,7 @@ import prisma from "../db.server";
 import { getPreorderLocationSettings } from "./preorder-locations.server";
 import { getPreorderPermissionContext } from "./preorder-permissions.server";
 import { calculatePreorderCapacity, getPreorderEligibility } from "./preorder-rules.server";
+import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
 
 export type PreorderDashboardVariant = {
   variantId: string;
@@ -27,6 +28,9 @@ export type PreorderDashboardBatch = {
   eligible: boolean;
   eligibilityReason: string;
   enabled: boolean;
+  shopifySellingPlanActive: boolean;
+  shopifySellingPlanGroupId: string | null;
+  shopifySellingPlanId: string | null;
   safetyBufferPercent: number;
   safetyBufferQty: number | null;
   shipDate: string | null;
@@ -114,7 +118,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
   });
 
   const orderIds = orders.map((order) => order.id);
-  const [settings, reservations, permissionContext, locations] = await Promise.all([
+  const [settings, reservations, permissionContext, locations, sellingPlanEntries] = await Promise.all([
     orderIds.length
       ? prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: orderIds } } })
       : Promise.resolve([]),
@@ -127,8 +131,10 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
       : Promise.resolve([]),
     getPreorderPermissionContext(),
     getPreorderLocationSettings(),
+    getPreorderSellingPlanRegistryEntries(),
   ]);
   const byOrder = new Map(settings.map((setting) => [setting.supplierOrderId, setting]));
+  const sellingPlanByOrder = new Map(sellingPlanEntries.map((entry) => [entry.supplierOrderId, entry]));
 
   const reservedByBatchVariant = new Map<string, number>();
   for (const reservation of reservations) {
@@ -139,6 +145,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
 
   const batches: PreorderDashboardBatch[] = orders.map((order) => {
     const setting = byOrder.get(order.id);
+    const sellingPlan = sellingPlanByOrder.get(order.id);
     const eligibility = getPreorderEligibility({
       supplierStatus: order.supplierStatus,
       destination: order.destination,
@@ -179,6 +186,9 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
       eligible: eligibility.eligible,
       eligibilityReason: eligibility.reason,
       enabled: setting?.enabled ?? false,
+      shopifySellingPlanActive: Boolean(sellingPlan),
+      shopifySellingPlanGroupId: sellingPlan?.sellingPlanGroupId ?? null,
+      shopifySellingPlanId: sellingPlan?.sellingPlanId ?? null,
       safetyBufferPercent: setting?.safetyBufferPercent ?? 5,
       safetyBufferQty: setting?.safetyBufferQty ?? null,
       shipDate: setting?.shipDate?.toISOString() ?? null,
