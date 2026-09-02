@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { PreorderDashboardBatch, PreorderDashboardData } from "./preorder/preorder-dashboard.server";
 import {
+  PreorderActivationReadinessPanel,
   PreorderCustomerOrdersPanel,
   PreorderReportsPanel,
   PreorderSettingsPanel,
@@ -115,6 +116,7 @@ export function PreordersDashboard({ data }: Props) {
 
       {tab === "dashboard" || tab === "batches" ? (
         <>
+          {tab === "dashboard" ? <PreorderActivationReadinessPanel configuration={data.configuration} /> : null}
           <div style={s.cards}>
             <MetricCard label="Active batches" value={data.totals.activeBatches} hint="Enabled + eligible" />
             <MetricCard label="Incoming units" value={data.totals.incomingUnits} hint="AU + USA open production" />

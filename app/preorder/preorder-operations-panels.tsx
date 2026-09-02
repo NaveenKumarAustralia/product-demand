@@ -46,6 +46,88 @@ export function PreorderCustomerOrdersPanel({ orders }: { orders: PreorderDashbo
   );
 }
 
+// One-glance activation readiness: aggregates the existing scope / webhook /
+// Klaviyo checks + the AU/USA location config into a single checklist so staff
+// can see exactly what's left before turning on customer preorders. These are
+// internal checks only — activation still requires staff to enable + activate a
+// batch. Blocker items must pass; optional items (Klaviyo, storefront) are
+// warnings/manual verifications.
+type ReadinessStatus = "loading" | "ok" | "fail" | "error" | "warn" | "manual";
+const READINESS_ICON: Record<ReadinessStatus, string> = { loading: "…", ok: "✅", fail: "❌", error: "❌", warn: "⚠️", manual: "🔍" };
+
+export function PreorderActivationReadinessPanel({ configuration }: { configuration: PreorderDashboardData["configuration"] }) {
+  const [scopes, setScopes] = useState<{ status: ReadinessStatus; detail: string }>({ status: "loading", detail: "Checking Shopify permissions…" });
+  const [webhooks, setWebhooks] = useState<{ status: ReadinessStatus; detail: string }>({ status: "loading", detail: "Checking webhooks…" });
+  const [klaviyo, setKlaviyo] = useState<{ status: ReadinessStatus; detail: string }>({ status: "loading", detail: "Checking Klaviyo…" });
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/preorder-shopify-readiness", { credentials: "same-origin" }).then((r) => r.json()).then((d: { ok?: boolean; error?: string; shops?: Array<{ ready?: boolean; missingScopes?: string[] }> }) => {
+      if (cancelled) return;
+      if (!d?.ok) { setScopes({ status: "error", detail: d?.error || "Could not check scopes." }); return; }
+      const shops = d.shops ?? [];
+      const ready = shops.length > 0 && shops.every((sh) => sh.ready);
+      const missing = Array.from(new Set(shops.flatMap((sh) => sh.missingScopes ?? [])));
+      setScopes(ready ? { status: "ok", detail: "All required Shopify scopes granted." } : { status: "fail", detail: `Missing scopes: ${missing.join(", ") || "some required scopes"} — approve in the dev dashboard + update Railway SCOPES, then re-auth.` });
+    }).catch(() => { if (!cancelled) setScopes({ status: "error", detail: "Network error checking scopes." }); });
+
+    fetch("/api/preorder-webhook-status", { credentials: "same-origin" }).then((r) => r.json()).then((d: { ok?: boolean; healthy?: boolean; error?: string }) => {
+      if (cancelled) return;
+      if (!d?.ok) { setWebhooks({ status: "error", detail: d?.error || "Could not check webhooks." }); return; }
+      setWebhooks(d.healthy ? { status: "ok", detail: "Order create / cancel / fulfilled webhooks registered." } : { status: "fail", detail: "Some order webhooks are not registered." });
+    }).catch(() => { if (!cancelled) setWebhooks({ status: "error", detail: "Network error checking webhooks." }); });
+
+    fetch("/api/preorder-klaviyo-status", { credentials: "same-origin" }).then((r) => r.json()).then((d: { ok?: boolean; configured?: boolean }) => {
+      if (cancelled) return;
+      setKlaviyo(d?.configured ? { status: "ok", detail: "Klaviyo API key present (Back-in-Stock notifications)." } : { status: "warn", detail: "Not connected — only needed for Back-in-Stock / notification emails." });
+    }).catch(() => { if (!cancelled) setKlaviyo({ status: "warn", detail: "Could not check Klaviyo connection." }); });
+
+    return () => { cancelled = true; };
+  }, []);
+
+  const auLoc = (configuration.locations.AU ?? "").trim();
+  const usaLoc = (configuration.locations.USA ?? "").trim();
+  const locations: { status: ReadinessStatus; detail: string } =
+    !auLoc || !usaLoc ? { status: "fail", detail: "Set both AU and USA Shopify locations in Settings." }
+      : auLoc === usaLoc ? { status: "fail", detail: "AU and USA are set to the same location — regional pools must differ." }
+        : { status: "ok", detail: "AU and USA locations configured and different." };
+
+  const items: Array<{ key: string; label: string; blocker: boolean; status: ReadinessStatus; detail: string }> = [
+    { key: "scopes", label: "Shopify permissions (scopes)", blocker: true, ...scopes },
+    { key: "webhooks", label: "Order webhooks registered", blocker: true, ...webhooks },
+    { key: "locations", label: "AU & USA locations set (and different)", blocker: true, ...locations },
+    { key: "klaviyo", label: "Klaviyo connected", blocker: false, ...klaviyo },
+    { key: "storefront", label: "Storefront app-proxy + theme block", blocker: false, status: "manual", detail: "Verify on the live store: an out-of-stock variant shows Pre-order in the correct market only (not the other market's plan)." },
+  ];
+
+  const anyLoading = items.some((i) => i.status === "loading");
+  const blockersFailing = items.filter((i) => i.blocker && (i.status === "fail" || i.status === "error")).length;
+  const badgeColor = anyLoading ? { bg: "#f1f5f9", fg: "#475569" } : blockersFailing === 0 ? { bg: "#dcfce7", fg: "#166534" } : { bg: "#fef3c7", fg: "#92400e" };
+
+  return (
+    <div style={s.card}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <div style={s.title}>Activation readiness</div>
+        <div style={{ ...s.badge, background: badgeColor.bg, color: badgeColor.fg }}>
+          {anyLoading ? "Checking…" : blockersFailing === 0 ? "Core checks pass" : `${blockersFailing} blocker${blockersFailing === 1 ? "" : "s"} to resolve`}
+        </div>
+      </div>
+      <div style={s.muted}>Internal checks only. Turning on customer preorders still requires enabling a batch and activating it on Shopify.</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+        {items.map((it) => (
+          <div key={it.key} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <span style={{ fontSize: 14, width: 18, textAlign: "center", flexShrink: 0 }}>{READINESS_ICON[it.status]}</span>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>{it.label}{!it.blocker ? <span style={{ fontWeight: 500, color: "#94a3b8" }}> · optional</span> : null}</div>
+              <div style={{ ...s.muted, fontSize: 11.5 }}>{it.detail}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 type ShopifyLocationOption = { id: string; name: string; city?: string | null; country?: string | null };
 
 // Dropdown of live Shopify locations (name · city, country) that stores the
