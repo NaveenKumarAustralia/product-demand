@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { PreorderDashboardData } from "./preorder/preorder-dashboard.server";
+import type { PreorderDashboardBatch, PreorderDashboardData } from "./preorder/preorder-dashboard.server";
 
 type Props = {
   data: PreorderDashboardData;
@@ -32,10 +32,19 @@ function formatDate(value: string | null) {
   return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric" }).format(date);
 }
 
+function dateInputValue(value: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toISOString().slice(0, 10);
+}
+
 export function PreordersDashboard({ data }: Props) {
   const [tab, setTab] = useState<TabId>("dashboard");
   const [market, setMarket] = useState<"ALL" | "AU" | "USA">("ALL");
   const [search, setSearch] = useState("");
+  const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+  const [busyBatchId, setBusyBatchId] = useState<number | null>(null);
 
   const batches = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -46,6 +55,28 @@ export function PreordersDashboard({ data }: Props) {
     });
   }, [data.batches, market, search]);
 
+  async function manageBatch(batchId: number, payload: Record<string, unknown>, successText: string) {
+    setBusyBatchId(batchId);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/preorder-manage", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ supplierOrderId: batchId, ...payload }),
+      });
+      const result = await response.json().catch(() => ({})) as { ok?: boolean; error?: string };
+      if (!response.ok || result.ok !== true) {
+        throw new Error(result.error || "Could not update this preorder batch.");
+      }
+      setNotice({ kind: "success", text: successText });
+      window.setTimeout(() => window.location.reload(), 350);
+    } catch (error) {
+      setNotice({ kind: "error", text: error instanceof Error ? error.message : "Could not update this preorder batch." });
+      setBusyBatchId(null);
+    }
+  }
+
   return (
     <div style={s.page}>
       <div style={s.header}>
@@ -53,8 +84,12 @@ export function PreordersDashboard({ data }: Props) {
           <h1 style={s.title}>Pre-orders</h1>
           <p style={s.subtitle}>Incoming production capacity, customer reservations and preorder health.</p>
         </div>
-        <div style={s.headerPill}>Foundation preview</div>
+        <div style={s.headerPill}>Operations preview</div>
       </div>
+
+      {notice ? (
+        <div style={{ ...s.notice, ...(notice.kind === "error" ? s.noticeError : s.noticeSuccess) }}>{notice.text}</div>
+      ) : null}
 
       <div style={s.tabs}>
         {TABS.map((item) => (
@@ -74,7 +109,7 @@ export function PreordersDashboard({ data }: Props) {
           <div style={s.cards}>
             <MetricCard label="Active batches" value={data.totals.activeBatches} hint="Enabled + eligible" />
             <MetricCard label="Incoming units" value={data.totals.incomingUnits} hint="AU + USA open production" />
-            <MetricCard label="Reserved" value={data.totals.reservedUnits} hint="Customer allocation ledger comes next" />
+            <MetricCard label="Reserved" value={data.totals.reservedUnits} hint="Reservation ledger being connected" />
             <MetricCard label="Available capacity" value={data.totals.availableCapacity} hint="After safety buffer" />
             <MetricCard label="Overallocated" value={data.totals.overallocatedUnits} hint="Needs attention" danger={data.totals.overallocatedUnits > 0} />
           </div>
@@ -130,6 +165,14 @@ export function PreordersDashboard({ data }: Props) {
                     </div>
                   ))}
                 </div>
+
+                {tab === "batches" ? (
+                  <BatchControls
+                    batch={batch}
+                    busy={busyBatchId === batch.id}
+                    onManage={(payload, successText) => manageBatch(batch.id, payload, successText)}
+                  />
+                ) : null}
               </div>
             ))}
           </div>
@@ -137,6 +180,69 @@ export function PreordersDashboard({ data }: Props) {
       ) : (
         <Placeholder tab={tab} />
       )}
+    </div>
+  );
+}
+
+function BatchControls({
+  batch,
+  busy,
+  onManage,
+}: {
+  batch: PreorderDashboardBatch;
+  busy: boolean;
+  onManage: (payload: Record<string, unknown>, successText: string) => void;
+}) {
+  const [shipDate, setShipDate] = useState(dateInputValue(batch.shipDate));
+  const [bufferPercent, setBufferPercent] = useState(String(batch.safetyBufferPercent));
+  const [bufferQty, setBufferQty] = useState(batch.safetyBufferQty == null ? "" : String(batch.safetyBufferQty));
+  const canActivate = batch.supplierStatus === "on_production" && (batch.destination === "send_to_au" || batch.destination === "send_to_usa");
+
+  return (
+    <div style={s.controls}>
+      <div style={s.controlsTitle}>Staff controls</div>
+      <div style={s.controlGrid}>
+        <label style={s.fieldLabel}>
+          Expected dispatch
+          <input type="date" value={shipDate} onChange={(e) => setShipDate(e.target.value)} style={s.input} disabled={busy} />
+        </label>
+        <label style={s.fieldLabel}>
+          Safety buffer %
+          <input type="number" min={0} max={50} step={0.5} value={bufferPercent} onChange={(e) => setBufferPercent(e.target.value)} style={s.input} disabled={busy} />
+        </label>
+        <label style={s.fieldLabel}>
+          Fixed buffer qty <span style={s.optional}>(optional override)</span>
+          <input type="number" min={0} step={1} value={bufferQty} onChange={(e) => setBufferQty(e.target.value)} placeholder="Use %" style={s.input} disabled={busy} />
+        </label>
+      </div>
+      <div style={s.controlActions}>
+        <button
+          type="button"
+          style={s.secondaryButton}
+          disabled={busy}
+          onClick={() => onManage({
+            operation: "update-settings",
+            shipDate,
+            safetyBufferPercent: bufferPercent,
+            safetyBufferQty: bufferQty,
+          }, "Preorder batch settings saved.")}
+        >
+          {busy ? "Saving…" : "Save settings"}
+        </button>
+        <button
+          type="button"
+          style={{ ...s.primaryButton, ...(batch.enabled ? s.pauseButton : {}) }}
+          disabled={busy || (!batch.enabled && !canActivate)}
+          title={!batch.enabled && !canActivate ? "Batch must be On Production and assigned to AUS or USA first." : undefined}
+          onClick={() => onManage({ operation: "set-enabled", enabled: !batch.enabled }, batch.enabled ? "Preorder paused." : "Preorder enabled.")}
+        >
+          {busy ? "Working…" : batch.enabled ? "Pause preorder" : "Enable preorder"}
+        </button>
+      </div>
+      {!batch.enabled && !canActivate ? (
+        <div style={s.controlHint}>To enable, this production batch must be <strong>On Production</strong> and assigned to <strong>Send to AUS</strong> or <strong>Send to USA</strong>.</div>
+      ) : null}
+      {batch.pausedReason ? <div style={s.controlHint}>Paused reason: {batch.pausedReason}</div> : null}
     </div>
   );
 }
@@ -178,7 +284,10 @@ const s: Record<string, React.CSSProperties> = {
   header: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 20, marginBottom: 18 },
   title: { margin: 0, fontSize: 28, lineHeight: 1.15, color: "#0f172a" },
   subtitle: { margin: "6px 0 0", color: "#64748b", fontSize: 14 },
-  headerPill: { padding: "7px 11px", borderRadius: 999, background: "#fef3c7", color: "#92400e", fontWeight: 700, fontSize: 12 },
+  headerPill: { padding: "7px 11px", borderRadius: 999, background: "#dbeafe", color: "#1d4ed8", fontWeight: 700, fontSize: 12 },
+  notice: { marginBottom: 14, padding: "10px 12px", borderRadius: 9, fontSize: 13, fontWeight: 700 },
+  noticeError: { background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" },
+  noticeSuccess: { background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534" },
   tabs: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 20, paddingBottom: 12, borderBottom: "1px solid #e2e8f0" },
   tab: { border: 0, background: "transparent", borderRadius: 8, padding: "8px 11px", fontSize: 13, fontWeight: 700, color: "#64748b", cursor: "pointer" },
   tabActive: { background: "#0f172a", color: "white" },
@@ -210,6 +319,17 @@ const s: Record<string, React.CSSProperties> = {
   variantGrid: { marginTop: 14, borderTop: "1px solid #f1f5f9" },
   variantRow: { display: "grid", gridTemplateColumns: "minmax(120px, 1.4fr) repeat(3, minmax(90px, .7fr))", gap: 10, padding: "9px 2px", borderBottom: "1px solid #f8fafc", fontSize: 12, color: "#64748b" },
   variantName: { color: "#334155", fontWeight: 700 },
+  controls: { marginTop: 16, paddingTop: 15, borderTop: "1px solid #e2e8f0" },
+  controlsTitle: { fontSize: 12, fontWeight: 800, color: "#475569", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 10 },
+  controlGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 },
+  fieldLabel: { display: "flex", flexDirection: "column", gap: 5, fontSize: 11, fontWeight: 700, color: "#64748b" },
+  optional: { fontWeight: 500, color: "#94a3b8" },
+  input: { border: "1px solid #cbd5e1", borderRadius: 8, padding: "8px 9px", fontSize: 13, background: "white", color: "#0f172a" },
+  controlActions: { display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap", marginTop: 11 },
+  secondaryButton: { border: "1px solid #cbd5e1", background: "white", color: "#334155", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 800, cursor: "pointer" },
+  primaryButton: { border: "1px solid #0f766e", background: "#0f766e", color: "white", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 800, cursor: "pointer" },
+  pauseButton: { border: "1px solid #b45309", background: "#b45309" },
+  controlHint: { marginTop: 9, fontSize: 11, color: "#64748b" },
   empty: { padding: 36, textAlign: "center", color: "#64748b", background: "white", border: "1px dashed #cbd5e1", borderRadius: 12 },
   placeholder: { padding: 50, textAlign: "center", background: "white", border: "1px solid #e2e8f0", borderRadius: 14 },
   placeholderIcon: { width: 44, height: 44, borderRadius: 999, display: "grid", placeItems: "center", background: "#f1f5f9", color: "#64748b", fontSize: 24, margin: "0 auto 12px" },
