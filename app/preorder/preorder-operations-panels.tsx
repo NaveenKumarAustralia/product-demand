@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   PreorderDashboardCustomerOrder,
   PreorderDashboardData,
@@ -134,6 +134,102 @@ export function PreorderSettingsPanel({ configuration }: { configuration: Preord
   );
 }
 
+type PreorderReportResponse = {
+  ok: boolean;
+  error?: string;
+  summary?: {
+    customerOrders: number;
+    reservationRows: number;
+    quantities: Array<{ status: string; market: string; quantity: number; rows: number }>;
+  };
+  activeBatches?: Array<{ id: number; productTitle: string; supplier: string; destination: string | null; reservedQty: number }>;
+  recentFailures?: Array<{ id: number; shopifyOrderId: string | null; orderName: string | null; message: string | null; createdAt: string }>;
+};
+
+export function PreorderReportsPanel() {
+  const [report, setReport] = useState<PreorderReportResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/preorder-report", { credentials: "same-origin" })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({ ok: false, error: "Could not read report response." }));
+        if (!response.ok || result.ok !== true) throw new Error(result.error || "Could not load preorder report.");
+        return result as PreorderReportResponse;
+      })
+      .then((result) => { if (active) setReport(result); })
+      .catch((error) => { if (active) setReport({ ok: false, error: error instanceof Error ? error.message : "Could not load preorder report." }); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const totals = useMemo(() => {
+    const quantities = report?.summary?.quantities ?? [];
+    const sum = (status: string, market?: string) => quantities
+      .filter((row) => row.status === status && (!market || row.market === market))
+      .reduce((total, row) => total + row.quantity, 0);
+    return {
+      reserved: sum("reserved"),
+      fulfilled: sum("fulfilled"),
+      released: sum("released"),
+      au: sum("reserved", "AU"),
+      usa: sum("reserved", "USA"),
+    };
+  }, [report]);
+
+  if (loading) return <div style={s.empty}>Loading preorder report…</div>;
+  if (!report?.ok) return <div style={{ ...s.notice, ...s.noticeError }}>{report?.error || "Could not load preorder report."}</div>;
+
+  return (
+    <div style={s.stack}>
+      <div style={s.reportCards}>
+        <ReportMetric label="Customer orders" value={report.summary?.customerOrders ?? 0} />
+        <ReportMetric label="Reserved units" value={totals.reserved} />
+        <ReportMetric label="Fulfilled units" value={totals.fulfilled} />
+        <ReportMetric label="Released units" value={totals.released} />
+        <ReportMetric label="AU active" value={totals.au} />
+        <ReportMetric label="USA active" value={totals.usa} />
+      </div>
+
+      <div style={s.card}>
+        <div style={s.title}>Most reserved active batches</div>
+        <div style={s.muted}>Where current preorder commitments are concentrated.</div>
+        {(report.activeBatches ?? []).length ? (
+          <div style={s.lines}>
+            {(report.activeBatches ?? []).slice(0, 20).map((batch) => (
+              <div key={batch.id} style={s.reportBatchRow}>
+                <div><strong>{batch.productTitle}</strong><div style={s.small}>Batch #{batch.id} · {batch.supplier}</div></div>
+                <div style={s.lineMeta}>{batch.destination === "send_to_usa" ? "USA" : "AU"}</div>
+                <div style={s.reportNumber}>{batch.reservedQty}</div>
+              </div>
+            ))}
+          </div>
+        ) : <div style={s.muted}>No active reservations yet.</div>}
+      </div>
+
+      <div style={s.card}>
+        <div style={s.title}>Allocation exceptions</div>
+        <div style={s.muted}>Orders where confirmed preorder capacity could not be allocated. These should be reviewed rather than silently cancelled.</div>
+        {(report.recentFailures ?? []).length ? (
+          <div style={s.lines}>
+            {(report.recentFailures ?? []).map((failure) => (
+              <div key={failure.id} style={s.failureRow}>
+                <div><strong>{failure.orderName || failure.shopifyOrderId || "Shopify order"}</strong><div style={s.small}>{formatDate(failure.createdAt)}</div></div>
+                <div style={s.failureMessage}>{failure.message || "Allocation failed"}</div>
+              </div>
+            ))}
+          </div>
+        ) : <div style={s.muted}>No allocation exceptions recorded.</div>}
+      </div>
+    </div>
+  );
+}
+
+function ReportMetric({ label, value }: { label: string; value: number }) {
+  return <div style={s.reportMetric}><div style={s.reportLabel}>{label}</div><div style={s.reportValue}>{value}</div></div>;
+}
+
 const s: Record<string, React.CSSProperties> = {
   stack: { display: "flex", flexDirection: "column", gap: 12 },
   card: { background: "white", border: "1px solid #e2e8f0", borderRadius: 14, padding: 18, boxShadow: "0 1px 3px rgba(15,23,42,.04)" },
@@ -158,4 +254,12 @@ const s: Record<string, React.CSSProperties> = {
   notice: { padding: "10px 12px", borderRadius: 9, fontSize: 13, fontWeight: 700 },
   noticeError: { background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" },
   noticeSuccess: { background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534" },
+  reportCards: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 },
+  reportMetric: { background: "white", border: "1px solid #e2e8f0", borderRadius: 12, padding: 14 },
+  reportLabel: { fontSize: 10, color: "#64748b", fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em" },
+  reportValue: { marginTop: 4, fontSize: 24, color: "#0f172a", fontWeight: 800 },
+  reportBatchRow: { display: "grid", gridTemplateColumns: "minmax(180px, 1fr) 90px 80px", gap: 10, alignItems: "center", padding: "10px 0", borderBottom: "1px solid #f8fafc", fontSize: 12 },
+  reportNumber: { textAlign: "right", fontSize: 16, fontWeight: 800, color: "#0f172a" },
+  failureRow: { display: "grid", gridTemplateColumns: "minmax(160px, .8fr) minmax(220px, 1.5fr)", gap: 16, padding: "10px 0", borderBottom: "1px solid #f8fafc", fontSize: 12 },
+  failureMessage: { color: "#991b1b" },
 };
