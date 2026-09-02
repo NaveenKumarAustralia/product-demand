@@ -15,6 +15,7 @@ on:
       - preorder-phase9-selling-plan-foundation
       - preorder-phase10-batch-binding
       - preorder-phase11-activation-service
+      - preorder-phase12-working
   pull_request:
     branches:
       - main
