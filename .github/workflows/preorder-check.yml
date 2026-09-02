@@ -16,6 +16,7 @@ on:
       - preorder-phase10-batch-binding
       - preorder-phase11-activation-service
       - preorder-phase12-working
+      - preorder-phase13-storefront-state
   pull_request:
     branches:
       - main
