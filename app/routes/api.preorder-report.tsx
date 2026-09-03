@@ -57,9 +57,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const batches = batchIds.length
       ? await prisma.supplierOrder.findMany({
           where: { id: { in: batchIds } },
-          select: { id: true, productTitle: true, supplier: true, destination: true },
+          select: {
+            id: true, productTitle: true, supplier: true, destination: true,
+            lines: { select: { qtyOrdered: true, qtyReceived: true } },
+          },
         })
       : [];
+    const incomingByBatch = new Map<number, number>(
+      batches.map((batch) => [
+        batch.id,
+        batch.lines.reduce((sum, line) => sum + Math.max(0, line.qtyOrdered - line.qtyReceived), 0),
+      ]),
+    );
 
     return Response.json({
       ok: true,
@@ -74,13 +83,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         })),
       },
       activeBatches: batches
-        .map((batch) => ({
-          id: batch.id,
-          productTitle: batch.productTitle,
-          supplier: batch.supplier,
-          destination: batch.destination,
-          reservedQty: activeByBatch.get(batch.id) ?? 0,
-        }))
+        .map((batch) => {
+          const reservedQty = activeByBatch.get(batch.id) ?? 0;
+          const incomingQty = incomingByBatch.get(batch.id) ?? 0;
+          return {
+            id: batch.id,
+            productTitle: batch.productTitle,
+            supplier: batch.supplier,
+            destination: batch.destination,
+            reservedQty,
+            incomingQty,
+            fillPercent: incomingQty > 0 ? Math.min(100, Math.round((reservedQty / incomingQty) * 100)) : 0,
+          };
+        })
         .sort((a, b) => b.reservedQty - a.reservedQty),
       recentFailures: recentFailures.map((row) => ({
         id: row.id,

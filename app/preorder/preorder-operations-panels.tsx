@@ -261,7 +261,7 @@ type PreorderReportResponse = {
     reservationRows: number;
     quantities: Array<{ status: string; market: string; quantity: number; rows: number }>;
   };
-  activeBatches?: Array<{ id: number; productTitle: string; supplier: string; destination: string | null; reservedQty: number }>;
+  activeBatches?: Array<{ id: number; productTitle: string; supplier: string; destination: string | null; reservedQty: number; incomingQty?: number; fillPercent?: number }>;
   recentFailures?: Array<{ id: number; shopifyOrderId: string | null; orderName: string | null; message: string | null; createdAt: string }>;
 };
 
@@ -316,13 +316,25 @@ export function PreorderReportsPanel() {
         <div style={s.muted}>Where current preorder commitments are concentrated.</div>
         {(report.activeBatches ?? []).length ? (
           <div style={s.lines}>
-            {(report.activeBatches ?? []).slice(0, 20).map((batch) => (
-              <div key={batch.id} style={s.reportBatchRow}>
-                <div><strong>{batch.productTitle}</strong><div style={s.small}>Batch #{batch.id} · {batch.supplier}</div></div>
-                <div style={s.lineMeta}>{batch.destination === "send_to_usa" ? "USA" : "AU"}</div>
-                <div style={s.reportNumber}>{batch.reservedQty}</div>
-              </div>
-            ))}
+            {(report.activeBatches ?? []).slice(0, 20).map((batch) => {
+              const incoming = batch.incomingQty ?? 0;
+              const fill = batch.fillPercent ?? 0;
+              const barColor = fill >= 90 ? "#dc2626" : fill >= 70 ? "#d97706" : "#0f766e";
+              return (
+                <div key={batch.id} style={s.reportBatchRow}>
+                  <div>
+                    <strong>{batch.productTitle}</strong>
+                    <div style={s.small}>Batch #{batch.id} · {batch.supplier}</div>
+                    <div style={s.fillTrack}><div style={{ ...s.fillBar, width: `${fill}%`, background: barColor }} /></div>
+                  </div>
+                  <div style={s.lineMeta}>{batch.destination === "send_to_usa" ? "USA" : "AU"}</div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={s.reportNumber}>{batch.reservedQty}<span style={s.reportDenom}> / {incoming}</span></div>
+                    <div style={s.small}>{fill}% reserved</div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         ) : <div style={s.muted}>No active reservations yet.</div>}
       </div>
@@ -377,8 +389,11 @@ const s: Record<string, React.CSSProperties> = {
   reportMetric: { background: "white", border: "1px solid #e2e8f0", borderRadius: 12, padding: 14 },
   reportLabel: { fontSize: 10, color: "#64748b", fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em" },
   reportValue: { marginTop: 4, fontSize: 24, color: "#0f172a", fontWeight: 800 },
-  reportBatchRow: { display: "grid", gridTemplateColumns: "minmax(180px, 1fr) 90px 80px", gap: 10, alignItems: "center", padding: "10px 0", borderBottom: "1px solid #f8fafc", fontSize: 12 },
+  reportBatchRow: { display: "grid", gridTemplateColumns: "minmax(180px, 1fr) 70px 120px", gap: 10, alignItems: "center", padding: "10px 0", borderBottom: "1px solid #f8fafc", fontSize: 12 },
   reportNumber: { textAlign: "right", fontSize: 16, fontWeight: 800, color: "#0f172a" },
+  reportDenom: { fontSize: 12, fontWeight: 600, color: "#94a3b8" },
+  fillTrack: { marginTop: 6, height: 5, borderRadius: 999, background: "#f1f5f9", overflow: "hidden", maxWidth: 220 },
+  fillBar: { height: "100%", borderRadius: 999 },
   failureRow: { display: "grid", gridTemplateColumns: "minmax(160px, .8fr) minmax(220px, 1.5fr)", gap: 16, padding: "10px 0", borderBottom: "1px solid #f8fafc", fontSize: 12 },
   failureMessage: { color: "#991b1b" },
 };

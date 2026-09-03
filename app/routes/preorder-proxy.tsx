@@ -2,6 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { getStorefrontPreorderState } from "../preorder/preorder-storefront-state.server";
 import { getCustomerPreorders } from "../preorder/preorder-customer-account.server";
+import { renderMyPreordersPage } from "../preorder/preorder-customer-account-page";
 import { authenticate } from "../shopify.server";
 
 function marketFrom(value: unknown) {
@@ -32,10 +33,23 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     // Customer-account "My preorders" — Shopify signs the request (including the
     // logged_in_customer_id it injects), so the customer is trusted. Read-only.
+    const customerId = url.searchParams.get("logged_in_customer_id");
     if (url.searchParams.get("op") === "my-preorders") {
-      const result = await getCustomerPreorders({ shop, customerId: url.searchParams.get("logged_in_customer_id") });
+      const result = await getCustomerPreorders({ shop, customerId });
       return Response.json(result, {
         headers: { "Cache-Control": "no-store", "Content-Type": "application/json; charset=utf-8" },
+      });
+    }
+
+    // Themed "My pre-orders" PAGE — visit /apps/karma-east-preorder?view=my-preorders
+    // (link it from the storefront account menu). Returned as application/liquid so
+    // Shopify renders it inside the store's theme (header/footer/fonts) — native
+    // look, no theme editing required.
+    if (url.searchParams.get("view") === "my-preorders") {
+      const result = await getCustomerPreorders({ shop, customerId });
+      const html = renderMyPreordersPage(result.preorders, Boolean(customerId));
+      return new Response(html, {
+        headers: { "Content-Type": "application/liquid", "Cache-Control": "no-store" },
       });
     }
 

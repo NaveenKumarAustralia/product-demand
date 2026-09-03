@@ -27,6 +27,8 @@ Updated: 2026-09-03.
 - [ ] Confirm cart/checkout clearly shows it's a pre-order + the dispatch date.
 - [ ] Cancel the test order → confirm the reservation **releases** (Remaining back to 5).
 - [ ] Try to order more than available (e.g. 6 when 5 left) → confirm it's blocked, never oversells.
+- [ ] Order-confirmation email wording for pre-order customers (clearly says pre-order + dispatch date).
+- [ ] Capture unit price on the reservation at this point → unlocks revenue/money-in-advance in the Reports tab (#7).
 
 ## 🔴 2. Fulfilment when the stock actually arrives  (needs a defined process)
 - [ ] Decide + build the flow: batch lands (status → arrived / received) → how the reserved pre-order orders get fulfilled in Shopify.
@@ -43,11 +45,13 @@ Updated: 2026-09-03.
 ## 🟡 5. Overallocation / shortfall handling
 - [ ] If incoming production drops below what's reserved, define the admin view + process (handoff rule: never silently unreserve a real customer).
 
-## 🟡 6. Customer "My pre-orders" page  (code + live)
-- [ ] Theme render of the customer-account endpoint (server side exists) so a logged-in customer sees their pre-orders + dispatch dates.
+## ✅ 6. Customer "My pre-orders" page  (DONE — one no-code link step left)
+- [x] Themed page served via the app proxy at `/apps/karma-east-preorder?view=my-preorders` — renders inside the live theme (header/footer/fonts), shows the logged-in customer's reserved items, sizes, dispatch dates and status. Read-only, no theme editing needed.
+- [ ] (Optional, no-code) Add a menu/account link to that URL: Shopify admin → Online Store → Navigation, so customers can find it. Or link it from the account page.
 
-## 🟡 7. Reporting  (code)
-- [ ] A pre-orders report: units reserved, revenue taken in advance, by batch/market. (viewReports permission already exists.)
+## ✅ 7. Reporting  (DONE except revenue)
+- [x] Pre-orders report (Pre-orders → Reports): customer orders, reserved / dispatched / released units, AU vs USA split, most-reserved batches **with a fill-rate bar (reserved vs incoming)**, and allocation exceptions.
+- [ ] Revenue / money-taken-in-advance — REQUIRES capturing unit price at reservation time (webhook doesn't carry it yet). Bundled with the checkout/order-processing work in the section below, since that's where price gets captured.
 
 ## 🟢 8. USA expansion (when 3PL ready)  (live)
 - [ ] Set the USA fulfilment location → USA batches become activatable automatically. Then repeat the end-to-end test for USA and verify AU/USA never cross.
