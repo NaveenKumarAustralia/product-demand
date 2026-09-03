@@ -76,13 +76,13 @@
       delete notifyMessage.dataset.kind;
     }
 
-    if (state.state === 'in_stock') {
-      root.hidden = true;
-      return;
-    }
-
-    root.hidden = false;
+    // Only ever take over the buy area for a real pre-order or a real
+    // notify-me. For in_stock, inactive (market not live, e.g. USA before its
+    // location is set), or any unknown state, our block does nothing so the
+    // theme's normal add-to-cart / out-of-stock UI shows instead. This is what
+    // stops in-stock variants (in markets we don't ship) showing the notify box.
     if (state.state === 'preorder') {
+      root.hidden = false;
       eyebrow.textContent = 'Pre-order';
       title.textContent = formatExpected(state.expectedShipDate);
       copy.textContent = 'This item is currently being made. Order now to reserve yours. Payment is taken in full at checkout.';
@@ -90,7 +90,10 @@
       root.dataset.batchId = String(state.batchId || '');
       setHidden(preorderButton, false);
       setHidden(notifyForm, true);
-    } else {
+      return;
+    }
+    if (state.state === 'notify_me') {
+      root.hidden = false;
       eyebrow.textContent = 'Currently unavailable';
       title.textContent = 'Notify me when this size is available';
       copy.textContent = 'Join the waitlist and we’ll let you know when this size can be ordered again.';
@@ -98,7 +101,9 @@
       delete root.dataset.batchId;
       setHidden(preorderButton, true);
       setHidden(notifyForm, false);
+      return;
     }
+    root.hidden = true;
   }
 
   async function addPreorder(root, button) {

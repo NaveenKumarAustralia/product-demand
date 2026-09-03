@@ -115,12 +115,19 @@ export async function getStorefrontPreorderState(input: {
   const locations = await getPreorderLocationSettings();
   const locationId = normalizeLocationId(locations[input.market]);
   if (!locationId) {
+    // This market isn't live (no fulfilment location — e.g. USA before its 3PL
+    // is set up). We can't read stock for a market we don't ship from, so the
+    // block must do NOTHING here. Return a state that HIDES the block. We use
+    // in_stock because the block JS already deployed to the storefront hides on
+    // in_stock (it only reveals for preorder/notify_me otherwise) — so this
+    // fixes the "every US variant shows notify, even in-stock ones" bug
+    // instantly via the server, with no theme redeploy required.
     return {
       ok: false as const,
       reason: "location_not_configured" as const,
       market: input.market,
       variantId,
-      state: { state: "notify_me" as const, physicalAvailable: 0 },
+      state: { state: "in_stock" as const, physicalAvailable: 0 },
     };
   }
 
