@@ -95,15 +95,19 @@ export function PreorderActivationReadinessPanel({ configuration }: { configurat
 
   const auLoc = (configuration.locations.AU ?? "").trim();
   const usaLoc = (configuration.locations.USA ?? "").trim();
+  // A market goes live only once ITS location is set. Launching one market
+  // (e.g. AU) is fine — the other stays off until its location is added, then
+  // plugs in automatically. Blocker only if NEITHER is set.
   const locations: { status: ReadinessStatus; detail: string } =
-    !auLoc || !usaLoc ? { status: "fail", detail: "Set both AU and USA Shopify locations in Settings." }
-      : auLoc === usaLoc ? { status: "fail", detail: "AU and USA are set to the same location — regional pools must differ." }
-        : { status: "ok", detail: "AU and USA locations configured and different." };
+    !auLoc && !usaLoc ? { status: "fail", detail: "Set at least one region's Shopify location in Settings (AU to launch now; add USA later)." }
+      : auLoc && usaLoc && auLoc === usaLoc ? { status: "fail", detail: "AU and USA are set to the same location — regional pools must differ." }
+        : auLoc && usaLoc ? { status: "ok", detail: "AU + USA locations set and different." }
+          : { status: "ok", detail: `${auLoc ? "AU" : "USA"} location set — ${auLoc ? "USA" : "AU"} preorders stay OFF until its location is added.` };
 
   const items: Array<{ key: string; label: string; blocker: boolean; status: ReadinessStatus; detail: string }> = [
     { key: "scopes", label: "Shopify permissions (scopes)", blocker: true, ...scopes },
     { key: "webhooks", label: "Order webhooks registered", blocker: true, ...webhooks },
-    { key: "locations", label: "AU & USA locations set (and different)", blocker: true, ...locations },
+    { key: "locations", label: "Fulfilment location(s) set", blocker: true, ...locations },
     { key: "klaviyo", label: "Klaviyo connected", blocker: false, ...klaviyo },
     { key: "storefront", label: "Storefront app-proxy + theme block", blocker: false, status: "manual", detail: "Verify on the live store: an out-of-stock variant shows Pre-order in the correct market only (not the other market's plan)." },
   ];

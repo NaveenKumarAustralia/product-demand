@@ -1,6 +1,7 @@
 import prisma from "../db.server";
 import { canManagePreorders, type PreorderPermissionSettings } from "./preorder-permissions.server";
 import { getPreorderEligibility } from "./preorder-rules.server";
+import { getPreorderLocationSettings, locationForMarket } from "./preorder-locations.server";
 import { buildPreorderSellingPlanGroup } from "./preorder-selling-plan";
 import {
   getPreorderSellingPlanRegistryEntry,
@@ -129,6 +130,15 @@ export async function activatePreorderSellingPlan(input: {
   });
   if (!eligibility.eligible) {
     throw new PreorderSellingPlanError(`Batch is not eligible for preorder (${eligibility.reason}).`);
+  }
+
+  // A market's preorders can only go live once that market has a fulfilment
+  // location configured. This keeps USA fully off until a US location is set
+  // (no US 3PL yet) and lets it "plug in" automatically later — set the USA
+  // location and USA batches become activatable with no code change.
+  const locationSettings = await getPreorderLocationSettings();
+  if (eligibility.market && !locationForMarket(locationSettings, eligibility.market)) {
+    throw new PreorderSellingPlanError(`Set the ${eligibility.market} fulfilment location in Pre-orders → Settings before activating ${eligibility.market} preorders.`);
   }
 
   const variantIds = order.lines
