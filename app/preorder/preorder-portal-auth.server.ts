@@ -42,9 +42,22 @@ export async function requirePreorderPortalUser(request: Request): Promise<Porta
 
 export function requireSameOrigin(request: Request) {
   const origin = request.headers.get("origin");
-  if (!origin) return;
-  const requestOrigin = new URL(request.url).origin;
-  if (origin !== requestOrigin) {
+  if (!origin) return; // non-browser / same-origin navigations omit Origin
+  // Compare HOST only, honouring the proxy's forwarded host. Behind Railway,
+  // TLS terminates at the edge so request.url is often http:// with an internal
+  // host, which made a full-origin (protocol+host) comparison wrongly 403 every
+  // POST (e.g. "could not save preorder location"). Host-matching still blocks
+  // genuine cross-site POSTs.
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host;
+  } catch {
+    throw new Response("Invalid origin", { status: 403 });
+  }
+  const host = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim()
+    || request.headers.get("host")
+    || new URL(request.url).host;
+  if (originHost !== host) {
     throw new Response("Invalid origin", { status: 403 });
   }
 }
