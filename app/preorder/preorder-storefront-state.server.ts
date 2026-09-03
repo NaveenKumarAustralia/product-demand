@@ -38,7 +38,7 @@ async function getOfflineSession(shop: string) {
   return session.accessToken;
 }
 
-async function getPhysicalAvailable(shop: string, accessToken: string, variantId: string, locationId: string) {
+async function getPhysicalAvailable(shop: string, accessToken: string, variantId: string, locationId: string | null) {
   const response = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
     method: "POST",
     headers: {
@@ -83,7 +83,10 @@ async function getPhysicalAvailable(shop: string, accessToken: string, variantId
 
   let available = 0;
   for (const level of json.data?.productVariant?.inventoryItem?.inventoryLevels?.nodes ?? []) {
-    if (level.location?.id !== locationId) continue;
+    // locationId null = sum EVERY location (total available). Used for markets
+    // with no configured preorder location, to still tell in-stock from
+    // out-of-stock for the notify-me fallback.
+    if (locationId && level.location?.id !== locationId) continue;
     for (const quantity of level.quantities ?? []) {
       if (quantity.name === "available" && Number.isFinite(Number(quantity.quantity))) available += Number(quantity.quantity);
     }
@@ -115,20 +118,36 @@ export async function getStorefrontPreorderState(input: {
   const locations = await getPreorderLocationSettings();
   const locationId = normalizeLocationId(locations[input.market]);
   if (!locationId) {
-    // This market isn't live (no fulfilment location — e.g. USA before its 3PL
-    // is set up). We can't read stock for a market we don't ship from, so the
-    // block must do NOTHING here. Return a state that HIDES the block. We use
-    // in_stock because the block JS already deployed to the storefront hides on
-    // in_stock (it only reveals for preorder/notify_me otherwise) — so this
-    // fixes the "every US variant shows notify, even in-stock ones" bug
-    // instantly via the server, with no theme redeploy required.
-    return {
-      ok: false as const,
-      reason: "location_not_configured" as const,
-      market: input.market,
-      variantId,
-      state: { state: "in_stock" as const, physicalAvailable: 0 },
-    };
+    // This market has no preorder fulfilment location (e.g. USA before its 3PL
+    // is set up), so PRE-ORDER isn't possible here. But we still want the
+    // notify-me fallback for genuinely out-of-stock variants, everywhere. With
+    // no market location to scope to, judge stock by TOTAL available across all
+    // locations: in stock -> hide (normal buy button); out of stock -> notify_me.
+    // (Both states are handled by the already-deployed block JS, so no theme
+    // redeploy is needed.) The earlier bug returned notify_me WITHOUT checking
+    // stock, so it showed on in-stock US variants too.
+    try {
+      const accessToken = await getOfflineSession(shop);
+      const totalAvailable = await getPhysicalAvailable(shop, accessToken, variantId, null);
+      return {
+        ok: true as const,
+        market: input.market,
+        variantId,
+        locationId: null,
+        state: resolveStorefrontVariantState({ market: input.market, physicalAvailable: totalAvailable, candidates: [] }),
+      };
+    } catch (error) {
+      console.warn("[preorder storefront] inventory check failed for unconfigured market:", error);
+      // If we can't read inventory, hide rather than risk showing notify on an
+      // in-stock item (which was the reported bug).
+      return {
+        ok: false as const,
+        reason: "location_not_configured" as const,
+        market: input.market,
+        variantId,
+        state: { state: "in_stock" as const, physicalAvailable: 0 },
+      };
+    }
   }
 
   const [accessToken, orders, registryEntries] = await Promise.all([
