@@ -65,6 +65,33 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return Response.json({ ok: true, result });
     }
 
+    // One-click flow for the per-row Status-cell control: set the customer
+    // dispatch date, enable, and go live on Shopify in a single manage action.
+    // If activation fails, roll the enable back so a row can never show "live"
+    // without an actual Shopify selling plan behind it.
+    if (operation === "row-enable") {
+      const shipDate = parseOptionalDate(payload.shipDate);
+      const setting = await setPreorderBatchEnabled({ supplierOrderId, enabled: true, shipDate, actor, permissions });
+      try {
+        await activatePreorderSellingPlan({ supplierOrderId, actor, permissions });
+      } catch (error) {
+        await setPreorderBatchEnabled({ supplierOrderId, enabled: false, actor, permissions }).catch(() => undefined);
+        throw error;
+      }
+      return Response.json({
+        ok: true,
+        state: { enabled: true, activated: true, shipDate: setting.shipDate?.toISOString() ?? null },
+      });
+    }
+
+    // One-click "turn off" for the per-row control: remove the Shopify selling
+    // plan first (so a pause can never leave a live purchase option), then pause.
+    if (operation === "row-disable") {
+      await deactivatePreorderSellingPlan({ supplierOrderId, actor, permissions });
+      await setPreorderBatchEnabled({ supplierOrderId, enabled: false, actor, permissions });
+      return Response.json({ ok: true, state: { enabled: false, activated: false, shipDate: null } });
+    }
+
     if (operation === "remove-shopify") {
       const result = await deactivatePreorderSellingPlan({ supplierOrderId, actor, permissions });
       return Response.json({ ok: true, result });

@@ -2,6 +2,18 @@ export const PREORDER_STATUS_ON_PRODUCTION = "on_production";
 export const PREORDER_DESTINATION_AU = "send_to_au";
 export const PREORDER_DESTINATION_USA = "send_to_usa";
 
+// Preorder is for products that are committed/incoming but not yet sellable as
+// in-stock. Any production-lifecycle status qualifies EXCEPT "on_order" (not yet
+// committed to production) and "cancelled". A denylist (rather than an allowlist)
+// keeps custom statuses a merchant adds (e.g. "arrived_in_au") preorder-capable;
+// the storefront's own physical-stock check hides preorder the moment real stock
+// lands at the fulfilment location, so allowing later statuses stays safe.
+const PREORDER_INELIGIBLE_STATUSES = new Set(["", "on_order", "cancelled"]);
+export function isPreorderEligibleStatus(status?: string | null): boolean {
+  const value = String(status ?? "").trim();
+  return value.length > 0 && !PREORDER_INELIGIBLE_STATUSES.has(value);
+}
+
 export type PreorderMarket = "AU" | "USA";
 
 export type PreorderEligibilityInput = {
@@ -23,7 +35,7 @@ export function marketFromDestination(destination?: string | null): PreorderMark
 }
 
 export function getPreorderEligibility(input: PreorderEligibilityInput): PreorderEligibilityResult {
-  if (input.supplierStatus !== PREORDER_STATUS_ON_PRODUCTION) {
+  if (!isPreorderEligibleStatus(input.supplierStatus)) {
     return { eligible: false, market: marketFromDestination(input.destination), reason: "not_on_production" };
   }
 

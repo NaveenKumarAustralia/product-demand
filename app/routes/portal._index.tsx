@@ -10,6 +10,8 @@ import { randomUUID } from "node:crypto";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { PreordersDashboard } from "../portal-preorders";
 import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server";
+import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
+import { marketFromDestination } from "../preorder/preorder-rules.server";
 import { unauthenticated } from "../shopify.server";
 import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
 
@@ -1028,9 +1030,38 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const kb = (v: unknown) => { try { return Math.round(JSON.stringify(v).length / 1024); } catch { return -1; } };
     return { page, total, base, lists, rest, sizeKB: { productInfo: kb(productInfo), collections: kb(collections), photoShoots: kb(photoShoots), fabricSheets: kb(fabricSheets), settings: kb(settingsRows), activityLogs: kb(activityLogs) } };
   })() : undefined;
+
+  // Per-row preorder state for the restock table's Status-cell control: is a
+  // preorder enabled, is it live on Shopify (selling-plan registry), the
+  // customer dispatch date, and which market the destination maps to. Two cheap
+  // lookups keyed by the order (batch) id; only for the restock page.
+  const preorderByOrderId: Record<number, { enabled: boolean; activated: boolean; shipDate: string | null; market: "AU" | "USA" | null }> = {};
+  if (isRestockPage && orders.length) {
+    const orderIds = orders.map((o) => o.id);
+    const [batchSettings, registryEntries] = await Promise.all([
+      prisma.preorderBatchSetting.findMany({
+        where: { supplierOrderId: { in: orderIds } },
+        select: { supplierOrderId: true, enabled: true, shipDate: true },
+      }),
+      getPreorderSellingPlanRegistryEntries(orders[0]?.shop),
+    ]);
+    const settingById = new Map(batchSettings.map((setting) => [setting.supplierOrderId, setting]));
+    const activatedIds = new Set(registryEntries.map((entry) => entry.supplierOrderId));
+    for (const order of orders) {
+      const setting = settingById.get(order.id);
+      preorderByOrderId[order.id] = {
+        enabled: setting?.enabled === true,
+        activated: activatedIds.has(order.id),
+        shipDate: setting?.shipDate ? setting.shipDate.toISOString() : null,
+        market: marketFromDestination(order.destination),
+      };
+    }
+  }
+
   return {
     perf,
     orders,
+    preorderByOrderId,
     sizes: allSizes,
     productGroups,
     selectedProductGroup,
@@ -10816,6 +10847,7 @@ export default function PortalDashboard() {
     restockProductResults,
     users,
     currentUser,
+    preorderByOrderId,
     activeUsers,
     messages,
     allNotes,
@@ -11077,6 +11109,12 @@ export default function PortalDashboard() {
   }, [searchTitleInput, isSearchFocused, page]);
   const restockSearch = page === "restock" ? searchTitleInput.trim().toLowerCase() : "";
   const usaSearch = page === "usa-stock" ? searchTitleInput.trim().toLowerCase() : "";
+  // Who may see the per-row "Enable pre-order" control: portal admins/superadmins
+  // or anyone the superadmin gave the preorder "manage" permission. Everyone else
+  // never sees the button (server re-checks on every action — UI is not security).
+  const canManagePreorder = Boolean(
+    currentUser && (currentUser.admin === true || currentUser.role === "superadmin" || currentUser.preorderAccess?.manage === true),
+  );
   const visibleOrders = page === "restock" && restockSearch
     ? localRestockOrders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
     : localRestockOrders;
@@ -11796,6 +11834,8 @@ export default function PortalDashboard() {
                     allFabrics={allFabrics}
                     onSplit={splitRestockOrder}
                     celebrating={celebrateRows.has(order.id)}
+                    canManagePreorder={canManagePreorder}
+                    preorder={preorderByOrderId?.[order.id]}
                   />
                   );
                 })}
@@ -26545,6 +26585,8 @@ function OrderRow({
   allFabrics,
   onSplit,
   celebrating,
+  canManagePreorder,
+  preorder,
 }: {
   order: Order;
   rowIndex: number;
@@ -26568,6 +26610,8 @@ function OrderRow({
   allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
   onSplit?: (orderId: number, destination: string, qtys: Record<string, number>) => void;
   celebrating?: boolean;
+  canManagePreorder?: boolean;
+  preorder?: { enabled: boolean; activated: boolean; shipDate: string | null; market: "AU" | "USA" | null };
 }) {
   const fetcher = useFetcher();
   const trRef = useRef<HTMLTableRowElement | null>(null);
@@ -26653,6 +26697,13 @@ function OrderRow({
   // when scanning the table.
   const destinationStamp = destinationStampStyle(destinationLocal, restockSettings.destinationOptions);
   const destinationRowBg = destinationStamp ? { background: destinationStamp.rowBg } : undefined;
+  // Preorder enabled state is lifted to the row so turning it on/off in the
+  // Status cell instantly locks BOTH the Status and Destination chips (a sibling
+  // cell) — protecting a live preorder from an accidental status/destination edit
+  // that would break eligibility. Re-syncs if the loader value changes.
+  const [preorderEnabledLocal, setPreorderEnabledLocal] = useState(Boolean(preorder?.enabled));
+  useEffect(() => { setPreorderEnabledLocal(Boolean(preorder?.enabled)); }, [preorder?.enabled]);
+  const preorderMarket = destinationLocal === "send_to_au" ? "AU" : destinationLocal === "send_to_usa" ? "USA" : null;
   return (
     <>
       {celebrating && <RowFireworks anchorRef={trRef} />}
@@ -26804,7 +26855,7 @@ function OrderRow({
         </Td>
 
         {/* Status */}
-        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} linkedPackingListId={order.packingListId ?? null} openPackingLists={openPackingLists} /></Td>
+        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} linkedPackingListId={order.packingListId ?? null} openPackingLists={openPackingLists} canManagePreorder={canManagePreorder} preorderMarket={preorderMarket} preorderActivated={preorder?.activated ?? false} preorderShipDate={preorder?.shipDate ?? null} preorderEnabled={preorderEnabledLocal} onPreorderEnabledChange={setPreorderEnabledLocal} productTitle={order.productTitle} orderEta={order.eta ?? null} /></Td>
 
         {/* Notes (from order) */}
         <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle} style={{ height: 1, padding: 0, position: "relative", verticalAlign: "top" }}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
@@ -26817,7 +26868,7 @@ function OrderRow({
 
         {/* Destination — keep at factory in India vs send to AU */}
         <Td rowIndex={rowIndex} colIndex={destinationCol} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Destination" historyEntityName={order.productTitle}>
-          <DestinationCell orderId={order.id} value={destinationLocal} restockSettings={restockSettings} onChange={setDestinationLocal} />
+          <DestinationCell orderId={order.id} value={destinationLocal} restockSettings={restockSettings} onChange={setDestinationLocal} locked={preorderEnabledLocal} />
         </Td>
 
         {/* Cost in rupees — derived from the matching Product Info style.
@@ -27452,12 +27503,18 @@ function DestinationCell({
   value,
   restockSettings,
   onChange,
+  locked = false,
 }: {
   orderId: number;
   value: string;
   restockSettings: RestockSettings;
   onChange?: (next: string) => void;
+  locked?: boolean;
 }) {
+  // Locked while a preorder is live on this batch — changing the destination
+  // would move it to a different market (or off preorder entirely) under
+  // customers who have already reserved. Turn the preorder off to edit.
+  if (locked) return <LockedPreorderChip label={labelForOption(restockSettings.destinationOptions, value)} />;
   return (
     <RestockOptionChipDropdown
       orderId={orderId}
@@ -27474,6 +27531,25 @@ function DestinationCell({
   );
 }
 
+// Read-only chip shown in place of the Status / Destination dropdown while a
+// preorder is enabled, so neither can be edited out from under live customers.
+function LockedPreorderChip({ label }: { label: string }) {
+  return (
+    <span
+      title="Locked while pre-order is on. Turn pre-order off to change this."
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 4, maxWidth: "100%",
+        fontSize: 12, fontWeight: 600, color: "#3f3f46",
+        background: "#f4f4f5", border: "1px dashed #a1a1aa", borderRadius: 6,
+        padding: "3px 8px", cursor: "not-allowed", whiteSpace: "nowrap",
+      }}
+    >
+      <span aria-hidden>🔒</span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{label || "—"}</span>
+    </span>
+  );
+}
+
 function StatusCell({
   orderId,
   value,
@@ -27481,6 +27557,14 @@ function StatusCell({
   packingListBadges,
   linkedPackingListId,
   openPackingLists,
+  canManagePreorder = false,
+  preorderMarket = null,
+  preorderEnabled = false,
+  preorderActivated = false,
+  preorderShipDate = null,
+  onPreorderEnabledChange,
+  productTitle = "",
+  orderEta = null,
 }: {
   orderId: number;
   value: string;
@@ -27488,6 +27572,14 @@ function StatusCell({
   packingListBadges: PackingListBadge[];
   linkedPackingListId: number | null;
   openPackingLists: PackingListBadge[];
+  canManagePreorder?: boolean;
+  preorderMarket?: "AU" | "USA" | null;
+  preorderEnabled?: boolean;
+  preorderActivated?: boolean;
+  preorderShipDate?: string | null;
+  onPreorderEnabledChange?: (enabled: boolean) => void;
+  productTitle?: string;
+  orderEta?: string | null;
 }) {
   const linkFetcher = useFetcher();
   // Track the chip's selected status locally so the packing list picker
@@ -27522,19 +27614,28 @@ function StatusCell({
       { label: "Undo packing list link", fields: { intent: "update_packing_list_link", orderId, value: linkLocal === null ? "" : String(linkLocal) } },
     );
   };
+  // The button appears once a destination (market) is set AND the status is a
+  // production status — i.e. anything except On Order / Cancelled. Blank status
+  // or On Order shows nothing, matching the merchant's rule.
+  const statusIsPreorderable = Boolean(statusLocal) && statusLocal !== "on_order" && statusLocal !== "cancelled";
+  const showPreorderButton = canManagePreorder && Boolean(preorderMarket) && statusIsPreorderable;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
-      <RestockOptionChipDropdown
-        orderId={orderId}
-        value={statusLocal}
-        options={restockSettings.statusOptions}
-        optionKind="statusOptions"
-        restockSettings={restockSettings}
-        updateIntent="update_status"
-        undoLabel="Undo status"
-        onChange={setStatusLocal}
-        controlled
-      />
+      {preorderEnabled ? (
+        <LockedPreorderChip label={labelForOption(restockSettings.statusOptions, statusLocal)} />
+      ) : (
+        <RestockOptionChipDropdown
+          orderId={orderId}
+          value={statusLocal}
+          options={restockSettings.statusOptions}
+          optionKind="statusOptions"
+          restockSettings={restockSettings}
+          updateIntent="update_status"
+          undoLabel="Undo status"
+          onChange={setStatusLocal}
+          controlled
+        />
+      )}
       {showLinkUI && (
         linkedBadge ? (
           <div style={{ display: "flex", gap: 4, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
@@ -27593,7 +27694,177 @@ function StatusCell({
           </select>
         )
       )}
+      {showPreorderButton && (
+        <PreorderRowControl
+          orderId={orderId}
+          productTitle={productTitle}
+          market={preorderMarket as "AU" | "USA"}
+          enabled={preorderEnabled}
+          activated={preorderActivated}
+          shipDate={preorderShipDate}
+          etaFallback={orderEta}
+          onEnabledChange={(next) => onPreorderEnabledChange?.(next)}
+        />
+      )}
     </div>
+  );
+}
+
+// Per-row pre-order control pinned to the bottom of the Status cell. Orange when
+// off, green with a ✓ when a pre-order is live. Opens a popup to pick the
+// customer dispatch date and enable/turn off — a single manage action that sets
+// the date, enables the batch, and creates/removes the Shopify selling plan via
+// /api/preorder-manage (a resource route that returns raw JSON).
+function PreorderRowControl({
+  orderId,
+  productTitle,
+  market,
+  enabled,
+  activated,
+  shipDate,
+  etaFallback,
+  onEnabledChange,
+}: {
+  orderId: number;
+  productTitle: string;
+  market: "AU" | "USA";
+  enabled: boolean;
+  activated: boolean;
+  shipDate: string | null;
+  etaFallback: string | null;
+  onEnabledChange: (enabled: boolean) => void;
+}) {
+  const isoToInputDate = (value: string | null) => {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toISOString().slice(0, 10);
+  };
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [enabledLocal, setEnabledLocal] = useState(enabled);
+  const [shipDateLocal, setShipDateLocal] = useState<string | null>(shipDate);
+  const [dateInput, setDateInput] = useState(() => isoToInputDate(shipDate) || isoToInputDate(etaFallback));
+  useEffect(() => { setEnabledLocal(enabled); }, [enabled]);
+  useEffect(() => { setShipDateLocal(shipDate); if (shipDate) setDateInput(isoToInputDate(shipDate)); }, [shipDate]);
+
+  const call = async (operation: "row-enable" | "row-disable", body: Record<string, unknown> = {}) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/preorder-manage", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation, supplierOrderId: orderId, ...body }),
+      });
+      const json = await response.json().catch(() => ({}));
+      if (!response.ok || json?.ok !== true) throw new Error(json?.error || "Could not update pre-order.");
+      const next = Boolean(json.state?.enabled);
+      setEnabledLocal(next);
+      setShipDateLocal(json.state?.shipDate ?? null);
+      onEnabledChange(next);
+      if (!next) setOpen(false);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update pre-order.");
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const enable = async () => {
+    if (!dateInput) { setError("Choose a customer dispatch date first."); return; }
+    const ok = await call("row-enable", { shipDate: dateInput });
+    if (ok) setOpen(false);
+  };
+
+  const prettyDate = (value: string | null) => {
+    if (!value) return "date to be confirmed";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "date to be confirmed";
+    return new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" }).format(date);
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => { setOpen(true); setError(null); }}
+        title={enabledLocal ? `Pre-order live for ${market} — dispatch ${prettyDate(shipDateLocal)}` : `Enable ${market} pre-order for this batch`}
+        style={{
+          marginTop: 2, width: "100%", border: "none", borderRadius: 6, padding: "4px 6px",
+          fontSize: 11, fontWeight: 700, cursor: "pointer", lineHeight: 1.2, color: "#fff",
+          background: enabledLocal ? "#16a34a" : "#ea580c",
+        }}
+      >
+        {enabledLocal ? `✓ Pre-order ${market}` : `Enable pre-order`}
+      </button>
+      {open && typeof document !== "undefined" && createPortal(
+        <div
+          onMouseDown={() => setOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.45)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+        >
+          <div
+            onMouseDown={(event) => event.stopPropagation()}
+            style={{ width: 360, maxWidth: "100%", background: "#fff", borderRadius: 12, boxShadow: "0 20px 50px rgba(0,0,0,0.25)", padding: 18, display: "flex", flexDirection: "column", gap: 12 }}
+          >
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: enabledLocal ? "#16a34a" : "#ea580c" }}>
+                {market} pre-order {enabledLocal ? "· live" : ""}
+              </span>
+              <strong style={{ fontSize: 15, color: "#111827" }}>{productTitle || "This product"}</strong>
+            </div>
+
+            <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, fontWeight: 600, color: "#374151" }}>
+              Customer dispatch date
+              <input
+                type="date"
+                value={dateInput}
+                onChange={(event) => setDateInput(event.currentTarget.value)}
+                style={{ fontSize: 14, padding: "8px 10px", border: "1px solid #d1d5db", borderRadius: 8, color: "#111827" }}
+              />
+              <span style={{ fontSize: 11, fontWeight: 400, color: "#6b7280" }}>Shown to customers as the expected dispatch date.</span>
+            </label>
+
+            {error && <div style={{ fontSize: 12, color: "#b91c1c", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 8, padding: "6px 8px" }}>{error}</div>}
+
+            {enabledLocal && (
+              <div style={{ fontSize: 12, color: "#166534", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 8, padding: "6px 8px" }}>
+                ● Live now for {market} customers · dispatch {prettyDate(shipDateLocal)}. Status &amp; destination are locked until you turn this off.
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button type="button" onClick={() => setOpen(false)} disabled={busy}
+                style={{ fontSize: 13, fontWeight: 600, padding: "8px 12px", borderRadius: 8, border: "1px solid #d1d5db", background: "#fff", color: "#374151", cursor: "pointer" }}>
+                Close
+              </button>
+              {enabledLocal ? (
+                <>
+                  <button type="button" onClick={enable} disabled={busy}
+                    style={{ fontSize: 13, fontWeight: 700, padding: "8px 12px", borderRadius: 8, border: "none", background: "#0e7490", color: "#fff", cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+                    {busy ? "Saving…" : "Update date"}
+                  </button>
+                  <button type="button" onClick={() => call("row-disable")} disabled={busy}
+                    style={{ fontSize: 13, fontWeight: 700, padding: "8px 12px", borderRadius: 8, border: "none", background: "#b91c1c", color: "#fff", cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+                    {busy ? "…" : "Turn off"}
+                  </button>
+                </>
+              ) : (
+                <button type="button" onClick={enable} disabled={busy}
+                  style={{ fontSize: 13, fontWeight: 700, padding: "8px 12px", borderRadius: 8, border: "none", background: "#16a34a", color: "#fff", cursor: "pointer", opacity: busy ? 0.6 : 1 }}>
+                  {busy ? "Enabling…" : "Enable pre-order"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 

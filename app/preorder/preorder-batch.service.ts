@@ -28,6 +28,11 @@ export type SetPreorderEnabledInput = {
   actor: PortalMessageUser;
   permissions: PreorderPermissionSettings;
   pausedReason?: string | null;
+  // Optional customer dispatch date to store alongside enabling. Lets the
+  // per-row "Enable pre-order" control set the date and enable in one manage
+  // action (a manager doesn't need the separate ship-date permission just to
+  // turn a preorder on with its promised date).
+  shipDate?: Date | null;
 };
 
 export type UpdatePreorderBatchSettingsInput = {
@@ -106,12 +111,16 @@ export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
     if (!eligibility.eligible) {
       throw new PreorderEligibilityError(
         eligibility.reason === "not_on_production"
-          ? "Batch must be On Production before preorder can be enabled."
+          ? "Set the batch to a production status (On Production, Ready or In Shipment) before enabling preorder."
           : "Batch must be assigned to the AUS or USA destination before preorder can be enabled.",
       );
     }
   }
 
+  // Only touch shipDate when the caller explicitly passed one (undefined = leave
+  // the existing date as-is; null = clear it). Enabling with a date is one atomic
+  // manage action for the per-row control.
+  const hasShipDate = Object.prototype.hasOwnProperty.call(input, "shipDate");
   const now = new Date();
   const setting = await prisma.preorderBatchSetting.upsert({
     where: { supplierOrderId: order.id },
@@ -120,6 +129,7 @@ export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
       shop: order.shop,
       enabled: input.enabled,
       pausedReason: input.enabled ? null : (input.pausedReason?.trim() || null),
+      ...(hasShipDate ? { shipDate: input.shipDate ?? null } : {}),
       enabledByUserId: input.enabled ? input.actor.id : null,
       enabledByUserName: input.enabled ? input.actor.name : null,
       enabledAt: input.enabled ? now : null,
@@ -129,6 +139,7 @@ export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
     update: {
       enabled: input.enabled,
       pausedReason: input.enabled ? null : (input.pausedReason?.trim() || null),
+      ...(hasShipDate ? { shipDate: input.shipDate ?? null } : {}),
       ...(input.enabled
         ? {
             enabledByUserId: input.actor.id,

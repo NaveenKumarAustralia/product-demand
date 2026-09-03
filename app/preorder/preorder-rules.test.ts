@@ -44,6 +44,21 @@ test("requires on-production status, valid destination and explicit enable", () 
   );
 });
 
+test("later production statuses (ready, in shipment, custom) are preorder-eligible; on_order/cancelled are not", () => {
+  for (const supplierStatus of ["ready", "in_shipment", "arrived_in_au"]) {
+    assert.equal(
+      getPreorderEligibility({ supplierStatus, destination: PREORDER_DESTINATION_AU, preorderEnabled: true }).eligible,
+      true,
+      `${supplierStatus} should be eligible`,
+    );
+  }
+  for (const supplierStatus of ["on_order", "cancelled", ""]) {
+    const result = getPreorderEligibility({ supplierStatus, destination: PREORDER_DESTINATION_AU, preorderEnabled: true });
+    assert.equal(result.eligible, false, `${supplierStatus || "(blank)"} should not be eligible`);
+    assert.equal(result.reason, "not_on_production");
+  }
+});
+
 test("100 incoming with 5 percent safety produces 95 preorder capacity", () => {
   assert.deepEqual(
     calculatePreorderCapacity({
