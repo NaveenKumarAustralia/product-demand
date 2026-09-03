@@ -9716,7 +9716,7 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
   const wMm = setup.wMm, hMm = setup.hMm, gapMm = setup.gapMm;
   const pageW = across * wMm + (across - 1) * gapMm;
   const bcW = Math.max(10, wMm - 4);
-  const bcH = Math.max(6, Math.min(hMm * 0.5, 13));
+  const bcH = Math.max(5, Math.min(hMm * 0.5, 13) * 0.7);
   const labels: string[] = [];
   for (const it of items) {
     const n = Math.max(0, Math.floor(it.count) || 0);
@@ -9746,11 +9746,11 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
     .row:last-child{page-break-after:auto;}
     .gap{width:${gapMm}mm;flex:0 0 ${gapMm}mm;}
     .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:1.2mm 1mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;}
-    .pname{font-size:10.5pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;line-height:1.1;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;word-break:break-word;}
+    .pname{font-size:8.5pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;line-height:1.2;padding-top:0.3mm;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;word-break:break-word;}
     .sku{font-size:7.5pt;font-weight:700;text-align:center;line-height:1.15;}
     .bc{line-height:0;margin-top:0.4mm;} .bc svg{display:block;shape-rendering:crispEdges;}
     .bc svg rect{fill:#000;}
-    .code{font-size:8pt;letter-spacing:1px;font-family:'Courier New',monospace;line-height:1.15;color:#000;}
+    .code{font-size:9pt;font-weight:700;letter-spacing:0.5px;font-family:'Courier New',monospace;line-height:1.2;color:#000;}
   </style></head><body>${rows.join("")}</body></html>`;
   const iframe = document.createElement("iframe");
   iframe.setAttribute("aria-hidden", "true");
