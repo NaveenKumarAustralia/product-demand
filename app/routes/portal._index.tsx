@@ -9745,7 +9745,7 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
     .row{display:flex;width:${pageW}mm;height:${hMm}mm;page-break-after:always;}
     .row:last-child{page-break-after:auto;}
     .gap{width:${gapMm}mm;flex:0 0 ${gapMm}mm;}
-    .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:1.2mm 1mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;}
+    .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:1.2mm 2mm 1.2mm 0mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;}
     .pname{font-size:8.5pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;line-height:1.2;padding-top:0.3mm;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;word-break:break-word;}
     .sku{font-size:7.5pt;font-weight:700;text-align:center;line-height:1.15;}
     .bc{line-height:0;margin-top:0.4mm;} .bc svg{display:block;shape-rendering:crispEdges;}
