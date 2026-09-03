@@ -62,19 +62,27 @@ export function PreorderActivationReadinessPanel({ configuration }: { configurat
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/preorder-shopify-readiness", { credentials: "same-origin" }).then((r) => r.json()).then((d: { ok?: boolean; error?: string; shops?: Array<{ ready?: boolean; missingScopes?: string[] }> }) => {
+    fetch("/api/preorder-shopify-readiness", { credentials: "same-origin" }).then((r) => r.json()).then((d: { ok?: boolean; error?: string; shops?: Array<{ shop?: string; ok?: boolean; ready?: boolean; error?: string; missingScopes?: string[] }> }) => {
       if (cancelled) return;
       if (!d?.ok) { setScopes({ status: "error", detail: d?.error || "Could not check scopes." }); return; }
       const shops = d.shops ?? [];
-      const ready = shops.length > 0 && shops.every((sh) => sh.ready);
+      if (!shops.length) { setScopes({ status: "fail", detail: "No linked Shopify shop found to check scopes against." }); return; }
+      const errored = shops.find((sh) => sh.ok === false);
+      if (errored) { setScopes({ status: "error", detail: `Scope query failed for ${errored.shop || "shop"}: ${errored.error || "Shopify rejected the request"} — usually a stale offline token; re-auth at /force-auth?force=1.` }); return; }
+      const ready = shops.every((sh) => sh.ready);
       const missing = Array.from(new Set(shops.flatMap((sh) => sh.missingScopes ?? [])));
-      setScopes(ready ? { status: "ok", detail: "All required Shopify scopes granted." } : { status: "fail", detail: `Missing scopes: ${missing.join(", ") || "some required scopes"} — approve in the dev dashboard + update Railway SCOPES, then re-auth.` });
+      setScopes(ready ? { status: "ok", detail: "All required Shopify scopes granted on the install." } : { status: "fail", detail: missing.length ? `Declared but NOT granted on the install yet: ${missing.join(", ")}. Re-consent at /force-auth?force=1.` : "Some required scopes aren't granted on the install — re-consent at /force-auth?force=1." });
     }).catch(() => { if (!cancelled) setScopes({ status: "error", detail: "Network error checking scopes." }); });
 
-    fetch("/api/preorder-webhook-status", { credentials: "same-origin" }).then((r) => r.json()).then((d: { ok?: boolean; healthy?: boolean; error?: string }) => {
+    fetch("/api/preorder-webhook-status", { credentials: "same-origin" }).then((r) => r.json()).then((d: { ok?: boolean; healthy?: boolean; error?: string; shops?: Array<{ shop?: string; ok?: boolean; error?: string; subscriptions?: Array<{ label?: string; registered?: boolean }> }> }) => {
       if (cancelled) return;
       if (!d?.ok) { setWebhooks({ status: "error", detail: d?.error || "Could not check webhooks." }); return; }
-      setWebhooks(d.healthy ? { status: "ok", detail: "Order create / cancel / fulfilled webhooks registered." } : { status: "fail", detail: "Some order webhooks are not registered." });
+      const shops = d.shops ?? [];
+      const errored = shops.find((sh) => sh.ok === false);
+      if (errored) { setWebhooks({ status: "error", detail: `Webhook query failed for ${errored.shop || "shop"}: ${errored.error || "Shopify rejected the request"} — usually a stale offline token; re-auth at /force-auth?force=1.` }); return; }
+      if (d.healthy) { setWebhooks({ status: "ok", detail: "Order create / cancel / fulfilled webhooks registered." }); return; }
+      const missing = shops.flatMap((sh) => (sh.subscriptions ?? []).filter((x) => !x.registered).map((x) => x.label ?? "")).filter(Boolean);
+      setWebhooks({ status: "fail", detail: missing.length ? `Not registered: ${missing.join(", ")}. A redeploy re-runs registration; re-auth then reload.` : "Some order webhooks are not registered." });
     }).catch(() => { if (!cancelled) setWebhooks({ status: "error", detail: "Network error checking webhooks." }); });
 
     fetch("/api/preorder-klaviyo-status", { credentials: "same-origin" }).then((r) => r.json()).then((d: { ok?: boolean; configured?: boolean }) => {
