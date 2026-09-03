@@ -5,7 +5,12 @@ import {
   type PortalMessageUser,
 } from "../portal-messages.server";
 
-export const PORTAL_USER_COOKIE = "portal_user_id";
+// MUST match the cookie the main Production Portal login sets
+// (portal._index.tsx → PORTAL_USER_COOKIE = "supplier_portal_user"). It was
+// "portal_user_id", which is set nowhere, so every /api/preorder-* call 401'd
+// for the logged-in portal user (readiness panel showed "Network error", and
+// all preorder admin actions silently failed auth).
+export const PORTAL_USER_COOKIE = "supplier_portal_user";
 
 function getCookieValue(request: Request, name: string): string | null {
   const cookie = request.headers.get("cookie") ?? "";
