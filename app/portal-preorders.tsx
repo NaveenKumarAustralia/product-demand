@@ -190,7 +190,10 @@ export function PreordersDashboard({ data }: Props) {
       ) : tab === "orders" ? (
         <PreorderCustomerOrdersPanel orders={data.customerOrders} />
       ) : tab === "waitlist" ? (
-        <PreorderWaitlistPanel />
+        <>
+          <NotifyBlockToggle enabled={data.configuration.notifyBlockEnabled} />
+          <PreorderWaitlistPanel />
+        </>
       ) : tab === "notifications" ? (
         <PreorderNotificationsPanel />
       ) : tab === "reports" ? (
@@ -280,6 +283,63 @@ function BatchControls({
         <div style={s.controlHint}>To enable, this production batch must be <strong>On Production</strong> and assigned to <strong>Send to AUS</strong> or <strong>Send to USA</strong>.</div>
       ) : null}
       {batch.pausedReason ? <div style={s.controlHint}>Paused reason: {batch.pausedReason}</div> : null}
+    </div>
+  );
+}
+
+function NotifyBlockToggle({ enabled }: { enabled: boolean }) {
+  const [on, setOn] = useState(enabled);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async () => {
+    const next = !on;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/preorder-manage", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation: "set-notify-enabled", enabled: next }),
+      });
+      const result = await response.json().catch(() => ({})) as { ok?: boolean; error?: string; notifyBlockEnabled?: boolean };
+      if (!response.ok || result.ok !== true) throw new Error(result.error || "Could not update the notify-me block.");
+      setOn(result.notifyBlockEnabled ?? next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update the notify-me block.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, marginBottom: 16, background: "#fff", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+      <div style={{ maxWidth: 620 }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "#0f172a" }}>Storefront “Notify me” block</div>
+        <div style={{ fontSize: 13, color: "#64748b", marginTop: 4 }}>
+          Shows a “Notify me when available” form on out-of-stock variants. Turn this <strong>off</strong> if another
+          back-in-stock app is running, so customers don’t see two forms. <strong>Pre-order is unaffected</strong> — only the
+          notify-me fallback is hidden.
+        </div>
+        {error ? <div style={{ fontSize: 12, color: "#b91c1c", marginTop: 6 }}>{error}</div> : null}
+      </div>
+      <button
+        type="button"
+        onClick={toggle}
+        disabled={busy}
+        aria-pressed={on}
+        title={on ? "Notify-me block is ON — click to turn off" : "Notify-me block is OFF — click to turn on"}
+        style={{
+          flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 8,
+          border: "none", borderRadius: 999, padding: "8px 16px", cursor: busy ? "default" : "pointer",
+          fontSize: 13, fontWeight: 700, color: "#fff", opacity: busy ? 0.6 : 1,
+          background: on ? "#16a34a" : "#9ca3af",
+        }}
+      >
+        <span style={{ width: 8, height: 8, borderRadius: 999, background: "#fff" }} />
+        {busy ? "Saving…" : on ? "ON — showing notify-me" : "OFF — hidden"}
+      </button>
     </div>
   );
 }

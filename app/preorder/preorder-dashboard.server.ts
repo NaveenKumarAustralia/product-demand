@@ -1,5 +1,6 @@
 import prisma from "../db.server";
 import { getPreorderLocationSettings } from "./preorder-locations.server";
+import { getPreorderNotifyEnabled } from "./preorder-storefront-settings.server";
 import { getPreorderPermissionContext } from "./preorder-permissions.server";
 import { calculatePreorderCapacity, getPreorderEligibility } from "./preorder-rules.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
@@ -69,6 +70,7 @@ export type PreorderDashboardData = {
   customerOrders: PreorderDashboardCustomerOrder[];
   configuration: {
     locations: { AU: string | null; USA: string | null };
+    notifyBlockEnabled: boolean;
     users: Array<{ id: string; name: string; admin: boolean }>;
     permissions: {
       managePreorderUserIds: string[];
@@ -118,7 +120,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
   });
 
   const orderIds = orders.map((order) => order.id);
-  const [settings, reservations, permissionContext, locations, sellingPlanEntries] = await Promise.all([
+  const [settings, reservations, permissionContext, locations, sellingPlanEntries, notifyBlockEnabled] = await Promise.all([
     orderIds.length
       ? prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: orderIds } } })
       : Promise.resolve([]),
@@ -132,6 +134,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
     getPreorderPermissionContext(),
     getPreorderLocationSettings(),
     getPreorderSellingPlanRegistryEntries(),
+    getPreorderNotifyEnabled(),
   ]);
   const byOrder = new Map(settings.map((setting) => [setting.supplierOrderId, setting]));
   const sellingPlanByOrder = new Map(sellingPlanEntries.map((entry) => [entry.supplierOrderId, entry]));
@@ -238,6 +241,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
     customerOrders,
     configuration: {
       locations,
+      notifyBlockEnabled,
       users: permissionContext.users.map((user) => ({
         id: user.id,
         name: user.name,

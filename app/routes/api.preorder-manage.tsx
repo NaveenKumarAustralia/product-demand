@@ -7,6 +7,7 @@ import {
 } from "../preorder/preorder-batch.service";
 import { getPreorderPermissionContext } from "../preorder/preorder-permissions.server";
 import { setPreorderLocationSettings } from "../preorder/preorder-locations.server";
+import { setPreorderNotifyEnabled } from "../preorder/preorder-storefront-settings.server";
 import {
   PreorderSellingPlanError,
   activatePreorderSellingPlan,
@@ -47,6 +48,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!payload) return jsonError("Invalid request body.", 400);
 
     const operation = String(payload.operation ?? "");
+
+    if (operation === "set-notify-enabled") {
+      if (actor.admin !== true) return jsonError("Only a portal admin can change the notify-me block.", 403);
+      const enabled = await setPreorderNotifyEnabled(payload.enabled === true, actor.name);
+      return Response.json({ ok: true, notifyBlockEnabled: enabled });
+    }
 
     if (operation === "update-locations") {
       if (actor.admin !== true) return jsonError("Only a portal admin can change preorder location settings.", 403);

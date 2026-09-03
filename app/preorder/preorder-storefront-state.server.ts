@@ -1,11 +1,13 @@
 import prisma from "../db.server";
 import { getPreorderLocationSettings } from "./preorder-locations.server";
+import { getPreorderNotifyEnabled } from "./preorder-storefront-settings.server";
 import { calculatePreorderCapacity, getPreorderEligibility } from "./preorder-rules.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
 import {
   resolveStorefrontVariantState,
   type StorefrontMarket,
   type StorefrontPreorderCandidate,
+  type StorefrontVariantState,
 } from "./preorder-storefront-state";
 
 const API_VERSION = "2025-10";
@@ -26,6 +28,14 @@ function normalizeLocationId(value: string | null) {
 
 function destinationForMarket(market: StorefrontMarket) {
   return market === "USA" ? "send_to_usa" : "send_to_au";
+}
+
+// When the merchant turns the storefront notify-me block off (e.g. they run a
+// separate back-in-stock app), collapse any notify_me result to in_stock so the
+// block hides. Pre-order results pass through untouched.
+function suppressNotify(state: StorefrontVariantState, notifyEnabled: boolean): StorefrontVariantState {
+  if (!notifyEnabled && state.state === "notify_me") return { state: "in_stock", physicalAvailable: 0 };
+  return state;
 }
 
 async function getOfflineSession(shop: string) {
@@ -115,6 +125,7 @@ export async function getStorefrontPreorderState(input: {
     ].filter(Boolean))),
   };
 
+  const notifyEnabled = await getPreorderNotifyEnabled();
   const locations = await getPreorderLocationSettings();
   const locationId = normalizeLocationId(locations[input.market]);
   if (!locationId) {
@@ -134,7 +145,7 @@ export async function getStorefrontPreorderState(input: {
         market: input.market,
         variantId,
         locationId: null,
-        state: resolveStorefrontVariantState({ market: input.market, physicalAvailable: totalAvailable, candidates: [] }),
+        state: suppressNotify(resolveStorefrontVariantState({ market: input.market, physicalAvailable: totalAvailable, candidates: [] }), notifyEnabled),
       };
     } catch (error) {
       console.warn("[preorder storefront] inventory check failed for unconfigured market:", error);
@@ -241,6 +252,6 @@ export async function getStorefrontPreorderState(input: {
     market: input.market,
     variantId,
     locationId,
-    state: resolveStorefrontVariantState({ market: input.market, physicalAvailable: 0, candidates }),
+    state: suppressNotify(resolveStorefrontVariantState({ market: input.market, physicalAvailable: 0, candidates }), notifyEnabled),
   };
 }
