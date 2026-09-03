@@ -15,7 +15,10 @@ redirect_urls = [
 scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_reports,read_purchase_options,write_purchase_options,read_all_orders,read_customer_payment_methods,read_payment_mandate,write_payment_mandate,write_app_proxy"
 
 [app_proxy]
-url = "/preorder-proxy"
+# Must be an ABSOLUTE URL — Shopify forwards storefront /apps/karma-east-preorder
+# requests here. A relative "/preorder-proxy" leaves Shopify with nowhere to
+# proxy to, so the storefront block's fetch fails and the block stays hidden.
+url = "https://product-demand-production.up.railway.app/preorder-proxy"
 prefix = "apps"
 subpath = "karma-east-preorder"
 
