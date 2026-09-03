@@ -91,7 +91,7 @@ model PreorderBatchSetting {
   supplierOrderId     Int      @unique
   shop                String
   enabled             Boolean  @default(false)
-  safetyBufferPercent Float    @default(5)
+  safetyBufferPercent Float    @default(0)
   safetyBufferQty     Int?
   shipDate            DateTime?
   pausedReason        String?

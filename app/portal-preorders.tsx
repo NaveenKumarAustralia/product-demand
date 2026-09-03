@@ -121,7 +121,7 @@ export function PreordersDashboard({ data }: Props) {
             <MetricCard label="Active batches" value={data.totals.activeBatches} hint="Enabled + eligible" />
             <MetricCard label="Incoming units" value={data.totals.incomingUnits} hint="AU + USA open production" />
             <MetricCard label="Reserved" value={data.totals.reservedUnits} hint="Live reservation ledger" />
-            <MetricCard label="Available capacity" value={data.totals.availableCapacity} hint="After reservations + safety buffer" />
+            <MetricCard label="Available capacity" value={data.totals.availableCapacity} hint="After reservations" />
             <MetricCard label="Overallocated" value={data.totals.overallocatedUnits} hint="Needs attention" danger={data.totals.overallocatedUnits > 0} />
           </div>
 
@@ -153,7 +153,6 @@ export function PreordersDashboard({ data }: Props) {
                   <MiniStat label="Incoming" value={batch.totalIncoming} />
                   <MiniStat label="Reserved" value={batch.totalReserved} />
                   <MiniStat label="Remaining" value={batch.totalAvailable} />
-                  <MiniStat label="Safety" value={batch.safetyBufferQty != null ? batch.safetyBufferQty : `${batch.safetyBufferPercent}%`} />
                   <MiniStat label="Ship date" value={formatDate(batch.shipDate || batch.productionEta)} />
                 </div>
 
@@ -219,8 +218,6 @@ function BatchControls({
   onManage: (payload: Record<string, unknown>, successText: string) => void;
 }) {
   const [shipDate, setShipDate] = useState(dateInputValue(batch.shipDate));
-  const [bufferPercent, setBufferPercent] = useState(String(batch.safetyBufferPercent));
-  const [bufferQty, setBufferQty] = useState(batch.safetyBufferQty == null ? "" : String(batch.safetyBufferQty));
   const canActivate = batch.supplierStatus === "on_production" && (batch.destination === "send_to_au" || batch.destination === "send_to_usa");
 
   return (
@@ -231,14 +228,6 @@ function BatchControls({
           Expected dispatch
           <input type="date" value={shipDate} onChange={(e) => setShipDate(e.target.value)} style={s.input} disabled={busy} />
         </label>
-        <label style={s.fieldLabel}>
-          Safety buffer %
-          <input type="number" min={0} max={50} step={0.5} value={bufferPercent} onChange={(e) => setBufferPercent(e.target.value)} style={s.input} disabled={busy} />
-        </label>
-        <label style={s.fieldLabel}>
-          Fixed buffer qty <span style={s.optional}>(optional override)</span>
-          <input type="number" min={0} step={1} value={bufferQty} onChange={(e) => setBufferQty(e.target.value)} placeholder="Use %" style={s.input} disabled={busy} />
-        </label>
       </div>
       <div style={s.controlActions}>
         <button
@@ -248,8 +237,6 @@ function BatchControls({
           onClick={() => onManage({
             operation: "update-settings",
             shipDate,
-            safetyBufferPercent: bufferPercent,
-            safetyBufferQty: bufferQty,
           }, "Preorder batch settings saved.")}
         >
           {busy ? "Saving…" : "Save settings"}

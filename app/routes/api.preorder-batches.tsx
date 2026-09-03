@@ -86,7 +86,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         const capacity = calculatePreorderCapacity({
           confirmedIncomingQty: incomingRemaining,
           reservedQty,
-          safetyBufferPercent: setting?.safetyBufferPercent ?? 5,
+          safetyBufferPercent: setting?.safetyBufferPercent ?? 0,
           safetyBufferQty: setting?.safetyBufferQty ?? null,
         });
         return {
@@ -110,7 +110,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         market: eligibility.market,
         eligibility,
         enabled: setting?.enabled ?? false,
-        safetyBufferPercent: setting?.safetyBufferPercent ?? 5,
+        safetyBufferPercent: setting?.safetyBufferPercent ?? 0,
         safetyBufferQty: setting?.safetyBufferQty ?? null,
         shipDate: setting?.shipDate?.toISOString() ?? null,
         productionEta: order.eta?.toISOString() ?? null,

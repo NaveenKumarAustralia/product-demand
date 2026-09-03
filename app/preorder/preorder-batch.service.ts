@@ -128,6 +128,9 @@ export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
       supplierOrderId: order.id,
       shop: order.shop,
       enabled: input.enabled,
+      // Karma East doesn't hold back a safety buffer — all incoming units are
+      // sellable as preorder.
+      safetyBufferPercent: 0,
       pausedReason: input.enabled ? null : (input.pausedReason?.trim() || null),
       ...(hasShipDate ? { shipDate: input.shipDate ?? null } : {}),
       enabledByUserId: input.enabled ? input.actor.id : null,

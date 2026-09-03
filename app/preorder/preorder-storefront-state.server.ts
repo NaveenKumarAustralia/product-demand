@@ -180,7 +180,7 @@ export async function getStorefrontPreorderState(input: {
     const capacity = calculatePreorderCapacity({
       confirmedIncomingQty: Math.max(0, line.qtyOrdered - line.qtyReceived),
       reservedQty: reservedByOrder.get(order.id) ?? 0,
-      safetyBufferPercent: setting?.safetyBufferPercent ?? 5,
+      safetyBufferPercent: setting?.safetyBufferPercent ?? 0,
       safetyBufferQty: setting?.safetyBufferQty ?? null,
     });
     return [{

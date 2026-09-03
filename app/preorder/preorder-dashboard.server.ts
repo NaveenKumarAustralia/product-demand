@@ -158,7 +158,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
       const capacity = calculatePreorderCapacity({
         confirmedIncomingQty: incomingRemaining,
         reservedQty,
-        safetyBufferPercent: setting?.safetyBufferPercent ?? 5,
+        safetyBufferPercent: setting?.safetyBufferPercent ?? 0,
         safetyBufferQty: setting?.safetyBufferQty ?? null,
       });
       return {
@@ -189,7 +189,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
       shopifySellingPlanActive: Boolean(sellingPlan),
       shopifySellingPlanGroupId: sellingPlan?.sellingPlanGroupId ?? null,
       shopifySellingPlanId: sellingPlan?.sellingPlanId ?? null,
-      safetyBufferPercent: setting?.safetyBufferPercent ?? 5,
+      safetyBufferPercent: setting?.safetyBufferPercent ?? 0,
       safetyBufferQty: setting?.safetyBufferQty ?? null,
       shipDate: setting?.shipDate?.toISOString() ?? null,
       productionEta: order.eta?.toISOString() ?? null,
