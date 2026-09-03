@@ -35,7 +35,7 @@ Updated: 2026-09-03.
 ## 🟡 3. Back-in-stock email (Klaviyo)  (live)
 - [ ] Build a Klaviyo **Flow** triggered by the `Karma East Back In Stock Available` event (the app fires the event; no Flow = no email sent).
 - [ ] Test with a real (non-@test) email address.
-- [ ] Decide who owns "Notify me" store-wide — our block vs the old back-in-stock app — so customers aren't notified twice. (Currently excluded per-product.)
+- [ ] Decide who owns "Notify me" store-wide — our block vs the old back-in-stock app — so customers aren't notified twice. (Interim: a global ON/OFF toggle for our notify-me block now exists on Pre-orders → Back in Stock; turn OFF while the other app runs. Pre-order is unaffected.)
 
 ## 🟡 4. Destination-change action (the "I don't know what yet")
 - [ ] Define what should happen when a live-preorder product's destination changes (e.g. pause the preorder? refund/cancel reservations? move market?). Right now it only alerts you.
