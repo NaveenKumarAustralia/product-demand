@@ -27292,6 +27292,7 @@ function RestockOptionChipDropdown({
   emptyLabel,
   onChange,
   controlled,
+  readOnly,
 }: {
   orderId: number;
   value: string;
@@ -27307,6 +27308,10 @@ function RestockOptionChipDropdown({
   // applies optimistic updates locally — that way the loader returning
   // a stale prop value can't briefly override the user's selection.
   controlled?: boolean;
+  // When true, render the SAME chip but non-interactive — it can't be opened or
+  // switched. Used to freeze Status/Destination while a preorder is live so the
+  // value stays put (looks identical to a normal chip, just not clickable).
+  readOnly?: boolean;
 }) {
   const cellFetcher = useFetcher();
   const settingsFetcher = useFetcher();
@@ -27475,6 +27480,29 @@ function RestockOptionChipDropdown({
     document.body,
   ) : null;
 
+  if (readOnly) {
+    // Identical chip, just frozen — no dropdown, no chevron affordance change,
+    // clicking does nothing. The value can't be switched while preorder is on.
+    return (
+      <div style={s.restockChipCell}>
+        <button
+          type="button"
+          title="Can't change while pre-order is on — turn the pre-order off in the Status cell to edit."
+          style={{
+            ...s.fabricChipSelect,
+            background: option?.bg ?? "#f3f4f6",
+            color: option?.color ?? "#374151",
+            cursor: "default",
+          }}
+          onClick={(event) => event.preventDefault()}
+        >
+          <span style={s.fabricChipButtonText}>{option?.label ?? emptyLabel ?? "—"}</span>
+          <span style={s.fabricChipChevron}>⌄</span>
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div style={s.restockChipCell}>
       <button
@@ -27511,10 +27539,9 @@ function DestinationCell({
   onChange?: (next: string) => void;
   locked?: boolean;
 }) {
-  // Locked while a preorder is live on this batch — changing the destination
+  // Frozen while a preorder is live on this batch — changing the destination
   // would move it to a different market (or off preorder entirely) under
-  // customers who have already reserved. Turn the preorder off to edit.
-  if (locked) return <LockedPreorderChip label={labelForOption(restockSettings.destinationOptions, value)} />;
+  // customers who have already reserved. Same chip, just not switchable.
   return (
     <RestockOptionChipDropdown
       orderId={orderId}
@@ -27527,26 +27554,8 @@ function DestinationCell({
       emptyLabel="— Destination —"
       onChange={onChange}
       controlled
+      readOnly={locked}
     />
-  );
-}
-
-// Read-only chip shown in place of the Status / Destination dropdown while a
-// preorder is enabled, so neither can be edited out from under live customers.
-function LockedPreorderChip({ label }: { label: string }) {
-  return (
-    <span
-      title="Locked while pre-order is on. Turn pre-order off to change this."
-      style={{
-        display: "inline-flex", alignItems: "center", gap: 4, maxWidth: "100%",
-        fontSize: 12, fontWeight: 600, color: "#3f3f46",
-        background: "#f4f4f5", border: "1px dashed #a1a1aa", borderRadius: 6,
-        padding: "3px 8px", cursor: "not-allowed", whiteSpace: "nowrap",
-      }}
-    >
-      <span aria-hidden>🔒</span>
-      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{label || "—"}</span>
-    </span>
   );
 }
 
@@ -27621,21 +27630,18 @@ function StatusCell({
   const showPreorderButton = canManagePreorder && Boolean(preorderMarket) && statusIsPreorderable;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
-      {preorderEnabled ? (
-        <LockedPreorderChip label={labelForOption(restockSettings.statusOptions, statusLocal)} />
-      ) : (
-        <RestockOptionChipDropdown
-          orderId={orderId}
-          value={statusLocal}
-          options={restockSettings.statusOptions}
-          optionKind="statusOptions"
-          restockSettings={restockSettings}
-          updateIntent="update_status"
-          undoLabel="Undo status"
-          onChange={setStatusLocal}
-          controlled
-        />
-      )}
+      <RestockOptionChipDropdown
+        orderId={orderId}
+        value={statusLocal}
+        options={restockSettings.statusOptions}
+        optionKind="statusOptions"
+        restockSettings={restockSettings}
+        updateIntent="update_status"
+        undoLabel="Undo status"
+        onChange={setStatusLocal}
+        controlled
+        readOnly={preorderEnabled}
+      />
       {showLinkUI && (
         linkedBadge ? (
           <div style={{ display: "flex", gap: 4, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
