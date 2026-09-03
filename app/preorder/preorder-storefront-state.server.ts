@@ -118,7 +118,10 @@ export async function getStorefrontPreorderState(input: {
       where: {
         shop,
         status: "open",
-        supplierStatus: "on_production",
+        // Any production status qualifies (not just on_production) — the
+        // per-candidate getPreorderEligibility() below applies the real rule
+        // (denies On Order / Cancelled). Hardcoding on_production here made a
+        // batch silently stop showing preorder once it moved to Ready/Shipment.
         destination: destinationForMarket(input.market),
         lines: { some: { variantId } },
       },

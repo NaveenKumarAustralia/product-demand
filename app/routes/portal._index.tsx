@@ -5670,7 +5670,42 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // can't whitelist a fixed enum here. Accept any non-empty short
     // string; blank clears the destination back to null.
     const raw = String(form.get("value") ?? "").trim().slice(0, 64);
-    updates.destination = raw || null;
+    const newDestination = raw || null;
+    // If this batch has a LIVE pre-order, moving its destination changes (or
+    // removes) the market customers are pre-ordering against. It's allowed, but
+    // alert every other admin via their message bell so someone reviews what to
+    // do about any existing reservations.
+    const [existingOrder, preorderSetting] = await Promise.all([
+      prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { destination: true, productTitle: true } }),
+      prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: orderId }, select: { enabled: true } }),
+    ]);
+    const oldDestination = existingOrder?.destination ?? null;
+    if (preorderSetting?.enabled === true && oldDestination !== newDestination) {
+      const destLabel = (value: string | null) =>
+        value === "send_to_au" ? "AUS" : value === "send_to_usa" ? "USA" : (value || "none");
+      const recipients = users.filter((user) =>
+        (user.admin === true || user.role === "superadmin" || user.role === "admin") &&
+        user.active !== false &&
+        user.id !== currentUser?.id,
+      );
+      if (recipients.length) {
+        const body = `⚠️ Pre-order destination changed: “${existingOrder?.productTitle ?? `Order #${orderId}`}” moved from ${destLabel(oldDestination)} to ${destLabel(newDestination)} by ${currentUser?.name ?? "someone"}. This product has a live pre-order — please review it.`;
+        await prisma.$transaction(recipients.map((user) => prisma.portalMessage.create({
+          data: {
+            userId: user.id,
+            userName: user.name,
+            orderId,
+            field: "destination",
+            entityType: "supplier_order",
+            fromName: currentUser?.name ?? "System",
+            productTitle: existingOrder?.productTitle ?? null,
+            body,
+          },
+          select: { id: true },
+        }))).catch((error) => console.warn("[preorder destination alert] failed:", error));
+      }
+    }
+    updates.destination = newDestination;
   }
   if (intent === "update_packing_list_link") {
     const raw = String(form.get("value") ?? "").trim();
@@ -26868,7 +26903,7 @@ function OrderRow({
 
         {/* Destination — keep at factory in India vs send to AU */}
         <Td rowIndex={rowIndex} colIndex={destinationCol} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Destination" historyEntityName={order.productTitle}>
-          <DestinationCell orderId={order.id} value={destinationLocal} restockSettings={restockSettings} onChange={setDestinationLocal} locked={preorderEnabledLocal} />
+          <DestinationCell orderId={order.id} value={destinationLocal} restockSettings={restockSettings} onChange={setDestinationLocal} />
         </Td>
 
         {/* Cost in rupees — derived from the matching Product Info style.
@@ -27292,7 +27327,7 @@ function RestockOptionChipDropdown({
   emptyLabel,
   onChange,
   controlled,
-  readOnly,
+  blockedValues,
 }: {
   orderId: number;
   value: string;
@@ -27308,10 +27343,11 @@ function RestockOptionChipDropdown({
   // applies optimistic updates locally — that way the loader returning
   // a stale prop value can't briefly override the user's selection.
   controlled?: boolean;
-  // When true, render the SAME chip but non-interactive — it can't be opened or
-  // switched. Used to freeze Status/Destination while a preorder is live so the
-  // value stays put (looks identical to a normal chip, just not clickable).
-  readOnly?: boolean;
+  // Option values that can't be selected (shown greyed/disabled in the menu).
+  // Used to stop a live-preorder row being set back to On Order / Cancelled,
+  // which would break preorder eligibility. The chip stays fully editable
+  // otherwise — you can still move it to any other status.
+  blockedValues?: string[];
 }) {
   const cellFetcher = useFetcher();
   const settingsFetcher = useFetcher();
@@ -27433,13 +27469,17 @@ function RestockOptionChipDropdown({
       )}
       {localOptions.map((item) => {
         const selected = item.value === current;
+        const blocked = (blockedValues ?? []).includes(item.value) && item.value !== current;
         return (
           <div key={item.value} style={s.fabricChipMenuItem}>
             <button type="button" style={s.fabricChipEditButton} onClick={() => startEdit(item)}>Edit</button>
             <button
               type="button"
-              style={s.fabricChipMenuOption}
+              disabled={blocked}
+              title={blocked ? "Not allowed while a pre-order is on for this product." : undefined}
+              style={{ ...s.fabricChipMenuOption, ...(blocked ? { opacity: 0.4, cursor: "not-allowed" } : {}) }}
               onClick={() => {
+                if (blocked) return;
                 selectValue(item.value);
                 setOpen(false);
               }}
@@ -27480,29 +27520,6 @@ function RestockOptionChipDropdown({
     document.body,
   ) : null;
 
-  if (readOnly) {
-    // Identical chip, just frozen — no dropdown, no chevron affordance change,
-    // clicking does nothing. The value can't be switched while preorder is on.
-    return (
-      <div style={s.restockChipCell}>
-        <button
-          type="button"
-          title="Can't change while pre-order is on — turn the pre-order off in the Status cell to edit."
-          style={{
-            ...s.fabricChipSelect,
-            background: option?.bg ?? "#f3f4f6",
-            color: option?.color ?? "#374151",
-            cursor: "default",
-          }}
-          onClick={(event) => event.preventDefault()}
-        >
-          <span style={s.fabricChipButtonText}>{option?.label ?? emptyLabel ?? "—"}</span>
-          <span style={s.fabricChipChevron}>⌄</span>
-        </button>
-      </div>
-    );
-  }
-
   return (
     <div style={s.restockChipCell}>
       <button
@@ -27531,17 +27548,15 @@ function DestinationCell({
   value,
   restockSettings,
   onChange,
-  locked = false,
 }: {
   orderId: number;
   value: string;
   restockSettings: RestockSettings;
   onChange?: (next: string) => void;
-  locked?: boolean;
 }) {
-  // Frozen while a preorder is live on this batch — changing the destination
-  // would move it to a different market (or off preorder entirely) under
-  // customers who have already reserved. Same chip, just not switchable.
+  // Always editable. If the row has a live preorder, changing the destination
+  // is allowed but the server posts an alert to admins (a preorder product's
+  // market moved), handled in the update_destination action.
   return (
     <RestockOptionChipDropdown
       orderId={orderId}
@@ -27554,7 +27569,6 @@ function DestinationCell({
       emptyLabel="— Destination —"
       onChange={onChange}
       controlled
-      readOnly={locked}
     />
   );
 }
@@ -27640,7 +27654,7 @@ function StatusCell({
         undoLabel="Undo status"
         onChange={setStatusLocal}
         controlled
-        readOnly={preorderEnabled}
+        blockedValues={preorderEnabled ? ["on_order", "cancelled"] : undefined}
       />
       {showLinkUI && (
         linkedBadge ? (
