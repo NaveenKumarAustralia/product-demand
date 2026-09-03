@@ -9682,7 +9682,7 @@ function code128Svg(text: string, opts: { widthMm?: number; heightMm?: number } 
       x += w;
     }
   }
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}">${rects.join("")}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" shape-rendering="crispEdges">${rects.join("")}</svg>`;
 }
 function escapeHtmlText(s: string): string {
   return (s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
@@ -9715,8 +9715,8 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
   const across = Math.min(4, Math.max(1, Math.floor(setup.across) || 1));
   const wMm = setup.wMm, hMm = setup.hMm, gapMm = setup.gapMm;
   const pageW = across * wMm + (across - 1) * gapMm;
-  const bcW = Math.max(10, wMm - 6);
-  const bcH = Math.max(5, Math.min(hMm * 0.4, 10));
+  const bcW = Math.max(10, wMm - 4);
+  const bcH = Math.max(6, Math.min(hMm * 0.5, 13));
   const labels: string[] = [];
   for (const it of items) {
     const n = Math.max(0, Math.floor(it.count) || 0);
@@ -9740,16 +9740,17 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
     rows.push(`<div class="row">${cells.join("")}</div>`);
   }
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Barcodes</title><style>
-    *{box-sizing:border-box;} body{margin:0;font-family:Arial,Helvetica,sans-serif;}
+    *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;} body{margin:0;font-family:Arial,Helvetica,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
     @page{ size:${pageW}mm ${hMm}mm; margin:0; }
     .row{display:flex;width:${pageW}mm;height:${hMm}mm;page-break-after:always;}
     .row:last-child{page-break-after:auto;}
     .gap{width:${gapMm}mm;flex:0 0 ${gapMm}mm;}
     .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:1.2mm 1mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;}
-    .pname{font-size:6.5pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1.15;}
+    .pname{font-size:10.5pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;line-height:1.1;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;word-break:break-word;}
     .sku{font-size:7.5pt;font-weight:700;text-align:center;line-height:1.15;}
-    .bc{line-height:0;margin-top:0.4mm;} .bc svg{display:block;}
-    .code{font-size:8pt;letter-spacing:1px;font-family:'Courier New',monospace;line-height:1.15;}
+    .bc{line-height:0;margin-top:0.4mm;} .bc svg{display:block;shape-rendering:crispEdges;}
+    .bc svg rect{fill:#000;}
+    .code{font-size:8pt;letter-spacing:1px;font-family:'Courier New',monospace;line-height:1.15;color:#000;}
   </style></head><body>${rows.join("")}</body></html>`;
   const iframe = document.createElement("iframe");
   iframe.setAttribute("aria-hidden", "true");
