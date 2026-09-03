@@ -1145,6 +1145,47 @@ function jsonResponse<T>(body: T): Response {
   });
 }
 
+// Alert the account owner (superadmin) when a live-preorder product's status or
+// destination is changed by anyone else, so they can review reservations. Only
+// the superadmin is notified — not every admin. Never alerts the person who made
+// the change (they already know).
+async function notifyPreorderChange(params: {
+  orderId: number;
+  field: "status" | "destination";
+  oldValue: string | null;
+  newValue: string | null;
+  actor: PortalUser | null;
+  users: PortalUser[];
+  productTitle?: string | null;
+}) {
+  const recipients = params.users.filter((user) =>
+    user.role === "superadmin" && user.active !== false && user.id !== params.actor?.id,
+  );
+  if (!recipients.length) return;
+  const pretty = (value: string | null) => {
+    if (!value) return "none";
+    if (value === "send_to_au") return "AUS";
+    if (value === "send_to_usa") return "USA";
+    return value.replace(/_/g, " ");
+  };
+  const label = params.field === "destination" ? "destination" : "status";
+  const title = params.productTitle ?? `Order #${params.orderId}`;
+  const body = `⚠️ Pre-order ${label} changed: “${title}” ${label} moved from ${pretty(params.oldValue)} to ${pretty(params.newValue)} by ${params.actor?.name ?? "someone"}. This product has a live pre-order — please review it.`;
+  await prisma.$transaction(recipients.map((user) => prisma.portalMessage.create({
+    data: {
+      userId: user.id,
+      userName: user.name,
+      orderId: params.orderId,
+      field: params.field,
+      entityType: "supplier_order",
+      fromName: params.actor?.name ?? "System",
+      productTitle: params.productTitle ?? null,
+      body,
+    },
+    select: { id: true },
+  }))).catch((error) => console.warn("[preorder change alert] failed:", error));
+}
+
 export const action = async ({ request }: ActionFunctionArgs) => {
   try {
   const form = await request.formData();
@@ -5651,7 +5692,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   }
 
-  if (intent === "update_status")        updates.supplierStatus = form.get("value");
+  if (intent === "update_status") {
+    // Alert the account owner if the status of a LIVE-preorder product changes.
+    const newStatus = String(form.get("value") ?? "") || null;
+    const preorderSetting = await prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: orderId }, select: { enabled: true } });
+    if (preorderSetting?.enabled === true) {
+      const existingOrder = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { supplierStatus: true, productTitle: true } });
+      if ((existingOrder?.supplierStatus ?? null) !== newStatus) {
+        await notifyPreorderChange({ orderId, field: "status", oldValue: existingOrder?.supplierStatus ?? null, newValue: newStatus, actor: currentUser, users, productTitle: existingOrder?.productTitle });
+      }
+    }
+    updates.supplierStatus = form.get("value");
+  }
   if (intent === "update_priority")      updates.priority = form.get("value");
   if (intent === "update_product_type")  updates.productType = normalizeProductGroup(String(form.get("value") ?? "")) || null;
   if (intent === "update_factory_notes") updates.factoryNotes = form.get("value");
@@ -5673,36 +5725,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const newDestination = raw || null;
     // If this batch has a LIVE pre-order, moving its destination changes (or
     // removes) the market customers are pre-ordering against. It's allowed, but
-    // alert every other admin via their message bell so someone reviews what to
-    // do about any existing reservations.
-    const [existingOrder, preorderSetting] = await Promise.all([
-      prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { destination: true, productTitle: true } }),
-      prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: orderId }, select: { enabled: true } }),
-    ]);
-    const oldDestination = existingOrder?.destination ?? null;
-    if (preorderSetting?.enabled === true && oldDestination !== newDestination) {
-      const destLabel = (value: string | null) =>
-        value === "send_to_au" ? "AUS" : value === "send_to_usa" ? "USA" : (value || "none");
-      const recipients = users.filter((user) =>
-        (user.admin === true || user.role === "superadmin" || user.role === "admin") &&
-        user.active !== false &&
-        user.id !== currentUser?.id,
-      );
-      if (recipients.length) {
-        const body = `⚠️ Pre-order destination changed: “${existingOrder?.productTitle ?? `Order #${orderId}`}” moved from ${destLabel(oldDestination)} to ${destLabel(newDestination)} by ${currentUser?.name ?? "someone"}. This product has a live pre-order — please review it.`;
-        await prisma.$transaction(recipients.map((user) => prisma.portalMessage.create({
-          data: {
-            userId: user.id,
-            userName: user.name,
-            orderId,
-            field: "destination",
-            entityType: "supplier_order",
-            fromName: currentUser?.name ?? "System",
-            productTitle: existingOrder?.productTitle ?? null,
-            body,
-          },
-          select: { id: true },
-        }))).catch((error) => console.warn("[preorder destination alert] failed:", error));
+    // alert the account owner so they can review any existing reservations.
+    const preorderSetting = await prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: orderId }, select: { enabled: true } });
+    if (preorderSetting?.enabled === true) {
+      const existingOrder = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { destination: true, productTitle: true } });
+      if ((existingOrder?.destination ?? null) !== newDestination) {
+        await notifyPreorderChange({ orderId, field: "destination", oldValue: existingOrder?.destination ?? null, newValue: newDestination, actor: currentUser, users, productTitle: existingOrder?.productTitle });
       }
     }
     updates.destination = newDestination;

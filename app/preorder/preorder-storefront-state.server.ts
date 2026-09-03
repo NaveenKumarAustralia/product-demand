@@ -100,6 +100,18 @@ export async function getStorefrontPreorderState(input: {
   const variantId = String(input.variantId ?? "").trim();
   if (!shop || !variantId) throw new Error("Shop and variant are required.");
 
+  // OrderLine.variantId is stored as a Shopify GID (gid://shopify/ProductVariant/N)
+  // because it comes from the Admin GraphQL API, but the storefront sends the bare
+  // numeric id. Match on every form so the batch line is actually found — without
+  // this, an active batch with capacity still fell back to "notify me".
+  const variantIdMatch = {
+    in: Array.from(new Set([
+      variantId,
+      variantGid(variantId),
+      variantId.replace(/[^0-9]/g, ""),
+    ].filter(Boolean))),
+  };
+
   const locations = await getPreorderLocationSettings();
   const locationId = normalizeLocationId(locations[input.market]);
   if (!locationId) {
@@ -123,7 +135,7 @@ export async function getStorefrontPreorderState(input: {
         // (denies On Order / Cancelled). Hardcoding on_production here made a
         // batch silently stop showing preorder once it moved to Ready/Shipment.
         destination: destinationForMarket(input.market),
-        lines: { some: { variantId } },
+        lines: { some: { variantId: variantIdMatch } },
       },
       select: {
         id: true,
@@ -133,7 +145,7 @@ export async function getStorefrontPreorderState(input: {
         eta: true,
         createdAt: true,
         lines: {
-          where: { variantId },
+          where: { variantId: variantIdMatch },
           select: { variantId: true, qtyOrdered: true, qtyReceived: true },
         },
       },
@@ -160,7 +172,7 @@ export async function getStorefrontPreorderState(input: {
     orderIds.length
       ? prisma.preorderReservation.groupBy({
           by: ["supplierOrderId"],
-          where: { supplierOrderId: { in: orderIds }, variantId, status: "reserved" },
+          where: { supplierOrderId: { in: orderIds }, variantId: variantIdMatch, status: "reserved" },
           _sum: { quantity: true },
         })
       : Promise.resolve([]),
