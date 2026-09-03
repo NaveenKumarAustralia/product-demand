@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction } from "react-router";
-import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRevalidator, useRouteError, useSearchParams, useSubmit } from "react-router";
+import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams, useSubmit } from "react-router";
 import prisma from "../db.server";
 import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
 import { syncOrderNoteMessages, syncEntityNoteMessages, syncSampleIterationMessages, createReplyMessage, editPortalMessage, deletePortalMessage } from "../portal-messages.server";
@@ -11067,7 +11067,9 @@ export default function PortalDashboard() {
   }, [searchTitle]);
   useEffect(() => {
     if (!isSearchFocused) return;
-    if (page === "restock" || page === "usa-stock") return;
+    // Fabric filters client-side, so pushing q here only forces a loader
+    // revalidation that re-downloads the large fabric-sheet payload mid-type.
+    if (page === "restock" || page === "usa-stock" || page === "fabric") return;
     const timer = window.setTimeout(() => {
       if (searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
     }, 350);
@@ -11429,8 +11431,11 @@ export default function PortalDashboard() {
                     onFocus={() => setIsSearchFocused(true)}
                     onBlur={() => {
                       setIsSearchFocused(false);
-                      // restock + usa-stock filter client-side (no server round-trip).
-                      if (page !== "restock" && page !== "usa-stock" && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
+                      // restock + usa-stock + fabric filter client-side (no server
+                      // round-trip). Pushing q for fabric would re-run the loader and
+                      // re-download the heavy fabric-sheet payload on every search —
+                      // that was the multi-second "page hangs while typing" freeze.
+                      if (page !== "restock" && page !== "usa-stock" && page !== "fabric" && searchTitleInput !== searchTitle) updateParams({ q: searchTitleInput });
                     }}
                     style={s.searchInput}
                     placeholder={page === "fabric" ? "Fabric name" : page === "packing" ? "Invoice / list title" : page === "productinfo" ? "Style name" : page === "samples" ? "Sample name" : "Product title"}
@@ -21286,6 +21291,17 @@ function CombinedFabricStockPanel({
       .map((x) => x.entry);
   }, [allRows, nameSearch, fabricTypeFilter, supplierFilter]);
 
+  // Render rows in progressive batches. Each row mounts ~10 FabricCells (each a
+  // useFetcher subscriber), so rendering hundreds at once — and remounting them
+  // all on every keystroke/filter — was the multi-second freeze. Reset the
+  // reveal whenever the filter/search changes so a new query paints ~24 rows
+  // instantly and the rest fill in on idle.
+  const rowLimit = useProgressiveReveal(
+    filteredRows.length,
+    `${nameSearch}|${fabricTypeFilter}|${supplierFilter}`,
+  );
+  const visibleRows = useMemo(() => filteredRows.slice(0, rowLimit), [filteredRows, rowLimit]);
+
   const orderedColumns = useMemo(() => {
     const map = new Map(UNIFIED_FABRIC_COLUMNS.map((column) => [column.key, column]));
     const ordered: typeof UNIFIED_FABRIC_COLUMNS[number][] = [];
@@ -21505,7 +21521,7 @@ function CombinedFabricStockPanel({
               </tr>
             </thead>
             <tbody>
-              {filteredRows.map((entry, displayIdx) => (
+              {visibleRows.map((entry, displayIdx) => (
                 <CombinedFabricRow
                   key={`${entry.primarySheet.gid}:${entry.primaryRowIndex}`}
                   entry={entry}
@@ -21962,7 +21978,6 @@ function FabricCell({
   // lets every edit complete independently; the server serializes the writes.
   void _sharedFetcher;
   const fetcher = useFetcher();
-  const revalidator = useRevalidator();
   const [draft, setDraft] = useState(value);
   const [imageHover, setImageHover] = useState(false);
   const [pendingOpen, setPendingOpen] = useState(false);
