@@ -86,6 +86,40 @@ async function assertActivationScopes(shop: string, accessToken: string) {
   }
 }
 
+// Pre-order variants are out of stock, so Shopify blocks checkout ("sold out")
+// unless the variant is allowed to sell past zero. Activation flips the batch's
+// pre-order variants to CONTINUE (continue selling when out of stock); turning a
+// batch off flips them back to DENY so they behave as normal sold-out variants.
+async function setVariantsInventoryPolicy(
+  shop: string,
+  accessToken: string,
+  productId: string | null,
+  variantIds: string[],
+  policy: "CONTINUE" | "DENY",
+) {
+  if (!variantIds.length) return;
+  const pid = String(productId ?? "").trim();
+  if (!pid) throw new PreorderSellingPlanError("This batch has no linked Shopify product, so pre-order variants can't be set to continue selling.");
+  const productGid = pid.startsWith("gid://") ? pid : `gid://shopify/Product/${pid}`;
+  const variants = variantIds.map((id) => ({
+    id: id.startsWith("gid://") ? id : `gid://shopify/ProductVariant/${id}`,
+    inventoryPolicy: policy,
+  }));
+  const data = await shopifyGraphql<{
+    productVariantsBulkUpdate?: { userErrors?: Array<{ field?: string[]; message?: string }> };
+  }>(shop, accessToken, `#graphql
+    mutation KEPreorderInventoryPolicy($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+        userErrors { field message }
+      }
+    }
+  `, { productId: productGid, variants });
+  const errors = data.productVariantsBulkUpdate?.userErrors;
+  if (errors?.length) {
+    throw new PreorderSellingPlanError(`Could not update pre-order variant stock policy: ${errors.map((error) => error.message || "Shopify error").join("; ")}`);
+  }
+}
+
 function assertManagePermission(actor: Actor, permissions: PreorderPermissionSettings) {
   if (!canManagePreorders(actor, permissions)) {
     throw new PreorderSellingPlanError("You do not have permission to manage Shopify preorders.");
@@ -147,11 +181,16 @@ export async function activatePreorderSellingPlan(input: {
     .filter(Boolean);
   if (!variantIds.length) throw new PreorderSellingPlanError("This batch has no incoming Shopify variants available to preorder.");
 
-  const existing = await getPreorderSellingPlanRegistryEntry(order.shop, order.id);
-  if (existing) return { created: false, registry: existing };
-
   const accessToken = await offlineAccessToken(order.shop);
   await assertActivationScopes(order.shop, accessToken);
+
+  // Allow these variants to be purchased while out of stock — without this the
+  // pre-order adds to cart but Shopify drops it as "sold out" at checkout. Runs
+  // on every activate (idempotent) so a re-activation always re-asserts it.
+  await setVariantsInventoryPolicy(order.shop, accessToken, order.productId, variantIds, "CONTINUE");
+
+  const existing = await getPreorderSellingPlanRegistryEntry(order.shop, order.id);
+  if (existing) return { created: false, registry: existing };
 
   const variables = buildPreorderSellingPlanGroup({
     batchId: order.id,
@@ -225,7 +264,10 @@ export async function deactivatePreorderSellingPlan(input: {
 
   const order = await prisma.supplierOrder.findUnique({
     where: { id: input.supplierOrderId },
-    select: { id: true, shop: true, productTitle: true },
+    select: {
+      id: true, shop: true, productTitle: true, productId: true,
+      lines: { select: { variantId: true, qtyOrdered: true, qtyReceived: true } },
+    },
   });
   if (!order) throw new PreorderSellingPlanError("Production batch was not found.");
 
@@ -234,6 +276,15 @@ export async function deactivatePreorderSellingPlan(input: {
 
   const accessToken = await offlineAccessToken(order.shop);
   await assertActivationScopes(order.shop, accessToken);
+
+  // Restore normal sold-out behaviour on the variants we opened for pre-order.
+  const variantIds = order.lines
+    .filter((line) => line.qtyOrdered - line.qtyReceived > 0)
+    .map((line) => String(line.variantId ?? "").trim())
+    .filter(Boolean);
+  await setVariantsInventoryPolicy(order.shop, accessToken, order.productId, variantIds, "DENY").catch((error) => {
+    console.warn("[preorder deactivate] could not restore DENY inventory policy:", error);
+  });
 
   const data = await shopifyGraphql<{
     sellingPlanGroupDelete?: { deletedSellingPlanGroupId?: string; userErrors?: Array<{ field?: string[]; message?: string }> };
