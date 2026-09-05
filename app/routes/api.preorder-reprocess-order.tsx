@@ -49,7 +49,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
                 nodes {
                   id quantity sku title
                   variant { id title }
-                  sellingPlanAllocation { sellingPlan { name } }
+                  sellingPlan { name }
                 }
               }
             }
@@ -67,7 +67,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       lineItems?: { nodes?: Array<{
         id: string; quantity: number; sku: string | null; title: string | null;
         variant?: { id?: string | null; title?: string | null } | null;
-        sellingPlanAllocation?: { sellingPlan?: { name?: string | null } | null } | null;
+        sellingPlan?: { name?: string | null } | null;
       }> };
     }> } };
     errors?: Array<{ message?: string }>;
@@ -83,7 +83,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // What we see, before any filtering — so we can diagnose the exact data.
   const diagnosis = allLines.map((line) => {
-    const planName = line.sellingPlanAllocation?.sellingPlan?.name ?? null;
+    const planName = line.sellingPlan?.name ?? null;
     return {
       title: line.title,
       variantId: line.variant?.id ?? null,
@@ -95,14 +95,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
 
   const preorderLines = allLines.filter((line) => {
-    const planName = line.sellingPlanAllocation?.sellingPlan?.name ?? "";
+    const planName = line.sellingPlan?.name ?? "";
     return planName.startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX);
   });
 
   const results: Array<Record<string, unknown>> = [];
   if (!dryRun) {
     for (const line of preorderLines) {
-      const planName = line.sellingPlanAllocation?.sellingPlan?.name ?? "";
+      const planName = line.sellingPlan?.name ?? "";
       const batchId = preorderBatchIdFromPlanName(planName);
       try {
         const rows = await reservePreorderLine({
