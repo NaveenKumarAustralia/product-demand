@@ -61,5 +61,10 @@ Updated: 2026-09-03.
 
 ---
 
+## Known limitations / park for later
+- **Store credit can't be used on pre-orders** — Shopify blocks store credit with deferred purchase options ("You can't use store credit with deferred purchase options"). Platform rule, not our code; customers just pay by card/PayPal. Leave as-is.
+- **Product-page block design** — 4 mockups built (artifact); waiting on Koku to pick A/B/C/D before building the winner into the live theme block.
+- **Order-confirmation email wording** for pre-order customers (deferred with the checkout work).
+
 ## Open questions / things to add
 - (add here)
