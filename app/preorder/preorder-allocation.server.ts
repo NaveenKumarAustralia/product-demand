@@ -1,6 +1,20 @@
 import { Prisma } from "@prisma/client";
 import prisma from "../db.server";
-import { calculatePreorderCapacity, type PreorderMarket } from "./preorder-rules.server";
+import { calculatePreorderCapacity, isPreorderEligibleStatus, type PreorderMarket } from "./preorder-rules.server";
+
+// OrderLine.variantId is stored as a Shopify GID, but the order webhook sends a
+// bare numeric variant_id. Match every form so the batch line is actually found;
+// otherwise the reservation silently fails with "0 available" and the paid order
+// never gets reserved.
+function variantIdCandidates(value: string): string[] {
+  const raw = String(value ?? "").trim();
+  const numeric = raw.replace(/[^0-9]/g, "");
+  return Array.from(new Set([
+    raw,
+    numeric,
+    numeric ? `gid://shopify/ProductVariant/${numeric}` : "",
+  ].filter(Boolean)));
+}
 
 export class PreorderCapacityError extends Error {
   constructor(message: string) {
@@ -87,23 +101,26 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
         }
         const settingByBatch = new Map(enabledSettings.map((setting) => [setting.supplierOrderId, setting]));
 
+        const variantMatch = { in: variantIdCandidates(input.variantId) };
         const orders = await tx.supplierOrder.findMany({
           where: {
             id: { in: enabledSettings.map((setting) => setting.supplierOrderId) },
             shop: input.shop,
             status: "open",
-            supplierStatus: "on_production",
+            // Any production status qualifies (isPreorderEligibleStatus filters in
+            // code below) — not just on_production — matching the storefront rule.
             destination: destinationForMarket(input.market),
-            lines: { some: { variantId: input.variantId } },
+            lines: { some: { variantId: variantMatch } },
           },
           select: {
             id: true,
             productId: true,
             productTitle: true,
+            supplierStatus: true,
             eta: true,
             createdAt: true,
             lines: {
-              where: { variantId: input.variantId },
+              where: { variantId: variantMatch },
               select: {
                 variantId: true,
                 variantTitle: true,
@@ -116,6 +133,7 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
         });
 
         const orderedBatches = orders
+          .filter((order) => isPreorderEligibleStatus(order.supplierStatus))
           .filter((order) => order.lines.length > 0)
           .sort((a, b) => {
             if (input.preferredSupplierOrderId) return a.id - b.id;
@@ -141,7 +159,7 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
           by: ["supplierOrderId"],
           where: {
             supplierOrderId: { in: orderedBatches.map((order) => order.id) },
-            variantId: input.variantId,
+            variantId: variantMatch,
             status: "reserved",
           },
           _sum: { quantity: true },
