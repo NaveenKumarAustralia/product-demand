@@ -24,15 +24,51 @@
     }
   }
 
-  function formatExpected(value) {
-    if (!value) return 'Expected dispatch date to be confirmed';
+  // Date in the visitor's own country format (US -> 09/30/2026, AU -> 30/09/2026, etc.).
+  function formatLocalDate(value) {
+    if (!value) return 'soon';
     const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return 'Expected dispatch date to be confirmed';
-    return `Expected dispatch ${new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric' }).format(date)}`;
+    if (Number.isNaN(date.getTime())) return 'soon';
+    const locale = (typeof navigator !== 'undefined' && navigator.language) ? navigator.language : undefined;
+    try {
+      return new Intl.DateTimeFormat(locale, { year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+    } catch (_) {
+      return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
+    }
+  }
+
+  // Button label: "Pre-order · ships in 24 days" (counts down as the date nears).
+  function shipInLabel(value) {
+    if (!value) return 'Pre-order';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'Pre-order';
+    const days = Math.ceil((date.getTime() - Date.now()) / 86400000);
+    if (days <= 0) return 'Pre-order · ships soon';
+    return `Pre-order · ships in ${days} day${days === 1 ? '' : 's'}`;
   }
 
   function setHidden(element, hidden) {
     if (element) element.hidden = hidden;
+  }
+
+  // The theme's own "Sold out" / Add-to-cart + dynamic-checkout buttons. We hide
+  // these while a pre-order is showing so the customer can only pre-order (and
+  // can't bypass the selling plan via dynamic checkout); restored otherwise. We
+  // remember each element's previous inline display so we can put it back.
+  var THEME_BUY_SELECTORS = 'form[action*="/cart/add"] [type="submit"], form[action*="/cart/add"] [name="add"], .shopify-payment-button, .product-form__submit';
+  function setThemeBuyHidden(hidden) {
+    var nodes = Array.from(document.querySelectorAll(THEME_BUY_SELECTORS));
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.closest('[data-ke-preorder-root]')) continue; // never touch our own button
+      if (hidden) {
+        if (el.dataset.kePrevDisplay === undefined) el.dataset.kePrevDisplay = el.style.display || '';
+        el.style.display = 'none';
+      } else if (el.dataset.kePrevDisplay !== undefined) {
+        el.style.display = el.dataset.kePrevDisplay;
+        delete el.dataset.kePrevDisplay;
+      }
+    }
   }
 
   async function loadState(root) {
@@ -83,17 +119,23 @@
     // stops in-stock variants (in markets we don't ship) showing the notify box.
     if (state.state === 'preorder') {
       root.hidden = false;
-      eyebrow.textContent = 'Pre-order';
-      title.textContent = formatExpected(state.expectedShipDate);
-      copy.textContent = 'This item is currently being made. Order now to reserve yours. Payment is taken in full at checkout.';
+      // No badge — just the out-of-stock copy with the back-in-stock date, and
+      // the pre-order button. Hide the theme's Sold out / buy buttons.
+      setHidden(eyebrow, true);
+      setHidden(title, true);
+      copy.textContent = `Currently out of stock. Arriving back in stock ${formatLocalDate(state.expectedShipDate)}.`;
       root.dataset.sellingPlanId = state.sellingPlanId || '';
       root.dataset.batchId = String(state.batchId || '');
+      preorderButton.textContent = shipInLabel(state.expectedShipDate);
       setHidden(preorderButton, false);
       setHidden(notifyForm, true);
+      setThemeBuyHidden(true);
       return;
     }
     if (state.state === 'notify_me') {
       root.hidden = false;
+      setHidden(eyebrow, false);
+      setHidden(title, false);
       eyebrow.textContent = 'Currently unavailable';
       title.textContent = 'Notify me when this size is available';
       copy.textContent = 'Join the waitlist and we’ll let you know when this size can be ordered again.';
@@ -101,9 +143,11 @@
       delete root.dataset.batchId;
       setHidden(preorderButton, true);
       setHidden(notifyForm, false);
+      setThemeBuyHidden(false);
       return;
     }
     root.hidden = true;
+    setThemeBuyHidden(false);
   }
 
   async function addPreorder(root, button) {

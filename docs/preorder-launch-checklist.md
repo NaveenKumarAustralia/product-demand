@@ -30,9 +30,19 @@ Updated: 2026-09-03.
 - [ ] Order-confirmation email wording for pre-order customers (clearly says pre-order + dispatch date).
 - [ ] Capture unit price on the reservation at this point → unlocks revenue/money-in-advance in the Reports tab (#7).
 
+## ✅ 1b. Reservation proven end-to-end (6 Sep 2026)
+- [x] Paid pre-order reserves against the exact batch (5→4) and releases on cancel (→5). Webhook now reads the selling plan via GraphQL (the REST payload didn't expose it), so future orders reserve automatically. Admin reprocess tool exists at `/api/preorder-reprocess-order`.
+- [ ] Place ONE more live order right before loading products for pre-sale, to watch the automatic reserve happen on its own.
+
 ## 🔴 2. Fulfilment when the stock actually arrives  (needs a defined process)
 - [ ] Decide + build the flow: batch lands (status → arrived / received) → how the reserved pre-order orders get fulfilled in Shopify.
 - [ ] Confirm inventory received at the AU location correctly flips those variants back to normal in-stock and the block hides.
+
+## 🔴 2b. Pick-pack app must handle mixed orders  (BLOCKER before turning on)
+- [ ] An order with BOTH in-stock and pre-order items: the in-stock item ships now, the pre-order item ships when the batch arrives. The Pick Pack app / pick-pack team must clearly see which line is a pre-order (and its dispatch date) and NOT try to pick the pre-order item early. Verify how Shopify's "On hold" + the pre-order line surface in Pick Pack, and make it obvious.
+
+## 🔴 2c. Pre-order customer notifications  (before turning on)
+- [ ] Order-confirmation wording makes clear it's a pre-order + dispatch date; dispatch/ETA-change emails. (Notifications tab exists with an approve-and-send flow; wire the customer-facing messages.)
 
 ## 🟡 3. Back-in-stock email (Klaviyo)  (live)
 - [ ] Build a Klaviyo **Flow** triggered by the `Karma East Back In Stock Available` event (the app fires the event; no Flow = no email sent).
@@ -44,6 +54,9 @@ Updated: 2026-09-03.
 
 ## 🟡 5. Overallocation / shortfall handling
 - [ ] If incoming production drops below what's reserved, define the admin view + process (handoff rule: never silently unreserve a real customer).
+
+## ✅ 5b. Product-page block redesign (6 Sep 2026 — needs `npm run deploy`)
+- [x] No PRE-ORDER badge; button styled like the store buy button, text "Pre-order · ships in N days" (counts down); copy "Currently out of stock. Arriving back in stock <date>"; date shown in the visitor's own country format; theme "Sold out"/buy buttons hidden while pre-order shows. Theme-extension change — push with `npm run deploy`.
 
 ## ✅ 6. Customer "My pre-orders" page  (DONE — one no-code link step left)
 - [x] Themed page served via the app proxy at `/apps/karma-east-preorder?view=my-preorders` — renders inside the live theme (header/footer/fonts), shows the logged-in customer's reserved items, sizes, dispatch dates and status. Read-only, no theme editing needed.
