@@ -129,6 +129,10 @@ model PreorderReservation {
   reservedAt        DateTime  @default(now())
   releasedAt        DateTime?
   fulfilledAt       DateTime?
+  // Set when the batch's stock has landed in Shopify and we've released the
+  // Shopify fulfilment hold + tagged the order so Pick Pack can pick it. Distinct
+  // from releasedAt (which is a cancellation). Null = still awaiting stock.
+  readyAt           DateTime?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 

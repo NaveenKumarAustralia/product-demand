@@ -11,6 +11,7 @@ import {
   preorderText,
   type ShopifyOrderPayload,
 } from "./preorder-shopify-order-normalize";
+import { getOfflineToken, addOrderTags } from "./preorder-fulfillment.server";
 
 const API_VERSION = "2025-10";
 
@@ -84,7 +85,14 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
       preferredSupplierOrderId: preorderBatchIdFromPlanName(line.sellingPlan?.name),
     }));
 
-  return { shopifyOrderId: numericId(order.id), shopifyOrderName: order.name ?? null, customerEmail: order.email ?? null, market, lines };
+  return {
+    shopifyOrderId: numericId(order.id),
+    shopifyOrderName: order.name ?? null,
+    customerEmail: order.email ?? null,
+    market,
+    lines,
+    totalLines: (order.lineItems?.nodes ?? []).length,
+  };
 }
 
 export async function processShopifyOrderCreated(shop: string, payload: unknown) {
@@ -95,6 +103,24 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
   const normalized = await fetchPreorderOrderViaGraphql(shop, orderIdNumeric);
   if (!normalized || !normalized.lines.length) return { preorder: false, reservations: 0 };
   if (!normalized.shopifyOrderId) throw new PreorderCapacityError("Shopify preorder order ID is missing.");
+
+  // Tag the order so Pick Pack handles it: a fully pre-order order gets
+  // `pre-order-hold` (Pick Pack sets it aside entirely); a mixed order gets
+  // `pre-order` (Pick Pack hides just the pre-order line). Needs write_orders
+  // (granted on re-auth) — fails soft until then. Tags before allocating so the
+  // pick-pack team never treats it as normal even if allocation needs review.
+  try {
+    const token = await getOfflineToken(shop);
+    if (token) {
+      const batchIds = Array.from(new Set(normalized.lines.map((line) => line.preferredSupplierOrderId).filter(Boolean)));
+      const fullyPreorder = normalized.totalLines > 0 && normalized.lines.length >= normalized.totalLines;
+      const tags = ["pre-order", ...batchIds.map((id) => `pre-order-batch-${id}`)];
+      if (fullyPreorder) tags.push("pre-order-hold");
+      await addOrderTags(shop, token, orderIdNumeric, tags);
+    }
+  } catch (error) {
+    console.warn("[preorder] order tagging failed (needs write_orders?):", error instanceof Error ? error.message : error);
+  }
 
   try {
     let reservations = 0;

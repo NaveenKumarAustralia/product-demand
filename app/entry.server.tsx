@@ -5,6 +5,11 @@ import { createReadableStreamFromReadable } from "@react-router/node";
 import { type EntryContext } from "react-router";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
+import { startPreorderReleaseScheduler } from "./preorder/preorder-release.server";
+
+// Start the pre-order auto-release timer once when the server boots (releases
+// Shopify holds + tags orders for Pick Pack when a batch's stock lands).
+startPreorderReleaseScheduler();
 
 export const streamTimeout = 5000;
 
