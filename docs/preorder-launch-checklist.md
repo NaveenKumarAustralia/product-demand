@@ -43,6 +43,9 @@ Updated: 2026-09-03.
 
 ## 🔴 2c. Pre-order customer notifications  (before turning on)
 - [ ] Order-confirmation wording makes clear it's a pre-order + dispatch date; dispatch/ETA-change emails. (Notifications tab exists with an approve-and-send flow; wire the customer-facing messages.)
+- Draft copy Koku wants for the pre-order order-confirmation (6 Sep 2026):
+  > Thanks for your order. You've picked an incredibly popular product — we're finding it hard to keep it stocked at the moment. As soon as it's landed, we'll dispatch your order to you. Thanks again for your patience and for shopping with Karma East.
+  (Refine tone/wording when we build it; ideally include the expected dispatch date.)
 
 ## 🟡 3. Back-in-stock email (Klaviyo)  (live)
 - [ ] Build a Klaviyo **Flow** triggered by the `Karma East Back In Stock Available` event (the app fires the event; no Flow = no email sent).
