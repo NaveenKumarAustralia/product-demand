@@ -34,9 +34,11 @@ Updated: 2026-09-03.
 - [x] Paid pre-order reserves against the exact batch (5→4) and releases on cancel (→5). Webhook now reads the selling plan via GraphQL (the REST payload didn't expose it), so future orders reserve automatically. Admin reprocess tool exists at `/api/preorder-reprocess-order`.
 - [ ] Place ONE more live order right before loading products for pre-sale, to watch the automatic reserve happen on its own.
 
-## 🔴 2. Fulfilment when the stock actually arrives  (needs a defined process)
-- [ ] Decide + build the flow: batch lands (status → arrived / received) → how the reserved pre-order orders get fulfilled in Shopify.
-- [ ] Confirm inventory received at the AU location correctly flips those variants back to normal in-stock and the block hides.
+## ✅ 2. Fulfilment when stock arrives — AUTO-RELEASE LIVE (6 Sep 2026)
+- [x] Load the shipment's stock into Shopify → a 10-min job (or /api/preorder-release-arrived) releases the Shopify hold on those orders, tags `pre-order-ready-batch-N`, removes `pre-order-hold`, marks reservation readyAt. Pick Pack then picks & dispatches → Shopify shipping-confirmation email fires.
+- [x] Scopes granted + re-authed (write_orders, read/write merchant_managed_fulfillment_orders); scope check returns scopesReady:true.
+- [x] On-order auto-tagging live (pre-order / pre-order-hold) so Pick Pack handles orders from purchase.
+- [ ] Do one real load-stock → release → Pick Pack → ship test end to end.
 
 ## 🔴 2b. Pick-pack app must handle mixed orders  (BLOCKER before turning on)
 - [ ] An order with BOTH in-stock and pre-order items: the in-stock item ships now, the pre-order item ships when the batch arrives. The Pick Pack app / pick-pack team must clearly see which line is a pre-order (and its dispatch date) and NOT try to pick the pre-order item early. Verify how Shopify's "On hold" + the pre-order line surface in Pick Pack, and make it obvious.
