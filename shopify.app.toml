@@ -12,7 +12,7 @@ redirect_urls = [
 ]
 
 [access_scopes]
-scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_reports,read_purchase_options,write_purchase_options,read_all_orders,read_customer_payment_methods,read_payment_mandate,write_payment_mandate,write_app_proxy"
+scopes = "read_products,write_products,read_inventory,write_inventory,read_locations,read_orders,read_reports,read_purchase_options,write_purchase_options,read_all_orders,read_customer_payment_methods,read_payment_mandate,write_payment_mandate,write_app_proxy,write_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders"
 
 [app_proxy]
 # Must be an ABSOLUTE URL — Shopify forwards storefront /apps/karma-east-preorder
