@@ -71,29 +71,56 @@
     }
   }
 
-  async function loadState(root) {
-    const variantId = currentVariantId(root);
-    if (!variantId) return;
-    if (root.dataset.loadingVariant === variantId) return;
-    root.dataset.loadingVariant = variantId;
+  // Cache each variant's state (keyed by variant id) so switching sizes renders
+  // instantly instead of waiting on a network round-trip each time.
+  const stateCache = new Map();
 
+  async function fetchState(root, variantId) {
     const proxy = root.dataset.proxyPath || '/apps/karma-east-preorder';
     const market = root.dataset.market || 'AU';
     const url = new URL(proxy, window.location.origin);
     url.searchParams.set('variantId', variantId);
     url.searchParams.set('market', market);
+    const response = await fetch(url.toString(), { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+    const result = await response.json();
+    if (!response.ok || !result?.state) throw new Error(result?.error || 'Availability could not be loaded.');
+    stateCache.set(String(variantId), result.state);
+    return result.state;
+  }
 
+  async function loadState(root) {
+    const variantId = currentVariantId(root);
+    if (!variantId) return;
+
+    // Instant path: we already know this size's state.
+    if (stateCache.has(String(variantId))) {
+      render(root, variantId, stateCache.get(String(variantId)));
+      return;
+    }
+
+    if (root.dataset.loadingVariant === variantId) return;
+    root.dataset.loadingVariant = variantId;
     try {
-      const response = await fetch(url.toString(), { credentials: 'same-origin', headers: { Accept: 'application/json' } });
-      const result = await response.json();
-      if (!response.ok || !result?.state) throw new Error(result?.error || 'Availability could not be loaded.');
+      const state = await fetchState(root, variantId);
       if (currentVariantId(root) !== variantId) return;
-      render(root, variantId, result.state);
+      render(root, variantId, state);
     } catch (error) {
       console.warn('[Karma East preorder] state load failed', error);
       root.hidden = true;
+      setThemeBuyHidden(false); // never leave the buy button hidden on an error
     } finally {
       if (root.dataset.loadingVariant === variantId) delete root.dataset.loadingVariant;
+    }
+  }
+
+  // Warm the cache for every size in the background on load, so the FIRST switch
+  // to any size is already instant.
+  function prefetchAll(root) {
+    let variants = [];
+    try { variants = JSON.parse(root.querySelector('[data-ke-variants]')?.textContent || '[]'); } catch (_) {}
+    for (const v of variants) {
+      const id = String(v?.id || '').trim();
+      if (id && !stateCache.has(id)) fetchState(root, id).catch(() => {});
     }
   }
 
@@ -226,6 +253,7 @@
       joinWaitlist(root, event.currentTarget);
     });
     loadState(root);
+    prefetchAll(root);
   }
 
   let timer;
