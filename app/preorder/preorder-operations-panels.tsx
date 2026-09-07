@@ -187,6 +187,7 @@ function LocationSelect({ label, value, onChange, locations, loaded, loadError }
 export function PreorderSettingsPanel({ configuration }: { configuration: PreorderDashboardData["configuration"] }) {
   const [au, setAu] = useState(configuration.locations.AU ?? "");
   const [usa, setUsa] = useState(configuration.locations.USA ?? "");
+  const [combineDays, setCombineDays] = useState(String(configuration.combineWindowDays ?? 8));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [locations, setLocations] = useState<ShopifyLocationOption[]>([]);
@@ -244,6 +245,39 @@ export function PreorderSettingsPanel({ configuration }: { configuration: Preord
         </div>
         {au && usa && au === usa ? <div style={{ ...s.notice, ...s.noticeError }}>AU and USA are set to the SAME location — regional pools must be different.</div> : null}
         <div style={s.actions}><button type="button" disabled={busy} style={s.primary} onClick={() => post({ operation: "update-locations", AU: au, USA: usa }, "Shopify preorder locations saved.")}>Save locations</button></div>
+      </div>
+      <div style={s.card}>
+        <div style={s.title}>Combine mixed orders (ship together)</div>
+        <div style={s.muted}>
+          When an order has both in-stock and pre-order items and the pre-order is due to dispatch within this many days,
+          hold the whole order so it ships in <strong>one parcel</strong> when the batch lands (instead of shipping the in-stock
+          part first). The order releases automatically the moment its stock is loaded into Shopify. Set to <strong>0</strong> to
+          always ship in-stock items immediately.
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+          <input
+            type="number" min={0} max={365} value={combineDays}
+            onChange={(e) => setCombineDays(e.target.value.replace(/[^0-9]/g, ""))}
+            style={{ width: 90, height: 36, boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 8, padding: "0 10px", fontSize: 14 }}
+          />
+          <span style={s.muted}>days</span>
+        </div>
+        <div style={{ ...s.actions, gap: 8, flexWrap: "wrap" }}>
+          <button type="button" disabled={busy} style={s.primary} onClick={() => post({ operation: "set-combine-window", days: Number(combineDays) || 0 }, `Combine window saved (${Number(combineDays) || 0} days).`)}>Save combine window</button>
+          <button type="button" disabled={busy} style={{ border: "1px solid #0f766e", background: "#fff", color: "#0f766e", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 800, cursor: busy ? "default" : "pointer" }} onClick={async () => {
+            setBusy(true); setNotice(null);
+            try {
+              const r = await fetch("/api/preorder-manage", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operation: "combine-existing" }) });
+              const d = await r.json().catch(() => ({})) as { ok?: boolean; error?: string; combine?: { heldOrders: number; scannedOrders: number; skippedNoScope?: boolean } };
+              if (!r.ok || d.ok !== true) throw new Error(d.error || "Could not combine existing orders.");
+              const c = d.combine;
+              setNotice({ kind: "success", text: c ? `Held ${c.heldOrders} existing order${c.heldOrders === 1 ? "" : "s"} (of ${c.scannedOrders} due within the window)${c.skippedNoScope ? " — some skipped, re-auth the app for order/fulfilment scopes" : ""}. They'll release when their stock is loaded.` : "Done." });
+            } catch (error) {
+              setNotice({ kind: "error", text: error instanceof Error ? error.message : "Could not combine existing orders." });
+            } finally { setBusy(false); }
+          }}>Apply to existing orders now</button>
+        </div>
+        <div style={{ ...s.muted, marginTop: 6 }}>“Apply to existing orders” holds the in-stock items of orders already placed whose pre-order is due within the window above (raise the days to catch more). Already-shipped items aren’t affected.</div>
       </div>
       <div style={s.card}>
         <div style={s.title}>Staff permissions</div>

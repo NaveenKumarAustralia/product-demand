@@ -7,7 +7,8 @@ import {
 } from "../preorder/preorder-batch.service";
 import { getPreorderPermissionContext } from "../preorder/preorder-permissions.server";
 import { setPreorderLocationSettings } from "../preorder/preorder-locations.server";
-import { setPreorderNotifyEnabled } from "../preorder/preorder-storefront-settings.server";
+import { setPreorderNotifyEnabled, setPreorderCombineWindowDays } from "../preorder/preorder-storefront-settings.server";
+import { combineExistingPreorderOrders } from "../preorder/preorder-release.server";
 import {
   PreorderSellingPlanError,
   activatePreorderSellingPlan,
@@ -53,6 +54,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (actor.admin !== true) return jsonError("Only a portal admin can change the notify-me block.", 403);
       const enabled = await setPreorderNotifyEnabled(payload.enabled === true, actor.name);
       return Response.json({ ok: true, notifyBlockEnabled: enabled });
+    }
+
+    if (operation === "set-combine-window") {
+      if (actor.admin !== true) return jsonError("Only a portal admin can change the combine window.", 403);
+      const days = await setPreorderCombineWindowDays(Number(payload.days), actor.name);
+      return Response.json({ ok: true, combineWindowDays: days });
+    }
+
+    if (operation === "combine-existing") {
+      if (actor.admin !== true) return jsonError("Only a portal admin can combine existing orders.", 403);
+      const result = await combineExistingPreorderOrders();
+      return Response.json({ ok: true, combine: result });
     }
 
     if (operation === "update-locations") {

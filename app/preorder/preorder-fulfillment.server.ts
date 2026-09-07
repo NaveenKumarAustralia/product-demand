@@ -98,6 +98,37 @@ export async function releaseOrderPreorderHolds(shop: string, token: string, ord
   return released;
 }
 
+/**
+ * Put a hold on every OPEN fulfilment order of an order — used to keep the
+ * in-stock items of a MIXED order from shipping before the pre-order item, so
+ * the whole order ships together. Pre-order lines are already ON_HOLD (Shopify's
+ * deferred selling plan). Returns how many fulfilment orders were newly held.
+ */
+export async function holdOrderOpenFulfillmentOrders(shop: string, token: string, orderIdNumeric: string, reasonNotes: string): Promise<number> {
+  const data = await graphql<{ order?: { fulfillmentOrders?: { nodes?: Array<{ id: string; status?: string }> } } }>(
+    shop, token, `#graphql
+      query PreorderOpenFOs($id: ID!) {
+        order(id: $id) { fulfillmentOrders(first: 25) { nodes { id status } } }
+      }
+    `, { id: `gid://shopify/Order/${orderIdNumeric}` },
+  );
+  const open = (data.order?.fulfillmentOrders?.nodes ?? []).filter((fo) => fo.status === "OPEN");
+  let held = 0;
+  for (const fo of open) {
+    const result = await graphql<{ fulfillmentOrderHold?: { userErrors?: Array<{ message?: string }> } }>(
+      shop, token, `#graphql
+        mutation PreorderHold($id: ID!, $hold: FulfillmentOrderHoldInput!) {
+          fulfillmentOrderHold(id: $id, fulfillmentHold: $hold) { userErrors { message } }
+        }
+      `, { id: fo.id, hold: { reason: "OTHER", reasonNotes } },
+    );
+    const errs = result.fulfillmentOrderHold?.userErrors;
+    if (errs?.length) throw new PreorderFulfillmentError(errs.map((e) => e.message || "hold error").join("; "));
+    held += 1;
+  }
+  return held;
+}
+
 export async function addOrderTags(shop: string, token: string, orderIdNumeric: string, tags: string[]): Promise<void> {
   if (!tags.length) return;
   const result = await graphql<{ tagsAdd?: { userErrors?: Array<{ message?: string }> } }>(

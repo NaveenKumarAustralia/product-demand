@@ -11,7 +11,8 @@ import {
   preorderText,
   type ShopifyOrderPayload,
 } from "./preorder-shopify-order-normalize";
-import { getOfflineToken, addOrderTags } from "./preorder-fulfillment.server";
+import { getOfflineToken, addOrderTags, holdOrderOpenFulfillmentOrders } from "./preorder-fulfillment.server";
+import { getPreorderCombineWindowDays } from "./preorder-storefront-settings.server";
 
 const API_VERSION = "2025-10";
 
@@ -109,11 +110,13 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
   // `pre-order` (Pick Pack hides just the pre-order line). Needs write_orders
   // (granted on re-auth) — fails soft until then. Tags before allocating so the
   // pick-pack team never treats it as normal even if allocation needs review.
+  // A fully pre-order order: every line is a pre-order. A mixed order has some
+  // in-stock lines too.
+  const fullyPreorder = normalized.totalLines > 0 && normalized.lines.length >= normalized.totalLines;
   try {
     const token = await getOfflineToken(shop);
     if (token) {
       const batchIds = Array.from(new Set(normalized.lines.map((line) => line.preferredSupplierOrderId).filter(Boolean)));
-      const fullyPreorder = normalized.totalLines > 0 && normalized.lines.length >= normalized.totalLines;
       const tags = ["pre-order", ...batchIds.map((id) => `pre-order-batch-${id}`)];
       if (fullyPreorder) tags.push("pre-order-hold");
       await addOrderTags(shop, token, orderIdNumeric, tags);
@@ -124,6 +127,7 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
 
   try {
     let reservations = 0;
+    let earliestShipMs: number | null = null;
     for (const line of normalized.lines) {
       if (!line.shopifyLineItemId || !line.variantId || !Number.isInteger(line.quantity) || line.quantity <= 0) {
         throw new PreorderCapacityError("Shopify preorder line is missing a valid line ID, variant ID or quantity.");
@@ -148,6 +152,33 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
         preferredSupplierOrderId: line.preferredSupplierOrderId,
       });
       reservations += rows.reduce((sum, row) => sum + row.quantity, 0);
+      for (const row of rows) {
+        const t = row.expectedShipDate ? new Date(row.expectedShipDate).getTime() : NaN;
+        if (Number.isFinite(t) && (earliestShipMs === null || t < earliestShipMs)) earliestShipMs = t;
+      }
+    }
+
+    // "Combine window": for a MIXED order whose pre-order is due within N days,
+    // hold the in-stock items too (and set the whole order aside for Pick Pack)
+    // so it all ships together when the batch lands. The existing stock-aware
+    // auto-release releases every hold on the order at once.
+    if (!fullyPreorder && earliestShipMs !== null) {
+      try {
+        const windowDays = await getPreorderCombineWindowDays();
+        const cutoff = Date.now() + windowDays * 86400000;
+        if (windowDays > 0 && earliestShipMs <= cutoff) {
+          const token = await getOfflineToken(shop);
+          if (token) {
+            const held = await holdOrderOpenFulfillmentOrders(shop, token, orderIdNumeric, "Held to ship with the pre-order item in this order (combine window)");
+            if (held > 0) await addOrderTags(shop, token, orderIdNumeric, ["pre-order-hold"]);
+            console.log(`[preorder combine] ${shop} order ${orderIdNumeric}: held ${held} in-stock fulfilment order(s) to ship with the pre-order.`);
+          }
+        }
+      } catch (error) {
+        // Non-fatal: reservation still succeeded; the in-stock part just ships
+        // separately if the hold couldn't be placed (e.g., missing scope).
+        console.warn("[preorder combine] hold failed:", error instanceof Error ? error.message : error);
+      }
     }
 
     return { preorder: true, reservations, market: normalized.market };

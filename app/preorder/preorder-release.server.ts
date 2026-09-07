@@ -6,8 +6,59 @@ import {
   releaseOrderPreorderHolds,
   addOrderTags,
   removeOrderTags,
+  holdOrderOpenFulfillmentOrders,
 } from "./preorder-fulfillment.server";
+import { getPreorderCombineWindowDays } from "./preorder-storefront-settings.server";
 import type { PreorderMarket } from "./preorder-rules.server";
+
+// Backfill for the "combine mixed orders" feature: hold the in-stock items of
+// EXISTING open pre-order orders (whose pre-order is due within the combine
+// window) so they ship together when the batch lands. Idempotent — an order
+// whose in-stock lines are already held (no OPEN fulfilment orders) is a no-op,
+// and shipped lines (CLOSED) are never touched. The existing stock-aware
+// release then releases everything when the inventory is loaded into Shopify.
+export async function combineExistingPreorderOrders(): Promise<{ scannedOrders: number; heldOrders: number; errors: number; skippedNoScope: boolean; windowDays: number }> {
+  const windowDays = await getPreorderCombineWindowDays();
+  if (windowDays <= 0) return { scannedOrders: 0, heldOrders: 0, errors: 0, skippedNoScope: false, windowDays };
+  const pending = await prisma.preorderReservation.findMany({
+    where: { status: "reserved", readyAt: null },
+    select: { shop: true, shopifyOrderId: true, expectedShipDate: true },
+  });
+  // Earliest promised dispatch per (shop, order).
+  const orders = new Map<string, { shop: string; orderId: string; earliest: number | null }>();
+  for (const r of pending) {
+    if (!r.shopifyOrderId) continue;
+    const key = `${r.shop}::${r.shopifyOrderId}`;
+    const t = r.expectedShipDate ? new Date(r.expectedShipDate).getTime() : NaN;
+    const cur = orders.get(key) ?? { shop: r.shop, orderId: r.shopifyOrderId, earliest: null };
+    if (Number.isFinite(t) && (cur.earliest === null || t < cur.earliest)) cur.earliest = t;
+    orders.set(key, cur);
+  }
+  const cutoff = Date.now() + windowDays * 86400000;
+  const tokenByShop = new Map<string, string | null>();
+  let scannedOrders = 0, heldOrders = 0, errors = 0, skippedNoScope = false;
+  for (const { shop, orderId, earliest } of orders.values()) {
+    if (earliest === null || earliest > cutoff) continue; // not due within the window
+    scannedOrders += 1;
+    if (!tokenByShop.has(shop)) tokenByShop.set(shop, await getOfflineToken(shop));
+    const token = tokenByShop.get(shop);
+    if (!token) { skippedNoScope = true; continue; }
+    try {
+      const held = await holdOrderOpenFulfillmentOrders(shop, token, orderId, "Held to ship with the pre-order item in this order (combine window)");
+      if (held > 0) {
+        await addOrderTags(shop, token, orderId, ["pre-order-hold"]);
+        heldOrders += 1;
+        console.log(`[preorder combine backfill] ${shop} order ${orderId}: held ${held} in-stock fulfilment order(s).`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/access denied|not approved|scope/i.test(message)) skippedNoScope = true;
+      console.warn(`[preorder combine backfill] ${shop} order ${orderId} failed:`, message);
+      errors += 1;
+    }
+  }
+  return { scannedOrders, heldOrders, errors, skippedNoScope, windowDays };
+}
 
 // When a batch's stock lands in Shopify (available at the market's location covers
 // the reservations), release the Shopify fulfilment hold on those orders and tag
