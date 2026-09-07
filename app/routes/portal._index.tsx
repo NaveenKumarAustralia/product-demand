@@ -2519,8 +2519,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
     if (!linesToCreate.length) return jsonResponse({ ok: false, error: "Nothing to split" });
 
+    let createdSplitId = 0;
     await prisma.$transaction(async (tx) => {
-      await tx.supplierOrder.create({
+      const created = await tx.supplierOrder.create({
         data: {
           shop: order.shop,
           poNumber: order.poNumber,
@@ -2539,7 +2540,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           totalQty: linesToCreate.reduce((s, l) => s + l.qtyOrdered, 0),
           lines: { create: linesToCreate },
         },
+        select: { id: true },
       });
+      createdSplitId = created.id;
       // Deduct moved quantities from the source's lines (across duplicate
       // lines for a size if there are any).
       for (const d of deductions) {
@@ -2553,6 +2556,33 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const srcLines = await tx.orderLine.findMany({ where: { orderId }, select: { qtyOrdered: true } });
       await tx.supplierOrder.update({ where: { id: orderId }, data: { totalQty: srcLines.reduce((s, l) => s + l.qtyOrdered, 0) } });
     });
+    return jsonResponse({ ok: true, newOrderId: createdSplitId });
+  }
+
+  // Undo of a split: delete the split-off order and add the moved quantities
+  // back onto the original order's lines (first line per size; recompute total).
+  if (intent === "undo_split_order") {
+    const newOrderId = Number(form.get("newOrderId"));
+    let restore: Record<string, number> = {};
+    try { restore = normalizeQtys(JSON.parse(String(form.get("restoreQtys") ?? "{}"))); } catch { restore = {}; }
+    if (Number.isFinite(newOrderId) && newOrderId > 0) {
+      await prisma.portalMessage.deleteMany({ where: { orderId: newOrderId } }).catch(() => {});
+      await prisma.supplierOrder.delete({ where: { id: newOrderId } }).catch(() => {});
+    }
+    const original = await prisma.supplierOrder.findUnique({ where: { id: orderId }, include: { lines: { orderBy: { id: "asc" } } } });
+    if (original) {
+      await prisma.$transaction(async (tx) => {
+        for (const [size, rawQty] of Object.entries(restore)) {
+          const add = Math.max(0, Math.floor(Number(rawQty) || 0));
+          if (add <= 0) continue;
+          const line = original.lines.find((l) => l.variantTitle === size);
+          if (line) await tx.orderLine.update({ where: { id: line.id }, data: { qtyOrdered: line.qtyOrdered + add } });
+          else await tx.orderLine.create({ data: { orderId, variantId: `${orderId}:${size}`, variantTitle: size, qtyOrdered: add } });
+        }
+        const srcLines = await tx.orderLine.findMany({ where: { orderId }, select: { qtyOrdered: true } });
+        await tx.supplierOrder.update({ where: { id: orderId }, data: { totalQty: srcLines.reduce((s, l) => s + l.qtyOrdered, 0) } });
+      });
+    }
     return jsonResponse({ ok: true });
   }
 
@@ -11193,9 +11223,30 @@ export default function PortalDashboard() {
     setCelebrateRows((p) => { const n = new Set(p); n.add(id); return n; });
     window.setTimeout(() => setCelebrateRows((p) => { const n = new Set(p); n.delete(id); return n; }), 4600);
   };
+  // Remember the last split's inputs so we can build its undo entry once the
+  // server returns the new (split-off) order's id.
+  const pendingSplitRef = useRef<{ orderId: number; qtys: Record<string, number>; label: string } | null>(null);
+  useEffect(() => {
+    if (restockSplitFetcher.state !== "idle" || !restockSplitFetcher.data || !pendingSplitRef.current) return;
+    const data = restockSplitFetcher.data as { ok?: boolean; newOrderId?: number };
+    const p = pendingSplitRef.current;
+    pendingSplitRef.current = null;
+    if (!data?.ok || !data.newOrderId) return;
+    const moved: Record<string, number> = {};
+    for (const [size, q] of Object.entries(p.qtys)) { const n = Number(q) || 0; if (n > 0) moved[size] = n; }
+    // Undo-only (no redo): re-splitting would create a different order id, so a
+    // stored redo would point at a stale row. Undo un-splits back to the original.
+    pushPortalUndo({
+      label: `Undo split → ${p.label}`,
+      fields: { intent: "undo_split_order", orderId: p.orderId, newOrderId: data.newOrderId, restoreQtys: JSON.stringify(moved) },
+      focusOrderId: p.orderId,
+    });
+  }, [restockSplitFetcher.state, restockSplitFetcher.data]);
   const splitRestockOrder = (orderId: number, destination: string, qtys: Record<string, number>) => {
     type SL = { variantTitle: string; qtyOrdered: number; sku?: string | null; barcode?: string | null; variantId?: string };
     const tempId = -(Date.now());
+    const destLabel = labelForOption(restockSettings.destinationOptions, destination) || destination;
+    pendingSplitRef.current = { orderId, qtys, label: destLabel };
     setLocalRestockOrders((prev) => {
       const src = prev.find((o) => o.id === orderId) as (Order & { lines?: SL[] }) | undefined;
       if (!src) return prev;
