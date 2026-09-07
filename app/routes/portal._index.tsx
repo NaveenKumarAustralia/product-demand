@@ -27427,6 +27427,7 @@ function RestockOptionChipDropdown({
   onChange,
   controlled,
   blockedValues,
+  compact,
 }: {
   orderId: number;
   value: string;
@@ -27448,6 +27449,9 @@ function RestockOptionChipDropdown({
   // editable otherwise — you can still move it to any other status (On Order
   // included, which is itself preorder-eligible).
   blockedValues?: string[];
+  // Compact renders a roughly half-size chip (smaller padding + font), for the
+  // Reorder Planner's dense on-order rows. Default (restock table) stays full size.
+  compact?: boolean;
 }) {
   const cellFetcher = useFetcher();
   const settingsFetcher = useFetcher();
@@ -27621,7 +27625,7 @@ function RestockOptionChipDropdown({
   ) : null;
 
   return (
-    <div style={s.restockChipCell}>
+    <div style={compact ? { display: "grid", alignContent: "center" } : s.restockChipCell}>
       <button
         ref={buttonRef}
         type="button"
@@ -27629,6 +27633,7 @@ function RestockOptionChipDropdown({
           ...s.fabricChipSelect,
           background: option?.bg ?? "#f3f4f6",
           color: option?.color ?? "#374151",
+          ...(compact ? { width: "auto", minHeight: 22, padding: "2px 6px 2px 8px", borderRadius: 6, fontSize: 11, fontWeight: 800, gap: 3 } : null),
         }}
         onClick={() => {
           updateRect();
@@ -27636,7 +27641,7 @@ function RestockOptionChipDropdown({
         }}
       >
         <span style={s.fabricChipButtonText}>{option?.label ?? emptyLabel ?? "—"}</span>
-        <span style={s.fabricChipChevron}>⌄</span>
+        <span style={compact ? { ...s.fabricChipChevron, fontSize: 11, minWidth: 11, marginLeft: 2 } : s.fabricChipChevron}>⌄</span>
       </button>
       {dropdown}
     </div>
@@ -29815,9 +29820,9 @@ function ReorderPlannerPage({ search = "", restockSettings }: { search?: string;
                                       <td style={{ padding: i === 0 ? "7px 10px 5px 0" : "5px 10px 5px 0", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined, verticalAlign: "middle" }}>
                                         <div style={{ display: "flex", alignItems: "center", gap: 5, justifyContent: "flex-end", flexWrap: "wrap" }}>
                                           <span style={{ fontSize: 10, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>{e.label}</span>
-                                          <RestockOptionChipDropdown orderId={e.orderId} value={chipVal(e.orderId, "status", e.supplierStatus)} options={restockSettings.statusOptions} optionKind="statusOptions" restockSettings={restockSettings} updateIntent="update_status" undoLabel="Undo status" controlled onChange={(v) => setChip(e.orderId, "status", v)} />
-                                          <RestockOptionChipDropdown orderId={e.orderId} value={chipVal(e.orderId, "priority", e.priority)} options={restockSettings.priorityOptions} optionKind="priorityOptions" restockSettings={restockSettings} updateIntent="update_priority" undoLabel="Undo priority" emptyLabel="Priority" controlled onChange={(v) => setChip(e.orderId, "priority", v)} />
-                                          <RestockOptionChipDropdown orderId={e.orderId} value={chipVal(e.orderId, "destination", e.destination)} options={restockSettings.destinationOptions} optionKind="destinationOptions" restockSettings={restockSettings} updateIntent="update_destination" undoLabel="Undo destination" emptyLabel="Destination" controlled onChange={(v) => setChip(e.orderId, "destination", v)} />
+                                          <RestockOptionChipDropdown compact orderId={e.orderId} value={chipVal(e.orderId, "status", e.supplierStatus)} options={restockSettings.statusOptions} optionKind="statusOptions" restockSettings={restockSettings} updateIntent="update_status" undoLabel="Undo status" controlled onChange={(v) => setChip(e.orderId, "status", v)} />
+                                          <RestockOptionChipDropdown compact orderId={e.orderId} value={chipVal(e.orderId, "priority", e.priority)} options={restockSettings.priorityOptions} optionKind="priorityOptions" restockSettings={restockSettings} updateIntent="update_priority" undoLabel="Undo priority" emptyLabel="Priority" controlled onChange={(v) => setChip(e.orderId, "priority", v)} />
+                                          <RestockOptionChipDropdown compact orderId={e.orderId} value={chipVal(e.orderId, "destination", e.destination)} options={restockSettings.destinationOptions} optionKind="destinationOptions" restockSettings={restockSettings} updateIntent="update_destination" undoLabel="Undo destination" emptyLabel="Destination" controlled onChange={(v) => setChip(e.orderId, "destination", v)} />
                                         </div>
                                       </td>
                                       {calc.rows.map((c) => <td key={c.key} style={{ padding: i === 0 ? "7px 8px 5px" : "5px 8px", textAlign: "center", fontSize: 13, color: (e.bySize[c.size] ?? 0) > 0 ? "#7c3aed" : "#cbd5e1", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>{e.bySize[c.size] ?? 0}</td>)}
