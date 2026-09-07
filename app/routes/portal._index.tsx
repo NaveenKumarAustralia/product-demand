@@ -10905,7 +10905,14 @@ type RowMenuAction = {
 };
 type PortalUndoEntry = {
   label: string;
+  // `fields` is the action to SUBMIT when this entry is applied (for an undo-stack
+  // entry that's the inverse action; for a redo-stack entry it's the forward one).
   fields: Record<string, string | number>;
+  // `redo` is the opposite action, so undo/redo can swap the entry between the two
+  // stacks. Absent = the action isn't redoable (still undoable).
+  redo?: Record<string, string | number>;
+  // When set, jump to + flash this order's row after the undo/redo applies.
+  focusOrderId?: number;
 };
 
 export default function PortalDashboard() {
@@ -11149,14 +11156,19 @@ export default function PortalDashboard() {
   }, [imageLightbox]);
   useEffect(() => {
     const handleUndoKey = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.key.toLowerCase() !== "z") return;
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      // Cmd/Ctrl+Z = undo; Cmd/Ctrl+Shift+Z or Ctrl+Y = redo.
+      const isUndo = key === "z" && !event.shiftKey;
+      const isRedo = (key === "z" && event.shiftKey) || key === "y";
+      if (!isUndo && !isRedo) return;
       const activeElement = document.activeElement as HTMLElement | null;
       const isEditingText = activeElement instanceof HTMLInputElement
         || activeElement instanceof HTMLTextAreaElement
         || activeElement?.isContentEditable;
       if (isEditingText) return;
-      const undone = submitLastPortalUndo(undoFetcher);
-      if (undone) event.preventDefault();
+      const done = isRedo ? submitNextPortalRedo(undoFetcher) : submitLastPortalUndo(undoFetcher);
+      if (done) event.preventDefault();
     };
     window.addEventListener("keydown", handleUndoKey);
     return () => window.removeEventListener("keydown", handleUndoKey);
@@ -27213,14 +27225,34 @@ function setPortalUndoUser(id: string | number | null | undefined) {
   _portalUndoUser = id != null && String(id).trim() ? String(id) : "shared";
 }
 function portalUndoStackKey() { return `${PORTAL_UNDO_STACK_KEY}:${_portalUndoUser}`; }
+function portalRedoStackKey() { return `${PORTAL_UNDO_STACK_KEY}:redo:${_portalUndoUser}`; }
+// Jump to + briefly flash an order row after an undo/redo, so it's easy to keep
+// an eye on what just changed. No-op if the row isn't on the current page.
+function scrollFlashOrderRow(orderId?: number | null) {
+  if (!orderId || typeof document === "undefined") return;
+  let tries = 0;
+  const run = () => {
+    const el = document.getElementById(`order-${orderId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.remove("portal-row-flash");
+      void el.offsetWidth; // reflow so the flash re-triggers
+      el.classList.add("portal-row-flash");
+      window.setTimeout(() => el.classList.remove("portal-row-flash"), 2800);
+      return;
+    }
+    if (tries++ < 20) window.setTimeout(run, 150);
+  };
+  window.setTimeout(run, 250); // let the loader revalidation re-render first
+}
 function notifyPortalUndoChanged() {
   if (typeof window !== "undefined") window.dispatchEvent(new Event("portal-undo-changed"));
 }
 
-function readPortalUndoStack(): PortalUndoEntry[] {
+function readPortalStack(key: string): PortalUndoEntry[] {
   if (typeof window === "undefined") return [];
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(portalUndoStackKey()) ?? "[]");
+    const parsed = JSON.parse(window.localStorage.getItem(key) ?? "[]");
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((entry): entry is PortalUndoEntry => (
       entry
@@ -27233,40 +27265,53 @@ function readPortalUndoStack(): PortalUndoEntry[] {
     return [];
   }
 }
+function readPortalUndoStack(): PortalUndoEntry[] { return readPortalStack(portalUndoStackKey()); }
+function readPortalRedoStack(): PortalUndoEntry[] { return readPortalStack(portalRedoStackKey()); }
 
-function pushPortalUndo(entry?: PortalUndoEntry | null) {
-  if (!entry || typeof window === "undefined") return;
-  // Skip oversized entries so a single ~5MB+ row blob (e.g. a
-  // collection row carrying base64 images) doesn't blow the
-  // localStorage quota. Anything ≥1MB silently doesn't get stacked
-  // — callers that care about big-state undo (Collections) keep
-  // their own in-memory ref.
+// Low-level append to a specific stack (no redo-stack clearing). Used by the
+// public push (undo stack) and by the undo/redo handlers as they move an entry
+// between stacks.
+function rawPushPortalStack(key: string, entry: PortalUndoEntry) {
+  if (typeof window === "undefined") return;
   let serialized: string;
   try { serialized = JSON.stringify(entry); } catch { return; }
+  // Skip oversized entries so a single ~5MB+ row blob (e.g. a collection row
+  // carrying base64 images) doesn't blow the localStorage quota.
   if (serialized.length > 1_000_000) return;
-  const stack = readPortalUndoStack();
+  const stack = readPortalStack(key);
   stack.push(entry);
   const trimmed = stack.slice(-MAX_PORTAL_UNDO_ENTRIES);
-  let payload: string;
-  try { payload = JSON.stringify(trimmed); } catch { return; }
   const writeWithRetry = (s: PortalUndoEntry[], p: string) => {
     try {
-      window.localStorage.setItem(portalUndoStackKey(), p);
+      window.localStorage.setItem(key, p);
     } catch (err) {
-      // Quota likely exceeded — keep retrying with fewer entries
-      // until it fits, then bail completely if even one entry won't
-      // fit (means the entry itself is too big; we drop it).
       if (s.length > 1) {
         const shorter = s.slice(Math.floor(s.length / 2));
         try { writeWithRetry(shorter, JSON.stringify(shorter)); } catch { /* drop */ }
         return;
       }
-      try { window.localStorage.removeItem(portalUndoStackKey()); } catch { /* ignore */ }
+      try { window.localStorage.removeItem(key); } catch { /* ignore */ }
       console.warn("[undo] dropped — entry too large for localStorage", err);
     }
   };
+  let payload: string;
+  try { payload = JSON.stringify(trimmed); } catch { return; }
   writeWithRetry(trimmed, payload);
+}
+
+// Public push for a brand-new user action: goes on the undo stack AND clears the
+// redo stack (a fresh change invalidates any redo history).
+function pushPortalUndo(entry?: PortalUndoEntry | null) {
+  if (!entry || typeof window === "undefined") return;
+  rawPushPortalStack(portalUndoStackKey(), entry);
+  try { window.localStorage.removeItem(portalRedoStackKey()); } catch { /* ignore */ }
   notifyPortalUndoChanged();
+}
+
+// The opposite action, so an entry can flip between the undo and redo stacks.
+function swapPortalEntry(entry: PortalUndoEntry): PortalUndoEntry | null {
+  if (!entry.redo) return null;
+  return { label: entry.label, fields: entry.redo, redo: entry.fields, focusOrderId: entry.focusOrderId };
 }
 
 function submitLastPortalUndo(fetcher: ReturnType<typeof useFetcher>) {
@@ -27275,21 +27320,45 @@ function submitLastPortalUndo(fetcher: ReturnType<typeof useFetcher>) {
   const entry = stack.pop();
   if (!entry) return false;
   window.localStorage.setItem(portalUndoStackKey(), JSON.stringify(stack));
+  // Make it redoable: move the (swapped) entry onto the redo stack.
+  const swapped = swapPortalEntry(entry);
+  if (swapped) rawPushPortalStack(portalRedoStackKey(), swapped);
   notifyPortalUndoChanged();
-  submitPortalCell(fetcher, entry.fields, null);
+  submitPortalCell(fetcher, entry.fields, null); // replay = no new push, no redo-clear
+  scrollFlashOrderRow(entry.focusOrderId);
   return true;
 }
 
-// Top-bar "Undo" button — undoes the current user's own last cell change. Its
-// enabled state / tooltip track the per-user undo stack via the
-// "portal-undo-changed" event, so it lights up the moment you make an
-// undoable edit and greys out when there's nothing (of yours) to undo.
+function submitNextPortalRedo(fetcher: ReturnType<typeof useFetcher>) {
+  if (typeof window === "undefined") return false;
+  const stack = readPortalRedoStack();
+  const entry = stack.pop();
+  if (!entry) return false;
+  window.localStorage.setItem(portalRedoStackKey(), JSON.stringify(stack));
+  // Make it undoable again: move the (swapped) entry back onto the undo stack.
+  const swapped = swapPortalEntry(entry);
+  if (swapped) rawPushPortalStack(portalUndoStackKey(), swapped);
+  notifyPortalUndoChanged();
+  submitPortalCell(fetcher, entry.fields, null); // replay = no new push, no redo-clear
+  scrollFlashOrderRow(entry.focusOrderId);
+  return true;
+}
+
+// Top-bar Undo/Redo — a single compact button (↶) that opens a dropdown with
+// Undo and Redo, each showing what they'll do. Both stacks are per portal-user
+// and track the "portal-undo-changed" event, so the menu updates live. Keyboard:
+// ⌘Z / Ctrl+Z = undo, ⌘⇧Z / Ctrl+Y = redo.
 function PortalUndoButton() {
   const undoFetcher = useFetcher();
-  const [topLabel, setTopLabel] = useState<string | null>(null);
+  const [undoLabel, setUndoLabel] = useState<string | null>(null);
+  const [redoLabel, setRedoLabel] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const refresh = useCallback(() => {
-    const s = readPortalUndoStack();
-    setTopLabel(s.length ? s[s.length - 1].label : null);
+    const u = readPortalUndoStack();
+    const r = readPortalRedoStack();
+    setUndoLabel(u.length ? u[u.length - 1].label : null);
+    setRedoLabel(r.length ? r[r.length - 1].label : null);
   }, []);
   useEffect(() => {
     refresh();
@@ -27298,22 +27367,57 @@ function PortalUndoButton() {
     window.addEventListener("focus", h);
     return () => { window.removeEventListener("portal-undo-changed", h); window.removeEventListener("focus", h); };
   }, [refresh]);
-  const disabled = !topLabel;
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (!wrapRef.current?.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+  const nothing = !undoLabel && !redoLabel;
+  const cleanLabel = (l: string | null) => (l ? l.replace(/^Undo\s+/i, "") : "");
+  const row = (kind: "undo" | "redo", label: string | null, shortcut: string) => {
+    const on = Boolean(label);
+    return (
+      <button
+        type="button"
+        disabled={!on}
+        onClick={() => { if (!on) return; (kind === "undo" ? submitLastPortalUndo : submitNextPortalRedo)(undoFetcher); setOpen(false); }}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, width: "100%",
+          padding: "8px 12px", border: "none", background: "transparent", cursor: on ? "pointer" : "default",
+          color: on ? "#0f172a" : "#9ca3af", fontSize: 13, fontWeight: 600, textAlign: "left", whiteSpace: "nowrap",
+        }}
+        onMouseEnter={(e) => { if (on) e.currentTarget.style.background = "#f1f5f9"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+      >
+        <span>{kind === "undo" ? "↶ Undo" : "↷ Redo"}{on ? ` ${cleanLabel(label)}` : ""}</span>
+        <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700 }}>{shortcut}</span>
+      </button>
+    );
+  };
   return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={() => submitLastPortalUndo(undoFetcher)}
-      title={topLabel ? `Undo: ${topLabel}  (⌘Z / Ctrl+Z)` : "Nothing of yours to undo"}
-      style={{
-        display: "inline-flex", alignItems: "center", gap: 6, height: 32,
-        padding: "0 12px", borderRadius: 8, fontSize: 13, fontWeight: 700,
-        border: "1px solid #cbd5e1", cursor: disabled ? "default" : "pointer",
-        background: disabled ? "#f1f5f9" : "#fff", color: disabled ? "#9ca3af" : "#334155",
-      }}
-    >
-      ↶ Undo
-    </button>
+    <div ref={wrapRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        type="button"
+        disabled={nothing}
+        onClick={() => setOpen((v) => !v)}
+        title={nothing ? "Nothing of yours to undo" : `Undo / Redo${undoLabel ? ` — last: ${cleanLabel(undoLabel)}` : ""}`}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 5, height: 32,
+          padding: "0 10px", borderRadius: 8, fontSize: 13, fontWeight: 700,
+          border: "1px solid #cbd5e1", cursor: nothing ? "default" : "pointer",
+          background: nothing ? "#f1f5f9" : "#fff", color: nothing ? "#9ca3af" : "#334155",
+        }}
+      >
+        ↶ Undo <span style={{ fontSize: 10, opacity: 0.7 }}>▾</span>
+      </button>
+      {open && !nothing && (
+        <div style={{ position: "absolute", top: 36, right: 0, zIndex: 3000, minWidth: 220, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, boxShadow: "0 12px 30px rgba(15,23,42,0.18)", padding: "4px 0", overflow: "hidden" }}>
+          {row("undo", undoLabel, "⌘Z")}
+          {row("redo", redoLabel, "⌘⇧Z")}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -27394,7 +27498,18 @@ function submitPortalCell(
   fields: Record<string, string | number>,
   undo?: PortalUndoEntry | null,
 ) {
-  pushPortalUndo(undo);
+  // A real action with an inverse: record it so it's both undoable AND redoable.
+  // `fields` is the forward action (redo), `undo.fields` is the inverse (undo).
+  // Carry an orderId (either side) so undo/redo can jump to the affected row.
+  if (undo) {
+    const oid = Number(String((fields.orderId ?? undo.fields.orderId ?? "")).replace(/[^0-9]/g, ""));
+    pushPortalUndo({
+      label: undo.label,
+      fields: undo.fields,
+      redo: undo.redo ?? fields,
+      focusOrderId: Number.isFinite(oid) && oid > 0 ? oid : undefined,
+    });
+  }
   const formData = new FormData();
   for (const [key, value] of Object.entries(fields)) {
     formData.set(key, String(value));
