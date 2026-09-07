@@ -2695,9 +2695,20 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const ordersByProduct = new Map<string, typeof openOrders>();
     for (const o of openOrders) { if (!o.productId) continue; const arr = ordersByProduct.get(o.productId) ?? []; arr.push(o); ordersByProduct.set(o.productId, arr); }
     const pageLabelFor = (supplier: string | null) => (supplier ?? "").trim().toLowerCase() === "jj" ? "JJ Order" : "Restock";
+    // Per-batch preorder state so the planner can show + toggle a preorder chip
+    // on each on-order row (enabled + whether the Shopify selling plan is live).
+    const preorderOrderIds = openOrders.map((o) => o.id);
+    const [preorderBatchSettings, preorderRegistry] = preorderOrderIds.length
+      ? await Promise.all([
+          prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: preorderOrderIds } }, select: { supplierOrderId: true, enabled: true, shipDate: true } }).catch(() => [] as Array<{ supplierOrderId: number; enabled: boolean; shipDate: Date | null }>),
+          getPreorderSellingPlanRegistryEntries(session.shop).catch(() => [] as Array<{ supplierOrderId: number }>),
+        ])
+      : [[] as Array<{ supplierOrderId: number; enabled: boolean; shipDate: Date | null }>, [] as Array<{ supplierOrderId: number }>];
+    const preorderSettingByOrder = new Map(preorderBatchSettings.map((setting) => [setting.supplierOrderId, setting]));
+    const preorderActivatedIds = new Set(preorderRegistry.map((entry) => entry.supplierOrderId));
     const slice = sliceRaw.map((p) => {
       const normToSize = new Map(p.sizes.map((sz) => [normalizeVariantSizeLabel(sz.size), sz.size]));
-      const entries: Array<{ orderId: number; label: string; supplierStatus: string | null; priority: string | null; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number }> = [];
+      const entries: Array<{ orderId: number; label: string; supplierStatus: string | null; priority: string | null; destination: string | null; supplier: string | null; preorderEnabled: boolean; preorderActivated: boolean; preorderShipDate: string | null; bySize: Record<string, number>; total: number }> = [];
       const bySize: Record<string, number> = {};
       for (const o of ordersByProduct.get(p.id) ?? []) {
         const eBySize: Record<string, number> = {};
@@ -2711,7 +2722,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           bySize[sizeLabel] = (bySize[sizeLabel] ?? 0) + qc;
           total += qc;
         }
-        if (total > 0) entries.push({ orderId: o.id, label: pageLabelFor(o.supplier), supplierStatus: o.supplierStatus ?? null, priority: o.priority ?? null, destination: (o.destination ?? "").trim() || null, supplier: o.supplier ?? null, bySize: eBySize, total });
+        if (total > 0) entries.push({ orderId: o.id, label: pageLabelFor(o.supplier), supplierStatus: o.supplierStatus ?? null, priority: o.priority ?? null, destination: (o.destination ?? "").trim() || null, supplier: o.supplier ?? null, preorderEnabled: preorderSettingByOrder.get(o.id)?.enabled === true, preorderActivated: preorderActivatedIds.has(o.id), preorderShipDate: preorderSettingByOrder.get(o.id)?.shipDate ? preorderSettingByOrder.get(o.id)!.shipDate!.toISOString() : null, bySize: eBySize, total });
       }
       return {
         ...p,
@@ -11866,7 +11877,7 @@ export default function PortalDashboard() {
         ) : page === "preorders" && preorderDashboard ? (
           <PreordersDashboard data={preorderDashboard} />
         ) : page === "reorder" ? (
-          <ReorderPlannerPage search={reorderSearch} restockSettings={restockSettings} />
+          <ReorderPlannerPage search={reorderSearch} restockSettings={restockSettings} canManagePreorder={canManagePreorder} />
         ) : page === "search" ? (
           <GlobalSearchPage query={globalSearchQuery} results={globalSearch} isAdmin={Boolean(currentUser?.admin)} shopDomain={shopDomain} />
         ) : page === "usa-stock" ? (
@@ -27850,6 +27861,7 @@ function PreorderRowControl({
   shipDate,
   etaFallback,
   onEnabledChange,
+  compact,
 }: {
   orderId: number;
   productTitle: string;
@@ -27859,6 +27871,9 @@ function PreorderRowControl({
   shipDate: string | null;
   etaFallback: string | null;
   onEnabledChange: (enabled: boolean) => void;
+  // Compact = inline chip sized to content (for the Reorder Planner on-order rows)
+  // instead of the full-width button used in the restock Status cell.
+  compact?: boolean;
 }) {
   const isoToInputDate = (value: string | null) => {
     if (!value) return "";
@@ -27921,7 +27936,8 @@ function PreorderRowControl({
         onClick={() => { setOpen(true); setError(null); }}
         title={enabledLocal ? `Pre-order live for ${market} — dispatch ${prettyDate(shipDateLocal)}` : `Enable ${market} pre-order for this batch`}
         style={{
-          marginTop: 2, width: "100%", border: "none", borderRadius: 6, padding: "4px 6px",
+          marginTop: compact ? 0 : 2, width: compact ? "auto" : "100%", border: "none", borderRadius: 6,
+          padding: compact ? "2px 8px" : "4px 6px", whiteSpace: "nowrap",
           fontSize: 11, fontWeight: 700, cursor: "pointer", lineHeight: 1.2, color: "#fff",
           background: enabledLocal ? "#16a34a" : "#ea580c",
         }}
@@ -29235,9 +29251,9 @@ function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; s
 // breakdown and edit suggested quantities. "Place order" auto-routes to Existing
 // Products Restock or JJ On Order based on the product's vendor. Stock is live
 // Shopify; sell-through comes from the analytics dashboard.
-type ReorderOnOrderEntry = { orderId: number; label: string; supplierStatus: string | null; priority: string | null; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number };
+type ReorderOnOrderEntry = { orderId: number; label: string; supplierStatus: string | null; priority: string | null; destination: string | null; supplier: string | null; preorderEnabled: boolean; preorderActivated: boolean; preorderShipDate: string | null; bySize: Record<string, number>; total: number };
 type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; effectiveDays?: number; weeksCover: number | null; firstSoldDate?: string | null; daysSource?: "sold" | "release" | "window"; onOrder?: { entries: ReorderOnOrderEntry[]; bySize: Record<string, number> } };
-function ReorderPlannerPage({ search = "", restockSettings }: { search?: string; restockSettings: RestockSettings }) {
+function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = false }: { search?: string; restockSettings: RestockSettings; canManagePreorder?: boolean }) {
   const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
   const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
 
@@ -29284,6 +29300,9 @@ function ReorderPlannerPage({ search = "", restockSettings }: { search?: string;
   const [orderChip, setOrderChip] = useState<Record<number, { status?: string; priority?: string; destination?: string }>>({});
   const chipVal = (id: number, field: "status" | "priority" | "destination", fallback: string | null) => orderChip[id]?.[field] ?? (fallback ?? "");
   const setChip = (id: number, field: "status" | "priority" | "destination", v: string) => setOrderChip((prev) => ({ ...prev, [id]: { ...prev[id], [field]: v } }));
+  // Local preorder-enabled override per on-order batch, so the chip reflects a
+  // toggle instantly (the overview isn't revalidated after /api/preorder-manage).
+  const [preorderOn, setPreorderOn] = useState<Record<number, boolean>>({});
   // Focusable "Suggested" inputs, keyed by `${productId}:${size}`, for arrow-key
   // movement between size cells.
   const suggestRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -29823,6 +29842,12 @@ function ReorderPlannerPage({ search = "", restockSettings }: { search?: string;
                                           <RestockOptionChipDropdown compact orderId={e.orderId} value={chipVal(e.orderId, "status", e.supplierStatus)} options={restockSettings.statusOptions} optionKind="statusOptions" restockSettings={restockSettings} updateIntent="update_status" undoLabel="Undo status" controlled onChange={(v) => setChip(e.orderId, "status", v)} />
                                           <RestockOptionChipDropdown compact orderId={e.orderId} value={chipVal(e.orderId, "priority", e.priority)} options={restockSettings.priorityOptions} optionKind="priorityOptions" restockSettings={restockSettings} updateIntent="update_priority" undoLabel="Undo priority" emptyLabel="Priority" controlled onChange={(v) => setChip(e.orderId, "priority", v)} />
                                           <RestockOptionChipDropdown compact orderId={e.orderId} value={chipVal(e.orderId, "destination", e.destination)} options={restockSettings.destinationOptions} optionKind="destinationOptions" restockSettings={restockSettings} updateIntent="update_destination" undoLabel="Undo destination" emptyLabel="Destination" controlled onChange={(v) => setChip(e.orderId, "destination", v)} />
+                                          {canManagePreorder && (() => {
+                                            const dest = chipVal(e.orderId, "destination", e.destination);
+                                            const mkt = dest === "send_to_au" ? "AU" : dest === "send_to_usa" ? "USA" : null;
+                                            if (!mkt) return null;
+                                            return <PreorderRowControl compact orderId={e.orderId} productTitle={p.title} market={mkt} enabled={preorderOn[e.orderId] ?? e.preorderEnabled} activated={e.preorderActivated} shipDate={e.preorderShipDate} etaFallback={null} onEnabledChange={(v) => setPreorderOn((prev) => ({ ...prev, [e.orderId]: v }))} />;
+                                          })()}
                                         </div>
                                       </td>
                                       {calc.rows.map((c) => <td key={c.key} style={{ padding: i === 0 ? "7px 8px 5px" : "5px 8px", textAlign: "center", fontSize: 13, color: (e.bySize[c.size] ?? 0) > 0 ? "#7c3aed" : "#cbd5e1", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>{e.bySize[c.size] ?? 0}</td>)}
