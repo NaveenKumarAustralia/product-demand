@@ -2689,15 +2689,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const openOrders = pageIds.length
       ? await prisma.supplierOrder.findMany({
           where: { productId: { in: pageIds }, status: "open" },
-          select: { productId: true, supplier: true, destination: true, lines: { select: { variantTitle: true, qtyOrdered: true } } },
-        }).catch(() => [] as Array<{ productId: string | null; supplier: string | null; destination: string | null; lines: Array<{ variantTitle: string | null; qtyOrdered: number }> }>)
+          select: { id: true, productId: true, supplier: true, supplierStatus: true, priority: true, destination: true, lines: { select: { variantTitle: true, qtyOrdered: true } } },
+        }).catch(() => [] as Array<{ id: number; productId: string | null; supplier: string | null; supplierStatus: string | null; priority: string | null; destination: string | null; lines: Array<{ variantTitle: string | null; qtyOrdered: number }> }>)
       : [];
     const ordersByProduct = new Map<string, typeof openOrders>();
     for (const o of openOrders) { if (!o.productId) continue; const arr = ordersByProduct.get(o.productId) ?? []; arr.push(o); ordersByProduct.set(o.productId, arr); }
     const pageLabelFor = (supplier: string | null) => (supplier ?? "").trim().toLowerCase() === "jj" ? "JJ Order" : "Restock";
     const slice = sliceRaw.map((p) => {
       const normToSize = new Map(p.sizes.map((sz) => [normalizeVariantSizeLabel(sz.size), sz.size]));
-      const entries: Array<{ label: string; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number }> = [];
+      const entries: Array<{ orderId: number; label: string; supplierStatus: string | null; priority: string | null; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number }> = [];
       const bySize: Record<string, number> = {};
       for (const o of ordersByProduct.get(p.id) ?? []) {
         const eBySize: Record<string, number> = {};
@@ -2711,7 +2711,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           bySize[sizeLabel] = (bySize[sizeLabel] ?? 0) + qc;
           total += qc;
         }
-        if (total > 0) entries.push({ label: pageLabelFor(o.supplier), destination: (o.destination ?? "").trim() || null, supplier: o.supplier ?? null, bySize: eBySize, total });
+        if (total > 0) entries.push({ orderId: o.id, label: pageLabelFor(o.supplier), supplierStatus: o.supplierStatus ?? null, priority: o.priority ?? null, destination: (o.destination ?? "").trim() || null, supplier: o.supplier ?? null, bySize: eBySize, total });
       }
       return {
         ...p,
@@ -11828,7 +11828,7 @@ export default function PortalDashboard() {
         ) : page === "preorders" && preorderDashboard ? (
           <PreordersDashboard data={preorderDashboard} />
         ) : page === "reorder" ? (
-          <ReorderPlannerPage search={reorderSearch} />
+          <ReorderPlannerPage search={reorderSearch} restockSettings={restockSettings} />
         ) : page === "search" ? (
           <GlobalSearchPage query={globalSearchQuery} results={globalSearch} isAdmin={Boolean(currentUser?.admin)} shopDomain={shopDomain} />
         ) : page === "usa-stock" ? (
@@ -29192,9 +29192,9 @@ function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; s
 // breakdown and edit suggested quantities. "Place order" auto-routes to Existing
 // Products Restock or JJ On Order based on the product's vendor. Stock is live
 // Shopify; sell-through comes from the analytics dashboard.
-type ReorderOnOrderEntry = { label: string; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number };
+type ReorderOnOrderEntry = { orderId: number; label: string; supplierStatus: string | null; priority: string | null; destination: string | null; supplier: string | null; bySize: Record<string, number>; total: number };
 type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; effectiveDays?: number; weeksCover: number | null; firstSoldDate?: string | null; daysSource?: "sold" | "release" | "window"; onOrder?: { entries: ReorderOnOrderEntry[]; bySize: Record<string, number> } };
-function ReorderPlannerPage({ search = "" }: { search?: string }) {
+function ReorderPlannerPage({ search = "", restockSettings }: { search?: string; restockSettings: RestockSettings }) {
   const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
   const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
 
@@ -29235,6 +29235,12 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   const [ratePopover, setRatePopover] = useState<{ id: string; top: number; left: number } | null>(null);
   const [pushedFor, setPushedFor] = useState<Record<string, string>>({});
   const pushTargetRef = useRef<{ id: string; label: string } | null>(null);
+  // Local optimistic overrides for the on-order chips (status/priority/dest)
+  // edited inline from the expanded breakdown, keyed by supplier-order id, so the
+  // chip keeps the new value even though the overview data isn't revalidated.
+  const [orderChip, setOrderChip] = useState<Record<number, { status?: string; priority?: string; destination?: string }>>({});
+  const chipVal = (id: number, field: "status" | "priority" | "destination", fallback: string | null) => orderChip[id]?.[field] ?? (fallback ?? "");
+  const setChip = (id: number, field: "status" | "priority" | "destination", v: string) => setOrderChip((prev) => ({ ...prev, [id]: { ...prev[id], [field]: v } }));
   // Focusable "Suggested" inputs, keyed by `${productId}:${size}`, for arrow-key
   // movement between size cells.
   const suggestRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -29714,7 +29720,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                                 </tr>
                                 <tr>
                                   <td style={{ padding: "4px 12px 4px 0", fontSize: 12, color: "#64748b", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>In stock</td>
-                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13, fontWeight: 700 }}>{c.stock}</td>)}
+                                  {calc.rows.map((c) => <td key={c.key} style={{ padding: "4px 8px", textAlign: "center", fontSize: 13, fontWeight: 700, color: c.stock <= 0 ? "#dc2626" : "#0f172a" }}>{c.stock}</td>)}
                                   <td style={totCell}>{calc.rows.reduce((s, c) => s + c.stock, 0)}</td>
                                 </tr>
                                 <tr>
@@ -29757,31 +29763,35 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                                     );
                                   });
                                 })()}
-                                {/* Already on order — each open order with its destination, then the total */}
+                                {/* Already on order — one editable row per open order (status /
+                                    priority / destination chips can be changed right here, like the
+                                    dashboard). Chip edits persist through the update_* intents. */}
                                 {(p.onOrder?.entries?.length ?? 0) === 0 ? (
                                   <tr>
                                     <td style={{ padding: "6px 12px 4px 0", fontSize: 12, color: "#94a3b8", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap", borderTop: "1px solid #e2e8f0" }}>On order</td>
                                     {calc.rows.map((c) => <td key={c.key} style={{ padding: "6px 8px 4px", textAlign: "center", fontSize: 13, color: "#cbd5e1", borderTop: "1px solid #e2e8f0" }}>—</td>)}
                                     <td style={{ ...totCell, color: "#cbd5e1", borderTop: "1px solid #e2e8f0" }}>—</td>
                                   </tr>
-                                ) : <>
-                                  {p.onOrder!.entries.map((e, i) => (
-                                    <tr key={`oo${i}`}>
-                                      <td style={{ padding: i === 0 ? "6px 12px 3px 0" : "3px 12px 3px 0", fontSize: 12, color: "#7c3aed", fontWeight: 600, textAlign: "right", whiteSpace: "nowrap", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>
-                                        On order → {e.label}{e.destination ? ` · ${e.destination}` : ""} <span style={{ color: "#a78bda", fontWeight: 700 }}>({e.total})</span>
+                                ) : p.onOrder!.entries.map((e, i) => (
+                                    <tr key={`oo${e.orderId}`}>
+                                      <td style={{ padding: i === 0 ? "7px 10px 5px 0" : "5px 10px 5px 0", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined, verticalAlign: "middle" }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 5, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                                          <span style={{ fontSize: 10, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>{e.label}</span>
+                                          <RestockOptionChipDropdown orderId={e.orderId} value={chipVal(e.orderId, "status", e.supplierStatus)} options={restockSettings.statusOptions} optionKind="statusOptions" restockSettings={restockSettings} updateIntent="update_status" undoLabel="Undo status" controlled onChange={(v) => setChip(e.orderId, "status", v)} />
+                                          <RestockOptionChipDropdown orderId={e.orderId} value={chipVal(e.orderId, "priority", e.priority)} options={restockSettings.priorityOptions} optionKind="priorityOptions" restockSettings={restockSettings} updateIntent="update_priority" undoLabel="Undo priority" emptyLabel="Priority" controlled onChange={(v) => setChip(e.orderId, "priority", v)} />
+                                          <RestockOptionChipDropdown orderId={e.orderId} value={chipVal(e.orderId, "destination", e.destination)} options={restockSettings.destinationOptions} optionKind="destinationOptions" restockSettings={restockSettings} updateIntent="update_destination" undoLabel="Undo destination" emptyLabel="Destination" controlled onChange={(v) => setChip(e.orderId, "destination", v)} />
+                                        </div>
                                       </td>
-                                      {calc.rows.map((c) => <td key={c.key} style={{ padding: i === 0 ? "6px 8px 3px" : "3px 8px", textAlign: "center", fontSize: 13, color: (e.bySize[c.size] ?? 0) > 0 ? "#7c3aed" : "#cbd5e1", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>{e.bySize[c.size] ?? 0}</td>)}
+                                      {calc.rows.map((c) => <td key={c.key} style={{ padding: i === 0 ? "7px 8px 5px" : "5px 8px", textAlign: "center", fontSize: 13, color: (e.bySize[c.size] ?? 0) > 0 ? "#7c3aed" : "#cbd5e1", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>{e.bySize[c.size] ?? 0}</td>)}
                                       <td style={{ ...totCell, color: "#7c3aed", borderTop: i === 0 ? "1px solid #e2e8f0" : undefined }}>{e.total}</td>
                                     </tr>
                                   ))}
-                                  {p.onOrder!.entries.length > 1 && (
-                                    <tr>
-                                      <td style={{ padding: "3px 12px 4px 0", fontSize: 12, color: "#6d28d9", fontWeight: 800, textAlign: "right", whiteSpace: "nowrap" }}>Total on order</td>
-                                      {calc.rows.map((c) => <td key={c.key} style={{ padding: "3px 8px 4px", textAlign: "center", fontSize: 13, fontWeight: 800, color: (p.onOrder!.bySize[c.size] ?? 0) > 0 ? "#6d28d9" : "#cbd5e1" }}>{p.onOrder!.bySize[c.size] ?? 0}</td>)}
-                                      <td style={{ ...totCell, color: "#6d28d9" }}>{calc.rows.reduce((s, c) => s + (p.onOrder!.bySize[c.size] ?? 0), 0)}</td>
-                                    </tr>
-                                  )}
-                                </>}
+                                {/* Subtotal: what you have + what's already coming (like the dashboard's Total). */}
+                                <tr>
+                                  <td style={{ padding: "6px 12px 5px 0", fontSize: 12, color: "#334155", fontWeight: 800, textAlign: "right", whiteSpace: "nowrap", borderTop: "2px solid #cbd5e1" }}>In stock + on order</td>
+                                  {calc.rows.map((c) => { const v = c.stock + (p.onOrder?.bySize[c.size] ?? 0); return <td key={c.key} style={{ padding: "6px 8px 5px", textAlign: "center", fontSize: 13, fontWeight: 800, color: "#334155", borderTop: "2px solid #cbd5e1" }}>{v}</td>; })}
+                                  <td style={{ ...totCell, borderTop: "2px solid #cbd5e1" }}>{calc.rows.reduce((s, c) => s + c.stock + (p.onOrder?.bySize[c.size] ?? 0), 0)}</td>
+                                </tr>
                                 <tr>
                                   <td style={{ padding: "6px 12px 4px 0", fontSize: 12, color: "#0f766e", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap", borderTop: "1px solid #e2e8f0" }}>Suggested</td>
                                   {calc.rows.map((c, i) => <td key={c.key} style={{ padding: "6px 8px 4px", textAlign: "center", borderTop: "1px solid #e2e8f0" }}><input
