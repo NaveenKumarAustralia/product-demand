@@ -29250,6 +29250,8 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   let since = "", until = "";
   if (lookback === "custom") { since = customFrom; until = customUntil; }
   else if (lookback === "lastyear") { since = fmtISO(addYears(today, -1)); until = fmtISO(addYears(addDays(today, 90), -1)); }
+  else if (lookback === "today") { since = fmtISO(today); until = fmtISO(today); }
+  else if (lookback === "yesterday") { const y = fmtISO(addDays(today, -1)); since = y; until = y; }
   else { const n = Number(lookback) || 90; since = fmtISO(addDays(today, -n)); until = fmtISO(today); }
   const lookbackDays = overviewFetcher.data?.lookbackDays ?? ((since && until) ? Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000)) : 90);
   // The window changed → drop cached per-country data so it refetches.
@@ -29550,9 +29552,14 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
           <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
             <span style={inlineLabel}>Window</span>
             <select value={lookback} onChange={(e) => { setLookback(e.target.value); persistWindow({ lookback: e.target.value }); }} style={{ ...compact, width: 150 }}>
+              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
+              <option value="3">Last 3 days</option>
+              <option value="7">Last 7 days</option>
+              <option value="14">Last 14 days</option>
               <option value="30">Last 30 days</option>
-              <option value="60">Last 60 days</option>
               <option value="90">Last 90 days</option>
+              <option value="365">Last 365 days</option>
               <option value="lastyear">Same period last year</option>
               <option value="custom">Custom range…</option>
             </select>
