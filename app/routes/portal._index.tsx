@@ -2606,39 +2606,37 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!since || !until) return jsonResponse({ ok: false, error: "bad_input" });
     const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
     if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
-    const [stockProducts, soldDirect, soldDashboard, sellingDaysDirect, sellingDaysDashboard] = await Promise.all([
+    // Only three calls are on the critical path now: the cached stock snapshot,
+    // one PRODUCT-LEVEL sold query, and the selling-days query — all queried
+    // directly from the store. The per-SIZE sold breakdown is NOT fetched here
+    // any more; it loads lazily when a row is expanded. The dashboard endpoints
+    // are used only as a fallback (below), not awaited in parallel, so a cold
+    // dashboard service can't slow every page load.
+    const [stockProducts, soldDirect, sellingDaysDirect] = await Promise.all([
       getAllShopifyProductsWithInventory(session.shop, session.accessToken, refresh).catch(() => [] as ReorderStockProduct[]),
-      // Query the store directly (high LIMIT, nothing truncated) as the primary
-      // source; fall back to the dashboard bulk if the direct query fails.
-      fetchReorderSalesAllVariantsDirect(session.shop, session.accessToken, since, until),
-      fetchReorderSalesAllVariants(since, until),
+      fetchReorderSalesByProductDirect(session.shop, session.accessToken, since, until),
       fetchReorderSellingDaysDirect(session.shop, session.accessToken, since, until),
-      fetchReorderSellingDays(since, until),
     ]);
-    const soldByProduct = soldDirect ?? soldDashboard;
+    // Fall back to the dashboard ONLY when the direct query failed (rare), and
+    // sequentially so we never wait on it unless we have to.
+    let soldByProduct: Record<string, number> | null = soldDirect;
+    if (soldByProduct === null) soldByProduct = sumVariantMapToProduct(await fetchReorderSalesAllVariants(since, until));
     // Direct query carries the measured first-sale day + date; dashboard fallback
     // is just a days number. Flatten to a plain days map for the rate math, and
     // keep the direct first-sale timestamps for the "days counting" popover.
-    const sellingDaysByProd: Record<string, number> | null = sellingDaysDirect
+    let sellingDaysByProd: Record<string, number> | null = sellingDaysDirect
       ? Object.fromEntries(Object.entries(sellingDaysDirect).map(([k, v]) => [k, v.days]))
-      : sellingDaysDashboard;
+      : null;
+    if (sellingDaysByProd === null) sellingDaysByProd = await fetchReorderSellingDays(since, until);
     const lookbackDays = Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000));
     const numId = (id: string) => id.replace(/[^0-9]/g, "");
     const enriched = stockProducts.map((p) => {
-      const soldMap = soldByProduct?.[numId(p.id)] ?? {};
-      // Match sold rows to sizes by normalized label.
-      const soldBySize = new Map<string, number>();
-      let soldTotalAll = 0;
-      for (const [variant, units] of Object.entries(soldMap)) { const u = Number(units) || 0; soldTotalAll += u; soldBySize.set(normalizeVariantSizeLabel(variant), (soldBySize.get(normalizeVariantSizeLabel(variant)) ?? 0) + u); }
-      // Single-variant products (e.g. "Free Size") report sold under "Default
-      // Title", which won't match the size label — so give the lone size all the
-      // product's sales.
-      const sizes = p.sizes.map((s) => ({ size: s.size, stock: s.stock, unitsSold: p.sizes.length === 1 ? soldTotalAll : (soldBySize.get(normalizeVariantSizeLabel(s.size)) ?? 0) }));
+      // Product-level sold total (per-size breakdown is loaded lazily on expand).
+      const totalSold = Math.max(0, Math.round(Number(soldByProduct?.[numId(p.id)] ?? 0)) || 0);
+      // Per-size stock is known upfront (cheap); per-size unitsSold is 0 here and
+      // is filled in on the client when the row is expanded.
+      const sizes = p.sizes.map((s) => ({ size: s.size, stock: s.stock, unitsSold: 0 }));
       const totalStock = sizes.reduce((a, s) => a + s.stock, 0);
-      // Use the TRUE total from the data (soldTotalAll), not just the sizes that
-      // matched — otherwise a variant-label mismatch shows 0 sold even when the
-      // product genuinely sold. Per-size stays best-effort for the suggestion.
-      const totalSold = Math.max(soldTotalAll, sizes.reduce((a, s) => a + s.unitsSold, 0));
       // Rate denominator = days since the product started selling (its first
       // sale in the window), so a newly released item isn't divided by the whole
       // window. Prefer the measured first-sale day; else fall back to the
@@ -8962,6 +8960,40 @@ async function fetchReorderSalesAllVariantsDirect(shop: string, token: string, s
     console.warn("[reorder sold direct]", e);
     return null;
   }
+}
+
+// PRODUCT-LEVEL sell-through for the overview — one lightweight ShopifyQL query
+// grouped by product only (no per-variant dimension), so the whole-catalogue
+// ranking loads fast. The per-size breakdown is fetched lazily on row expand
+// (via /api/reorder-country-sales), not here. Returns { "<numericProductId>":
+// totalUnitsSold } or null on failure.
+async function fetchReorderSalesByProductDirect(shop: string, token: string, since: string, until: string): Promise<Record<string, number> | null> {
+  try {
+    const rows = await runReorderShopifyQL(shop, token, `FROM sales SHOW net_items_sold GROUP BY product_id SINCE ${since} UNTIL ${until} LIMIT 100000`);
+    const out: Record<string, number> = {};
+    for (const r of rows) {
+      const pid = (r.product_id || "").replace(/[^0-9]/g, "");
+      const units = Math.max(0, parseInt(r.net_items_sold || "0", 10) || 0);
+      if (!pid || units <= 0) continue;
+      out[pid] = (out[pid] ?? 0) + units;
+    }
+    return out;
+  } catch (e) {
+    console.warn("[reorder sold-by-product direct]", e);
+    return null;
+  }
+}
+
+// Collapse a per-variant sold map to product totals (used only as a fallback,
+// when the direct product-level query fails and we fall back to the dashboard's
+// per-variant bulk endpoint).
+function sumVariantMapToProduct(byProduct: Record<string, Record<string, number>> | null): Record<string, number> | null {
+  if (!byProduct) return null;
+  const out: Record<string, number> = {};
+  for (const [pid, sizes] of Object.entries(byProduct)) {
+    out[pid] = Object.values(sizes).reduce((a, n) => a + (Number(n) || 0), 0);
+  }
+  return out;
 }
 
 // Per-product "days selling in the window" for the release-date-aware rate.
@@ -29331,7 +29363,33 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
   };
 
   type VariantCalc = { size: string; key: string; stock: number; unitsSold: number; rate: number; daysCover: number; onOrder: number; computed: number; qty: number; qtyStr: string };
-  const calcProduct = (p: ReorderOverviewProduct) => {
+  // Per-size units sold for an EXPANDED product, derived from the lazily-fetched
+  // per-country rows (summed across countries). Returns null while that data is
+  // still loading. Single-variant products report under "Default Title", so the
+  // lone size gets the whole total.
+  const perSizeSoldFrom = (p: ReorderOverviewProduct): Map<string, number> | null => {
+    const cs = countrySales[p.id];
+    if (!cs || cs.loading || !cs.rows) return null;
+    const map = new Map<string, number>();
+    if (p.sizes.length === 1) {
+      const total = cs.rows.reduce((a, r) => a + (Number(r.units) || 0), 0);
+      map.set(p.sizes[0].size, total);
+      return map;
+    }
+    const normToActual = new Map(p.sizes.map((s) => [normalizeVariantSizeLabel(s.size), s.size]));
+    for (const r of cs.rows) {
+      const size = normToActual.get(normalizeVariantSizeLabel(r.variant));
+      if (!size) continue;
+      map.set(size, (map.get(size) ?? 0) + (Number(r.units) || 0));
+    }
+    // Ensure every size has an entry (0 if it never sold).
+    for (const s of p.sizes) if (!map.has(s.size)) map.set(s.size, 0);
+    return map;
+  };
+  // One calc covers both views: product-level fields (always available, used on
+  // the collapsed row) and per-size rows (only meaningful once `soldBySize` is
+  // supplied from the lazy fetch — undefined on a collapsed row).
+  const calcProduct = (p: ReorderOverviewProduct, soldBySize?: Map<string, number> | null) => {
     const until = effUntil(p.id);
     const lead = Math.max(0, Math.round(Number(effLead(p.id)) || 0));
     const dtt = until ? Math.round((new Date(until).getTime() - today.getTime()) / 86400000) : 0;
@@ -29343,17 +29401,34 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
     // and we credit only the stock that's STILL on the shelf when it lands
     // (in stock + on order minus what sells during the lead time).
     const serveDays = Math.max(0, dtt - lead);
+
+    // Product-level suggestion — same arrival-aware math on the whole-product
+    // totals, so the collapsed row has an order estimate without per-size data.
+    const productRate = (p.totalSold / denom) * growthFactor;
+    const onOrderTotal = Object.values(onOrderBySize).reduce((a, n) => a + (Number(n) || 0), 0);
+    const productStockAtArrival = Math.max(0, p.totalStock + onOrderTotal - productRate * lead);
+    const productSuggested = valid ? Math.max(0, Math.ceil(productRate * serveDays - productStockAtArrival)) : 0;
+    const productDaysCover = productRate > 0 ? p.totalStock / productRate : Infinity;
+    const productDaysStock = productRate > 0 ? Math.round(p.totalStock / productRate) : null;
+
+    const haveSizes = !!soldBySize;
     const rows: VariantCalc[] = p.sizes.map((sz) => {
       const key = `${p.id}:${sz.size}`;
-      const rate = (sz.unitsSold / denom) * growthFactor;
+      const sold = soldBySize?.get(sz.size) ?? 0;
+      const rate = (sold / denom) * growthFactor;
       const daysCover = rate > 0 ? sz.stock / rate : Infinity;
       const onOrder = onOrderBySize[sz.size] ?? 0;
       const stockAtArrival = Math.max(0, sz.stock + onOrder - rate * lead);
       const computed = valid ? Math.max(0, Math.ceil(rate * serveDays - stockAtArrival)) : 0;
       const qtyStr = key in manualQty ? manualQty[key] : String(computed);
-      return { size: sz.size, key, stock: sz.stock, unitsSold: sz.unitsSold, rate, daysCover, onOrder, computed, qty: Math.max(0, parseInt(qtyStr) || 0), qtyStr };
+      return { size: sz.size, key, stock: sz.stock, unitsSold: sold, rate, daysCover, onOrder, computed, qty: Math.max(0, parseInt(qtyStr) || 0), qtyStr };
     });
-    return { rows, total: rows.reduce((a, r) => a + r.qty, 0), until, lead, dtt, valid, onOrderTotal: rows.reduce((a, r) => a + r.onOrder, 0) };
+    return {
+      rows, haveSizes,
+      perSizeTotal: rows.reduce((a, r) => a + r.qty, 0),
+      productSuggested, productRate, productDaysCover, productDaysStock,
+      until, lead, dtt, valid, onOrderTotal,
+    };
   };
 
   // Where a product's order goes, from its Shopify vendor.
@@ -29530,6 +29605,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                 <th style={{ ...th, textAlign: "left", minWidth: 260, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("product")} title="Sort by name">Product{sortArrow("product")}</th>
                 <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("daysStock")} title="Sort by days of stock left">Days stock{sortArrow("daysStock")}</th>
                 <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("inStock")} title="Sort by in stock">In stock{sortArrow("inStock")}</th>
+                <th style={{ ...th, minWidth: 180 }} title="Stock per size">Variants</th>
                 <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("sold")} title="Sort by units sold">Sold{sortArrow("sold")}</th>
                 <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("rate")} title="Sort by sold per day">Sold/day{sortArrow("rate")}</th>
                 <th style={th}>Days cover</th>
@@ -29540,15 +29616,23 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
               </tr>
             </thead>
             <tbody>
-              {firstLoad && <tr><td colSpan={10} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>Loading products…</td></tr>}
-              {!firstLoad && products.length === 0 && <tr><td colSpan={10} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>No products match.</td></tr>}
+              {firstLoad && <tr><td colSpan={11} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>Loading products…</td></tr>}
+              {!firstLoad && products.length === 0 && <tr><td colSpan={11} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>No products match.</td></tr>}
               {sortedProducts.map((p) => {
-                const calc = calcProduct(p);
-                const productRate = (p.totalSold / (p.effectiveDays || lookbackDays)) * growthFactor;
-                const productDaysStock = productRate > 0 ? Math.round(p.totalStock / productRate) : null;
-                // Warn if any size's CURRENT stock runs out before the sell-until date.
-                const runOutSizes = calc.valid ? calc.rows.filter((c) => c.rate > 0 && c.daysCover < calc.dtt).map((c) => `${c.size} (${Math.round(c.daysCover)}d)`) : [];
                 const isOpen = expanded.has(p.id);
+                // Per-size sold is only fetched (and only needed) once a row is
+                // expanded; null until it lands.
+                const soldBySize = isOpen ? perSizeSoldFrom(p) : null;
+                const calc = calcProduct(p, soldBySize);
+                const productRate = calc.productRate;
+                const productDaysStock = calc.productDaysStock;
+                // Collapsed run-out warning uses the product-level cover (per-size
+                // detail isn't loaded until expand); the tooltip says to expand.
+                const productRunsOut = calc.valid && Number.isFinite(calc.productDaysCover) && calc.productDaysCover < calc.dtt;
+                // Suggested shown: product-level estimate when collapsed, the exact
+                // editable per-size sum once expanded and loaded.
+                const suggestedShown = soldBySize ? calc.perSizeTotal : calc.productSuggested;
+                const canOrder = isOpen && !!soldBySize;
                 const route = routeFor(p.vendor);
                 const pushed = pushedFor[p.id];
                 const toggle = () => setExpanded((prev) => { const n = new Set(prev); if (n.has(p.id)) n.delete(p.id); else n.add(p.id); return n; });
@@ -29560,11 +29644,19 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                           <span style={{ color: "#475569", fontSize: 18, lineHeight: 1, width: 18, textAlign: "center" }}>{isOpen ? "▾" : "▸"}</span>
                           {p.imageUrl ? <img src={p.imageUrl} alt="" style={{ width: 34, height: 42, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 34, height: 42, background: "#f1f5f9", borderRadius: 4 }} />}
                           <span style={{ fontWeight: 700, fontSize: 14 }}>{p.title}</span>
-                          {runOutSizes.length > 0 && <span title={`Runs out before your sell-until date — ${runOutSizes.join(", ")}. Expand to see sizes.`} style={{ fontSize: 15, lineHeight: 1, cursor: "help" }}>⚠️</span>}
+                          {productRunsOut && <span title="Sells out before your sell-until date at the current rate. Expand to see which sizes." style={{ fontSize: 15, lineHeight: 1, cursor: "help" }}>⚠️</span>}
                         </div>
                       </td>
                       <td style={cell}>{daysBadge(productDaysStock)}</td>
                       <td style={{ ...cell, fontWeight: 700 }}>{p.totalStock}</td>
+                      <td style={{ ...cell, textAlign: "left", maxWidth: 260 }}>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, justifyContent: "flex-start" }}>
+                          {p.sizes.map((sz) => {
+                            const tone = sz.stock <= 0 ? { bg: "#ffe4e6", fg: "#be123c" } : sz.stock <= 9 ? { bg: "#dbeafe", fg: "#1d4ed8" } : { bg: "#dcfce7", fg: "#15803d" };
+                            return <span key={sz.size} title={`${sz.size}: ${sz.stock} in stock`} style={{ display: "inline-block", padding: "1px 7px", borderRadius: 999, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap", background: tone.bg, color: tone.fg }}>{sz.size} {sz.stock}</span>;
+                          })}
+                        </div>
+                      </td>
                       <td style={cell}>{p.totalSold}</td>
                       <td
                         style={{ ...cell, color: "#0f766e", cursor: "pointer", textDecoration: "underline dotted", textUnderlineOffset: 3 }}
@@ -29587,19 +29679,24 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                           <button type="button" onClick={() => togglePinLead(p.id)} title={pinnedLead.has(p.id) ? "Lead set for this product only — click to follow all products again" : "This lead time applies to every product — click to set it just for this one"} style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0, opacity: pinnedLead.has(p.id) ? 1 : 0.3, filter: pinnedLead.has(p.id) ? "none" : "grayscale(1)" }}>📌</button>
                         </div>
                       </td>
-                      <td style={{ ...cell, fontWeight: 800, color: calc.total > 0 ? "#0f766e" : "#94a3b8", fontSize: 15 }}>{calc.total}</td>
+                      <td style={{ ...cell, fontWeight: 800, color: suggestedShown > 0 ? "#0f766e" : "#94a3b8", fontSize: 15 }} title={soldBySize ? undefined : "Estimate from product totals — expand to see (and adjust) the per-size split before ordering"}>{suggestedShown}{soldBySize ? "" : "*"}</td>
                       <td style={{ ...cell, textAlign: "right" }}>
                         {pushed
                           ? <span style={{ color: "#047857", fontSize: 12, fontWeight: 700 }}>✓ Sent to {pushed}</span>
                           : <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
-                              <button type="button" onClick={() => placeOrder(p, calc)} disabled={pushFetcher.state !== "idle" || calc.total <= 0} style={{ border: "none", borderRadius: 7, padding: "7px 14px", fontSize: 13, fontWeight: 700, background: calc.total > 0 ? "#0f766e" : "#e5e7eb", color: calc.total > 0 ? "#fff" : "#9ca3af", cursor: calc.total > 0 ? "pointer" : "default", whiteSpace: "nowrap" }}>Place order</button>
+                              {canOrder
+                                ? <button type="button" onClick={() => placeOrder(p, calc)} disabled={pushFetcher.state !== "idle" || calc.perSizeTotal <= 0} style={{ border: "none", borderRadius: 7, padding: "7px 14px", fontSize: 13, fontWeight: 700, background: calc.perSizeTotal > 0 ? "#0f766e" : "#e5e7eb", color: calc.perSizeTotal > 0 ? "#fff" : "#9ca3af", cursor: calc.perSizeTotal > 0 ? "pointer" : "default", whiteSpace: "nowrap" }}>Place order</button>
+                                : <button type="button" onClick={() => { if (!isOpen) toggle(); }} title="Expand to load the per-size split, then place the order" style={{ border: "1px solid #cbd5e1", background: "#fff", borderRadius: 7, padding: "7px 12px", fontSize: 12.5, fontWeight: 700, color: "#0f766e", cursor: "pointer", whiteSpace: "nowrap" }}>{isOpen ? "Loading…" : "Review & order"}</button>}
                               <span style={{ fontSize: 10, color: "#94a3b8", whiteSpace: "nowrap" }}>→ {route.label}</span>
                             </div>}
                       </td>
                     </tr>
                     {isOpen && (
                       <tr>
-                        <td colSpan={10} style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0", padding: "10px 16px 14px 38px" }}>
+                        <td colSpan={11} style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0", padding: "10px 16px 14px 38px" }}>
+                          {!calc.haveSizes ? (
+                            <div style={{ padding: "8px 2px 4px", fontSize: 12.5, color: "#94a3b8" }}>Loading size breakdown…</div>
+                          ) : (
                           <div style={{ overflowX: "auto" }}>
                             <table style={{ borderCollapse: "collapse", background: "transparent" }}>
                               <tbody>
@@ -29690,7 +29787,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                                       else if (ev.key === "ArrowLeft" && el.selectionStart === 0 && i > 0) { ev.preventDefault(); const pv = suggestRefs.current[calc.rows[i - 1].key]; if (pv) { pv.focus(); pv.select(); } }
                                     }}
                                     style={{ ...cellInput, width: 56, fontWeight: 800, color: c.qty > 0 ? "#0f766e" : "#94a3b8", borderColor: c.qty > 0 ? "#5eead4" : "#cbd5e1" }} /></td>)}
-                                  <td style={{ ...totCell, color: calc.total > 0 ? "#0f766e" : "#94a3b8", borderTop: "1px solid #e2e8f0" }}>{calc.total}</td>
+                                  <td style={{ ...totCell, color: calc.perSizeTotal > 0 ? "#0f766e" : "#94a3b8", borderTop: "1px solid #e2e8f0" }}>{calc.perSizeTotal}</td>
                                 </tr>
                                 {/* After ordering: projected total position and how long it covers */}
                                 <tr>
@@ -29706,6 +29803,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
                               </tbody>
                             </table>
                           </div>
+                          )}
                           {/* Fabric: in-stock vs on-order for the product's fabric. Auto-
                               matched when possible; ALWAYS searchable so any fabric from the
                               Fabric-in-stock page can be picked. Pick is remembered. */}
@@ -29779,7 +29877,7 @@ function ReorderPlannerPage({ search = "" }: { search?: string }) {
         </div>
       </div>
       <div style={{ fontSize: 12, color: "#6b7280", margin: "12px 2px 24px" }}>
-        Changing a “Sell until” date or lead time moves every product; click the 📌 beside it to set (and keep) that product on its own. Expand a row and use ← → to move across the Suggested boxes. Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (not the whole window), so new releases aren’t understated — click any Sold/day number to see the first-sold date and the days it’s counting. Growth % scales the sell rate up/down, so e.g. 20% plans the order for 20% more than the baseline period. Auto-filled — expand a row and type over any size to set it yourself. Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
+        The collapsed <b>Suggested</b> is a quick product-level estimate (shown with a <b>*</b>); <b>expand a row</b> to load the exact per-size split from that size’s own sales — the <b>*</b> disappears and “Review &amp; order” becomes “Place order”. Changing a “Sell until” date or lead time moves every product; click the 📌 beside it to set (and keep) that product on its own. Expand a row and use ← → to move across the Suggested boxes. Suggested = sold/day × (days from when the order lands until your “sell until” date) − the stock you’ll still have when it lands. No safety buffer — set “sell until” to whatever cover you want. Sold/day divides by days since the product’s first sale (not the whole window), so new releases aren’t understated — click any Sold/day number to see the first-sold date and the days it’s counting. Growth % scales the sell rate up/down, so e.g. 20% plans the order for 20% more than the baseline period. The <b>Variants</b> pills show stock per size (red = out, blue = low, green = healthy). Ranked by days of cover (lowest first). “Place order” routes by the product’s vendor. Stock is cached ~10 min — hit “Refresh stock” after loading a shipment.
       </div>
       {/* Sold/day explainer: first-sold date + how many days the rate divides by. */}
       {ratePopover && typeof document !== "undefined" && (() => {
