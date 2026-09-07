@@ -2,7 +2,7 @@ import prisma from "../db.server";
 import { getPreorderLocationSettings } from "./preorder-locations.server";
 import { getPreorderNotifyEnabled } from "./preorder-storefront-settings.server";
 import { getPreorderPermissionContext } from "./preorder-permissions.server";
-import { calculatePreorderCapacity, getPreorderEligibility } from "./preorder-rules.server";
+import { calculatePreorderCapacity, getPreorderEligibility, isPreorderEligibleStatus } from "./preorder-rules.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
 
 export type PreorderDashboardVariant = {
@@ -251,7 +251,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
     },
     totals: {
       activeBatches: batches.filter((batch) => batch.enabled && batch.eligible).length,
-      eligibleBatches: batches.filter((batch) => batch.supplierStatus === "on_production").length,
+      eligibleBatches: batches.filter((batch) => isPreorderEligibleStatus(batch.supplierStatus)).length,
       incomingUnits: batches.reduce((sum, batch) => sum + batch.totalIncoming, 0),
       reservedUnits: batches.reduce((sum, batch) => sum + batch.totalReserved, 0),
       availableCapacity: batches.reduce((sum, batch) => sum + batch.totalAvailable, 0),

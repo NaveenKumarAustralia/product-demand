@@ -27373,9 +27373,10 @@ function RestockOptionChipDropdown({
   // a stale prop value can't briefly override the user's selection.
   controlled?: boolean;
   // Option values that can't be selected (shown greyed/disabled in the menu).
-  // Used to stop a live-preorder row being set back to On Order / Cancelled,
-  // which would break preorder eligibility. The chip stays fully editable
-  // otherwise — you can still move it to any other status.
+  // Used to stop a live-preorder row being set to Cancelled, which would remove
+  // the incoming stock its paid preorders depend on. The chip stays fully
+  // editable otherwise — you can still move it to any other status (On Order
+  // included, which is itself preorder-eligible).
   blockedValues?: string[];
 }) {
   const cellFetcher = useFetcher();
@@ -27666,10 +27667,11 @@ function StatusCell({
       { label: "Undo packing list link", fields: { intent: "update_packing_list_link", orderId, value: linkLocal === null ? "" : String(linkLocal) } },
     );
   };
-  // The button appears once a destination (market) is set AND the status is a
-  // production status — i.e. anything except On Order / Cancelled. Blank status
-  // or On Order shows nothing, matching the merchant's rule.
-  const statusIsPreorderable = Boolean(statusLocal) && statusLocal !== "on_order" && statusLocal !== "cancelled";
+  // The button appears once a destination (market) is set AND the status can
+  // take preorders — anything except a blank status or Cancelled. On Order is
+  // allowed (the store often pre-sells stock it knows is coming); the required
+  // destination is what gates it (showPreorderButton needs preorderMarket).
+  const statusIsPreorderable = Boolean(statusLocal) && statusLocal !== "cancelled";
   const showPreorderButton = canManagePreorder && Boolean(preorderMarket) && statusIsPreorderable;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
@@ -27683,7 +27685,7 @@ function StatusCell({
         undoLabel="Undo status"
         onChange={setStatusLocal}
         controlled
-        blockedValues={preorderEnabled ? ["on_order", "cancelled"] : undefined}
+        blockedValues={preorderEnabled ? ["cancelled"] : undefined}
       />
       {showLinkUI && (
         linkedBadge ? (

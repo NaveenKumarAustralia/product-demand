@@ -15,7 +15,7 @@ test("maps production destinations to separate preorder markets", () => {
   assert.equal(marketFromDestination("keep_at_factory"), null);
 });
 
-test("requires on-production status, valid destination and explicit enable", () => {
+test("requires a sellable status, valid destination and explicit enable", () => {
   assert.deepEqual(
     getPreorderEligibility({
       supplierStatus: PREORDER_STATUS_ON_PRODUCTION,
@@ -25,13 +25,25 @@ test("requires on-production status, valid destination and explicit enable", () 
     { eligible: true, market: "AU", reason: "eligible" },
   );
 
-  assert.equal(
+  // On Order is now eligible (the store pre-sells stock it knows is incoming),
+  // as long as a destination is set and preorder is explicitly enabled.
+  assert.deepEqual(
     getPreorderEligibility({
       supplierStatus: "on_order",
       destination: PREORDER_DESTINATION_AU,
       preorderEnabled: true,
-    }).eligible,
-    false,
+    }),
+    { eligible: true, market: "AU", reason: "eligible" },
+  );
+
+  // On Order still requires a destination.
+  assert.equal(
+    getPreorderEligibility({
+      supplierStatus: "on_order",
+      destination: null,
+      preorderEnabled: true,
+    }).reason,
+    "invalid_destination",
   );
 
   assert.equal(
@@ -44,15 +56,15 @@ test("requires on-production status, valid destination and explicit enable", () 
   );
 });
 
-test("later production statuses (ready, in shipment, custom) are preorder-eligible; on_order/cancelled are not", () => {
-  for (const supplierStatus of ["ready", "in_shipment", "arrived_in_au"]) {
+test("incoming statuses (on_order, ready, in shipment, custom) are preorder-eligible; blank/cancelled are not", () => {
+  for (const supplierStatus of ["on_order", "ready", "in_shipment", "arrived_in_au"]) {
     assert.equal(
       getPreorderEligibility({ supplierStatus, destination: PREORDER_DESTINATION_AU, preorderEnabled: true }).eligible,
       true,
       `${supplierStatus} should be eligible`,
     );
   }
-  for (const supplierStatus of ["on_order", "cancelled", ""]) {
+  for (const supplierStatus of ["cancelled", ""]) {
     const result = getPreorderEligibility({ supplierStatus, destination: PREORDER_DESTINATION_AU, preorderEnabled: true });
     assert.equal(result.eligible, false, `${supplierStatus || "(blank)"} should not be eligible`);
     assert.equal(result.reason, "not_on_production");

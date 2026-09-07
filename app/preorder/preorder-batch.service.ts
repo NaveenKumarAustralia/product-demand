@@ -111,7 +111,7 @@ export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
     if (!eligibility.eligible) {
       throw new PreorderEligibilityError(
         eligibility.reason === "not_on_production"
-          ? "Set the batch to a production status (On Production, Ready or In Shipment) before enabling preorder."
+          ? "Give the batch a status (On Order, On Production, Ready, In Shipment…) — a blank or Cancelled status can't take preorders."
           : "Batch must be assigned to the AUS or USA destination before preorder can be enabled.",
       );
     }
