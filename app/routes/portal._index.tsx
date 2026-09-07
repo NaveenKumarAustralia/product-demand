@@ -2435,9 +2435,53 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "delete_order") {
+    // Snapshot the whole order first so the delete can be undone (restore_order
+    // recreates it — with a new id, hence undo/redo keep the id in sync client-side).
+    const existing = await prisma.supplierOrder.findUnique({ where: { id: orderId }, include: { lines: { orderBy: { id: "asc" } } } });
     await prisma.portalMessage.deleteMany({ where: { orderId } });
     await prisma.supplierOrder.delete({ where: { id: orderId } });
-    return null;
+    if (!existing) return jsonResponse({ ok: true });
+    const snapshot = {
+      shop: existing.shop, poNumber: existing.poNumber, supplier: existing.supplier,
+      productId: existing.productId, productTitle: existing.productTitle, productType: existing.productType,
+      status: existing.status, supplierStatus: existing.supplierStatus, priority: existing.priority,
+      productImageUrl: existing.productImageUrl, eta: existing.eta ? existing.eta.toISOString() : null,
+      destination: existing.destination, createdAt: existing.createdAt.toISOString(), totalQty: existing.totalQty,
+      lines: existing.lines.map((l) => ({ variantId: l.variantId, variantTitle: l.variantTitle, sku: l.sku, barcode: l.barcode, qtyOrdered: l.qtyOrdered, costPrice: l.costPrice })),
+    };
+    return jsonResponse({ ok: true, undo: {
+      label: `Undo delete${existing.productTitle ? ` ${existing.productTitle}` : ""}`,
+      fields: { intent: "restore_order", snapshot: JSON.stringify(snapshot) },
+      redo: { intent: "delete_order", orderId },
+      focusOrderId: orderId,
+    } });
+  }
+
+  // Recreate an order from a delete snapshot (undo of delete). Returns the new id
+  // so the client can keep undo/redo pointing at the right row.
+  if (intent === "restore_order") {
+    let snap: Record<string, unknown> = {};
+    try { snap = JSON.parse(String(form.get("snapshot") ?? "{}")) as Record<string, unknown>; } catch { snap = {}; }
+    const s = snap as {
+      shop?: string; poNumber?: string | null; supplier?: string | null; productId?: string;
+      productTitle?: string | null; productType?: string | null; status?: string; supplierStatus?: string;
+      priority?: string | null; productImageUrl?: string | null; eta?: string | null; destination?: string | null;
+      createdAt?: string; totalQty?: number; lines?: Array<{ variantId?: string; variantTitle?: string; sku?: string | null; barcode?: string | null; qtyOrdered?: number; costPrice?: number | null }>;
+    };
+    if (!s.productId) return jsonResponse({ ok: false, error: "bad_snapshot" });
+    const created = await prisma.supplierOrder.create({
+      data: {
+        shop: s.shop ?? "", poNumber: s.poNumber ?? null, supplier: s.supplier ?? "",
+        productId: s.productId, productTitle: s.productTitle ?? "", productType: s.productType ?? null,
+        status: s.status ?? "open", supplierStatus: s.supplierStatus ?? "on_order", priority: s.priority ?? null,
+        productImageUrl: s.productImageUrl ?? null, eta: s.eta ? new Date(s.eta) : null,
+        destination: s.destination ?? null, createdAt: s.createdAt ? new Date(s.createdAt) : undefined,
+        totalQty: Number(s.totalQty) || 0,
+        lines: { create: (s.lines ?? []).map((l) => ({ variantId: l.variantId ?? "", variantTitle: l.variantTitle ?? "", sku: l.sku ?? null, barcode: l.barcode ?? null, qtyOrdered: Number(l.qtyOrdered) || 0, costPrice: l.costPrice ?? null })) },
+      },
+      select: { id: true },
+    });
+    return jsonResponse({ ok: true, newOrderId: created.id });
   }
 
   if (intent === "duplicate_order") {
@@ -2459,7 +2503,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       costPrice: line.costPrice,
     }));
 
-    await prisma.supplierOrder.create({
+    const dup = await prisma.supplierOrder.create({
       data: {
         shop: order.shop,
         poNumber: order.poNumber,
@@ -2477,8 +2521,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         totalQty: 0,
         lines: { create: linesToCreate },
       },
+      select: { id: true },
     });
-    return null;
+    // Undo = delete the duplicate; redo = duplicate the source again (new id,
+    // kept in sync client-side).
+    return jsonResponse({ ok: true, newOrderId: dup.id, undo: {
+      label: `Undo duplicate${order.productTitle ? ` ${order.productTitle}` : ""}`,
+      fields: { intent: "delete_order", orderId: dup.id },
+      redo: { intent: "duplicate_order", orderId },
+      focusOrderId: orderId,
+    } });
   }
 
   if (intent === "split_order_to_destination") {
@@ -11203,6 +11255,14 @@ export default function PortalDashboard() {
     window.addEventListener("keydown", handleUndoKey);
     return () => window.removeEventListener("keydown", handleUndoKey);
   }, [undoFetcher]);
+  // After an undo/redo that recreated a row (restore/duplicate), patch the
+  // opposite stack's entry + jump to the row using the server's new id.
+  useEffect(() => {
+    if (undoFetcher.state === "idle" && undoFetcher.data) {
+      const d = undoFetcher.data as { newOrderId?: number };
+      if (d?.newOrderId) applyPortalIdSync(d.newOrderId);
+    }
+  }, [undoFetcher.state, undoFetcher.data]);
   // Scope the undo stack to the logged-in user so nobody can undo someone else's
   // change (even on a shared computer). Set every render (a cheap module-var
   // write) so it's correct before any child reads the stack.
@@ -11263,6 +11323,34 @@ export default function PortalDashboard() {
     });
     celebrate(tempId);
     restockSplitFetcher.submit({ intent: "split_order_to_destination", orderId: String(orderId), destination, qtys: JSON.stringify(qtys) }, { method: "post" });
+  };
+  // Delete + duplicate go through parent-level fetchers (not the row's own) so
+  // that when the deleted row unmounts, the fetcher survives to push the undo
+  // entry the server returns. Both are undoable AND redoable.
+  const restockDeleteFetcher = useFetcher<{ ok?: boolean; undo?: PortalUndoEntry }>();
+  const pendingDeleteRef = useRef(false);
+  useEffect(() => {
+    if (restockDeleteFetcher.state !== "idle" || !restockDeleteFetcher.data || !pendingDeleteRef.current) return;
+    pendingDeleteRef.current = false;
+    const u = (restockDeleteFetcher.data as { undo?: PortalUndoEntry }).undo;
+    if (u) pushPortalUndo(u);
+  }, [restockDeleteFetcher.state, restockDeleteFetcher.data]);
+  const deleteRestockOrder = (orderId: number) => {
+    pendingDeleteRef.current = true;
+    setLocalRestockOrders((prev) => prev.filter((o) => o.id !== orderId)); // optimistic remove
+    restockDeleteFetcher.submit({ intent: "delete_order", orderId: String(orderId) }, { method: "post" });
+  };
+  const restockDupFetcher = useFetcher<{ ok?: boolean; undo?: PortalUndoEntry }>();
+  const pendingDupRef = useRef(false);
+  useEffect(() => {
+    if (restockDupFetcher.state !== "idle" || !restockDupFetcher.data || !pendingDupRef.current) return;
+    pendingDupRef.current = false;
+    const u = (restockDupFetcher.data as { undo?: PortalUndoEntry }).undo;
+    if (u) pushPortalUndo(u);
+  }, [restockDupFetcher.state, restockDupFetcher.data]);
+  const duplicateRestockOrder = (orderId: number) => {
+    pendingDupRef.current = true;
+    restockDupFetcher.submit({ intent: "duplicate_order", orderId: String(orderId) }, { method: "post" });
   };
   const columns: ColumnDef[] = [
     { id: "factoryNotes", label: "Factory Notes" },
@@ -12041,6 +12129,8 @@ export default function PortalDashboard() {
                     productInfo={productInfo}
                     allFabrics={allFabrics}
                     onSplit={splitRestockOrder}
+                    onDelete={deleteRestockOrder}
+                    onDuplicate={duplicateRestockOrder}
                     celebrating={celebrateRows.has(order.id)}
                     canManagePreorder={canManagePreorder}
                     preorder={preorderByOrderId?.[order.id]}
@@ -26792,6 +26882,8 @@ function OrderRow({
   productInfo,
   allFabrics,
   onSplit,
+  onDelete,
+  onDuplicate,
   celebrating,
   canManagePreorder,
   preorder,
@@ -26817,6 +26909,8 @@ function OrderRow({
   productInfo: ProductInfo;
   allFabrics: Array<{ key: string; sheetName: string; fabricName: string; costPerMeter: number; fabricType?: string }>;
   onSplit?: (orderId: number, destination: string, qtys: Record<string, number>) => void;
+  onDelete?: (orderId: number) => void;
+  onDuplicate?: (orderId: number) => void;
   celebrating?: boolean;
   canManagePreorder?: boolean;
   preorder?: { enabled: boolean; activated: boolean; shipDate: string | null; market: "AU" | "USA" | null };
@@ -26876,7 +26970,7 @@ function OrderRow({
     const skipUntil = Number(window.localStorage.getItem(DELETE_CONFIRM_SKIP_KEY) ?? 0);
     return skipUntil > Date.now();
   };
-  const deleteOrder = () => submitPortalCell(fetcher, { intent: "delete_order", orderId: order.id });
+  const deleteOrder = () => (onDelete ? onDelete(order.id) : submitPortalCell(fetcher, { intent: "delete_order", orderId: order.id }));
   const requestDeleteOrder = () => {
     if (shouldSkipDeleteConfirm()) {
       deleteOrder();
@@ -26918,7 +27012,7 @@ function OrderRow({
       <tr ref={trRef} id={`order-${order.id}`} style={{ ...s.row, ...(rowHeights[rowHeightKey] ? { height: rowHeights[rowHeightKey] } : {}), ...(destinationStamp ? { background: destinationStamp.rowBg } : {}) }}>
         <RowNumberCell rowNumber={rowIndex} actions={[
           { label: "Split to destination…", onClick: () => setSplitOpen(true) },
-          { label: "Duplicate row", onClick: () => submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id }) },
+          { label: "Duplicate row", onClick: () => (onDuplicate ? onDuplicate(order.id) : submitPortalCell(fetcher, { intent: "duplicate_order", orderId: order.id })) },
           { label: "Delete row", danger: true, onClick: requestDeleteOrder },
         ]} heightKey={rowHeightKey} />
         {printOpen && (
@@ -27365,6 +27459,28 @@ function swapPortalEntry(entry: PortalUndoEntry): PortalUndoEntry | null {
   return { label: entry.label, fields: entry.redo, redo: entry.fields, focusOrderId: entry.focusOrderId };
 }
 
+// Intents that recreate a row and return a NEW order id. When one of these is
+// applied during an undo/redo, the just-swapped entry on the opposite stack
+// still references the OLD id, so we patch it with the new id (below).
+const PORTAL_CREATE_INTENTS = new Set(["restore_order", "duplicate_order"]);
+// Stack key whose top entry needs its order id patched after the in-flight
+// create replay resolves (set by undo/redo, consumed by applyPortalIdSync).
+let _portalPendingIdSync: string | null = null;
+function applyPortalIdSync(newOrderId?: number | null) {
+  const key = _portalPendingIdSync;
+  _portalPendingIdSync = null;
+  if (!key || !newOrderId || typeof window === "undefined") return;
+  const stack = readPortalStack(key);
+  const top = stack[stack.length - 1];
+  if (top) {
+    top.fields = { ...top.fields, orderId: newOrderId };
+    top.focusOrderId = newOrderId;
+    try { window.localStorage.setItem(key, JSON.stringify(stack)); } catch { /* ignore */ }
+    notifyPortalUndoChanged();
+  }
+  scrollFlashOrderRow(newOrderId);
+}
+
 function submitLastPortalUndo(fetcher: ReturnType<typeof useFetcher>) {
   if (typeof window === "undefined") return false;
   const stack = readPortalUndoStack();
@@ -27374,9 +27490,12 @@ function submitLastPortalUndo(fetcher: ReturnType<typeof useFetcher>) {
   // Make it redoable: move the (swapped) entry onto the redo stack.
   const swapped = swapPortalEntry(entry);
   if (swapped) rawPushPortalStack(portalRedoStackKey(), swapped);
+  // If this undo recreates a row (new id), the swapped redo entry needs its id
+  // patched once the server responds.
+  _portalPendingIdSync = swapped && PORTAL_CREATE_INTENTS.has(String(entry.fields.intent)) ? portalRedoStackKey() : null;
   notifyPortalUndoChanged();
   submitPortalCell(fetcher, entry.fields, null); // replay = no new push, no redo-clear
-  scrollFlashOrderRow(entry.focusOrderId);
+  if (!_portalPendingIdSync) scrollFlashOrderRow(entry.focusOrderId);
   return true;
 }
 
@@ -27389,9 +27508,10 @@ function submitNextPortalRedo(fetcher: ReturnType<typeof useFetcher>) {
   // Make it undoable again: move the (swapped) entry back onto the undo stack.
   const swapped = swapPortalEntry(entry);
   if (swapped) rawPushPortalStack(portalUndoStackKey(), swapped);
+  _portalPendingIdSync = swapped && PORTAL_CREATE_INTENTS.has(String(entry.fields.intent)) ? portalUndoStackKey() : null;
   notifyPortalUndoChanged();
   submitPortalCell(fetcher, entry.fields, null); // replay = no new push, no redo-clear
-  scrollFlashOrderRow(entry.focusOrderId);
+  if (!_portalPendingIdSync) scrollFlashOrderRow(entry.focusOrderId);
   return true;
 }
 
