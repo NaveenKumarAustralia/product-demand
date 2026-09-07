@@ -11000,6 +11000,36 @@ export default function PortalDashboard() {
     const el = restockTableScrollRef.current;
     if (el) el.scrollTop = 0;
   }, [page]);
+  // Arriving from a message (?thread=supplier_order:<orderId>:…): scroll to that
+  // order's row and flash it, so it's obvious which row the note belongs to. The
+  // thread drawer opens separately (it reads the same param) for reading/replying.
+  const lastScrolledThreadRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const thread = searchParams.get("thread");
+    if (!thread) { lastScrolledThreadRef.current = null; return; }
+    if (lastScrolledThreadRef.current === thread) return;
+    const [entityType, orderId] = thread.split(":");
+    // Only supplier-order (restock) rows have stable DOM anchors today.
+    if (entityType !== "supplier_order" || !orderId) return;
+    let tries = 0;
+    let cancelled = false;
+    const flash = (el: HTMLElement) => {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.remove("portal-row-flash");
+      void el.offsetWidth; // reflow so the animation re-triggers if already flashed
+      el.classList.add("portal-row-flash");
+      window.setTimeout(() => el.classList.remove("portal-row-flash"), 2800);
+    };
+    const tryScroll = () => {
+      if (cancelled) return;
+      const el = document.getElementById(`order-${orderId}`);
+      if (el) { lastScrolledThreadRef.current = thread; flash(el); return; }
+      if (tries++ < 20) window.setTimeout(tryScroll, 150); // wait for the table to render
+    };
+    const t = window.setTimeout(tryScroll, 200);
+    return () => { cancelled = true; window.clearTimeout(t); };
+  }, [searchParams, page]);
   // Scroll memory: remember where the user was scrolled (the <main> body and
   // each table's scroll container), per page, and restore it on a FULL page
   // reload so a refresh doesn't dump them back at the top. In-app navigation
@@ -11369,6 +11399,14 @@ export default function PortalDashboard() {
             position: relative;
             z-index: 60;
           }
+          /* Flash a row when you arrive on it from a message, so it's obvious
+             which row the note belongs to. */
+          @keyframes portal-row-flash {
+            0%   { background-color: #fde68a; box-shadow: inset 0 0 0 2px #f59e0b; }
+            70%  { background-color: #fef3c7; box-shadow: inset 0 0 0 2px #fbbf24; }
+            100% { background-color: transparent; box-shadow: inset 0 0 0 0 transparent; }
+          }
+          .portal-row-flash > td { animation: portal-row-flash 2.6s ease-out; }
           /* Excel-style cell focus: a teal outline around the focused
              grid cell so the user knows exactly where they're typing.
              Both :focus (Td itself focused via tabIndex) and
