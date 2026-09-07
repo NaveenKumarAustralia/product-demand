@@ -27404,7 +27404,9 @@ function PortalUndoButton() {
   const [undoLabel, setUndoLabel] = useState<string | null>(null);
   const [redoLabel, setRedoLabel] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
   const refresh = useCallback(() => {
     const u = readPortalUndoStack();
     const r = readPortalRedoStack();
@@ -27418,9 +27420,26 @@ function PortalUndoButton() {
     window.addEventListener("focus", h);
     return () => { window.removeEventListener("portal-undo-changed", h); window.removeEventListener("focus", h); };
   }, [refresh]);
+  // Position the menu from the button's rect and render it via a portal to
+  // <body> so it can't be trapped behind the sticky top bar's stacking context.
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => { if (!wrapRef.current?.contains(e.target as Node)) setOpen(false); };
+    const place = () => {
+      const rect = buttonRef.current?.getBoundingClientRect();
+      if (rect) setPos({ top: rect.bottom + 6, right: Math.max(8, window.innerWidth - rect.right) });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (buttonRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
+    };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
@@ -27447,8 +27466,9 @@ function PortalUndoButton() {
     );
   };
   return (
-    <div ref={wrapRef} style={{ position: "relative", display: "inline-block" }}>
+    <div style={{ position: "relative", display: "inline-block" }}>
       <button
+        ref={buttonRef}
         type="button"
         disabled={nothing}
         onClick={() => setOpen((v) => !v)}
@@ -27462,11 +27482,12 @@ function PortalUndoButton() {
       >
         ↶ Undo <span style={{ fontSize: 10, opacity: 0.7 }}>▾</span>
       </button>
-      {open && !nothing && (
-        <div style={{ position: "absolute", top: 36, right: 0, zIndex: 3000, minWidth: 220, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, boxShadow: "0 12px 30px rgba(15,23,42,0.18)", padding: "4px 0", overflow: "hidden" }}>
+      {open && !nothing && pos && typeof document !== "undefined" && createPortal(
+        <div ref={menuRef} style={{ position: "fixed", top: pos.top, right: pos.right, zIndex: 4001, minWidth: 220, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, boxShadow: "0 18px 40px rgba(15,23,42,0.24)", padding: "4px 0", overflow: "hidden" }}>
           {row("undo", undoLabel, "⌘Z")}
           {row("redo", redoLabel, "⌘⇧Z")}
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
