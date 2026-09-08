@@ -6,10 +6,14 @@ import { type EntryContext } from "react-router";
 import { isbot } from "isbot";
 import { addDocumentResponseHeaders } from "./shopify.server";
 import { startPreorderReleaseScheduler } from "./preorder/preorder-release.server";
+import { startPreorderPlanReconcileScheduler } from "./preorder/preorder-selling-plan.service.server";
 
 // Start the pre-order auto-release timer once when the server boots (releases
 // Shopify holds + tags orders for Pick Pack when a batch's stock lands).
 startPreorderReleaseScheduler();
+// Daily safety net: keep every live selling plan's "Expected <date>" in sync
+// with its batch's dispatch date (in case an on-change rename ever failed).
+startPreorderPlanReconcileScheduler();
 
 export const streamTimeout = 5000;
 

@@ -5,6 +5,7 @@ import { getPreorderLocationSettings, locationForMarket } from "./preorder-locat
 import { buildPreorderSellingPlanGroup, buildPreorderSellingPlanUpdateInput } from "./preorder-selling-plan";
 import {
   getPreorderSellingPlanRegistryEntry,
+  getPreorderSellingPlanRegistryEntries,
   removePreorderSellingPlanRegistryEntry,
   savePreorderSellingPlanRegistryEntry,
 } from "./preorder-selling-plan-registry.server";
@@ -152,6 +153,39 @@ export async function refreshPreorderSellingPlanDate(supplierOrderId: number) {
   const setting = await prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: order.id }, select: { shipDate: true } });
   const token = await offlineAccessToken(order.shop);
   await refreshExistingPlanDate(order.shop, token, registry.sellingPlanGroupId, registry.sellingPlanId, order.id, setting?.shipDate ?? order.eta ?? null);
+}
+
+// Safety net: re-sync EVERY live plan's name to its batch's current dispatch
+// date, so a plan can never silently drift from the portal date (e.g. if a
+// single on-change rename failed transiently). Runs on a daily timer.
+export async function reconcileAllPreorderSellingPlanDates(): Promise<{ checked: number; errors: number }> {
+  const entries = await getPreorderSellingPlanRegistryEntries();
+  let checked = 0, errors = 0;
+  for (const entry of entries) {
+    checked += 1;
+    try {
+      await refreshPreorderSellingPlanDate(entry.supplierOrderId);
+    } catch (error) {
+      errors += 1;
+      console.warn(`[preorder plan reconcile] batch ${entry.supplierOrderId} failed:`, error instanceof Error ? error.message : error);
+    }
+  }
+  return { checked, errors };
+}
+
+// Start the daily reconcile once per process (first pass ~60s after boot).
+export function startPreorderPlanReconcileScheduler() {
+  const g = globalThis as unknown as { __kePreorderPlanReconcileStarted?: boolean };
+  if (g.__kePreorderPlanReconcileStarted) return;
+  g.__kePreorderPlanReconcileStarted = true;
+  const run = () => {
+    reconcileAllPreorderSellingPlanDates()
+      .then((r) => { if (r.checked || r.errors) console.log("[preorder plan reconcile] cycle:", r); })
+      .catch((error) => console.warn("[preorder plan reconcile] cycle failed:", error instanceof Error ? error.message : error));
+  };
+  setTimeout(run, 60_000);
+  setInterval(run, 24 * 60 * 60 * 1000);
+  console.log("[preorder plan reconcile] scheduler started (daily)");
 }
 
 export async function activatePreorderSellingPlan(input: {
