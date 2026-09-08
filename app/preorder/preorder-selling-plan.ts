@@ -27,6 +27,27 @@ function expectedLabel(value: Date | string | null) {
   return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric", timeZone: "Australia/Adelaide" }).format(date);
 }
 
+// The customer-facing plan name/options for a given batch + dispatch date. Used
+// both when creating and when refreshing the date on an existing plan.
+export function preorderPlanNameFor(batchId: number, shipDate: Date | string | null) {
+  return `${KARMA_EAST_PREORDER_PLAN_PREFIX} · Batch #${batchId} · Expected ${expectedLabel(shipDate)}`;
+}
+
+// Input for sellingPlanGroupUpdate that renames the existing plan to reflect a
+// changed dispatch date (so the order line, cart and email show the new date).
+export function buildPreorderSellingPlanUpdateInput(input: { batchId: number; shipDate: Date | string | null; sellingPlanId: string }) {
+  const dateLabel = expectedLabel(input.shipDate);
+  return {
+    sellingPlansToUpdate: [
+      {
+        id: input.sellingPlanId,
+        name: `${KARMA_EAST_PREORDER_PLAN_PREFIX} · Batch #${input.batchId} · Expected ${dateLabel}`,
+        options: `Expected dispatch ${dateLabel}`,
+      },
+    ],
+  };
+}
+
 export function buildPreorderSellingPlanGroup(input: PreorderSellingPlanInput) {
   if (!Number.isInteger(input.batchId) || input.batchId <= 0) throw new Error("A valid production batch ID is required.");
 

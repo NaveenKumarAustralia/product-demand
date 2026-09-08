@@ -13,6 +13,7 @@ import {
   PreorderSellingPlanError,
   activatePreorderSellingPlan,
   deactivatePreorderSellingPlan,
+  refreshPreorderSellingPlanDate,
 } from "../preorder/preorder-selling-plan.service.server";
 import {
   requirePreorderPortalUser,
@@ -150,8 +151,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         permissions,
       };
 
+      let shipDateChanged = false;
       if (Object.prototype.hasOwnProperty.call(payload, "shipDate")) {
         input.shipDate = parseOptionalDate(payload.shipDate);
+        shipDateChanged = true;
       }
       if (Object.prototype.hasOwnProperty.call(payload, "safetyBufferPercent")) {
         input.safetyBufferPercent = Number(payload.safetyBufferPercent);
@@ -162,6 +165,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
 
       const setting = await updatePreorderBatchSettings(input);
+      // Keep the live Shopify selling plan's "Expected <date>" in sync so the
+      // order line, cart and email show the new date (best-effort).
+      if (shipDateChanged) await refreshPreorderSellingPlanDate(supplierOrderId).catch(() => undefined);
       return Response.json({
         ok: true,
         setting: {

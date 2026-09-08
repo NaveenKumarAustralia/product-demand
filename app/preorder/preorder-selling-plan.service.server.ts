@@ -2,7 +2,7 @@ import prisma from "../db.server";
 import { canManagePreorders, type PreorderPermissionSettings } from "./preorder-permissions.server";
 import { getPreorderEligibility } from "./preorder-rules.server";
 import { getPreorderLocationSettings, locationForMarket } from "./preorder-locations.server";
-import { buildPreorderSellingPlanGroup } from "./preorder-selling-plan";
+import { buildPreorderSellingPlanGroup, buildPreorderSellingPlanUpdateInput } from "./preorder-selling-plan";
 import {
   getPreorderSellingPlanRegistryEntry,
   removePreorderSellingPlanRegistryEntry,
@@ -126,6 +126,34 @@ function assertManagePermission(actor: Actor, permissions: PreorderPermissionSet
   }
 }
 
+// Rename an existing Shopify selling plan so its "Expected <date>" reflects the
+// current dispatch date. This is what the order line / cart / email display.
+async function refreshExistingPlanDate(shop: string, token: string, sellingPlanGroupId: string, sellingPlanId: string, batchId: number, shipDate: Date | string | null) {
+  const input = buildPreorderSellingPlanUpdateInput({ batchId, shipDate, sellingPlanId });
+  const data = await shopifyGraphql<{ sellingPlanGroupUpdate?: { userErrors?: Array<{ field?: string[]; message?: string }> } }>(
+    shop, token, `#graphql
+      mutation KePreorderPlanRename($id: ID!, $input: SellingPlanGroupInput!) {
+        sellingPlanGroupUpdate(id: $id, input: $input) { userErrors { field message } }
+      }
+    `, { id: sellingPlanGroupId, input: input as unknown as Record<string, unknown> },
+  );
+  const errs = data.sellingPlanGroupUpdate?.userErrors;
+  if (errs?.length) throw new PreorderSellingPlanError(errs.map((e) => e.message || "Shopify rejected the selling-plan rename.").join("; "));
+}
+
+// Refresh the live selling plan's date for a batch (no-op if it isn't live).
+// Called after a dispatch-date change so the order/cart/email stay in sync with
+// the portal + storefront.
+export async function refreshPreorderSellingPlanDate(supplierOrderId: number) {
+  const order = await prisma.supplierOrder.findUnique({ where: { id: supplierOrderId }, select: { id: true, shop: true, eta: true } });
+  if (!order) return;
+  const registry = await getPreorderSellingPlanRegistryEntry(order.shop, order.id);
+  if (!registry) return; // not live — nothing to rename
+  const setting = await prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: order.id }, select: { shipDate: true } });
+  const token = await offlineAccessToken(order.shop);
+  await refreshExistingPlanDate(order.shop, token, registry.sellingPlanGroupId, registry.sellingPlanId, order.id, setting?.shipDate ?? order.eta ?? null);
+}
+
 export async function activatePreorderSellingPlan(input: {
   supplierOrderId: number;
   actor: Actor;
@@ -190,7 +218,18 @@ export async function activatePreorderSellingPlan(input: {
   await setVariantsInventoryPolicy(order.shop, accessToken, order.productId, variantIds, "CONTINUE");
 
   const existing = await getPreorderSellingPlanRegistryEntry(order.shop, order.id);
-  if (existing) return { created: false, registry: existing };
+  if (existing) {
+    // Plan already live — refresh its name/options so a CHANGED dispatch date
+    // shows on the order line, cart and email. (The storefront block reads the
+    // live date separately, which is why it was already correct.) Best-effort:
+    // a rename failure shouldn't block the activate call.
+    try {
+      await refreshExistingPlanDate(order.shop, accessToken, existing.sellingPlanGroupId, existing.sellingPlanId, order.id, setting?.shipDate ?? order.eta ?? null);
+    } catch (error) {
+      console.warn("[preorder] selling-plan date refresh failed:", error instanceof Error ? error.message : error);
+    }
+    return { created: false, registry: existing };
+  }
 
   const variables = buildPreorderSellingPlanGroup({
     batchId: order.id,
