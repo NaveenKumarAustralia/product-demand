@@ -47,6 +47,8 @@ export type PreorderDashboardCustomerOrderLine = {
   reservationId: number;
   supplierOrderId: number;
   productId: string | null;
+  productTitle: string | null;
+  imageUrl: string | null;
   variantId: string;
   variantTitle: string | null;
   sku: string | null;
@@ -101,6 +103,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
       id: true,
       productId: true,
       productTitle: true,
+      productImageUrl: true,
       supplier: true,
       supplierStatus: true,
       destination: true,
@@ -206,6 +209,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
     };
   });
 
+  const batchInfoById = new Map(orders.map((o) => [o.id, { productTitle: o.productTitle, imageUrl: o.productImageUrl }]));
   const customerOrderMap = new Map<string, PreorderDashboardCustomerOrder>();
   for (const reservation of reservations) {
     let item = customerOrderMap.get(reservation.shopifyOrderId);
@@ -226,6 +230,8 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
       reservationId: reservation.id,
       supplierOrderId: reservation.supplierOrderId,
       productId: reservation.productId,
+      productTitle: batchInfoById.get(reservation.supplierOrderId)?.productTitle ?? null,
+      imageUrl: batchInfoById.get(reservation.supplierOrderId)?.imageUrl ?? null,
       variantId: reservation.variantId,
       variantTitle: reservation.variantTitle,
       sku: reservation.sku,

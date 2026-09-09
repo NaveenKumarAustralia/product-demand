@@ -13,12 +13,12 @@ import { PreorderNotificationsPanel } from "./preorder/preorder-notifications-pa
 
 type Props = {
   data: PreorderDashboardData;
+  search?: string;
 };
 
-type TabId = "dashboard" | "batches" | "orders" | "waitlist" | "notifications" | "reports" | "settings";
+type TabId = "batches" | "orders" | "waitlist" | "notifications" | "reports" | "settings";
 
 const TABS: Array<{ id: TabId; label: string }> = [
-  { id: "dashboard", label: "Dashboard" },
   { id: "batches", label: "Products & Batches" },
   { id: "orders", label: "Customer Orders" },
   { id: "waitlist", label: "Back in Stock" },
@@ -49,21 +49,25 @@ function dateInputValue(value: string | null) {
   return date.toISOString().slice(0, 10);
 }
 
-export function PreordersDashboard({ data }: Props) {
-  const [tab, setTab] = useState<TabId>("dashboard");
+export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
+  const [tab, setTab] = useState<TabId>("batches");
   const [market, setMarket] = useState<"ALL" | "AU" | "USA">("ALL");
-  const [search, setSearch] = useState("");
+  // Click a summary tile to filter the list below (e.g. "Active batches" → only
+  // the active ones). Click the same tile again to clear.
+  const [tileFilter, setTileFilter] = useState<"all" | "active" | "overallocated">("all");
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [busyBatchId, setBusyBatchId] = useState<number | null>(null);
 
   const batches = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = headerSearch.trim().toLowerCase();
     return data.batches.filter((batch) => {
       if (market !== "ALL" && batch.market !== market) return false;
+      if (tileFilter === "active" && !(batch.enabled && batch.eligible)) return false;
+      if (tileFilter === "overallocated" && !(batch.totalReserved > batch.totalIncoming)) return false;
       if (q && !`${batch.productTitle} ${batch.supplier} ${batch.market ?? ""}`.toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [data.batches, market, search]);
+  }, [data.batches, market, headerSearch, tileFilter]);
 
   async function manageBatch(batchId: number, payload: Record<string, unknown>, successText: string) {
     setBusyBatchId(batchId);
@@ -89,14 +93,6 @@ export function PreordersDashboard({ data }: Props) {
 
   return (
     <div style={s.page}>
-      <div style={s.header}>
-        <div>
-          <h1 style={s.title}>Pre-orders</h1>
-          <p style={s.subtitle}>Incoming production capacity, customer reservations and preorder health.</p>
-        </div>
-        <div style={s.headerPill}>Operations preview</div>
-      </div>
-
       {notice ? (
         <div style={{ ...s.notice, ...(notice.kind === "error" ? s.noticeError : s.noticeSuccess) }}>{notice.text}</div>
       ) : null}
@@ -114,15 +110,14 @@ export function PreordersDashboard({ data }: Props) {
         ))}
       </div>
 
-      {tab === "dashboard" || tab === "batches" ? (
+      {tab === "batches" ? (
         <>
-          {tab === "dashboard" ? <PreorderActivationReadinessPanel configuration={data.configuration} /> : null}
           <div style={s.cards}>
-            <MetricCard label="Active batches" value={data.totals.activeBatches} hint="Enabled + eligible" />
-            <MetricCard label="Incoming units" value={data.totals.incomingUnits} hint="AU + USA open production" />
-            <MetricCard label="Reserved" value={data.totals.reservedUnits} hint="Live reservation ledger" />
-            <MetricCard label="Available capacity" value={data.totals.availableCapacity} hint="After reservations" />
-            <MetricCard label="Overallocated" value={data.totals.overallocatedUnits} hint="Needs attention" danger={data.totals.overallocatedUnits > 0} />
+            <MetricCard label="Active batches" value={data.totals.activeBatches} hint="Enabled + eligible — click to filter" active={tileFilter === "active"} onClick={() => setTileFilter((f) => (f === "active" ? "all" : "active"))} />
+            <MetricCard label="Incoming units" value={data.totals.incomingUnits} hint="AU + USA open production" onClick={() => setTileFilter("all")} />
+            <MetricCard label="Reserved" value={data.totals.reservedUnits} hint="Live reservation ledger" onClick={() => setTileFilter("all")} />
+            <MetricCard label="Available capacity" value={data.totals.availableCapacity} hint="After reservations" onClick={() => setTileFilter("all")} />
+            <MetricCard label="Overallocated" value={data.totals.overallocatedUnits} hint="Needs attention — click to filter" danger={data.totals.overallocatedUnits > 0} active={tileFilter === "overallocated"} onClick={() => setTileFilter((f) => (f === "overallocated" ? "all" : "overallocated"))} />
           </div>
 
           <div style={s.toolbar}>
@@ -131,7 +126,9 @@ export function PreordersDashboard({ data }: Props) {
                 <button key={item} type="button" onClick={() => setMarket(item)} style={{ ...s.segmentButton, ...(market === item ? s.segmentActive : {}) }}>{item}</button>
               ))}
             </div>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search product or supplier" style={s.search} />
+            {tileFilter !== "all" ? (
+              <button type="button" onClick={() => setTileFilter("all")} style={s.clearFilter}>Showing {tileFilter === "active" ? "active" : "overallocated"} only · clear ✕</button>
+            ) : null}
           </div>
 
           <div style={s.batchList}>
@@ -176,13 +173,11 @@ export function PreordersDashboard({ data }: Props) {
                   ))}
                 </div>
 
-                {tab === "batches" ? (
-                  <BatchControls
-                    batch={batch}
-                    busy={busyBatchId === batch.id}
-                    onManage={(payload, successText) => manageBatch(batch.id, payload, successText)}
-                  />
-                ) : null}
+                <BatchControls
+                  batch={batch}
+                  busy={busyBatchId === batch.id}
+                  onManage={(payload, successText) => manageBatch(batch.id, payload, successText)}
+                />
               </div>
             ))}
           </div>
@@ -203,6 +198,7 @@ export function PreordersDashboard({ data }: Props) {
           <PreorderShopifyReadinessPanel />
           <PreorderWebhookStatusPanel />
           <PreorderSettingsPanel configuration={data.configuration} />
+          <PreorderActivationReadinessPanel configuration={data.configuration} />
         </>
       ) : (
         <Placeholder tab={tab} />
@@ -344,9 +340,12 @@ function NotifyBlockToggle({ enabled }: { enabled: boolean }) {
   );
 }
 
-function MetricCard({ label, value, hint, danger = false }: { label: string; value: number | string; hint: string; danger?: boolean }) {
+function MetricCard({ label, value, hint, danger = false, active = false, onClick }: { label: string; value: number | string; hint: string; danger?: boolean; active?: boolean; onClick?: () => void }) {
   return (
-    <div style={{ ...s.metricCard, ...(danger ? s.metricDanger : {}) }}>
+    <div
+      onClick={onClick}
+      style={{ ...s.metricCard, ...(danger ? s.metricDanger : {}), ...(onClick ? { cursor: "pointer" } : {}), ...(active ? s.metricActive : {}) }}
+    >
       <div style={s.metricLabel}>{label}</div>
       <div style={s.metricValue}>{value}</div>
       <div style={s.metricHint}>{hint}</div>
@@ -385,12 +384,14 @@ const s: Record<string, React.CSSProperties> = {
   notice: { marginBottom: 14, padding: "10px 12px", borderRadius: 9, fontSize: 13, fontWeight: 700 },
   noticeError: { background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" },
   noticeSuccess: { background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534" },
-  tabs: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 20, paddingBottom: 12, borderBottom: "1px solid #e2e8f0" },
-  tab: { border: 0, background: "transparent", borderRadius: 8, padding: "8px 11px", fontSize: 13, fontWeight: 700, color: "#64748b", cursor: "pointer" },
-  tabActive: { background: "#0f172a", color: "white" },
+  tabs: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 20 },
+  tab: { border: "1px solid #e2e8f0", background: "#fff", borderRadius: 9, padding: "9px 15px", fontSize: 13, fontWeight: 700, color: "#475569", cursor: "pointer", boxShadow: "0 1px 2px rgba(15,23,42,0.05)" },
+  tabActive: { background: "#C16452", color: "#fff", borderColor: "#C16452" },
   cards: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(165px, 1fr))", gap: 12, marginBottom: 18 },
   metricCard: { background: "white", border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" },
   metricDanger: { border: "1px solid #fecaca", background: "#fff7f7" },
+  metricActive: { border: "2px solid #C16452", boxShadow: "0 2px 8px rgba(193,100,82,0.25)" },
+  clearFilter: { border: "1px solid #C16452", background: "#fff", color: "#C16452", borderRadius: 999, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" },
   metricLabel: { fontSize: 12, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: ".04em" },
   metricValue: { fontSize: 27, fontWeight: 800, color: "#0f172a", marginTop: 5 },
   metricHint: { fontSize: 11, color: "#94a3b8", marginTop: 4 },

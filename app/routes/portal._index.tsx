@@ -11222,6 +11222,7 @@ export default function PortalDashboard() {
   // Existing Products Restock search).
   const [jjSearch, setJjSearch] = useState("");
   const [reorderSearch, setReorderSearch] = useState("");
+  const [preorderSearch, setPreorderSearch] = useState("");
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as { url: string; alt?: string };
@@ -11800,6 +11801,18 @@ export default function PortalDashboard() {
                   />
                 </label>
               )}
+              {page === "preorders" && (
+                <label style={s.filterLabel}>
+                  Search
+                  <input
+                    type="search"
+                    value={preorderSearch}
+                    onChange={(event) => setPreorderSearch(event.currentTarget.value)}
+                    style={s.searchInput}
+                    placeholder="Product or supplier"
+                  />
+                </label>
+              )}
               {page === "restock" && (
                 <button
                   type="button"
@@ -12026,7 +12039,7 @@ export default function PortalDashboard() {
         ) : page === "dropbox" ? (
           <DropboxPanel />
         ) : page === "preorders" && preorderDashboard ? (
-          <PreordersDashboard data={preorderDashboard} />
+          <PreordersDashboard data={preorderDashboard} search={preorderSearch} />
         ) : page === "reorder" ? (
           <ReorderPlannerPage search={reorderSearch} restockSettings={restockSettings} canManagePreorder={canManagePreorder} />
         ) : page === "search" ? (

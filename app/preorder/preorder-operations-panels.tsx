@@ -11,37 +11,103 @@ function formatDate(value: string | null) {
   return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric" }).format(date);
 }
 
+type OrdersSortCol = "order" | "customer" | "product" | "batch" | "sku" | "qty" | "status" | "dispatch";
+
+function statusPill(status: string) {
+  const s2 = status.toLowerCase();
+  const tone = s2 === "reserved" ? { bg: "#fef3c7", fg: "#92400e" }
+    : s2 === "ready" || s2 === "dispatched" || s2 === "fulfilled" ? { bg: "#dcfce7", fg: "#166534" }
+    : s2 === "released" ? { bg: "#e0e7ff", fg: "#3730a3" }
+    : { bg: "#f1f5f9", fg: "#475569" };
+  const label = s2 === "reserved" ? "Reserved" : s2 === "ready" ? "Ready" : s2 === "dispatched" ? "Dispatched" : s2 === "fulfilled" ? "Fulfilled" : s2 === "released" ? "Released" : status;
+  return <span style={{ display: "inline-block", padding: "2px 9px", borderRadius: 999, fontSize: 11.5, fontWeight: 700, background: tone.bg, color: tone.fg }}>{label}</span>;
+}
+
 export function PreorderCustomerOrdersPanel({ orders }: { orders: PreorderDashboardCustomerOrder[] }) {
+  const [sortCol, setSortCol] = useState<OrdersSortCol>("dispatch");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  const rows = useMemo(() => {
+    const flat = orders.flatMap((order) => order.lines.map((line) => ({
+      key: line.reservationId,
+      orderName: order.shopifyOrderName || order.shopifyOrderId,
+      customer: order.customerEmail || "—",
+      market: order.market,
+      imageUrl: line.imageUrl,
+      product: line.productTitle || "—",
+      size: line.variantTitle || "",
+      batch: line.supplierOrderId,
+      sku: line.sku || "",
+      qty: line.quantity,
+      status: line.status,
+      dispatch: line.expectedShipDate,
+    })));
+    const val = (r: typeof flat[number]): string | number => {
+      switch (sortCol) {
+        case "order": return r.orderName.toLowerCase();
+        case "customer": return r.customer.toLowerCase();
+        case "product": return r.product.toLowerCase();
+        case "batch": return r.batch;
+        case "sku": return r.sku.toLowerCase();
+        case "qty": return r.qty;
+        case "status": return r.status.toLowerCase();
+        case "dispatch": return r.dispatch ? new Date(r.dispatch).getTime() : Number.POSITIVE_INFINITY;
+      }
+    };
+    return [...flat].sort((a, b) => {
+      const va = val(a), vb = val(b);
+      const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [orders, sortCol, sortDir]);
+
   if (!orders.length) {
     return <div style={s.empty}>No preorder reservations have been created yet. Customer orders will appear here once Shopify order allocation is connected.</div>;
   }
 
+  const clickSort = (col: OrdersSortCol) => {
+    if (sortCol === col) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortCol(col); setSortDir("asc"); }
+  };
+  const arrow = (col: OrdersSortCol) => (sortCol === col ? (sortDir === "asc" ? " ▲" : " ▼") : "");
+  const th: React.CSSProperties = { position: "sticky", top: 0, zIndex: 2, background: "#f8fafc", borderBottom: "2px solid #e2e8f0", padding: "9px 10px", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: ".03em", whiteSpace: "nowrap", textAlign: "left", cursor: "pointer", userSelect: "none" };
+  const thPlain: React.CSSProperties = { ...th, cursor: "default" };
+  const td: React.CSSProperties = { padding: "8px 10px", fontSize: 13, borderBottom: "1px solid #eef2f7", verticalAlign: "middle", whiteSpace: "nowrap" };
+
   return (
-    <div style={s.stack}>
-      {orders.map((order) => (
-        <div key={order.shopifyOrderId} style={s.card}>
-          <div style={s.rowBetween}>
-            <div>
-              <div style={s.title}>{order.shopifyOrderName || order.shopifyOrderId}</div>
-              <div style={s.muted}>{order.customerEmail || "No customer email"} · {order.market} · {order.totalQuantity} unit{order.totalQuantity === 1 ? "" : "s"}</div>
-            </div>
-            <div style={s.badge}>Reserved {formatDate(order.reservedAt)}</div>
-          </div>
-          <div style={s.lines}>
-            {order.lines.map((line) => (
-              <div key={line.reservationId} style={s.line}>
-                <div>
-                  <strong>{line.variantTitle || line.sku || line.variantId}</strong>
-                  <div style={s.small}>Batch #{line.supplierOrderId}{line.sku ? ` · ${line.sku}` : ""}</div>
-                </div>
-                <div style={s.lineMeta}>Qty <strong>{line.quantity}</strong></div>
-                <div style={s.lineMeta}>{line.status}</div>
-                <div style={s.lineMeta}>Dispatch <strong>{formatDate(line.expectedShipDate)}</strong></div>
-              </div>
+    <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, overflow: "hidden" }}>
+      <div style={{ overflow: "auto", maxHeight: "calc(100vh - 240px)", borderRadius: 12 }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 940 }}>
+          <thead>
+            <tr>
+              <th style={th} onClick={() => clickSort("order")}>Order{arrow("order")}</th>
+              <th style={th} onClick={() => clickSort("customer")}>Customer{arrow("customer")}</th>
+              <th style={thPlain}>Picture</th>
+              <th style={th} onClick={() => clickSort("product")}>Product{arrow("product")}</th>
+              <th style={th} onClick={() => clickSort("batch")}>Batch{arrow("batch")}</th>
+              <th style={th} onClick={() => clickSort("sku")}>SKU{arrow("sku")}</th>
+              <th style={{ ...th, textAlign: "center" }} onClick={() => clickSort("qty")}>Qty{arrow("qty")}</th>
+              <th style={th} onClick={() => clickSort("status")}>Status{arrow("status")}</th>
+              <th style={th} onClick={() => clickSort("dispatch")}>Dispatch{arrow("dispatch")}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key}>
+                <td style={{ ...td, fontWeight: 700 }}>{r.orderName}</td>
+                <td style={{ ...td, color: "#64748b" }}>{r.customer}</td>
+                <td style={td}>{r.imageUrl ? <img src={r.imageUrl} alt="" style={{ width: 34, height: 42, objectFit: "cover", borderRadius: 4 }} /> : <div style={{ width: 34, height: 42, background: "#f1f5f9", borderRadius: 4 }} />}</td>
+                <td style={td}>{r.product}{r.size ? <span style={{ color: "#94a3b8" }}> · {r.size}</span> : null}</td>
+                <td style={td}>#{r.batch}</td>
+                <td style={{ ...td, color: "#64748b" }}>{r.sku || "—"}</td>
+                <td style={{ ...td, textAlign: "center", fontWeight: 700 }}>{r.qty}</td>
+                <td style={td}>{statusPill(r.status)}</td>
+                <td style={{ ...td, fontWeight: 700 }}>{formatDate(r.dispatch)}</td>
+              </tr>
             ))}
-          </div>
-        </div>
-      ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
