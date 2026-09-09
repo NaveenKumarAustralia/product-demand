@@ -22,6 +22,7 @@ export type PreorderDashboardBatch = {
   id: number;
   productId: string;
   productTitle: string;
+  imageUrl: string | null;
   supplier: string;
   supplierStatus: string;
   destination: string | null;
@@ -187,6 +188,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
       id: order.id,
       productId: order.productId,
       productTitle: order.productTitle,
+      imageUrl: order.productImageUrl ?? null,
       supplier: order.supplier,
       supplierStatus: order.supplierStatus,
       destination: order.destination,

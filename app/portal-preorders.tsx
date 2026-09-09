@@ -54,7 +54,7 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
   const [market, setMarket] = useState<"ALL" | "AU" | "USA">("ALL");
   // Click a summary tile to filter the list below (e.g. "Active batches" → only
   // the active ones). Click the same tile again to clear.
-  const [tileFilter, setTileFilter] = useState<"all" | "active" | "overallocated">("all");
+  const [tileFilter, setTileFilter] = useState<"all" | "active" | "incoming" | "reserved" | "available" | "overallocated">("all");
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [busyBatchId, setBusyBatchId] = useState<number | null>(null);
 
@@ -63,6 +63,9 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
     return data.batches.filter((batch) => {
       if (market !== "ALL" && batch.market !== market) return false;
       if (tileFilter === "active" && !(batch.enabled && batch.eligible)) return false;
+      if (tileFilter === "incoming" && !(batch.totalIncoming > 0)) return false;
+      if (tileFilter === "reserved" && !(batch.totalReserved > 0)) return false;
+      if (tileFilter === "available" && !(batch.totalAvailable > 0)) return false;
       if (tileFilter === "overallocated" && !(batch.totalReserved > batch.totalIncoming)) return false;
       if (q && !`${batch.productTitle} ${batch.supplier} ${batch.market ?? ""}`.toLowerCase().includes(q)) return false;
       return true;
@@ -97,39 +100,43 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
         <div style={{ ...s.notice, ...(notice.kind === "error" ? s.noticeError : s.noticeSuccess) }}>{notice.text}</div>
       ) : null}
 
-      <div style={s.tabs}>
-        {TABS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => setTab(item.id)}
-            style={{ ...s.tab, ...(tab === item.id ? s.tabActive : {}) }}
-          >
-            {item.label}
-          </button>
-        ))}
+      <div style={s.tabsRow}>
+        <div style={s.tabs}>
+          {TABS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setTab(item.id)}
+              style={{ ...s.tab, ...(tab === item.id ? s.tabActive : {}) }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        {tab === "batches" ? (
+          <div style={s.segmented}>
+            {(["ALL", "AU", "USA"] as const).map((item) => (
+              <button key={item} type="button" onClick={() => setMarket(item)} style={{ ...s.segmentButton, ...(market === item ? s.segmentActive : {}) }}>{item}</button>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       {tab === "batches" ? (
         <>
           <div style={s.cards}>
             <MetricCard label="Active batches" value={data.totals.activeBatches} hint="Enabled + eligible — click to filter" active={tileFilter === "active"} onClick={() => setTileFilter((f) => (f === "active" ? "all" : "active"))} />
-            <MetricCard label="Incoming units" value={data.totals.incomingUnits} hint="AU + USA open production" onClick={() => setTileFilter("all")} />
-            <MetricCard label="Reserved" value={data.totals.reservedUnits} hint="Live reservation ledger" onClick={() => setTileFilter("all")} />
-            <MetricCard label="Available capacity" value={data.totals.availableCapacity} hint="After reservations" onClick={() => setTileFilter("all")} />
+            <MetricCard label="Incoming units" value={data.totals.incomingUnits} hint="Open production — click to filter" active={tileFilter === "incoming"} onClick={() => setTileFilter((f) => (f === "incoming" ? "all" : "incoming"))} />
+            <MetricCard label="Reserved" value={data.totals.reservedUnits} hint="Has reservations — click to filter" active={tileFilter === "reserved"} onClick={() => setTileFilter((f) => (f === "reserved" ? "all" : "reserved"))} />
+            <MetricCard label="Available capacity" value={data.totals.availableCapacity} hint="Has capacity — click to filter" active={tileFilter === "available"} onClick={() => setTileFilter((f) => (f === "available" ? "all" : "available"))} />
             <MetricCard label="Overallocated" value={data.totals.overallocatedUnits} hint="Needs attention — click to filter" danger={data.totals.overallocatedUnits > 0} active={tileFilter === "overallocated"} onClick={() => setTileFilter((f) => (f === "overallocated" ? "all" : "overallocated"))} />
           </div>
 
-          <div style={s.toolbar}>
-            <div style={s.segmented}>
-              {(["ALL", "AU", "USA"] as const).map((item) => (
-                <button key={item} type="button" onClick={() => setMarket(item)} style={{ ...s.segmentButton, ...(market === item ? s.segmentActive : {}) }}>{item}</button>
-              ))}
+          {tileFilter !== "all" ? (
+            <div style={s.toolbar}>
+              <button type="button" onClick={() => setTileFilter("all")} style={s.clearFilter}>Showing {tileFilter} only · clear ✕</button>
             </div>
-            {tileFilter !== "all" ? (
-              <button type="button" onClick={() => setTileFilter("all")} style={s.clearFilter}>Showing {tileFilter === "active" ? "active" : "overallocated"} only · clear ✕</button>
-            ) : null}
-          </div>
+          ) : null}
 
           <div style={s.batchList}>
             {batches.length === 0 ? (
@@ -137,40 +144,45 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
             ) : batches.map((batch) => (
               <div key={batch.id} style={s.batchCard}>
                 <div style={s.batchTop}>
-                  <div>
-                    <div style={s.productTitle}>{batch.productTitle}</div>
-                    <div style={s.meta}>Batch #{batch.id} · {batch.supplier} · {batch.market ?? "No market"}</div>
-                  </div>
-                  <div style={{ ...s.badge, ...(batch.enabled && batch.eligible ? s.badgeGreen : batch.supplierStatus === "on_production" ? s.badgeAmber : s.badgeGrey) }}>
-                    {batch.enabled && batch.eligible ? "Preorder active" : batch.supplierStatus === "on_production" ? "Eligible / Off" : statusLabel(batch.supplierStatus)}
-                  </div>
-                </div>
-
-                <div style={s.batchStats}>
-                  <MiniStat label="Incoming" value={batch.totalIncoming} />
-                  <MiniStat label="Reserved" value={batch.totalReserved} />
-                  <MiniStat label="Remaining" value={batch.totalAvailable} />
-                  <MiniStat label="Ship date" value={formatDate(batch.shipDate || batch.productionEta)} />
-                </div>
-
-                <div style={s.progressTrack}>
-                  <div
-                    style={{
-                      ...s.progressFill,
-                      width: `${Math.min(100, batch.totalIncoming > 0 ? (batch.totalReserved / batch.totalIncoming) * 100 : 0)}%`,
-                    }}
-                  />
-                </div>
-
-                <div style={s.variantGrid}>
-                  {batch.variants.map((variant) => (
-                    <div key={`${batch.id}-${variant.variantId}`} style={s.variantRow}>
-                      <div style={s.variantName}>{variant.variantTitle || "Default"}</div>
-                      <div>Incoming <strong>{variant.incomingRemaining}</strong></div>
-                      <div>Reserved <strong>{variant.reservedQty}</strong></div>
-                      <div>Available <strong>{variant.availableToPreorder}</strong></div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                    {batch.imageUrl ? <img src={batch.imageUrl} alt="" style={{ width: 42, height: 52, objectFit: "cover", borderRadius: 6, flexShrink: 0 }} /> : <div style={{ width: 42, height: 52, background: "#f1f5f9", borderRadius: 6, flexShrink: 0 }} />}
+                    <div style={{ minWidth: 0 }}>
+                      <div style={s.productTitle}>{batch.productTitle}</div>
+                      <div style={s.meta}>Batch #{batch.id} · {batch.supplier} · {batch.market ?? "No market"}</div>
                     </div>
-                  ))}
+                  </div>
+                  <div style={{ ...s.badge, ...(batch.enabled && batch.shopifySellingPlanActive ? s.badgeGreen : s.badgeGrey) }}>
+                    {batch.enabled && batch.shopifySellingPlanActive ? "Pre-order active" : "Pre-order off"}
+                  </div>
+                </div>
+
+                {/* Table-like size grid: sizes across the top, Incoming / Reserved /
+                    Available stacked down. */}
+                <div style={{ overflowX: "auto", marginTop: 14 }}>
+                  <table style={{ borderCollapse: "collapse" }}>
+                    <tbody>
+                      <tr>
+                        <td style={s.gridRowLabel} />
+                        {batch.variants.map((v) => <td key={v.variantId} style={s.gridSizeHead}>{v.variantTitle || "Free"}</td>)}
+                        <td style={s.gridTotalHead}>Total</td>
+                      </tr>
+                      <tr>
+                        <td style={s.gridRowLabel}>Incoming</td>
+                        {batch.variants.map((v) => <td key={v.variantId} style={s.gridCell}>{v.incomingRemaining}</td>)}
+                        <td style={s.gridTotalCell}>{batch.totalIncoming}</td>
+                      </tr>
+                      <tr>
+                        <td style={s.gridRowLabel}>Reserved</td>
+                        {batch.variants.map((v) => <td key={v.variantId} style={{ ...s.gridCell, color: "#7c3aed" }}>{v.reservedQty}</td>)}
+                        <td style={{ ...s.gridTotalCell, color: "#7c3aed" }}>{batch.totalReserved}</td>
+                      </tr>
+                      <tr>
+                        <td style={s.gridRowLabel}>Available</td>
+                        {batch.variants.map((v) => <td key={v.variantId} style={{ ...s.gridCell, color: v.availableToPreorder > 0 ? "#0f766e" : "#dc2626", fontWeight: 800 }}>{v.availableToPreorder}</td>)}
+                        <td style={{ ...s.gridTotalCell, color: batch.totalAvailable > 0 ? "#0f766e" : "#dc2626" }}>{batch.totalAvailable}</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
 
                 <BatchControls
@@ -217,66 +229,49 @@ function BatchControls({
   onManage: (payload: Record<string, unknown>, successText: string) => void;
 }) {
   const [shipDate, setShipDate] = useState(dateInputValue(batch.shipDate));
-  const canActivate = batch.supplierStatus === "on_production" && (batch.destination === "send_to_au" || batch.destination === "send_to_usa");
+  // "Live" = enabled + a Shopify selling plan active. Enabling does both in one
+  // step (no separate "Activate on Shopify"); turning off removes both.
+  const live = batch.enabled && batch.shopifySellingPlanActive;
+  const canEnable = Boolean(batch.market); // destination (AUS/USA) is set
 
   return (
     <div style={s.controls}>
-      <div style={s.controlsTitle}>Staff controls</div>
-      <div style={s.controlGrid}>
-        <label style={s.fieldLabel}>
-          Expected dispatch
+      <div style={s.controlRow}>
+        <div style={s.controlField}>
+          <span style={s.fieldCaption}>Batch</span>
+          <span style={s.fieldValue}>#{batch.id}</span>
+        </div>
+        <div style={s.controlField}>
+          <span style={s.fieldCaption}>Country</span>
+          <span style={s.fieldValue}>{batch.market === "AU" ? "Australia" : batch.market === "USA" ? "USA" : "Not set"}</span>
+        </div>
+        <label style={s.controlField}>
+          <span style={s.fieldCaption}>Dispatch date</span>
           <input type="date" value={shipDate} onChange={(e) => setShipDate(e.target.value)} style={s.input} disabled={busy} />
         </label>
-      </div>
-      <div style={s.controlActions}>
+        <div style={{ flex: 1 }} />
         <button
           type="button"
           style={s.secondaryButton}
           disabled={busy}
-          onClick={() => onManage({
-            operation: "update-settings",
-            shipDate,
-          }, "Preorder batch settings saved.")}
+          onClick={() => onManage({ operation: "update-settings", shipDate }, "Dispatch date saved.")}
         >
           {busy ? "Saving…" : "Save settings"}
         </button>
         <button
           type="button"
-          style={{ ...s.primaryButton, ...(batch.enabled ? s.pauseButton : {}) }}
-          disabled={busy || (!batch.enabled && !canActivate)}
-          title={!batch.enabled && !canActivate ? "Batch must be On Production and assigned to AUS or USA first." : undefined}
-          onClick={() => onManage({ operation: "set-enabled", enabled: !batch.enabled }, batch.enabled ? "Preorder paused and removed from Shopify." : "Preorder enabled internally. Activate it on Shopify when ready.")}
+          style={{ ...s.primaryButton, ...(live ? s.pauseButton : {}) }}
+          disabled={busy || (!live && !canEnable)}
+          title={!live && !canEnable ? "Assign the batch to Send to AUS or Send to USA first." : undefined}
+          onClick={() => (live
+            ? onManage({ operation: "row-disable" }, "Pre-order turned off.")
+            : onManage({ operation: "row-enable", shipDate }, "Pre-order enabled and live on Shopify."))}
         >
-          {busy ? "Working…" : batch.enabled ? "Pause preorder" : "Enable preorder"}
+          {busy ? "Working…" : live ? "Turn off pre-order" : "Enable pre-order"}
         </button>
       </div>
-      <div style={{ ...s.controlActions, marginTop: 10, paddingTop: 10, borderTop: "1px solid #e2e8f0" }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: batch.shopifySellingPlanActive ? "#166534" : "#64748b" }}>
-          Shopify: {batch.shopifySellingPlanActive ? "Live preorder selling plan" : "Not active"}
-        </div>
-        {batch.shopifySellingPlanActive ? (
-          <button
-            type="button"
-            style={s.pauseButton}
-            disabled={busy}
-            onClick={() => onManage({ operation: "remove-shopify" }, "Shopify preorder selling plan removed.")}
-          >
-            {busy ? "Working…" : "Remove from Shopify"}
-          </button>
-        ) : (
-          <button
-            type="button"
-            style={s.primaryButton}
-            disabled={busy || !batch.enabled || !batch.eligible || batch.totalAvailable <= 0}
-            title={!batch.enabled ? "Enable this preorder batch first." : batch.totalAvailable <= 0 ? "No preorder capacity is currently available." : undefined}
-            onClick={() => onManage({ operation: "activate-shopify" }, "Shopify preorder selling plan activated.")}
-          >
-            {busy ? "Working…" : "Activate on Shopify"}
-          </button>
-        )}
-      </div>
-      {!batch.enabled && !canActivate ? (
-        <div style={s.controlHint}>To enable, this production batch must be <strong>On Production</strong> and assigned to <strong>Send to AUS</strong> or <strong>Send to USA</strong>.</div>
+      {!live && !canEnable ? (
+        <div style={s.controlHint}>To enable, assign this batch to <strong>Send to AUS</strong> or <strong>Send to USA</strong>.</div>
       ) : null}
       {batch.pausedReason ? <div style={s.controlHint}>Paused reason: {batch.pausedReason}</div> : null}
     </div>
@@ -384,9 +379,19 @@ const s: Record<string, React.CSSProperties> = {
   notice: { marginBottom: 14, padding: "10px 12px", borderRadius: 9, fontSize: 13, fontWeight: 700 },
   noticeError: { background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" },
   noticeSuccess: { background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534" },
-  tabs: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 20 },
+  tabsRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 20 },
+  tabs: { display: "flex", gap: 8, flexWrap: "wrap" },
   tab: { border: "1px solid #e2e8f0", background: "#fff", borderRadius: 9, padding: "9px 15px", fontSize: 13, fontWeight: 700, color: "#475569", cursor: "pointer", boxShadow: "0 1px 2px rgba(15,23,42,0.05)" },
   tabActive: { background: "#C16452", color: "#fff", borderColor: "#C16452" },
+  gridRowLabel: { padding: "4px 14px 4px 0", fontSize: 12, fontWeight: 700, color: "#64748b", textAlign: "right", whiteSpace: "nowrap" },
+  gridSizeHead: { padding: "4px 10px", textAlign: "center", fontWeight: 800, fontSize: 13, borderBottom: "2px solid #e2e8f0", minWidth: 56, color: "#0f172a" },
+  gridTotalHead: { padding: "4px 12px 4px 14px", textAlign: "center", fontWeight: 800, fontSize: 13, borderBottom: "2px solid #cbd5e1", borderLeft: "2px solid #cbd5e1", color: "#334155" },
+  gridCell: { padding: "4px 10px", textAlign: "center", fontSize: 13, color: "#0f172a" },
+  gridTotalCell: { padding: "4px 12px 4px 14px", textAlign: "center", fontSize: 13, fontWeight: 800, borderLeft: "2px solid #cbd5e1", color: "#334155" },
+  controlRow: { display: "flex", alignItems: "flex-end", gap: 14, flexWrap: "wrap", marginTop: 16, paddingTop: 15, borderTop: "1px solid #e2e8f0" },
+  controlField: { display: "flex", flexDirection: "column", gap: 4 },
+  fieldCaption: { fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".04em" },
+  fieldValue: { fontSize: 14, fontWeight: 800, color: "#0f172a" },
   cards: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(165px, 1fr))", gap: 12, marginBottom: 18 },
   metricCard: { background: "white", border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" },
   metricDanger: { border: "1px solid #fecaca", background: "#fff7f7" },
