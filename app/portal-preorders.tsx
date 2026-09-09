@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { PreorderDashboardBatch, PreorderDashboardData } from "./preorder/preorder-dashboard.server";
 import {
   PreorderActivationReadinessPanel,
@@ -144,22 +145,19 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
             ) : batches.map((batch) => (
               <div key={batch.id} style={s.batchCard}>
                 <div style={s.batchTop}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-                    {batch.imageUrl ? <img src={batch.imageUrl} alt="" style={{ width: 42, height: 52, objectFit: "cover", borderRadius: 6, flexShrink: 0 }} /> : <div style={{ width: 42, height: 52, background: "#f1f5f9", borderRadius: 6, flexShrink: 0 }} />}
-                    <div style={{ minWidth: 0 }}>
-                      <div style={s.productTitle}>{batch.productTitle}</div>
-                      <div style={s.meta}>Batch #{batch.id} · {batch.supplier} · {batch.market ?? "No market"}</div>
+                  {/* Picture + title on the left, size grid to their right. */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 20, minWidth: 0, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
+                      {batch.imageUrl ? <img src={batch.imageUrl} alt="" style={{ width: 84, height: 104, objectFit: "cover", borderRadius: 8, flexShrink: 0 }} /> : <div style={{ width: 84, height: 104, background: "#f1f5f9", borderRadius: 8, flexShrink: 0 }} />}
+                      <div style={{ minWidth: 0 }}>
+                        <div style={s.productTitle}>{batch.productTitle}</div>
+                        <div style={s.meta}>Batch #{batch.id} · {batch.supplier} · {batch.market ?? "No market"}</div>
+                      </div>
                     </div>
-                  </div>
-                  <div style={{ ...s.badge, ...(batch.enabled && batch.shopifySellingPlanActive ? s.badgeGreen : s.badgeGrey) }}>
-                    {batch.enabled && batch.shopifySellingPlanActive ? "Pre-order active" : "Pre-order off"}
-                  </div>
-                </div>
-
-                {/* Table-like size grid: sizes across the top, Incoming / Reserved /
-                    Available stacked down. */}
-                <div style={{ overflowX: "auto", marginTop: 14 }}>
-                  <table style={{ borderCollapse: "collapse" }}>
+                    {/* Table-like size grid: sizes across the top, Incoming / Reserved /
+                        Available stacked down. */}
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ borderCollapse: "collapse" }}>
                     <tbody>
                       <tr>
                         <td style={s.gridRowLabel} />
@@ -181,8 +179,13 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
                         {batch.variants.map((v) => <td key={v.variantId} style={{ ...s.gridCell, color: v.availableToPreorder > 0 ? "#0f766e" : "#dc2626", fontWeight: 800 }}>{v.availableToPreorder}</td>)}
                         <td style={{ ...s.gridTotalCell, color: batch.totalAvailable > 0 ? "#0f766e" : "#dc2626" }}>{batch.totalAvailable}</td>
                       </tr>
-                    </tbody>
-                  </table>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div style={{ ...s.badge, ...(batch.enabled && batch.shopifySellingPlanActive ? s.badgeGreen : s.badgeGrey) }}>
+                    {batch.enabled && batch.shopifySellingPlanActive ? "Pre-order active" : "Pre-order off"}
+                  </div>
                 </div>
 
                 <BatchControls
@@ -245,10 +248,10 @@ function BatchControls({
           <span style={s.fieldCaption}>Country</span>
           <span style={s.fieldValue}>{batch.market === "AU" ? "Australia" : batch.market === "USA" ? "USA" : "Not set"}</span>
         </div>
-        <label style={s.controlField}>
+        <div style={s.controlField}>
           <span style={s.fieldCaption}>Dispatch date</span>
-          <input type="date" value={shipDate} onChange={(e) => setShipDate(e.target.value)} style={s.input} disabled={busy} />
-        </label>
+          <CalendarDatePicker value={shipDate} onChange={setShipDate} disabled={busy} />
+        </div>
         <div style={{ flex: 1 }} />
         <button
           type="button"
@@ -335,6 +338,70 @@ function NotifyBlockToggle({ enabled }: { enabled: boolean }) {
   );
 }
 
+// A compact single-date calendar picker (nicer than the native date input),
+// styled like the dashboard's: terracotta selected day, Monday-first grid.
+// Value + onChange use YYYY-MM-DD. The popover is portaled to <body> so it can't
+// be clipped by the card.
+function CalendarDatePicker({ value, onChange, disabled }: { value: string; onChange: (v: string) => void; disabled?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement | null>(null);
+  const popRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const selected = value ? new Date(`${value}T00:00:00`) : null;
+  const [view, setView] = useState(() => (selected && !Number.isNaN(selected.getTime()) ? new Date(selected) : new Date()));
+  useEffect(() => {
+    if (!open) return;
+    const place = () => { const r = btnRef.current?.getBoundingClientRect(); if (r) setPos({ top: r.bottom + 6, left: r.left }); };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { const t = e.target as Node; if (btnRef.current?.contains(t) || popRef.current?.contains(t)) return; setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+  const fmt = (d: Date) => new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric" }).format(d);
+  const y = view.getFullYear(), m = view.getMonth();
+  const startOffset = (new Date(y, m, 1).getDay() + 6) % 7; // Monday-first
+  const daysInMonth = new Date(y, m + 1, 0).getDate();
+  const cells: Array<number | null> = [];
+  for (let i = 0; i < startOffset; i += 1) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d += 1) cells.push(d);
+  const pick = (d: number) => {
+    const iso = `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    onChange(iso);
+    setOpen(false);
+  };
+  const isSel = (d: number) => selected && selected.getFullYear() === y && selected.getMonth() === m && selected.getDate() === d;
+  return (
+    <>
+      <button ref={btnRef} type="button" disabled={disabled} onClick={() => setOpen((v) => !v)} style={s.dateButton}>
+        <span>{selected && !Number.isNaN(selected.getTime()) ? fmt(selected) : "Pick a date"}</span>
+        <span style={{ marginLeft: 10, color: "#94a3b8", fontSize: 11 }}>▾</span>
+      </button>
+      {open && pos && typeof document !== "undefined" && createPortal(
+        <div ref={popRef} style={{ ...s.calPop, top: pos.top, left: pos.left }}>
+          <div style={s.calHead}>
+            <button type="button" style={s.calNav} onClick={() => setView(new Date(y, m - 1, 1))}>‹</button>
+            <div style={{ fontWeight: 800, fontSize: 15, color: "#0f172a" }}>{new Intl.DateTimeFormat("en-AU", { month: "long", year: "numeric" }).format(view)}</div>
+            <button type="button" style={s.calNav} onClick={() => setView(new Date(y, m + 1, 1))}>›</button>
+          </div>
+          <div style={s.calGrid}>
+            {["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"].map((d) => <div key={d} style={s.calDow}>{d}</div>)}
+            {cells.map((d, i) => (d === null ? <div key={`e${i}`} /> : (
+              <button key={d} type="button" onClick={() => pick(d)} style={{ ...s.calDay, ...(isSel(d) ? s.calDaySel : {}) }}>{d}</button>
+            )))}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 function MetricCard({ label, value, hint, danger = false, active = false, onClick }: { label: string; value: number | string; hint: string; danger?: boolean; active?: boolean; onClick?: () => void }) {
   return (
     <div
@@ -388,10 +455,18 @@ const s: Record<string, React.CSSProperties> = {
   gridTotalHead: { padding: "4px 12px 4px 14px", textAlign: "center", fontWeight: 800, fontSize: 13, borderBottom: "2px solid #cbd5e1", borderLeft: "2px solid #cbd5e1", color: "#334155" },
   gridCell: { padding: "4px 10px", textAlign: "center", fontSize: 13, color: "#0f172a" },
   gridTotalCell: { padding: "4px 12px 4px 14px", textAlign: "center", fontSize: 13, fontWeight: 800, borderLeft: "2px solid #cbd5e1", color: "#334155" },
-  controlRow: { display: "flex", alignItems: "flex-end", gap: 14, flexWrap: "wrap", marginTop: 16, paddingTop: 15, borderTop: "1px solid #e2e8f0" },
-  controlField: { display: "flex", flexDirection: "column", gap: 4 },
+  controlRow: { display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap", marginTop: 10, paddingTop: 12, borderTop: "1px solid #f1f5f9" },
+  controlField: { display: "flex", flexDirection: "column", gap: 5 },
   fieldCaption: { fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".04em" },
-  fieldValue: { fontSize: 14, fontWeight: 800, color: "#0f172a" },
+  fieldValue: { display: "flex", alignItems: "center", height: 40, fontSize: 15, fontWeight: 800, color: "#0f172a" },
+  dateButton: { display: "inline-flex", alignItems: "center", height: 40, boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 10, padding: "0 14px", fontSize: 14, fontWeight: 700, background: "#fff", color: "#0f172a", cursor: "pointer" },
+  calPop: { position: "fixed", zIndex: 4001, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 14, boxShadow: "0 18px 44px rgba(15,23,42,0.22)", padding: 14, width: 300 },
+  calHead: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  calNav: { border: "1px solid #e2e8f0", background: "#fff", borderRadius: 8, width: 30, height: 30, cursor: "pointer", fontSize: 16, color: "#475569", lineHeight: 1 },
+  calGrid: { display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 },
+  calDow: { textAlign: "center", fontSize: 11, fontWeight: 700, color: "#94a3b8", padding: "2px 0" },
+  calDay: { border: "none", background: "transparent", borderRadius: 8, height: 36, cursor: "pointer", fontSize: 14, fontWeight: 600, color: "#0f172a" },
+  calDaySel: { background: "#C16452", color: "#fff", fontWeight: 800 },
   cards: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(165px, 1fr))", gap: 12, marginBottom: 18 },
   metricCard: { background: "white", border: "1px solid #e2e8f0", borderRadius: 12, padding: 16, boxShadow: "0 1px 2px rgba(15,23,42,0.04)" },
   metricDanger: { border: "1px solid #fecaca", background: "#fff7f7" },
@@ -429,8 +504,8 @@ const s: Record<string, React.CSSProperties> = {
   optional: { fontWeight: 500, color: "#94a3b8" },
   input: { border: "1px solid #cbd5e1", borderRadius: 8, padding: "8px 9px", fontSize: 13, background: "white", color: "#0f172a" },
   controlActions: { display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap", marginTop: 11 },
-  secondaryButton: { border: "1px solid #cbd5e1", background: "white", color: "#334155", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 800, cursor: "pointer" },
-  primaryButton: { border: "1px solid #0f766e", background: "#0f766e", color: "white", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 800, cursor: "pointer" },
+  secondaryButton: { display: "inline-flex", alignItems: "center", height: 40, boxSizing: "border-box", border: "1px solid #cbd5e1", background: "white", color: "#334155", borderRadius: 10, padding: "0 16px", fontSize: 13, fontWeight: 800, cursor: "pointer" },
+  primaryButton: { display: "inline-flex", alignItems: "center", height: 40, boxSizing: "border-box", border: "1px solid #C16452", background: "#C16452", color: "white", borderRadius: 10, padding: "0 16px", fontSize: 13, fontWeight: 800, cursor: "pointer" },
   pauseButton: { border: "1px solid #b45309", background: "#b45309" },
   controlHint: { marginTop: 9, fontSize: 11, color: "#64748b" },
   empty: { padding: 36, textAlign: "center", color: "#64748b", background: "white", border: "1px dashed #cbd5e1", borderRadius: 12 },
