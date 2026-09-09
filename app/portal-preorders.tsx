@@ -148,7 +148,7 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
                   {/* Picture + title on the left, size grid to their right. */}
                   <div style={{ display: "flex", alignItems: "center", gap: 20, minWidth: 0, flexWrap: "wrap" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 14, minWidth: 0 }}>
-                      {batch.imageUrl ? <img src={batch.imageUrl} alt="" style={{ width: 84, height: 104, objectFit: "cover", borderRadius: 8, flexShrink: 0 }} /> : <div style={{ width: 84, height: 104, background: "#f1f5f9", borderRadius: 8, flexShrink: 0 }} />}
+                      {batch.imageUrl ? <img src={batch.imageUrl} alt="" style={{ width: 84, height: "auto", maxHeight: 130, borderRadius: 8, flexShrink: 0, display: "block" }} /> : <div style={{ width: 84, height: 104, background: "#f1f5f9", borderRadius: 8, flexShrink: 0 }} />}
                       <div style={{ minWidth: 0 }}>
                         <div style={s.productTitle}>{batch.productTitle}</div>
                         <div style={s.meta}>Batch #{batch.id} · {batch.supplier} · {batch.market ?? "No market"}</div>
@@ -455,7 +455,7 @@ const s: Record<string, React.CSSProperties> = {
   gridTotalHead: { padding: "4px 12px 4px 14px", textAlign: "center", fontWeight: 800, fontSize: 13, borderBottom: "2px solid #cbd5e1", borderLeft: "2px solid #cbd5e1", color: "#334155" },
   gridCell: { padding: "4px 10px", textAlign: "center", fontSize: 13, color: "#0f172a" },
   gridTotalCell: { padding: "4px 12px 4px 14px", textAlign: "center", fontSize: 13, fontWeight: 800, borderLeft: "2px solid #cbd5e1", color: "#334155" },
-  controlRow: { display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap", marginTop: 10, paddingTop: 12, borderTop: "1px solid #f1f5f9" },
+  controlRow: { display: "flex", alignItems: "flex-end", gap: 16, flexWrap: "wrap", marginTop: 3, paddingTop: 6, borderTop: "1px solid #f1f5f9" },
   controlField: { display: "flex", flexDirection: "column", gap: 5 },
   fieldCaption: { fontSize: 11, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".04em" },
   fieldValue: { display: "flex", alignItems: "center", height: 40, fontSize: 15, fontWeight: 800, color: "#0f172a" },
