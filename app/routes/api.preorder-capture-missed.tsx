@@ -16,7 +16,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // no changes — for emailing customers who got a normal confirmation.
   if (url.searchParams.get("followup") === "1") {
     const result = await listAffectedForFollowup({ days });
-    return Response.json({ ok: true, ...result }, { headers: { "Cache-Control": "no-store" } });
+    // Just the order numbers (add &detail=1 for emails/products/dispatch dates).
+    if (url.searchParams.get("detail") === "1") return Response.json({ ok: true, ...result }, { headers: { "Cache-Control": "no-store" } });
+    return Response.json({ ok: true, count: result.orders.length, orders: result.orders }, { headers: { "Cache-Control": "no-store" } });
   }
   const apply = url.searchParams.get("apply") === "1";
   const result = await captureMissedPreorders({ days, apply });

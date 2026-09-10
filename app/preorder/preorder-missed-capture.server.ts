@@ -178,7 +178,7 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
 // or shipped). Returns order #, customer email, product, size, and the batch's
 // expected dispatch date.
 export async function listAffectedForFollowup(opts: { days?: number } = {}): Promise<{
-  scannedOrders: number; affected: Array<{ order: string; email: string | null; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }>;
+  scannedOrders: number; orders: string[]; affected: Array<{ order: string; email: string | null; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }>;
 }> {
   const days = Math.max(1, Math.min(120, Math.floor(opts.days ?? 14)));
   const session = await prisma.session.findFirst({
@@ -187,10 +187,11 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
   if (!session?.accessToken) return { scannedOrders: 0, affected: [] };
   const { shop, accessToken } = session;
 
-  const [enabledSettings, registry, batchSettings] = await Promise.all([
+  const [enabledSettings, registry, batchSettings, locations] = await Promise.all([
     prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true } }),
     getPreorderSellingPlanRegistryEntries(shop),
     prisma.preorderBatchSetting.findMany({ select: { supplierOrderId: true, shipDate: true } }),
+    getPreorderLocationSettings(),
   ]);
   const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
   const liveIds = enabledSettings.map((s) => s.supplierOrderId).filter((id) => activatedIds.has(id));
@@ -206,10 +207,11 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
     const dispatch = shipByBatch.get(b.id) ?? etaByBatch.get(b.id) ?? null;
     for (const l of b.lines) { const num = numericId(l.variantId); if (num) variantMarketToBatch.set(`${num}:${market}`, { batchId: b.id, dispatch }); }
   }
-  if (!variantMarketToBatch.size) return { scannedOrders: 0, affected: [] };
+  if (!variantMarketToBatch.size) return { scannedOrders: 0, orders: [], affected: [] };
 
   const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
   const affected: Array<{ order: string; email: string | null; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }> = [];
+  const stockCache = new Map<string, number>();
   let scannedOrders = 0;
   let cursor: string | null = null;
   for (let page = 0; page < 20; page += 1) {
@@ -237,8 +239,22 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
       const market: PreorderMarket = country === "US" ? "USA" : "AU";
       for (const line of order.lineItems?.nodes ?? []) {
         if ((line.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX)) continue;
-        const hit = variantMarketToBatch.get(`${numericId(String(line.variant?.id ?? ""))}:${market}`);
+        const vnum = numericId(String(line.variant?.id ?? ""));
+        const hit = variantMarketToBatch.get(`${vnum}:${market}`);
         if (!hit) continue;
+        // Only count it as affected if the variant was actually OUT OF STOCK — an
+        // in-stock sale of a product that merely has a live batch got the correct
+        // (normal) email and shouldn't be followed up.
+        const locationId = locationForMarket(locations, market);
+        if (!locationId) continue;
+        const stockKey = `${vnum}:${market}`;
+        let available = stockCache.get(stockKey);
+        if (available === undefined) {
+          try { available = await getAvailableAtLocation(shop, accessToken, String(line.variant?.id ?? ""), locationId); }
+          catch { available = 1; }
+          stockCache.set(stockKey, available);
+        }
+        if (available > 0) continue;
         affected.push({ order: order.name, email: order.email, product: line.title, size: line.variant?.title ?? null, qty: line.quantity, batchId: hit.batchId, dispatch: hit.dispatch });
       }
     }
@@ -246,7 +262,8 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
     if (!pi?.hasNextPage || !pi.endCursor) break;
     cursor = pi.endCursor;
   }
-  return { scannedOrders, affected };
+  const orders = Array.from(new Set(affected.map((a) => a.order)));
+  return { scannedOrders, orders, affected };
 }
 
 // Run the capture automatically so missed pre-orders (Shop Pay / quick-add /
