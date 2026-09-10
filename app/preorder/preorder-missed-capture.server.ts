@@ -171,6 +171,73 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
   return { scannedOrders, candidates, converted, errors, applied: true, skippedNoScope: false };
 }
 
+// Real-time capture for the order webhook: given an order's no-plan lines, pull
+// the ones that are live pre-order variants (out of stock) into the pipeline
+// immediately — reserve + tag + hold — so no order waits for the scheduler.
+// Same tight gates as the batch capture. Idempotent.
+export async function captureNoPlanLinesForOrder(
+  shop: string, orderIdNumeric: string, orderName: string | null, market: PreorderMarket,
+  lines: Array<{ lineId: string; variantId: string; qty: number; size: string | null; title: string | null }>,
+): Promise<{ captured: number }> {
+  if (!lines.length) return { captured: 0 };
+  const [enabledSettings, registry, locations] = await Promise.all([
+    prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true } }),
+    getPreorderSellingPlanRegistryEntries(shop),
+    getPreorderLocationSettings(),
+  ]);
+  const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
+  const liveIds = enabledSettings.map((s) => s.supplierOrderId).filter((id) => activatedIds.has(id));
+  if (!liveIds.length) return { captured: 0 };
+  const batches = await prisma.supplierOrder.findMany({
+    where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } },
+    select: { id: true, destination: true, lines: { select: { variantId: true } } },
+  });
+  const variantMarketToBatch = new Map<string, number>();
+  for (const b of batches) {
+    const m = marketFromDestination(b.destination);
+    if (!m) continue;
+    for (const l of b.lines) { const num = numericId(l.variantId); if (num) variantMarketToBatch.set(`${num}:${m}`, b.id); }
+  }
+  if (!variantMarketToBatch.size) return { captured: 0 };
+
+  const token = await getOfflineToken(shop);
+  if (!token) return { captured: 0 };
+  const locationId = locationForMarket(locations, market);
+  const alreadyReserved = new Set((await prisma.preorderReservation.findMany({ where: { shopifyOrderId: orderIdNumeric }, select: { shopifyLineItemId: true } })).map((r) => r.shopifyLineItemId));
+  const stockCache = new Map<string, number>();
+  let captured = 0;
+  let tagged = false;
+  for (const line of lines) {
+    const vnum = numericId(line.variantId);
+    const batchId = variantMarketToBatch.get(`${vnum}:${market}`);
+    if (!batchId || alreadyReserved.has(line.lineId)) continue;
+    if (!locationId) continue;
+    let available = stockCache.get(vnum);
+    if (available === undefined) {
+      try { available = await getAvailableAtLocation(shop, token, line.variantId, locationId); } catch { available = 1; }
+      stockCache.set(vnum, available);
+    }
+    if (available > 0) continue; // in-stock size → normal sale, not a pre-order
+    try {
+      await reservePreorderLine({ shop, shopifyOrderId: orderIdNumeric, shopifyOrderName: orderName, shopifyLineItemId: line.lineId, productId: null, variantId: line.variantId, variantTitle: line.size, sku: null, market, quantity: line.qty, customerEmail: null, preferredSupplierOrderId: batchId });
+      captured += 1;
+    } catch (error) {
+      console.warn(`[preorder realtime capture] ${orderName} reserve failed:`, error instanceof PreorderCapacityError ? error.message : (error instanceof Error ? error.message : String(error)));
+      continue;
+    }
+    if (!tagged) {
+      tagged = true;
+      try {
+        await addOrderTags(shop, token, orderIdNumeric, ["pre-order", `pre-order-batch-${batchId}`, "pre-order-hold"]);
+        await holdOrderOpenFulfillmentOrders(shop, token, orderIdNumeric, "Captured missed pre-order (no selling plan) — held until the batch lands");
+      } catch (error) {
+        console.warn(`[preorder realtime capture] ${orderName} tag/hold failed:`, error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+  return { captured };
+}
+
 // Read-only list of EVERY order that bought a live pre-order variant WITHOUT the
 // selling plan (Shop Pay / express / any no-plan path) — for customer follow-up.
 // Unlike the capture, this does NOT gate on stock/fulfilment (a customer who got

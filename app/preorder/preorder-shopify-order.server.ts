@@ -13,6 +13,7 @@ import {
 } from "./preorder-shopify-order-normalize";
 import { getOfflineToken, addOrderTags, holdOrderOpenFulfillmentOrders } from "./preorder-fulfillment.server";
 import { getPreorderCombineWindowDays } from "./preorder-storefront-settings.server";
+import { captureNoPlanLinesForOrder } from "./preorder-missed-capture.server";
 
 const API_VERSION = "2025-10";
 
@@ -73,7 +74,8 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
 
   const country = String(order.shippingAddress?.countryCodeV2 || order.billingAddress?.countryCodeV2 || "").toUpperCase();
   const market = country === "US" ? "USA" as const : "AU" as const;
-  const lines = (order.lineItems?.nodes ?? [])
+  const allNodes = order.lineItems?.nodes ?? [];
+  const lines = allNodes
     .filter((line) => (line.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX))
     .map((line) => ({
       shopifyLineItemId: numericId(line.id),
@@ -85,6 +87,17 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
       sellingPlanName: line.sellingPlan?.name ?? "",
       preferredSupplierOrderId: preorderBatchIdFromPlanName(line.sellingPlan?.name),
     }));
+  // Lines WITHOUT our selling plan (Shop Pay / express / any no-plan path) — the
+  // webhook captures the ones that are live pre-order variants in real time.
+  const noPlanLines = allNodes
+    .filter((line) => !(line.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX) && line.variant?.id && Number(line.quantity) > 0)
+    .map((line) => ({
+      lineId: numericId(line.id),
+      variantId: String(line.variant?.id ?? ""),
+      qty: Number(line.quantity),
+      title: line.title ?? null,
+      size: line.variant?.title ?? null,
+    }));
 
   return {
     shopifyOrderId: numericId(order.id),
@@ -92,7 +105,8 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
     customerEmail: order.email ?? null,
     market,
     lines,
-    totalLines: (order.lineItems?.nodes ?? []).length,
+    noPlanLines,
+    totalLines: allNodes.length,
   };
 }
 
@@ -102,8 +116,25 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
   if (!orderIdNumeric) return { preorder: false, reservations: 0 };
 
   const normalized = await fetchPreorderOrderViaGraphql(shop, orderIdNumeric);
-  if (!normalized || !normalized.lines.length) return { preorder: false, reservations: 0 };
+  if (!normalized) return { preorder: false, reservations: 0 };
   if (!normalized.shopifyOrderId) throw new PreorderCapacityError("Shopify preorder order ID is missing.");
+
+  // Real-time missed-capture: pull in any line that bought a LIVE pre-order
+  // variant with NO selling plan (Shop Pay / express / any no-plan path) the
+  // instant the order lands — reserve + tag + hold. This is what makes every
+  // checkout path a proper pre-order without waiting for the scheduler.
+  let capturedMissed = 0;
+  if (normalized.noPlanLines.length) {
+    try {
+      const r = await captureNoPlanLinesForOrder(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.market, normalized.noPlanLines);
+      capturedMissed = r.captured;
+    } catch (error) {
+      console.warn("[preorder] real-time missed capture failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  // No lines carry our selling plan → nothing more to reserve via the plan path.
+  if (!normalized.lines.length) return { preorder: capturedMissed > 0, reservations: capturedMissed };
 
   // Tag the order so Pick Pack handles it: a fully pre-order order gets
   // `pre-order-hold` (Pick Pack sets it aside entirely); a mixed order gets
