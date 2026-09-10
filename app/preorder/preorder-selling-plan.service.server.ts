@@ -2,7 +2,8 @@ import prisma from "../db.server";
 import { canManagePreorders, type PreorderPermissionSettings } from "./preorder-permissions.server";
 import { getPreorderEligibility } from "./preorder-rules.server";
 import { getPreorderLocationSettings, locationForMarket } from "./preorder-locations.server";
-import { buildPreorderSellingPlanGroup, buildPreorderSellingPlanUpdateInput } from "./preorder-selling-plan";
+import { buildPreorderSellingPlanGroup, buildPreorderSellingPlanUpdateInput, preorderExpectedLabel } from "./preorder-selling-plan";
+import { setVariantsPreorderMetafields } from "./preorder-fulfillment.server";
 import {
   getPreorderSellingPlanRegistryEntry,
   getPreorderSellingPlanRegistryEntries,
@@ -146,13 +147,18 @@ async function refreshExistingPlanDate(shop: string, token: string, sellingPlanG
 // Called after a dispatch-date change so the order/cart/email stay in sync with
 // the portal + storefront.
 export async function refreshPreorderSellingPlanDate(supplierOrderId: number) {
-  const order = await prisma.supplierOrder.findUnique({ where: { id: supplierOrderId }, select: { id: true, shop: true, eta: true } });
+  const order = await prisma.supplierOrder.findUnique({ where: { id: supplierOrderId }, select: { id: true, shop: true, eta: true, lines: { select: { variantId: true, qtyOrdered: true, qtyReceived: true } } } });
   if (!order) return;
   const registry = await getPreorderSellingPlanRegistryEntry(order.shop, order.id);
   if (!registry) return; // not live — nothing to rename
   const setting = await prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: order.id }, select: { shipDate: true } });
   const token = await offlineAccessToken(order.shop);
-  await refreshExistingPlanDate(order.shop, token, registry.sellingPlanGroupId, registry.sellingPlanId, order.id, setting?.shipDate ?? order.eta ?? null);
+  const dispatch = setting?.shipDate ?? order.eta ?? null;
+  await refreshExistingPlanDate(order.shop, token, registry.sellingPlanGroupId, registry.sellingPlanId, order.id, dispatch);
+  // Keep the variant dispatch metafield in sync so the email shows the new date.
+  const variantIds = order.lines.filter((l) => l.qtyOrdered - l.qtyReceived > 0).map((l) => String(l.variantId ?? "").trim()).filter(Boolean);
+  await setVariantsPreorderMetafields(order.shop, token, variantIds, { preorder: true, dispatchLabel: preorderExpectedLabel(dispatch) })
+    .catch((error) => console.warn("[preorder] dispatch metafield refresh failed:", error instanceof Error ? error.message : error));
 }
 
 // Safety net: re-sync EVERY live plan's name to its batch's current dispatch
@@ -250,6 +256,12 @@ export async function activatePreorderSellingPlan(input: {
   // pre-order adds to cart but Shopify drops it as "sold out" at checkout. Runs
   // on every activate (idempotent) so a re-activation always re-asserts it.
   await setVariantsInventoryPolicy(order.shop, accessToken, order.productId, variantIds, "CONTINUE");
+
+  // Flag the variants as pre-order (+ dispatch label) so the confirmation email
+  // shows the pre-order banner on ANY checkout path — Shop Pay, express, or the
+  // pre-order button. Runs on every activate (create or re-activate/date change).
+  await setVariantsPreorderMetafields(order.shop, accessToken, variantIds, { preorder: true, dispatchLabel: preorderExpectedLabel(setting?.shipDate ?? order.eta ?? null) })
+    .catch((error) => console.warn("[preorder] variant pre-order metafields failed:", error instanceof Error ? error.message : error));
 
   const existing = await getPreorderSellingPlanRegistryEntry(order.shop, order.id);
   if (existing) {
@@ -358,6 +370,10 @@ export async function deactivatePreorderSellingPlan(input: {
   await setVariantsInventoryPolicy(order.shop, accessToken, order.productId, variantIds, "DENY").catch((error) => {
     console.warn("[preorder deactivate] could not restore DENY inventory policy:", error);
   });
+  // Clear the pre-order flag on the variants so future orders aren't treated as
+  // pre-order in the confirmation email.
+  await setVariantsPreorderMetafields(order.shop, accessToken, variantIds, { preorder: false, dispatchLabel: null })
+    .catch((error) => console.warn("[preorder deactivate] could not clear pre-order metafields:", error));
 
   const data = await shopifyGraphql<{
     sellingPlanGroupDelete?: { deletedSellingPlanGroupId?: string; userErrors?: Array<{ field?: string[]; message?: string }> };

@@ -27,6 +27,12 @@ function expectedLabel(value: Date | string | null) {
   return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric", timeZone: "Australia/Adelaide" }).format(date);
 }
 
+// Public: the customer-facing "Expected <date>" label for a dispatch date. Used
+// for the variant metafield so the confirmation email can show it on any path.
+export function preorderExpectedLabel(value: Date | string | null) {
+  return expectedLabel(value);
+}
+
 // The customer-facing plan name/options for a given batch + dispatch date. Used
 // both when creating and when refreshing the date on an existing plan.
 export function preorderPlanNameFor(batchId: number, shipDate: Date | string | null) {

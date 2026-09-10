@@ -98,6 +98,42 @@ export async function releaseOrderPreorderHolds(shop: string, token: string, ord
   return released;
 }
 
+function toVariantGid(value: string) {
+  const text = String(value ?? "").trim();
+  if (text.startsWith("gid://shopify/ProductVariant/")) return text;
+  const numeric = text.replace(/[^0-9]/g, "");
+  return numeric ? `gid://shopify/ProductVariant/${numeric}` : null;
+}
+
+/**
+ * Set the pre-order metafields on a batch's variants so the confirmation email
+ * (and storefront) can detect a pre-order from the VARIANT itself — this makes
+ * the pre-order banner show on EVERY checkout path (Shop Pay, express, plan or
+ * no plan), because the flag is on the product when the email renders.
+ * namespace `karmaeast`: `preorder` (boolean), `dispatch` (text label).
+ * Best-effort; needs write_products (we have it).
+ */
+export async function setVariantsPreorderMetafields(shop: string, token: string, variantIds: string[], opts: { preorder: boolean; dispatchLabel: string | null }): Promise<void> {
+  const owners = Array.from(new Set(variantIds.map(toVariantGid).filter(Boolean))) as string[];
+  if (!owners.length) return;
+  const metafields = owners.flatMap((ownerId) => ([
+    { ownerId, namespace: "karmaeast", key: "preorder", type: "boolean", value: opts.preorder ? "true" : "false" },
+    { ownerId, namespace: "karmaeast", key: "dispatch", type: "single_line_text_field", value: opts.dispatchLabel ?? "" },
+  ]));
+  for (let i = 0; i < metafields.length; i += 25) {
+    const chunk = metafields.slice(i, i + 25);
+    const result = await graphql<{ metafieldsSet?: { userErrors?: Array<{ field?: string[]; message?: string }> } }>(
+      shop, token, `#graphql
+        mutation KePreorderMeta($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) { userErrors { field message } }
+        }
+      `, { metafields: chunk },
+    );
+    const errs = result.metafieldsSet?.userErrors;
+    if (errs?.length) throw new PreorderFulfillmentError(errs.map((e) => e.message || "metafieldsSet error").join("; "));
+  }
+}
+
 /**
  * Put a hold on every OPEN fulfilment order of an order — used to keep the
  * in-stock items of a MIXED order from shipping before the pre-order item, so
