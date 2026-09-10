@@ -1,6 +1,6 @@
 import type { LoaderFunctionArgs } from "react-router";
 import { requirePreorderPortalUser } from "../preorder/preorder-portal-auth.server";
-import { captureMissedPreorders } from "../preorder/preorder-missed-capture.server";
+import { captureMissedPreorders, listAffectedForFollowup } from "../preorder/preorder-missed-capture.server";
 
 // Admin: find (and optionally convert) paid orders that sold a pre-order-enabled
 // variant WITHOUT the selling plan (bought via quick-add / theme button rather
@@ -12,6 +12,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (actor.admin !== true) return Response.json({ ok: false, error: "Admin only." }, { status: 403 });
   const url = new URL(request.url);
   const days = Number(url.searchParams.get("days") ?? "21") || 21;
+  // Read-only follow-up list (every affected order + customer email), no gating,
+  // no changes — for emailing customers who got a normal confirmation.
+  if (url.searchParams.get("followup") === "1") {
+    const result = await listAffectedForFollowup({ days });
+    return Response.json({ ok: true, ...result }, { headers: { "Cache-Control": "no-store" } });
+  }
   const apply = url.searchParams.get("apply") === "1";
   const result = await captureMissedPreorders({ days, apply });
   return Response.json({ ok: true, ...result }, { headers: { "Cache-Control": "no-store" } });

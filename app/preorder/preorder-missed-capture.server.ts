@@ -171,6 +171,84 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
   return { scannedOrders, candidates, converted, errors, applied: true, skippedNoScope: false };
 }
 
+// Read-only list of EVERY order that bought a live pre-order variant WITHOUT the
+// selling plan (Shop Pay / express / any no-plan path) — for customer follow-up.
+// Unlike the capture, this does NOT gate on stock/fulfilment (a customer who got
+// the wrong email should be followed up even if their item has since restocked
+// or shipped). Returns order #, customer email, product, size, and the batch's
+// expected dispatch date.
+export async function listAffectedForFollowup(opts: { days?: number } = {}): Promise<{
+  scannedOrders: number; affected: Array<{ order: string; email: string | null; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }>;
+}> {
+  const days = Math.max(1, Math.min(120, Math.floor(opts.days ?? 14)));
+  const session = await prisma.session.findFirst({
+    where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true, accessToken: true },
+  });
+  if (!session?.accessToken) return { scannedOrders: 0, affected: [] };
+  const { shop, accessToken } = session;
+
+  const [enabledSettings, registry, batchSettings] = await Promise.all([
+    prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true } }),
+    getPreorderSellingPlanRegistryEntries(shop),
+    prisma.preorderBatchSetting.findMany({ select: { supplierOrderId: true, shipDate: true } }),
+  ]);
+  const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
+  const liveIds = enabledSettings.map((s) => s.supplierOrderId).filter((id) => activatedIds.has(id));
+  const shipByBatch = new Map(batchSettings.map((b) => [b.supplierOrderId, b.shipDate ? b.shipDate.toISOString() : null]));
+  const batches = liveIds.length
+    ? await prisma.supplierOrder.findMany({ where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } }, select: { id: true, destination: true, eta: true, lines: { select: { variantId: true } } } })
+    : [];
+  const variantMarketToBatch = new Map<string, { batchId: number; dispatch: string | null }>();
+  const etaByBatch = new Map(batches.map((b) => [b.id, b.eta ? b.eta.toISOString() : null]));
+  for (const b of batches) {
+    const market = marketFromDestination(b.destination);
+    if (!market) continue;
+    const dispatch = shipByBatch.get(b.id) ?? etaByBatch.get(b.id) ?? null;
+    for (const l of b.lines) { const num = numericId(l.variantId); if (num) variantMarketToBatch.set(`${num}:${market}`, { batchId: b.id, dispatch }); }
+  }
+  if (!variantMarketToBatch.size) return { scannedOrders: 0, affected: [] };
+
+  const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
+  const affected: Array<{ order: string; email: string | null; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }> = [];
+  let scannedOrders = 0;
+  let cursor: string | null = null;
+  for (let page = 0; page < 20; page += 1) {
+    const res: Response = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+      body: JSON.stringify({
+        query: `#graphql
+          query Affected($q: String!, $cursor: String) {
+            orders(first: 100, after: $cursor, query: $q, sortKey: CREATED_AT, reverse: true) {
+              pageInfo { hasNextPage endCursor }
+              nodes { name email cancelledAt shippingAddress { countryCodeV2 } billingAddress { countryCodeV2 }
+                lineItems(first: 50) { nodes { title quantity variant { id title } sellingPlan { name } } } }
+            }
+          }`,
+        variables: { q: `created_at:>=${sinceIso} financial_status:paid`, cursor },
+      }),
+    });
+    const json = await res.json() as { data?: { orders?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ name: string; email: string | null; cancelledAt: string | null; shippingAddress?: { countryCodeV2?: string | null } | null; billingAddress?: { countryCodeV2?: string | null } | null; lineItems?: { nodes?: Array<{ title: string | null; quantity: number; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> } }> } }; errors?: Array<{ message?: string }> };
+    if (json.errors?.length) break;
+    const nodes = json.data?.orders?.nodes ?? [];
+    for (const order of nodes) {
+      scannedOrders += 1;
+      if (order.cancelledAt) continue;
+      const country = String(order.shippingAddress?.countryCodeV2 || order.billingAddress?.countryCodeV2 || "").toUpperCase();
+      const market: PreorderMarket = country === "US" ? "USA" : "AU";
+      for (const line of order.lineItems?.nodes ?? []) {
+        if ((line.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX)) continue;
+        const hit = variantMarketToBatch.get(`${numericId(String(line.variant?.id ?? ""))}:${market}`);
+        if (!hit) continue;
+        affected.push({ order: order.name, email: order.email, product: line.title, size: line.variant?.title ?? null, qty: line.quantity, batchId: hit.batchId, dispatch: hit.dispatch });
+      }
+    }
+    const pi = json.data?.orders?.pageInfo;
+    if (!pi?.hasNextPage || !pi.endCursor) break;
+    cursor = pi.endCursor;
+  }
+  return { scannedOrders, affected };
+}
+
 // Run the capture automatically so missed pre-orders (Shop Pay / quick-add /
 // any no-plan path) are pulled in without anyone remembering to. Tight gates
 // (live batch + out-of-stock + unfulfilled) make auto-apply safe. First pass ~2
