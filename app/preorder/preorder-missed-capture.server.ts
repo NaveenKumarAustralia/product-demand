@@ -184,7 +184,7 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
   const session = await prisma.session.findFirst({
     where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true, accessToken: true },
   });
-  if (!session?.accessToken) return { scannedOrders: 0, affected: [] };
+  if (!session?.accessToken) return { scannedOrders: 0, orders: [], affected: [] };
   const { shop, accessToken } = session;
 
   const [enabledSettings, registry, batchSettings, locations] = await Promise.all([
