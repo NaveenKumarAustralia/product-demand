@@ -170,3 +170,21 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
   }
   return { scannedOrders, candidates, converted, errors, applied: true, skippedNoScope: false };
 }
+
+// Run the capture automatically so missed pre-orders (Shop Pay / quick-add /
+// any no-plan path) are pulled in without anyone remembering to. Tight gates
+// (live batch + out-of-stock + unfulfilled) make auto-apply safe. First pass ~2
+// min after boot, then every 3 hours, over a short rolling window.
+export function startMissedPreorderCaptureScheduler() {
+  const g = globalThis as unknown as { __keMissedCaptureStarted?: boolean };
+  if (g.__keMissedCaptureStarted) return;
+  g.__keMissedCaptureStarted = true;
+  const run = () => {
+    captureMissedPreorders({ days: 4, apply: true })
+      .then((r) => { if (r.converted || r.errors.length) console.log("[preorder missed capture] cycle:", { converted: r.converted, candidates: r.candidates.length, errors: r.errors.length }); })
+      .catch((e) => console.warn("[preorder missed capture] cycle failed:", e instanceof Error ? e.message : e));
+  };
+  setTimeout(run, 120_000);
+  setInterval(run, 3 * 60 * 60 * 1000);
+  console.log("[preorder missed capture] scheduler started (every 3h)");
+}
