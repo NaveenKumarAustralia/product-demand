@@ -56,16 +56,25 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
         select: { id: true, destination: true, lines: { select: { variantId: true } } },
       })
     : [];
-  const variantMarketToBatch = new Map<string, { batchId: number; market: PreorderMarket }>();
+  // variant → the live batch(es) it belongs to. Keyed by variant only (NOT by the
+  // customer's market): the stock that fulfils a pre-order comes from the batch's
+  // own warehouse, so a US customer buying an item whose only live batch is AU is
+  // still a real pre-order — it just ships from AU. We prefer a batch matching the
+  // customer's market (once USA batches exist) and otherwise fall back to any live
+  // batch for that variant.
+  const variantToBatches = new Map<string, Array<{ batchId: number; market: PreorderMarket }>>();
   for (const b of batches) {
     const market = marketFromDestination(b.destination);
     if (!market) continue;
     for (const l of b.lines) {
       const num = numericId(l.variantId);
-      if (num) variantMarketToBatch.set(`${num}:${market}`, { batchId: b.id, market });
+      if (!num) continue;
+      const arr = variantToBatches.get(num) ?? [];
+      arr.push({ batchId: b.id, market });
+      variantToBatches.set(num, arr);
     }
   }
-  if (!variantMarketToBatch.size) return { scannedOrders: 0, candidates: [], converted: 0, errors: [], applied: apply, skippedNoScope: false };
+  if (!variantToBatches.size) return { scannedOrders: 0, candidates: [], converted: 0, errors: [], applied: apply, skippedNoScope: false };
 
   const reserved = await prisma.preorderReservation.findMany({ where: { status: "reserved" }, select: { shopifyLineItemId: true } });
   const reservedLineIds = new Set(reserved.map((r) => r.shopifyLineItemId));
@@ -114,16 +123,19 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
       for (const line of order.lineItems?.nodes ?? []) {
         if ((line.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX)) continue;
         const vnum = numericId(String(line.variant?.id ?? ""));
-        const hit = variantMarketToBatch.get(`${vnum}:${market}`);
-        if (!hit) continue;
+        const hits = variantToBatches.get(vnum);
+        if (!hits?.length) continue;
+        // Prefer a batch in the customer's own market; else fall back to any live
+        // batch (e.g. a US order for an AU-only batch → ships from AU stock).
+        const hit = hits.find((h) => h.market === market) ?? hits[0];
         const lineId = numericId(line.id);
         if (reservedLineIds.has(lineId)) continue;
         // Confirm the variant is actually out of stock now (an in-stock sale
         // would still have stock). This is what separates a missed pre-order
         // from a normal order of a product that also has an incoming batch.
-        const locationId = locationForMarket(locations, market);
+        const locationId = locationForMarket(locations, hit.market);
         if (!locationId) continue;
-        const stockKey = `${vnum}:${market}`;
+        const stockKey = `${vnum}:${hit.market}`;
         let available = stockCache.get(stockKey);
         if (available === undefined) {
           try { available = await getAvailableAtLocation(shop, accessToken, String(line.variant?.id ?? ""), locationId); }
@@ -131,7 +143,7 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
           stockCache.set(stockKey, available);
         }
         if (available > 0) continue; // had stock → normal sale, not a pre-order
-        candidates.push({ order: order.name, orderIdNumeric, lineId, variantId: String(line.variant?.id ?? ""), title: line.title, size: line.variant?.title ?? null, qty: Number(line.quantity), market, batchId: hit.batchId, available });
+        candidates.push({ order: order.name, orderIdNumeric, lineId, variantId: String(line.variant?.id ?? ""), title: line.title, size: line.variant?.title ?? null, qty: Number(line.quantity), market: hit.market, batchId: hit.batchId, available });
       }
     }
     const pi = json.data?.orders?.pageInfo;
@@ -192,35 +204,48 @@ export async function captureNoPlanLinesForOrder(
     where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } },
     select: { id: true, destination: true, lines: { select: { variantId: true } } },
   });
-  const variantMarketToBatch = new Map<string, number>();
+  // Keyed by variant only — a US order that draws on an AU batch is still a real
+  // pre-order (it ships from AU stock). Prefer the customer's own market when a
+  // pool exists there; otherwise fall back to any live batch for that variant.
+  const variantToBatches = new Map<string, Array<{ batchId: number; market: PreorderMarket }>>();
   for (const b of batches) {
     const m = marketFromDestination(b.destination);
     if (!m) continue;
-    for (const l of b.lines) { const num = numericId(l.variantId); if (num) variantMarketToBatch.set(`${num}:${m}`, b.id); }
+    for (const l of b.lines) {
+      const num = numericId(l.variantId);
+      if (!num) continue;
+      const arr = variantToBatches.get(num) ?? [];
+      arr.push({ batchId: b.id, market: m });
+      variantToBatches.set(num, arr);
+    }
   }
-  if (!variantMarketToBatch.size) return { captured: 0 };
+  if (!variantToBatches.size) return { captured: 0 };
 
   const token = await getOfflineToken(shop);
   if (!token) return { captured: 0 };
-  const locationId = locationForMarket(locations, market);
   const alreadyReserved = new Set((await prisma.preorderReservation.findMany({ where: { shopifyOrderId: orderIdNumeric }, select: { shopifyLineItemId: true } })).map((r) => r.shopifyLineItemId));
   const stockCache = new Map<string, number>();
   let captured = 0;
   let tagged = false;
+  let taggedBatchId: number | null = null;
   for (const line of lines) {
     const vnum = numericId(line.variantId);
-    const batchId = variantMarketToBatch.get(`${vnum}:${market}`);
-    if (!batchId || alreadyReserved.has(line.lineId)) continue;
+    const hits = variantToBatches.get(vnum);
+    if (!hits?.length || alreadyReserved.has(line.lineId)) continue;
+    const hit = hits.find((h) => h.market === market) ?? hits[0];
+    const locationId = locationForMarket(locations, hit.market);
     if (!locationId) continue;
-    let available = stockCache.get(vnum);
+    const stockKey = `${vnum}:${hit.market}`;
+    let available = stockCache.get(stockKey);
     if (available === undefined) {
       try { available = await getAvailableAtLocation(shop, token, line.variantId, locationId); } catch { available = 1; }
-      stockCache.set(vnum, available);
+      stockCache.set(stockKey, available);
     }
     if (available > 0) continue; // in-stock size → normal sale, not a pre-order
     try {
-      await reservePreorderLine({ shop, shopifyOrderId: orderIdNumeric, shopifyOrderName: orderName, shopifyLineItemId: line.lineId, productId: null, variantId: line.variantId, variantTitle: line.size, sku: null, market, quantity: line.qty, customerEmail: null, preferredSupplierOrderId: batchId });
+      await reservePreorderLine({ shop, shopifyOrderId: orderIdNumeric, shopifyOrderName: orderName, shopifyLineItemId: line.lineId, productId: null, variantId: line.variantId, variantTitle: line.size, sku: null, market: hit.market, quantity: line.qty, customerEmail: null, preferredSupplierOrderId: hit.batchId });
       captured += 1;
+      taggedBatchId = hit.batchId;
     } catch (error) {
       console.warn(`[preorder realtime capture] ${orderName} reserve failed:`, error instanceof PreorderCapacityError ? error.message : (error instanceof Error ? error.message : String(error)));
       continue;
@@ -228,7 +253,7 @@ export async function captureNoPlanLinesForOrder(
     if (!tagged) {
       tagged = true;
       try {
-        await addOrderTags(shop, token, orderIdNumeric, ["pre-order", `pre-order-batch-${batchId}`, "pre-order-hold"]);
+        await addOrderTags(shop, token, orderIdNumeric, ["pre-order", `pre-order-batch-${taggedBatchId}`, "pre-order-hold"]);
         await holdOrderOpenFulfillmentOrders(shop, token, orderIdNumeric, "Captured missed pre-order (no selling plan) — held until the batch lands");
       } catch (error) {
         console.warn(`[preorder realtime capture] ${orderName} tag/hold failed:`, error instanceof Error ? error.message : String(error));
@@ -266,15 +291,21 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
   const batches = liveIds.length
     ? await prisma.supplierOrder.findMany({ where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } }, select: { id: true, destination: true, eta: true, lines: { select: { variantId: true } } } })
     : [];
-  const variantMarketToBatch = new Map<string, { batchId: number; dispatch: string | null }>();
+  const variantToBatches = new Map<string, Array<{ batchId: number; market: PreorderMarket; dispatch: string | null }>>();
   const etaByBatch = new Map(batches.map((b) => [b.id, b.eta ? b.eta.toISOString() : null]));
   for (const b of batches) {
     const market = marketFromDestination(b.destination);
     if (!market) continue;
     const dispatch = shipByBatch.get(b.id) ?? etaByBatch.get(b.id) ?? null;
-    for (const l of b.lines) { const num = numericId(l.variantId); if (num) variantMarketToBatch.set(`${num}:${market}`, { batchId: b.id, dispatch }); }
+    for (const l of b.lines) {
+      const num = numericId(l.variantId);
+      if (!num) continue;
+      const arr = variantToBatches.get(num) ?? [];
+      arr.push({ batchId: b.id, market, dispatch });
+      variantToBatches.set(num, arr);
+    }
   }
-  if (!variantMarketToBatch.size) return { scannedOrders: 0, orders: [], affected: [] };
+  if (!variantToBatches.size) return { scannedOrders: 0, orders: [], affected: [] };
 
   const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
   const affected: Array<{ order: string; email: string | null; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }> = [];
@@ -307,14 +338,15 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
       for (const line of order.lineItems?.nodes ?? []) {
         if ((line.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX)) continue;
         const vnum = numericId(String(line.variant?.id ?? ""));
-        const hit = variantMarketToBatch.get(`${vnum}:${market}`);
-        if (!hit) continue;
+        const hits = variantToBatches.get(vnum);
+        if (!hits?.length) continue;
+        const hit = hits.find((h) => h.market === market) ?? hits[0];
         // Only count it as affected if the variant was actually OUT OF STOCK — an
         // in-stock sale of a product that merely has a live batch got the correct
         // (normal) email and shouldn't be followed up.
-        const locationId = locationForMarket(locations, market);
+        const locationId = locationForMarket(locations, hit.market);
         if (!locationId) continue;
-        const stockKey = `${vnum}:${market}`;
+        const stockKey = `${vnum}:${hit.market}`;
         let available = stockCache.get(stockKey);
         if (available === undefined) {
           try { available = await getAvailableAtLocation(shop, accessToken, String(line.variant?.id ?? ""), locationId); }
