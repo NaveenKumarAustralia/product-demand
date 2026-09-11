@@ -17733,6 +17733,12 @@ function CollectionSpreadsheetPage({
       setPushStatus({ msg: `Row ${idx + 1}: Name is required`, tone: "err" });
       return;
     }
+    // We create products by DUPLICATING an existing one (less work — only tweak
+    // the bits that differ). Warn if no "Duplicate from" style was picked, unless
+    // it's a genuinely new style not yet in Shopify.
+    if (!(row.duplicateFrom ?? "").trim()) {
+      if (!window.confirm(`No "Duplicate from" style is selected for "${title}".\n\nProducts should be created by duplicating an existing Shopify product, then editing only what differs. Only create from scratch if this is a brand-new style that doesn't exist in Shopify yet.\n\nCreate from scratch anyway?`)) return;
+    }
     setPushStatus(null);
     const fd = new FormData();
     fd.set("intent", "push_collection_row_to_shopify");
@@ -17742,12 +17748,19 @@ function CollectionSpreadsheetPage({
     pushFetcher.submit(fd, { method: "post" });
   };
   const pushAllUnsynced = () => {
-    const unsynced = rows.filter((r) => !(r[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()).length;
+    const unsyncedRows = rows.filter((r) => !(r[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim());
+    const unsynced = unsyncedRows.length;
     if (unsynced === 0) {
       setPushStatus({ msg: "All rows are already linked to Shopify", tone: "ok" });
       return;
     }
     if (!window.confirm(`Create ${unsynced} draft product(s) in Shopify?`)) return;
+    // Warn about any that have no "Duplicate from" style — we prefer creating by
+    // duplicating an existing product. Let them proceed only for genuinely new styles.
+    const noDup = unsyncedRows.filter((r) => !(r.duplicateFrom ?? "").trim()).length;
+    if (noDup > 0) {
+      if (!window.confirm(`${noDup} of these ${unsynced} row(s) have no "Duplicate from" style selected.\n\nProducts should be created by duplicating an existing Shopify product. Only create from scratch for brand-new styles not yet in Shopify.\n\nCreate them from scratch anyway?`)) return;
+    }
     setPushStatus(null);
     const fd = new FormData();
     fd.set("intent", "push_collection_rows_to_shopify");
