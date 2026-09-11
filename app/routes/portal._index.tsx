@@ -5606,25 +5606,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       console.warn(`[collection update] row ${idx} images failed:`, e);
     }
 
-    rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "" };
+    // Re-lock after a successful push so the product rests protected again —
+    // the portal shouldn't be able to overwrite it until explicitly unlocked.
+    rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1" };
     await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
     return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId }] });
-  }
-
-  if (intent === "lock_collection_row_shopify") {
-    // Lock a linked row so the portal can no longer push over its Shopify
-    // product — make edits directly in Shopify safely. Just sets the flag.
-    const id = Number(form.get("collectionId"));
-    const idx = Number(form.get("rowIndex"));
-    if (!id) return jsonResponse({ ok: false, error: "no_collection" });
-    const collection = await prisma.collection.findUnique({ where: { id } }).catch(() => null);
-    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
-    const rows = normalizeCollectionRows(collection.rows);
-    if (!Number.isFinite(idx) || idx < 0 || idx >= rows.length) return jsonResponse({ ok: false, error: "bad_index" });
-    if (!(rows[idx][COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return jsonResponse({ ok: false, error: "not_linked" });
-    rows[idx] = { ...rows[idx], [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_DIRTY]: "" };
-    await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
-    return jsonResponse({ ok: true, index: idx, locked: true });
   }
 
   if (intent === "unlock_collection_row_shopify") {
@@ -17802,18 +17788,6 @@ function CollectionSpreadsheetPage({
     fd.set("rowIndex", String(idx));
     updateShopifyFetcher.submit(fd, { method: "post" });
   };
-  // Lock a linked row → freeze it so no portal push can overwrite the Shopify
-  // product (edit directly in Shopify safely).
-  const lockRow = (idx: number) => {
-    if (!(rows[idx]?.[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
-    setPushStatus(null);
-    setLockBusyIdx(idx);
-    const fd = new FormData();
-    fd.set("intent", "lock_collection_row_shopify");
-    fd.set("collectionId", String(listItem.id));
-    fd.set("rowIndex", String(idx));
-    lockFetcher.submit(fd, { method: "post" });
-  };
   // Unlock a linked row → pull Shopify's current values into the row (replacing
   // description, tags, type, SEO, etc.), then resume portal control.
   const unlockRow = (idx: number) => {
@@ -17837,10 +17811,7 @@ function CollectionSpreadsheetPage({
     }
     if (typeof data.index !== "number") return;
     const i = data.index;
-    if (data.locked) {
-      setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_DIRTY]: "" }; return next; });
-      setPushStatus({ msg: "Locked — Shopify is now the source of truth. Portal changes won't be pushed until you unlock.", tone: "ok" });
-    } else if (data.unlocked) {
+    if (data.unlocked) {
       setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...(data.fields ?? {}), [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: "" }; return next; });
       setPushStatus({ msg: "Unlocked — pulled the latest from Shopify. You can edit and push again.", tone: "ok" });
     } else if (data.deleted) {
@@ -17857,11 +17828,11 @@ function CollectionSpreadsheetPage({
       setRows((prev) => {
         const next = [...prev];
         for (const r of data.results!) {
-          if (r.ok && next[r.index]) next[r.index] = { ...next[r.index], [COL_ROW_SHOPIFY_DIRTY]: "" };
+          if (r.ok && next[r.index]) next[r.index] = { ...next[r.index], [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1" };
         }
         return next;
       });
-      setPushStatus({ msg: "Shopify product updated", tone: "ok" });
+      setPushStatus({ msg: "Pushed to Shopify and locked again.", tone: "ok" });
     } else if (data.error) {
       setPushStatus({ msg: `Update failed — ${data.error}`, tone: "err" });
     }
@@ -18322,44 +18293,29 @@ function CollectionSpreadsheetPage({
                       ]}
                     />
                     {(() => {
-                      const shopifyDirty = (row[COL_ROW_SHOPIFY_DIRTY] ?? "") === "1";
                       const shopifyLocked = (row[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1";
                       const lockBusy = lockBusyIdx === rIdx;
                       // The Shopify action (Create / Linked status + Update) used to
                       // be its own column; it now sits at the TOP of the Name cell.
                       const shopifyContent = linked ? (
                         <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
-                          <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
+                          <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} locked={shopifyLocked} />
                           {shopifyLocked ? (
-                            <>
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: "#b45309" }} title="Locked — the portal won't push over this product. Edit it directly in Shopify. Unlock to resume portal control.">🔒 Editing in Shopify</span>
-                              <button
-                                type="button"
-                                onClick={() => unlockRow(rIdx)}
-                                disabled={lockBusy}
-                                style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: lockBusy ? "wait" : "pointer" }}
-                                title="Pull Shopify's current values into this row, then let the portal push changes again"
-                              >{lockBusy ? "Unlocking…" : "🔓 Unlock & sync from Shopify"}</button>
-                            </>
+                            <button
+                              type="button"
+                              onClick={() => unlockRow(rIdx)}
+                              disabled={lockBusy}
+                              style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: lockBusy ? "wait" : "pointer", width: "100%" }}
+                              title="Pull Shopify's latest into this row and unlock, so you can edit and push from the portal"
+                            >{lockBusy ? "Unlocking…" : "🔓 Unlock to edit"}</button>
                           ) : (
-                            <>
-                              {shopifyDirty && (
-                                <button
-                                  type="button"
-                                  onClick={() => updateRowInShopify(rIdx)}
-                                  disabled={isUpdatingShopify}
-                                  style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer" }}
-                                  title="You edited this row after it was created — push the changes (title, description, type, tags, SEO) to Shopify"
-                                >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => lockRow(rIdx)}
-                                disabled={lockBusy}
-                                style={{ background: "transparent", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 5, padding: "3px 8px", fontSize: 10, fontWeight: 600, cursor: lockBusy ? "wait" : "pointer" }}
-                                title="Lock this product so the portal can't overwrite it — then you can safely edit it directly in Shopify"
-                              >{lockBusy ? "Locking…" : "🔒 Lock (edit in Shopify)"}</button>
-                            </>
+                            <button
+                              type="button"
+                              onClick={() => updateRowInShopify(rIdx)}
+                              disabled={isUpdatingShopify}
+                              style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer", width: "100%" }}
+                              title="Push this row's changes to Shopify, then lock it again automatically"
+                            >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
                           )}
                         </div>
                       ) : (
@@ -18959,7 +18915,7 @@ function CollectionChipDropdown({
   );
 }
 
-function CollectionShopifyLinkedCell({ productId, status, shopDomain, linkOverride }: { productId: string; status: string; shopDomain?: string | null; linkOverride?: string }) {
+function CollectionShopifyLinkedCell({ productId, status, shopDomain, linkOverride, locked }: { productId: string; status: string; shopDomain?: string | null; linkOverride?: string; locked?: boolean }) {
   // Use the store's own admin path (store.myshopify.com/admin/products/<id>) so
   // Shopify resolves the correct store — avoids the "no permission" page.
   const numeric = productId.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
@@ -18975,10 +18931,10 @@ function CollectionShopifyLinkedCell({ productId, status, shopDomain, linkOverri
       target="_blank"
       rel="noopener noreferrer"
       style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "#0f766e", fontSize: 12, fontWeight: 600, textDecoration: "none" }}
-      title={`${status} — open in Shopify admin`}
+      title={locked ? `${status} — locked (edit in Shopify). Open in Shopify admin.` : `${status} — open in Shopify admin`}
     >
       <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: dot }} />
-      ✓ Linked
+      {locked ? "🔒 Linked" : "✓ Linked"}
     </a>
   );
 }
