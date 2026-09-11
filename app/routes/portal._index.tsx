@@ -5570,6 +5570,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const row = rows[idx];
     const linkedId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
     if (!linkedId) return jsonResponse({ ok: false, error: "not_linked" });
+    // Locked = Shopify is the source of truth; refuse to push over it.
+    if ((row[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1") return jsonResponse({ ok: false, error: "locked" });
 
     const isJJNew = (collection as { kind?: string }).kind === "jj-new";
     const inrPerAud = await getCachedInrPerAud().catch(() => null);
@@ -5604,6 +5606,81 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "" };
     await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
     return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId }] });
+  }
+
+  if (intent === "lock_collection_row_shopify") {
+    // Lock a linked row so the portal can no longer push over its Shopify
+    // product — make edits directly in Shopify safely. Just sets the flag.
+    const id = Number(form.get("collectionId"));
+    const idx = Number(form.get("rowIndex"));
+    if (!id) return jsonResponse({ ok: false, error: "no_collection" });
+    const collection = await prisma.collection.findUnique({ where: { id } }).catch(() => null);
+    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
+    const rows = normalizeCollectionRows(collection.rows);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= rows.length) return jsonResponse({ ok: false, error: "bad_index" });
+    if (!(rows[idx][COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return jsonResponse({ ok: false, error: "not_linked" });
+    rows[idx] = { ...rows[idx], [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_DIRTY]: "" };
+    await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+    return jsonResponse({ ok: true, index: idx, locked: true });
+  }
+
+  if (intent === "unlock_collection_row_shopify") {
+    // Unlock a linked row and RESUME portal control. Because Shopify was the
+    // source of truth while locked, first pull Shopify's current values into the
+    // row (OVERWRITE — so any edits made in Shopify show in the portal), then
+    // clear the lock + dirty flag so portal edits can be pushed again.
+    const id = Number(form.get("collectionId"));
+    const idx = Number(form.get("rowIndex"));
+    if (!id) return jsonResponse({ ok: false, error: "no_collection" });
+    const collection = await prisma.collection.findUnique({ where: { id } }).catch(() => null);
+    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+    const rows = normalizeCollectionRows(collection.rows);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= rows.length) return jsonResponse({ ok: false, error: "bad_index" });
+    const row = rows[idx];
+    const linkedId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+    if (!linkedId) return jsonResponse({ ok: false, error: "not_linked" });
+    const gid = linkedId.startsWith("gid://shopify/Product/") ? linkedId : `gid://shopify/Product/${linkedId.replace(/\D/g, "")}`;
+    const resp = await shopifyGraphql<{ data?: { product?: {
+      id?: string; descriptionHtml?: string; productType?: string; tags?: string[]; vendor?: string;
+      seo?: { title?: string; description?: string };
+      variants?: { nodes?: Array<{ compareAtPrice?: string | null; inventoryItem?: { harmonizedSystemCode?: string | null; countryCodeOfOrigin?: string | null } }> };
+    } | null }; errors?: unknown }>(session.shop, session.accessToken, `
+      query UnlockPull($id: ID!) {
+        product(id: $id) {
+          id descriptionHtml productType tags vendor
+          seo { title description }
+          variants(first: 1) { nodes { compareAtPrice inventoryItem { harmonizedSystemCode countryCodeOfOrigin } } }
+        }
+      }
+    `, { id: gid });
+    if (resp === null || resp.errors) return jsonResponse({ ok: false, error: "verify_failed" });
+    const product = resp.data?.product ?? null;
+    if (!product?.id) {
+      // Product was deleted in Shopify → clear the whole link so it can be made
+      // again (same as the auto-prune), rather than unlocking a ghost.
+      rows[idx] = { ...row, [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "" };
+      await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+      return jsonResponse({ ok: true, index: idx, deleted: true });
+    }
+    const v0 = product.variants?.nodes?.[0] ?? {};
+    const shopTags = Array.isArray(product.tags) ? product.tags.map((t) => String(t).trim()).filter(Boolean).join(", ") : "";
+    // OVERWRITE the descriptive fields with Shopify's current values.
+    const pulled: Record<string, string> = {
+      description: String(product.descriptionHtml ?? ""),
+      productType: String(product.productType ?? ""),
+      vendor: String(product.vendor ?? ""),
+      seoTitle: String(product.seo?.title ?? ""),
+      seoDescription: String(product.seo?.description ?? ""),
+      tags: shopTags,
+      compareAtPrice: v0.compareAtPrice ? String(v0.compareAtPrice) : "",
+      hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
+      countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
+    };
+    rows[idx] = { ...row, ...pulled, [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: "" };
+    await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+    return jsonResponse({ ok: true, index: idx, unlocked: true, fields: pulled });
   }
 
   if (intent === "update_fabric_cell") {
@@ -9532,6 +9609,7 @@ async function pruneDeletedShopifyLinks(shop: string, accessToken: string, rows:
       [COL_ROW_SHOPIFY_CREATED_AT]: "",
       [COL_ROW_SHOPIFY_STATUS]: "",
       [COL_ROW_SHOPIFY_DIRTY]: "",
+      [COL_ROW_SHOPIFY_LOCKED]: "",
     };
     removed += 1;
   }
@@ -9723,6 +9801,11 @@ const COL_ROW_SHOPIFY_STATUS = "__shopifyStatus";
 // Set to "1" whenever a linked row's info is edited after creation, so the
 // Shopify cell shows an "Update in Shopify" button. Cleared once pushed.
 const COL_ROW_SHOPIFY_DIRTY = "__shopifyDirty";
+// Set to "1" to LOCK a linked row: Shopify becomes the source of truth and the
+// portal can't push over it (so edits made directly in Shopify are safe). The
+// user unlocks to resume — unlocking first pulls Shopify's current values into
+// the row, then portal edits can be pushed again.
+const COL_ROW_SHOPIFY_LOCKED = "__shopifyLocked";
 // Id of the existing-product restock order auto-created when the product is
 // created in Shopify — so we don't seed it twice.
 const COL_ROW_RESTOCK_ORDER_ID = "__restockOrderId";
@@ -17054,6 +17137,9 @@ function CollectionSpreadsheetPage({
   // "Update in Shopify" for already-linked rows whose info was edited.
   const updateShopifyFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; productId?: string }>; error?: string }>();
   const backfillFetcher = useFetcher<{ ok?: boolean; updatedRows?: number; filledFields?: number; linked?: number; error?: string }>();
+  // Lock/unlock a linked row (freeze Shopify pushes / resume + pull from Shopify).
+  const lockFetcher = useFetcher<{ ok?: boolean; index?: number; locked?: boolean; unlocked?: boolean; deleted?: boolean; fields?: Record<string, string>; error?: string }>();
+  const [lockBusyIdx, setLockBusyIdx] = useState<number | null>(null);
   // Move/combine: selected row indices + a fetcher for the move action.
   const moveFetcher = useFetcher<{ ok?: boolean; moved?: number; targetId?: number; deletedSource?: boolean; error?: string }>();
   const sendShootFetcher = useFetcher<{ ok?: boolean; shootId?: number; added?: number; error?: string }>();
@@ -17713,6 +17799,53 @@ function CollectionSpreadsheetPage({
     fd.set("rowIndex", String(idx));
     updateShopifyFetcher.submit(fd, { method: "post" });
   };
+  // Lock a linked row → freeze it so no portal push can overwrite the Shopify
+  // product (edit directly in Shopify safely).
+  const lockRow = (idx: number) => {
+    if (!(rows[idx]?.[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
+    setPushStatus(null);
+    setLockBusyIdx(idx);
+    const fd = new FormData();
+    fd.set("intent", "lock_collection_row_shopify");
+    fd.set("collectionId", String(listItem.id));
+    fd.set("rowIndex", String(idx));
+    lockFetcher.submit(fd, { method: "post" });
+  };
+  // Unlock a linked row → pull Shopify's current values into the row (replacing
+  // description, tags, type, SEO, etc.), then resume portal control.
+  const unlockRow = (idx: number) => {
+    if (!(rows[idx]?.[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
+    if (!window.confirm("Unlock and pull the latest from Shopify?\n\nThis replaces this row's description, tags, product type, vendor and SEO with Shopify's current values, then lets you push changes from the portal again.")) return;
+    setPushStatus(null);
+    setLockBusyIdx(idx);
+    const fd = new FormData();
+    fd.set("intent", "unlock_collection_row_shopify");
+    fd.set("collectionId", String(listItem.id));
+    fd.set("rowIndex", String(idx));
+    lockFetcher.submit(fd, { method: "post" });
+  };
+  useEffect(() => {
+    const data = lockFetcher.data;
+    if (!data) return;
+    setLockBusyIdx(null);
+    if (!data.ok) {
+      setPushStatus({ msg: data.error === "verify_failed" ? "Couldn't reach Shopify — try again." : `Failed — ${data.error ?? "unknown error"}`, tone: "err" });
+      return;
+    }
+    if (typeof data.index !== "number") return;
+    const i = data.index;
+    if (data.locked) {
+      setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_DIRTY]: "" }; return next; });
+      setPushStatus({ msg: "Locked — Shopify is now the source of truth. Portal changes won't be pushed until you unlock.", tone: "ok" });
+    } else if (data.unlocked) {
+      setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...(data.fields ?? {}), [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: "" }; return next; });
+      setPushStatus({ msg: "Unlocked — pulled the latest from Shopify. You can edit and push again.", tone: "ok" });
+    } else if (data.deleted) {
+      setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "" }; return next; });
+      setPushStatus({ msg: "That product no longer exists in Shopify — unlinked. You can create it again.", tone: "ok" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lockFetcher.data]);
   const isUpdatingShopify = updateShopifyFetcher.state !== "idle";
   useEffect(() => {
     const data = updateShopifyFetcher.data;
@@ -18186,19 +18319,43 @@ function CollectionSpreadsheetPage({
                     />
                     {(() => {
                       const shopifyDirty = (row[COL_ROW_SHOPIFY_DIRTY] ?? "") === "1";
+                      const shopifyLocked = (row[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1";
+                      const lockBusy = lockBusyIdx === rIdx;
                       // The Shopify action (Create / Linked status + Update) used to
                       // be its own column; it now sits at the TOP of the Name cell.
                       const shopifyContent = linked ? (
                         <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
                           <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
-                          {shopifyDirty && (
-                            <button
-                              type="button"
-                              onClick={() => updateRowInShopify(rIdx)}
-                              disabled={isUpdatingShopify}
-                              style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer" }}
-                              title="You edited this row after it was created — push the changes (title, description, type, tags, SEO) to Shopify"
-                            >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
+                          {shopifyLocked ? (
+                            <>
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: "#b45309" }} title="Locked — the portal won't push over this product. Edit it directly in Shopify. Unlock to resume portal control.">🔒 Editing in Shopify</span>
+                              <button
+                                type="button"
+                                onClick={() => unlockRow(rIdx)}
+                                disabled={lockBusy}
+                                style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: lockBusy ? "wait" : "pointer" }}
+                                title="Pull Shopify's current values into this row, then let the portal push changes again"
+                              >{lockBusy ? "Unlocking…" : "🔓 Unlock & sync from Shopify"}</button>
+                            </>
+                          ) : (
+                            <>
+                              {shopifyDirty && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateRowInShopify(rIdx)}
+                                  disabled={isUpdatingShopify}
+                                  style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer" }}
+                                  title="You edited this row after it was created — push the changes (title, description, type, tags, SEO) to Shopify"
+                                >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => lockRow(rIdx)}
+                                disabled={lockBusy}
+                                style={{ background: "transparent", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 5, padding: "3px 8px", fontSize: 10, fontWeight: 600, cursor: lockBusy ? "wait" : "pointer" }}
+                                title="Lock this product so the portal can't overwrite it — then you can safely edit it directly in Shopify"
+                              >{lockBusy ? "Locking…" : "🔒 Lock (edit in Shopify)"}</button>
+                            </>
                           )}
                         </div>
                       ) : (
