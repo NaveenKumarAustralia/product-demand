@@ -5538,6 +5538,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           [COL_ROW_SHOPIFY_HANDLE]: res.handle ?? "",
           [COL_ROW_SHOPIFY_CREATED_AT]: now,
           [COL_ROW_SHOPIFY_STATUS]: statusOpt,
+          // Auto-lock on create so the portal can't overwrite the new product by
+          // accident — Shopify is protected by default. Unlock to push from here.
+          [COL_ROW_SHOPIFY_LOCKED]: "1",
           ...(restockOrderId ? { [COL_ROW_RESTOCK_ORDER_ID]: restockOrderId } : {}),
           // The person who created the product in Shopify — replaces any
           // manually-typed "Created by" once the product actually exists.
@@ -17879,6 +17882,7 @@ function CollectionSpreadsheetPage({
             [COL_ROW_SHOPIFY_PRODUCT_ID]: r.productId,
             [COL_ROW_SHOPIFY_CREATED_AT]: now,
             [COL_ROW_SHOPIFY_STATUS]: "DRAFT",
+            [COL_ROW_SHOPIFY_LOCKED]: "1",
           };
           okCount++;
         } else if (!r.ok) {
