@@ -4295,7 +4295,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const { changed, remaining } = await offloadInlineCollectionImages(id, rows, 40);
       if (changed) await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
       if (remaining > 0) return jsonResponse({ collection: null, migrating: true, remaining });
-      if (changed) return jsonResponse({ collection: { ...collection, rows } });
+      // Auto-detect products deleted in Shopify: unlink those rows so they show
+      // "Create in Shopify" again without anyone re-checking. Best-effort — a
+      // Shopify hiccup leaves every link untouched.
+      let linkChanged = false;
+      try {
+        const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+        if (session?.shop && session.accessToken) {
+          const pruned = await pruneDeletedShopifyLinks(session.shop, session.accessToken, rows);
+          if (pruned.changed) {
+            linkChanged = true;
+            await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+          }
+        }
+      } catch (e) {
+        console.warn("[get_collection_full] link prune failed:", e);
+      }
+      if (changed || linkChanged) return jsonResponse({ collection: { ...collection, rows } });
     } catch (e) {
       console.warn("[get_collection_full] image offload failed:", e);
     }
@@ -5588,50 +5604,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "" };
     await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
     return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId }] });
-  }
-
-  if (intent === "verify_collection_row_shopify_link") {
-    // A row can stay marked "Linked" after its Shopify product was deleted in
-    // admin — leaving no way to create it again. This checks whether the linked
-    // product still exists; if it's gone, it clears the __shopify* link fields so
-    // the row flips back to "Create in Shopify". Never unlinks on a network error
-    // (only on a confirmed "product not found") so a live product is never lost.
-    const id = Number(form.get("collectionId"));
-    const idx = Number(form.get("rowIndex"));
-    if (!id) return jsonResponse({ ok: false, error: "no_collection" });
-    const collection = await prisma.collection.findUnique({ where: { id } }).catch(() => null);
-    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
-    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
-    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
-    const rows = normalizeCollectionRows(collection.rows);
-    if (!Number.isFinite(idx) || idx < 0 || idx >= rows.length) return jsonResponse({ ok: false, error: "bad_index" });
-    const row = rows[idx];
-    const linkedId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
-    if (!linkedId) return jsonResponse({ ok: true, index: idx, exists: false, unlinked: false });
-    const gid = linkedId.startsWith("gid://shopify/Product/") ? linkedId : `gid://shopify/Product/${linkedId.replace(/\D/g, "")}`;
-    const resp = await shopifyGraphql<{ data?: { product?: { id?: string; status?: string } | null } }>(
-      session.shop, session.accessToken,
-      `query VerifyProduct($id: ID!) { product(id: $id) { id status } }`,
-      { id: gid },
-    );
-    // Null response = network/API error → don't touch the link (stay safe).
-    if (resp === null) return jsonResponse({ ok: false, index: idx, error: "verify_failed" });
-    const product = resp.data?.product ?? null;
-    if (product?.id) {
-      return jsonResponse({ ok: true, index: idx, exists: true, status: product.status ?? null });
-    }
-    // Product is gone in Shopify → clear the Shopify link fields so it can be
-    // created again. Leave the JJ order / restock links intact (those still exist).
-    rows[idx] = {
-      ...row,
-      [COL_ROW_SHOPIFY_PRODUCT_ID]: "",
-      [COL_ROW_SHOPIFY_HANDLE]: "",
-      [COL_ROW_SHOPIFY_CREATED_AT]: "",
-      [COL_ROW_SHOPIFY_STATUS]: "",
-      [COL_ROW_SHOPIFY_DIRTY]: "",
-    };
-    await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
-    return jsonResponse({ ok: true, index: idx, exists: false, unlinked: true });
   }
 
   if (intent === "update_fabric_cell") {
@@ -9520,6 +9492,50 @@ async function shopifyGraphql<T>(
   } catch {
     return null;
   }
+}
+
+// Detect collection rows whose linked Shopify product was DELETED in admin and
+// clear their __shopify* link fields, so the row shows "Create in Shopify" again
+// automatically (no manual re-check). Bulk-checks via nodes(ids) in chunks of
+// 250. Best-effort and safe: on ANY API/network error it changes nothing, so a
+// live product is never unlinked because of a transient failure. Mutates `rows`
+// in place; returns whether anything changed.
+async function pruneDeletedShopifyLinks(shop: string, accessToken: string, rows: Array<Record<string, string>>): Promise<{ changed: boolean; removed: number }> {
+  const linked: Array<{ idx: number; gid: string }> = [];
+  rows.forEach((row, idx) => {
+    const raw = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+    if (!raw) return;
+    const numeric = raw.replace(/^gid:\/\/shopify\/Product\//, "").replace(/\D/g, "");
+    if (numeric) linked.push({ idx, gid: `gid://shopify/Product/${numeric}` });
+  });
+  if (!linked.length) return { changed: false, removed: 0 };
+  const existing = new Set<string>();
+  for (let i = 0; i < linked.length; i += 250) {
+    const chunk = linked.slice(i, i + 250);
+    const resp = await shopifyGraphql<{ data?: { nodes?: Array<{ id?: string } | null> }; errors?: unknown }>(
+      shop, accessToken,
+      `query VerifyProducts($ids: [ID!]!) { nodes(ids: $ids) { ... on Product { id } } }`,
+      { ids: chunk.map((c) => c.gid) },
+    );
+    // Uncertain response (network error, GraphQL errors, missing nodes array) →
+    // abort the whole prune. Never unlink on anything but a confirmed answer.
+    if (resp === null || resp.errors || !resp.data || !Array.isArray(resp.data.nodes)) return { changed: false, removed: 0 };
+    for (const node of resp.data.nodes) { if (node?.id) existing.add(node.id); }
+  }
+  let removed = 0;
+  for (const { idx, gid } of linked) {
+    if (existing.has(gid)) continue; // still exists → leave linked
+    rows[idx] = {
+      ...rows[idx],
+      [COL_ROW_SHOPIFY_PRODUCT_ID]: "",
+      [COL_ROW_SHOPIFY_HANDLE]: "",
+      [COL_ROW_SHOPIFY_CREATED_AT]: "",
+      [COL_ROW_SHOPIFY_STATUS]: "",
+      [COL_ROW_SHOPIFY_DIRTY]: "",
+    };
+    removed += 1;
+  }
+  return { changed: removed > 0, removed };
 }
 
 async function getShopifyInventoryVariants(shop: string, productId: string): Promise<ShopifyInventoryVariantInfo[]> {
@@ -17038,10 +17054,6 @@ function CollectionSpreadsheetPage({
   // "Update in Shopify" for already-linked rows whose info was edited.
   const updateShopifyFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; productId?: string }>; error?: string }>();
   const backfillFetcher = useFetcher<{ ok?: boolean; updatedRows?: number; filledFields?: number; linked?: number; error?: string }>();
-  // "Re-check link": verify a linked row's product still exists in Shopify; if it
-  // was deleted, unlink so the row can be created again.
-  const verifyLinkFetcher = useFetcher<{ ok?: boolean; index?: number; exists?: boolean; unlinked?: boolean; status?: string | null; error?: string }>();
-  const [verifyingIdx, setVerifyingIdx] = useState<number | null>(null);
   // Move/combine: selected row indices + a fetcher for the move action.
   const moveFetcher = useFetcher<{ ok?: boolean; moved?: number; targetId?: number; deletedSource?: boolean; error?: string }>();
   const sendShootFetcher = useFetcher<{ ok?: boolean; shootId?: number; added?: number; error?: string }>();
@@ -17701,41 +17713,6 @@ function CollectionSpreadsheetPage({
     fd.set("rowIndex", String(idx));
     updateShopifyFetcher.submit(fd, { method: "post" });
   };
-  // Re-check whether a linked row's product still exists in Shopify. If it was
-  // deleted in Shopify admin, the server clears the link and we flip the row back
-  // to "Create in Shopify" so it can be re-created.
-  const verifyRowLink = (idx: number) => {
-    const row = rows[idx];
-    if (!(row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
-    setPushStatus(null);
-    setVerifyingIdx(idx);
-    const fd = new FormData();
-    fd.set("intent", "verify_collection_row_shopify_link");
-    fd.set("collectionId", String(listItem.id));
-    fd.set("rowIndex", String(idx));
-    verifyLinkFetcher.submit(fd, { method: "post" });
-  };
-  useEffect(() => {
-    const data = verifyLinkFetcher.data;
-    if (!data) return;
-    setVerifyingIdx(null);
-    if (!data.ok) {
-      setPushStatus({ msg: data.error === "verify_failed" ? "Couldn't reach Shopify — try again." : `Re-check failed — ${data.error ?? "unknown error"}`, tone: "err" });
-      return;
-    }
-    if (data.unlinked && typeof data.index === "number") {
-      const clearIdx = data.index;
-      setRows((prev) => {
-        const next = [...prev];
-        if (next[clearIdx]) next[clearIdx] = { ...next[clearIdx], [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "" };
-        return next;
-      });
-      setPushStatus({ msg: "That product no longer exists in Shopify — unlinked. You can create it again.", tone: "ok" });
-    } else if (data.exists) {
-      setPushStatus({ msg: "Still linked — the product exists in Shopify.", tone: "ok" });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [verifyLinkFetcher.data]);
   const isUpdatingShopify = updateShopifyFetcher.state !== "idle";
   useEffect(() => {
     const data = updateShopifyFetcher.data;
@@ -18213,16 +18190,7 @@ function CollectionSpreadsheetPage({
                       // be its own column; it now sits at the TOP of the Name cell.
                       const shopifyContent = linked ? (
                         <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "stretch" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "space-between" }}>
-                            <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
-                            <button
-                              type="button"
-                              onClick={() => verifyRowLink(rIdx)}
-                              disabled={verifyingIdx === rIdx}
-                              style={{ background: "transparent", color: "#6b7280", border: "none", padding: 2, fontSize: 12, cursor: verifyingIdx === rIdx ? "wait" : "pointer", lineHeight: 1 }}
-                              title="Deleted this product in Shopify? Re-check — if it's gone, this unlinks the row so you can create it again."
-                            >{verifyingIdx === rIdx ? "…" : "⟳"}</button>
-                          </div>
+                          <CollectionShopifyLinkedCell productId={linkedProductId} status={row[COL_ROW_SHOPIFY_STATUS] ?? "DRAFT"} shopDomain={shopDomain} linkOverride={row.link} />
                           {shopifyDirty && (
                             <button
                               type="button"
