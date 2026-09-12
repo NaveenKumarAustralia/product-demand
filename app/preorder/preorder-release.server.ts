@@ -7,6 +7,7 @@ import {
   addOrderTags,
   removeOrderTags,
   holdOrderOpenFulfillmentOrders,
+  resplitHeldOrderPreorderLines,
 } from "./preorder-fulfillment.server";
 import { getPreorderCombineWindowDays } from "./preorder-storefront-settings.server";
 import type { PreorderMarket } from "./preorder-rules.server";
@@ -58,6 +59,44 @@ export async function combineExistingPreorderOrders(): Promise<{ scannedOrders: 
     }
   }
   return { scannedOrders, heldOrders, errors, skippedNoScope, windowDays };
+}
+
+// One-off backfill: fix EXISTING held pre-order orders so only the pre-order
+// line stays held and the in-stock lines ship now (older orders were held whole).
+// Dry-run by default (counts pending pre-order orders); apply does the re-split.
+export async function resplitHeldPreorderOrders(opts: { apply?: boolean } = {}): Promise<{ scanned: number; fixed: number; errors: number; skippedNoScope: boolean; applied: boolean }> {
+  const pending = await prisma.preorderReservation.findMany({
+    where: { status: "reserved", readyAt: null },
+    select: { shop: true, shopifyOrderId: true, shopifyLineItemId: true },
+  });
+  const byOrder = new Map<string, { shop: string; orderId: string; lineIds: string[] }>();
+  for (const r of pending) {
+    if (!r.shopifyOrderId) continue;
+    const key = `${r.shop}::${r.shopifyOrderId}`;
+    const cur = byOrder.get(key) ?? { shop: r.shop, orderId: r.shopifyOrderId, lineIds: [] };
+    if (r.shopifyLineItemId) cur.lineIds.push(r.shopifyLineItemId);
+    byOrder.set(key, cur);
+  }
+  const tokenByShop = new Map<string, string | null>();
+  let scanned = 0, fixed = 0, errors = 0, skippedNoScope = false;
+  for (const { shop, orderId, lineIds } of byOrder.values()) {
+    if (!lineIds.length) continue;
+    scanned += 1;
+    if (!opts.apply) continue;
+    if (!tokenByShop.has(shop)) tokenByShop.set(shop, await getOfflineToken(shop));
+    const token = tokenByShop.get(shop);
+    if (!token) { skippedNoScope = true; continue; }
+    try {
+      const { changed } = await resplitHeldOrderPreorderLines(shop, token, orderId, lineIds);
+      if (changed) fixed += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/access denied|not approved|scope/i.test(message)) skippedNoScope = true;
+      console.warn(`[preorder resplit] ${shop} order ${orderId} failed:`, message);
+      errors += 1;
+    }
+  }
+  return { scanned, fixed, errors, skippedNoScope, applied: opts.apply === true };
 }
 
 // When a batch's stock lands in Shopify (available at the market's location covers

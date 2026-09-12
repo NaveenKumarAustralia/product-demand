@@ -278,6 +278,83 @@ export async function holdPreorderLinesOnly(shop: string, token: string, orderId
   return held;
 }
 
+async function holdFulfillmentOrderGraceful(shop: string, token: string, foId: string, reasonNotes: string): Promise<void> {
+  const r = await graphql<{ fulfillmentOrderHold?: { userErrors?: Array<{ message?: string }> } }>(
+    shop, token, `#graphql
+      mutation KeHoldFO($id: ID!, $hold: FulfillmentOrderHoldInput!) { fulfillmentOrderHold(id: $id, fulfillmentHold: $hold) { userErrors { message } } }
+    `, { id: foId, hold: { reason: "OTHER", reasonNotes } },
+  );
+  const bad = (r.fulfillmentOrderHold?.userErrors ?? []).filter((e) => !/already|on hold/i.test(e.message || ""));
+  if (bad.length) throw new PreorderFulfillmentError(bad.map((e) => e.message || "hold error").join("; "));
+}
+
+async function releaseFulfillmentOrderGraceful(shop: string, token: string, foId: string): Promise<void> {
+  const r = await graphql<{ fulfillmentOrderReleaseHold?: { userErrors?: Array<{ message?: string }> } }>(
+    shop, token, `#graphql
+      mutation KeReleaseFO($id: ID!) { fulfillmentOrderReleaseHold(id: $id) { userErrors { message } } }
+    `, { id: foId },
+  );
+  const bad = (r.fulfillmentOrderReleaseHold?.userErrors ?? []).filter((e) => !/not.*hold|no hold/i.test(e.message || ""));
+  if (bad.length) throw new PreorderFulfillmentError(bad.map((e) => e.message || "release error").join("; "));
+}
+
+/**
+ * Fix an EXISTING held order so only the pre-order line stays held and the
+ * in-stock lines ship now. For each ON_HOLD fulfilment order: if it has both
+ * pre-order and in-stock lines, split the pre-order lines into their own FO,
+ * hold that, and release the in-stock remainder; if it's all in-stock, release
+ * it; if it's all pre-order, leave it. Order-safe: the pre-order FO is held
+ * before/while the in-stock one is released, so the pre-order line is never
+ * left shippable. Returns whether anything changed.
+ */
+export async function resplitHeldOrderPreorderLines(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[]): Promise<{ changed: boolean }> {
+  const wanted = new Set(preorderLineItemIds.map((id) => String(id).replace(/\D/g, "")).filter(Boolean));
+  if (!wanted.size) return { changed: false };
+  const data = await graphql<{ order?: { fulfillmentOrders?: { nodes?: Array<{
+    id: string; status?: string;
+    lineItems?: { nodes?: Array<{ id: string; remainingQuantity?: number; lineItem?: { id?: string } }> };
+  }> } } }>(
+    shop, token, `#graphql
+      query KeResplitFOs($id: ID!) {
+        order(id: $id) { fulfillmentOrders(first: 25) { nodes { id status lineItems(first: 50) { nodes { id remainingQuantity lineItem { id } } } } } }
+      }
+    `, { id: `gid://shopify/Order/${orderIdNumeric}` },
+  );
+  const fos = data.order?.fulfillmentOrders?.nodes ?? [];
+  let changed = false;
+  for (const fo of fos) {
+    if (fo.status !== "ON_HOLD") continue;
+    const foLines = fo.lineItems?.nodes ?? [];
+    const preLines = foLines.filter((l) => wanted.has(String(l.lineItem?.id ?? "").replace(/\D/g, "")));
+    const otherLines = foLines.filter((l) => !wanted.has(String(l.lineItem?.id ?? "").replace(/\D/g, "")));
+    if (!otherLines.length) continue; // all pre-order → correctly held
+    if (!preLines.length) { await releaseFulfillmentOrderGraceful(shop, token, fo.id); changed = true; continue; } // all in-stock held → release
+    // Mixed: split the pre-order lines out, hold them, release the in-stock rest.
+    const split = await graphql<{ fulfillmentOrderSplit?: {
+      fulfillmentOrderSplits?: Array<{ fulfillmentOrder?: { id?: string }; remainingFulfillmentOrder?: { id?: string } }>;
+      userErrors?: Array<{ message?: string }>;
+    } }>(
+      shop, token, `#graphql
+        mutation KeResplit($splits: [FulfillmentOrderSplitInput!]!) {
+          fulfillmentOrderSplit(fulfillmentOrderSplits: $splits) {
+            fulfillmentOrderSplits { fulfillmentOrder { id } remainingFulfillmentOrder { id } }
+            userErrors { message }
+          }
+        }
+      `, { splits: [{ fulfillmentOrderId: fo.id, fulfillmentOrderLineItems: preLines.map((l) => ({ id: l.id, quantity: Math.max(1, Number(l.remainingQuantity) || 1) })) }] },
+    );
+    const serr = split.fulfillmentOrderSplit?.userErrors;
+    if (serr?.length) throw new PreorderFulfillmentError(serr.map((e) => e.message || "split error").join("; "));
+    const res0 = split.fulfillmentOrderSplit?.fulfillmentOrderSplits?.[0];
+    const preFO = res0?.fulfillmentOrder?.id;
+    const inStockFO = res0?.remainingFulfillmentOrder?.id;
+    if (preFO) await holdFulfillmentOrderGraceful(shop, token, preFO, "Pre-order — held until the batch lands");
+    if (inStockFO) await releaseFulfillmentOrderGraceful(shop, token, inStockFO);
+    changed = true;
+  }
+  return { changed };
+}
+
 export async function addOrderTags(shop: string, token: string, orderIdNumeric: string, tags: string[]): Promise<void> {
   if (!tags.length) return;
   const result = await graphql<{ tagsAdd?: { userErrors?: Array<{ message?: string }> } }>(
