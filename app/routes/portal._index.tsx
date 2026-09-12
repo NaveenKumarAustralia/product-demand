@@ -12,6 +12,7 @@ import { PreordersDashboard } from "../portal-preorders";
 import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server";
 import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
 import { marketFromDestination } from "../preorder/preorder-rules.server";
+import { releaseArrivedPreorders } from "../preorder/preorder-release.server";
 import { unauthenticated } from "../shopify.server";
 import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
 
@@ -1886,6 +1887,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         where: { id: packingId },
         data: { masterInventoryLoadedAt: new Date(), loadedBy: currentUser?.name ?? null },
       });
+    }
+
+    // Stock for this batch just landed in Shopify → release any held pre-orders
+    // for it NOW (flip On hold → Unfulfilled) instead of waiting for the 10-min
+    // scheduler. Fire-and-forget so the load button stays snappy; the scheduler
+    // still runs as a backstop for anything this pass misses.
+    if (loadedProductIds.size > 0) {
+      releaseArrivedPreorders()
+        .then((r) => { if (r.releasedOrders || r.errors) console.log("[preorder release] on-load:", r); })
+        .catch((e) => console.warn("[preorder release] on-load failed:", e instanceof Error ? e.message : e));
     }
 
     return null;
