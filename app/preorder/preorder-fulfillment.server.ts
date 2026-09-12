@@ -249,74 +249,82 @@ export async function holdOrderOpenFulfillmentOrders(shop: string, token: string
   return held;
 }
 
-/**
- * Hold ONLY the pre-order lines of an order, leaving in-stock lines free to ship
- * now. A no-plan order (Shop Pay / PayPal) has all items in one OPEN fulfilment
- * order, so we SPLIT the pre-order lines into their own fulfilment order and hold
- * just that; the remainder stays OPEN. `preorderLineItemIds` are numeric Shopify
- * LineItem ids (the reserved pre-order lines). Returns how many FOs were held.
- */
-export async function holdPreorderLinesOnly(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], reasonNotes: string): Promise<number> {
-  const wanted = new Set(preorderLineItemIds.map((id) => String(id).replace(/\D/g, "")).filter(Boolean));
-  if (!wanted.size) return 0;
-  const data = await graphql<{ order?: { fulfillmentOrders?: { nodes?: Array<{
-    id: string; status?: string;
-    lineItems?: { nodes?: Array<{ id: string; remainingQuantity?: number; lineItem?: { id?: string } }> };
-  }> } } }>(
+type PreorderFoNode = { id: string; status?: string; lineItems?: { nodes?: Array<{ id: string; remainingQuantity?: number; lineItem?: { id?: string } }> } };
+
+async function fetchOrderFulfillmentOrders(shop: string, token: string, orderIdNumeric: string): Promise<PreorderFoNode[]> {
+  const data = await graphql<{ order?: { fulfillmentOrders?: { nodes?: PreorderFoNode[] } } }>(
     shop, token, `#graphql
-      query PreorderFOLines($id: ID!) {
-        order(id: $id) {
-          fulfillmentOrders(first: 25) {
-            nodes { id status lineItems(first: 50) { nodes { id remainingQuantity lineItem { id } } } }
-          }
-        }
+      query KeOrderFOs($id: ID!) {
+        order(id: $id) { fulfillmentOrders(first: 25) { nodes { id status lineItems(first: 50) { nodes { id remainingQuantity lineItem { id } } } } } }
       }
     `, { id: `gid://shopify/Order/${orderIdNumeric}` },
   );
-  const open = (data.order?.fulfillmentOrders?.nodes ?? []).filter((fo) => fo.status === "OPEN");
-  let held = 0;
-  for (const fo of open) {
-    const foLines = fo.lineItems?.nodes ?? [];
-    const preLines = foLines.filter((l) => wanted.has(String(l.lineItem?.id ?? "").replace(/\D/g, "")));
-    if (!preLines.length) continue; // no pre-order line here → leave OPEN (ships now)
+  return data.order?.fulfillmentOrders?.nodes ?? [];
+}
 
-    let holdTargetId = fo.id;
-    // Mixed FO (has non-pre-order lines too) → split the pre-order lines into a
-    // new FO so the in-stock lines keep shipping. All lines are pre-order → hold
-    // the FO directly (no split needed).
-    const isMixed = preLines.length < foLines.length;
-    if (isMixed) {
-      const split = await graphql<{ fulfillmentOrderSplit?: {
-        fulfillmentOrderSplits?: Array<{ fulfillmentOrder?: { id?: string } }>;
-        userErrors?: Array<{ message?: string }>;
-      } }>(
-        shop, token, `#graphql
-          mutation PreorderSplitFO($splits: [FulfillmentOrderSplitInput!]!) {
-            fulfillmentOrderSplit(fulfillmentOrderSplits: $splits) {
-              fulfillmentOrderSplits { fulfillmentOrder { id } }
-              userErrors { message }
-            }
-          }
-        `, { splits: [{ fulfillmentOrderId: fo.id, fulfillmentOrderLineItems: preLines.map((l) => ({ id: l.id, quantity: Math.max(1, Number(l.remainingQuantity) || 1) })) }] },
-      );
-      const serr = split.fulfillmentOrderSplit?.userErrors;
-      if (serr?.length) throw new PreorderFulfillmentError(serr.map((e) => e.message || "split error").join("; "));
-      const newId = split.fulfillmentOrderSplit?.fulfillmentOrderSplits?.[0]?.fulfillmentOrder?.id;
-      if (newId) holdTargetId = newId;
-    }
+async function splitFulfillmentOrder(shop: string, token: string, foId: string, lineItems: Array<{ id: string; remainingQuantity?: number }>): Promise<void> {
+  const r = await graphql<{ fulfillmentOrderSplit?: { userErrors?: Array<{ message?: string }> } }>(
+    shop, token, `#graphql
+      mutation KeSplitFO($splits: [FulfillmentOrderSplitInput!]!) {
+        fulfillmentOrderSplit(fulfillmentOrderSplits: $splits) { userErrors { message } }
+      }
+    `, { splits: [{ fulfillmentOrderId: foId, fulfillmentOrderLineItems: lineItems.map((l) => ({ id: l.id, quantity: Math.max(1, Number(l.remainingQuantity) || 1) })) }] },
+  );
+  const errs = r.fulfillmentOrderSplit?.userErrors;
+  if (errs?.length) throw new PreorderFulfillmentError(errs.map((e) => e.message || "split error").join("; "));
+}
 
-    const result = await graphql<{ fulfillmentOrderHold?: { userErrors?: Array<{ message?: string }> } }>(
-      shop, token, `#graphql
-        mutation PreorderHoldLine($id: ID!, $hold: FulfillmentOrderHoldInput!) {
-          fulfillmentOrderHold(id: $id, fulfillmentHold: $hold) { userErrors { message } }
-        }
-      `, { id: holdTargetId, hold: { reason: "OTHER", reasonNotes } },
-    );
-    const errs = result.fulfillmentOrderHold?.userErrors;
-    if (errs?.length) throw new PreorderFulfillmentError(errs.map((e) => e.message || "hold error").join("; "));
-    held += 1;
+/**
+ * Normalize an order so ONLY its pre-order lines are held and everything else
+ * ships now — from ANY current state (whole-order held, half-held, unheld, or a
+ * previous split that held the wrong side). `preorderLineItemIds` are numeric
+ * Shopify LineItem ids. Steps: (1) no-op if already correct; (2) release every
+ * held fulfilment order so all are OPEN + splittable; (3) split each mixed FO to
+ * isolate the pre-order lines; (4) re-query and hold every FO that is now
+ * ENTIRELY pre-order — so we hold the right side by fact, never by guessing which
+ * side of the split it is. Returns whether anything changed and how many FOs held.
+ */
+export async function normalizeOrderPreorderHolds(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], reasonNotes: string): Promise<{ changed: boolean; held: number }> {
+  const wanted = new Set(preorderLineItemIds.map((id) => String(id).replace(/\D/g, "")).filter(Boolean));
+  if (!wanted.size) return { changed: false, held: 0 };
+  const isPre = (l: { lineItem?: { id?: string } }) => wanted.has(String(l.lineItem?.id ?? "").replace(/\D/g, ""));
+
+  let fos = await fetchOrderFulfillmentOrders(shop, token, orderIdNumeric);
+  const active = fos.filter((fo) => fo.status === "OPEN" || fo.status === "ON_HOLD");
+  // Already correct? Every held FO is all-pre-order AND no OPEN FO holds a pre-order line.
+  let correct = true;
+  for (const fo of active) {
+    const lines = fo.lineItems?.nodes ?? [];
+    if (fo.status === "ON_HOLD" && lines.some((l) => !isPre(l))) correct = false; // in-stock held
+    if (fo.status === "OPEN" && lines.some(isPre)) correct = false;                // pre-order not held
   }
-  return held;
+  if (correct) return { changed: false, held: 0 };
+
+  // (2) Release every held FO → OPEN + splittable.
+  for (const fo of active) if (fo.status === "ON_HOLD") await releaseFulfillmentOrderGraceful(shop, token, fo.id);
+  // (3) Split each mixed OPEN FO to isolate the pre-order lines.
+  fos = await fetchOrderFulfillmentOrders(shop, token, orderIdNumeric);
+  for (const fo of fos) {
+    if (fo.status !== "OPEN") continue;
+    const lines = fo.lineItems?.nodes ?? [];
+    const preLines = lines.filter(isPre);
+    if (preLines.length && lines.some((l) => !isPre(l))) await splitFulfillmentOrder(shop, token, fo.id, preLines);
+  }
+  // (4) Hold every OPEN FO that is now entirely pre-order (the in-stock FOs stay open).
+  fos = await fetchOrderFulfillmentOrders(shop, token, orderIdNumeric);
+  let held = 0;
+  for (const fo of fos) {
+    if (fo.status !== "OPEN") continue;
+    const lines = fo.lineItems?.nodes ?? [];
+    if (lines.length && lines.every(isPre)) { await holdFulfillmentOrderGraceful(shop, token, fo.id, reasonNotes); held += 1; }
+  }
+  return { changed: true, held };
+}
+
+/** Hold only the pre-order lines of a new order (thin wrapper over normalize). */
+export async function holdPreorderLinesOnly(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], reasonNotes: string): Promise<number> {
+  const r = await normalizeOrderPreorderHolds(shop, token, orderIdNumeric, preorderLineItemIds, reasonNotes);
+  return r.held;
 }
 
 async function holdFulfillmentOrderGraceful(shop: string, token: string, foId: string, reasonNotes: string): Promise<void> {
@@ -339,72 +347,11 @@ async function releaseFulfillmentOrderGraceful(shop: string, token: string, foId
   if (bad.length) throw new PreorderFulfillmentError(bad.map((e) => e.message || "release error").join("; "));
 }
 
-/**
- * Fix an EXISTING held order so only the pre-order line stays held and the
- * in-stock lines ship now. For each ON_HOLD fulfilment order: if it has both
- * pre-order and in-stock lines, split the pre-order lines into their own FO,
- * hold that, and release the in-stock remainder; if it's all in-stock, release
- * it; if it's all pre-order, leave it. Order-safe: the pre-order FO is held
- * before/while the in-stock one is released, so the pre-order line is never
- * left shippable. Returns whether anything changed.
- */
+/** Fix an EXISTING held order so only the pre-order line stays held and the
+ * in-stock lines ship now (thin wrapper over normalizeOrderPreorderHolds). */
 export async function resplitHeldOrderPreorderLines(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[]): Promise<{ changed: boolean }> {
-  const wanted = new Set(preorderLineItemIds.map((id) => String(id).replace(/\D/g, "")).filter(Boolean));
-  if (!wanted.size) return { changed: false };
-  const data = await graphql<{ order?: { fulfillmentOrders?: { nodes?: Array<{
-    id: string; status?: string;
-    lineItems?: { nodes?: Array<{ id: string; remainingQuantity?: number; lineItem?: { id?: string } }> };
-  }> } } }>(
-    shop, token, `#graphql
-      query KeResplitFOs($id: ID!) {
-        order(id: $id) { fulfillmentOrders(first: 25) { nodes { id status lineItems(first: 50) { nodes { id remainingQuantity lineItem { id } } } } } }
-      }
-    `, { id: `gid://shopify/Order/${orderIdNumeric}` },
-  );
-  const fos = data.order?.fulfillmentOrders?.nodes ?? [];
-  let changed = false;
-  for (const fo of fos) {
-    if (fo.status !== "ON_HOLD") continue;
-    const foLines = fo.lineItems?.nodes ?? [];
-    const preLines = foLines.filter((l) => wanted.has(String(l.lineItem?.id ?? "").replace(/\D/g, "")));
-    const otherLines = foLines.filter((l) => !wanted.has(String(l.lineItem?.id ?? "").replace(/\D/g, "")));
-    if (!otherLines.length) continue; // all pre-order → correctly held
-    if (!preLines.length) { await releaseFulfillmentOrderGraceful(shop, token, fo.id); changed = true; continue; } // all in-stock held → release
-    // Mixed held FO: a held FO isn't splittable, so RELEASE it first, then split
-    // off the pre-order lines and re-hold just those (the in-stock remainder
-    // stays open and ships). The variant is out of stock, so the brief open
-    // window can't be fulfilled; and if the split fails we restore the original
-    // hold so a pre-order line is never left shippable.
-    await releaseFulfillmentOrderGraceful(shop, token, fo.id);
-    let preFO: string | undefined;
-    try {
-      const split = await graphql<{ fulfillmentOrderSplit?: {
-        fulfillmentOrderSplits?: Array<{ fulfillmentOrder?: { id?: string } }>;
-        userErrors?: Array<{ message?: string }>;
-      } }>(
-        shop, token, `#graphql
-          mutation KeResplit($splits: [FulfillmentOrderSplitInput!]!) {
-            fulfillmentOrderSplit(fulfillmentOrderSplits: $splits) {
-              fulfillmentOrderSplits { fulfillmentOrder { id } }
-              userErrors { message }
-            }
-          }
-        `, { splits: [{ fulfillmentOrderId: fo.id, fulfillmentOrderLineItems: preLines.map((l) => ({ id: l.id, quantity: Math.max(1, Number(l.remainingQuantity) || 1) })) }] },
-      );
-      const serr = split.fulfillmentOrderSplit?.userErrors;
-      if (serr?.length) throw new PreorderFulfillmentError(serr.map((e) => e.message || "split error").join("; "));
-      preFO = split.fulfillmentOrderSplit?.fulfillmentOrderSplits?.[0]?.fulfillmentOrder?.id;
-    } catch (error) {
-      // Restore the original whole-FO hold so nothing ships unheld, then report.
-      await holdFulfillmentOrderGraceful(shop, token, fo.id, "Pre-order — held until the batch lands").catch(() => undefined);
-      throw error;
-    }
-    // Hold the pre-order lines (their own FO). The in-stock remainder (fo.id)
-    // stays open and ships now.
-    await holdFulfillmentOrderGraceful(shop, token, preFO ?? fo.id, "Pre-order — held until the batch lands");
-    changed = true;
-  }
-  return { changed };
+  const r = await normalizeOrderPreorderHolds(shop, token, orderIdNumeric, preorderLineItemIds, "Pre-order — held until the batch lands");
+  return { changed: r.changed };
 }
 
 export async function addOrderTags(shop: string, token: string, orderIdNumeric: string, tags: string[]): Promise<void> {
