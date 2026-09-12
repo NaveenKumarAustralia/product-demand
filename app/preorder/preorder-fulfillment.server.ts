@@ -139,7 +139,7 @@ export async function setProductPreorderTag(shop: string, token: string, product
   if (!gid) return;
   const wanted = new Set((variantIds ?? []).map((v) => String(v).replace(/\D/g, "")).filter(Boolean));
   const data = await graphql<{ product?: { id?: string; tags?: string[]; variants?: { nodes?: Array<{ id?: string; title?: string; inventoryQuantity?: number }> } } }>(
-    shop, token, `#graphql query KePreorderProdTags($id: ID!) { product(id: $id) { id tags variants(first: 100) { nodes { id title inventoryQuantity } } } }`, { id: gid },
+    shop, token, `query KePreorderProdTags($id: ID!) { product(id: $id) { id tags variants(first: 100) { nodes { id title inventoryQuantity } } } }`, { id: gid },
   );
   if (!data.product?.id) return;
   const current = (data.product.tags ?? []).map((t) => String(t));

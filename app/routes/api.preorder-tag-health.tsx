@@ -41,7 +41,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const chunk = gids.slice(i, i + 50);
     const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": token },
-      body: JSON.stringify({ query: `#graphql query TagHealth($ids: [ID!]!) { nodes(ids: $ids) { ... on Product { id tags } } }`, variables: { ids: chunk } }),
+      body: JSON.stringify({ query: `query TagHealth($ids: [ID!]!) { nodes(ids: $ids) { ... on Product { id tags } } }`, variables: { ids: chunk } }),
     });
     const json = await res.json() as { data?: { nodes?: Array<{ id?: string; tags?: string[] } | null> }; errors?: Array<{ message?: string }> };
     if (json.errors?.length) { queryErrors.push(json.errors.map((e) => e.message).join("; ")); continue; }
