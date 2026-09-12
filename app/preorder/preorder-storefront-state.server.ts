@@ -127,7 +127,19 @@ export async function getStorefrontPreorderState(input: {
 
   const notifyEnabled = await getPreorderNotifyEnabled();
   const locations = await getPreorderLocationSettings();
-  const locationId = normalizeLocationId(locations[input.market]);
+  // A market with no fulfilment location of its own (e.g. USA before its 3PL is
+  // set up) is fulfilled from the AU batch — so show those shoppers the AU
+  // pre-order (button + selling plan + date) rather than only "notify me". We
+  // compute against the AU location/batches but keep responding as the requested
+  // market, so the order still carries the plan (which makes the confirmation
+  // email flag it). When the market later gets its own location, this fallback
+  // stops and it uses its own batches.
+  let effectiveMarket: StorefrontMarket = input.market;
+  let locationId = normalizeLocationId(locations[input.market]);
+  if (!locationId && input.market !== "AU") {
+    const auLocation = normalizeLocationId(locations.AU);
+    if (auLocation) { effectiveMarket = "AU"; locationId = auLocation; }
+  }
   if (!locationId) {
     // This market has no preorder fulfilment location (e.g. USA before its 3PL
     // is set up), so PRE-ORDER isn't possible here. But we still want the
@@ -171,7 +183,7 @@ export async function getStorefrontPreorderState(input: {
         // per-candidate getPreorderEligibility() below applies the real rule
         // (denies On Order / Cancelled). Hardcoding on_production here made a
         // batch silently stop showing preorder once it moved to Ready/Shipment.
-        destination: destinationForMarket(input.market),
+        destination: destinationForMarket(effectiveMarket),
         lines: { some: { variantId: variantIdMatch } },
       },
       select: {
