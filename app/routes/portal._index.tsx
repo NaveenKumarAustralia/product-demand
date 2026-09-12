@@ -5368,7 +5368,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
           countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
         };
-        const shopTags = Array.isArray(node.tags) ? node.tags.map((t) => String(t).trim()).filter(Boolean) : [];
+        const shopTags = (Array.isArray(node.tags) ? node.tags.map((t) => String(t).trim()).filter(Boolean) : []).filter((t) => { const s = t.toLowerCase(); return s !== "pre-order" && !s.startsWith("pre-order ships "); });
         for (const rowIdx of idxByGid.get(node.id) ?? []) {
           const row = rows[rowIdx];
           let rowChanged = false;
@@ -5448,7 +5448,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       fields: {
         description,
         productType: String(product.productType ?? ""),
-        tags: Array.isArray(product.tags) ? product.tags.join(", ") : "",
+        // Never copy the pre-order system tags onto a duplicated/new product.
+        tags: Array.isArray(product.tags) ? product.tags.filter((t: unknown) => { const s = String(t).trim().toLowerCase(); return s !== "pre-order" && !s.startsWith("pre-order ships "); }).join(", ") : "",
         vendor: String(product.vendor ?? ""),
         seoTitle: String(product.seo?.title ?? ""),
         seoDescription: String(product.seo?.description ?? ""),
@@ -5665,7 +5666,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return jsonResponse({ ok: true, index: idx, deleted: true });
     }
     const v0 = product.variants?.nodes?.[0] ?? {};
-    const shopTags = Array.isArray(product.tags) ? product.tags.map((t) => String(t).trim()).filter(Boolean).join(", ") : "";
+    const shopTags = Array.isArray(product.tags) ? product.tags.map((t) => String(t).trim()).filter(Boolean).filter((t) => { const s = t.toLowerCase(); return s !== "pre-order" && !s.startsWith("pre-order ships "); }).join(", ") : "";
     // OVERWRITE the descriptive fields with Shopify's current values.
     const pulled: Record<string, string> = {
       description: String(product.descriptionHtml ?? ""),
@@ -10391,9 +10392,13 @@ async function createShopifyProductFromRow(
     ? undefined
     : [{ name: "Size", values: variantRows.map((v) => ({ name: v.size })) }];
 
-  // Tags: comma-separated string in the row → array.
+  // Tags: comma-separated string in the row → array. Pre-order tags are OWNED by
+  // the pre-order system (set on a live batch's product) — a collection row must
+  // never declare them, or duplicating a pre-order product would carry them onto
+  // the new product and wrongly flag its confirmation email as a pre-order.
+  const isPreorderTag = (t: string) => { const s = t.trim().toLowerCase(); return s === "pre-order" || s.startsWith("pre-order ships "); };
   const tagsRaw = (row.tags ?? "").trim();
-  const tags = tagsRaw ? tagsRaw.split(/\s*,\s*/).filter(Boolean) : [];
+  const tags = (tagsRaw ? tagsRaw.split(/\s*,\s*/).filter(Boolean) : []).filter((t) => !isPreorderTag(t));
 
   const input: Record<string, unknown> = {
     title,
@@ -10401,8 +10406,18 @@ async function createShopifyProductFromRow(
     variants,
   };
   // Update mode: pass the existing product id so productSet UPDATES it (full
-  // sync) instead of creating a new product.
-  if (opts.productId) input.id = opts.productId;
+  // sync) instead of creating a new product. Because productSet REPLACES all
+  // tags, re-preserve any pre-order tag the product currently has so an active
+  // pre-order isn't wiped by a portal update.
+  if (opts.productId) {
+    input.id = opts.productId;
+    try {
+      const cur = await shopifyGraphql<{ data?: { product?: { tags?: string[] } } }>(shop, accessToken, `query KeCurTags($id: ID!){ product(id: $id) { tags } }`, { id: opts.productId });
+      for (const t of (cur?.data?.product?.tags ?? [])) {
+        if (isPreorderTag(String(t)) && !tags.some((x) => x.toLowerCase() === String(t).toLowerCase())) tags.push(String(t));
+      }
+    } catch { /* best-effort: preserve nothing if the read fails */ }
+  }
   // Only set status when asked — on update we omit it so the live product's
   // status (active/draft) is preserved.
   if (opts.status) input.status = opts.status;
