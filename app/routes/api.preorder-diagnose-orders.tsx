@@ -39,7 +39,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             orders(first: 1, query: $q) {
               nodes {
                 id name createdAt displayFulfillmentStatus tags
-                lineItems(first: 50) { nodes { title quantity sku variant { id title } sellingPlan { name } } }
+                lineItems(first: 50) { nodes { title quantity sku
+                  variant { id title
+                    preorderMeta: metafield(namespace: "karmaeast", key: "preorder") { value }
+                    dispatchMeta: metafield(namespace: "karmaeast", key: "dispatch") { value }
+                  }
+                  sellingPlan { name } } }
               }
             }
           }`,
@@ -48,7 +53,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     });
     const json = await res.json() as { data?: { orders?: { nodes?: Array<{
       id: string; name: string; createdAt: string; displayFulfillmentStatus: string; tags: string[];
-      lineItems?: { nodes?: Array<{ title: string | null; quantity: number; sku: string | null; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> };
+      lineItems?: { nodes?: Array<{ title: string | null; quantity: number; sku: string | null; variant?: { id?: string | null; title?: string | null; preorderMeta?: { value?: string | null } | null; dispatchMeta?: { value?: string | null } | null } | null; sellingPlan?: { name?: string | null } | null }> };
     }> } }; errors?: Array<{ message?: string }> };
     if (json.errors?.length) return { name, error: json.errors.map((e) => e.message).join("; ") };
     const order = json.data?.orders?.nodes?.[0];
@@ -56,6 +61,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
     const lines = order.lineItems?.nodes ?? [];
     const preorderLines = lines.filter((l) => (l.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX));
+    const metaFlag = (l: typeof lines[number]) => String(l.variant?.preorderMeta?.value ?? "").toLowerCase() === "true";
+    // The email banner shows a pre-order if ANY line has the selling plan OR the
+    // variant's karmaeast.preorder metafield is true. This mirrors the template's
+    // condition, so we can tell "email didn't flag it" from a store-config issue.
+    const emailBannerWouldShow = preorderLines.length > 0 || lines.some((l) => metaFlag(l));
     const orderIdNumeric = numericId(order.id);
     const reservations = await prisma.preorderReservation.findMany({
       where: { shopifyOrderId: orderIdNumeric },
@@ -67,13 +77,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       createdAt: order.createdAt,
       fulfillment: order.displayFulfillmentStatus,
       hasPreorderPlan: preorderLines.length > 0,
+      // Would the order-confirmation email show the pre-order banner? If false but
+      // the order is on hold, the variant metafield isn't set (or unreadable) →
+      // customer got a plain email. This is the email-vs-hold mismatch check.
+      emailBannerWouldShow,
       preorderLines: preorderLines.map((l) => ({
         title: l.title, size: l.variant?.title ?? null, qty: l.quantity,
         plan: l.sellingPlan?.name ?? null, batchId: preorderBatchIdFromPlanName(l.sellingPlan?.name),
+        preorderMetafield: l.variant?.preorderMeta?.value ?? null, dispatchMetafield: l.variant?.dispatchMeta?.value ?? null,
       })),
-      // Lines with NO plan (e.g. bought via quick-add / theme button — an oversell,
-      // not a real pre-order). Shown so we can see if that's what happened.
-      nonPlanLines: lines.filter((l) => !(l.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX)).map((l) => ({ title: l.title, size: l.variant?.title ?? null, qty: l.quantity })),
+      // Lines with NO plan (e.g. bought via Shop Pay / PayPal express / quick-add).
+      // preorderMetafield shows whether the email would still flag it as a pre-order.
+      nonPlanLines: lines.filter((l) => !(l.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX)).map((l) => ({ title: l.title, size: l.variant?.title ?? null, qty: l.quantity, preorderMetafield: l.variant?.preorderMeta?.value ?? null, dispatchMetafield: l.variant?.dispatchMeta?.value ?? null })),
       reservedInPortal: reservations.length > 0,
       reservations,
       preorderTags: (order.tags ?? []).filter((t) => t.toLowerCase().startsWith("pre-order")),
@@ -88,6 +103,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     withPlanNotReserved: results.filter((r) => "hasPreorderPlan" in r && r.hasPreorderPlan && !r.reservedInPortal).map((r) => r.name),
     noPlanAtAll: results.filter((r) => "hasPreorderPlan" in r && !r.hasPreorderPlan).map((r) => r.name),
     reserved: results.filter((r) => "reservedInPortal" in r && r.reservedInPortal).map((r) => r.name),
+    // Reserved/held as a pre-order but the email banner would NOT show → customer
+    // got a plain confirmation. These need the metafield set (or the template updated).
+    heldButEmailWouldNotFlag: results.filter((r) => "reservedInPortal" in r && r.reservedInPortal && "emailBannerWouldShow" in r && !r.emailBannerWouldShow).map((r) => r.name),
   };
   return Response.json({ ok: true, summary, results }, { headers: { "Cache-Control": "no-store" } });
 };
