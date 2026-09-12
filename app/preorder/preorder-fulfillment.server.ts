@@ -115,27 +115,44 @@ function toProductGid(value: string | null) {
 }
 
 const PREORDER_FLAG_TAG = "Pre-order";
+const PREORDER_SIZE_TAG_PREFIX = "Pre-order: ";
 const PREORDER_SHIPS_TAG_PREFIX = "Pre-order ships ";
+// A tag the pre-order system owns (so we strip only these, never merchant tags).
+export const isPreorderSystemTag = (t: string): boolean => {
+  const s = String(t).trim().toLowerCase();
+  return s === "pre-order" || s.startsWith("pre-order: ") || s.startsWith("pre-order ships ");
+};
 
 /**
  * Tag/untag a product as a pre-order so the confirmation email can detect it
  * RELIABLY (notification Liquid reads `line.product.tags`, unlike variant
- * metafields). Adds `Pre-order` + `Pre-order ships <label>` when a batch is live
- * and strips them when it isn't. Read-modify-write so a changed date replaces the
- * old ships tag and unrelated tags are untouched. Best-effort; needs write_products.
+ * metafields) AND per-SIZE, so an in-stock size of a product that also has
+ * pre-order sizes is NOT flagged. For each pre-order variant we add
+ * `Pre-order: <size>` (its variant title); plus a product-level `Pre-order`
+ * flag (merchant visibility) and one `Pre-order ships <label>` (date). The email
+ * flags a line only when `Pre-order: <that line's size>` is present. Strips all
+ * pre-order tags when inactive. Read-modify-write; leaves merchant tags untouched.
+ * Best-effort; needs write_products.
  */
-export async function setProductPreorderTag(shop: string, token: string, productId: string | null, opts: { active: boolean; dispatchLabel: string | null }): Promise<void> {
+export async function setProductPreorderTag(shop: string, token: string, productId: string | null, variantIds: string[], opts: { active: boolean; dispatchLabel: string | null }): Promise<void> {
   const gid = toProductGid(productId);
   if (!gid) return;
-  const data = await graphql<{ product?: { id?: string; tags?: string[] } }>(
-    shop, token, `#graphql query KePreorderProdTags($id: ID!) { product(id: $id) { id tags } }`, { id: gid },
+  const wanted = new Set((variantIds ?? []).map((v) => String(v).replace(/\D/g, "")).filter(Boolean));
+  const data = await graphql<{ product?: { id?: string; tags?: string[]; variants?: { nodes?: Array<{ id?: string; title?: string }> } } }>(
+    shop, token, `#graphql query KePreorderProdTags($id: ID!) { product(id: $id) { id tags variants(first: 100) { nodes { id title } } } }`, { id: gid },
   );
   if (!data.product?.id) return;
   const current = (data.product.tags ?? []).map((t) => String(t));
-  const base = current.filter((t) => { const s = t.trim(); return s !== PREORDER_FLAG_TAG && !s.startsWith(PREORDER_SHIPS_TAG_PREFIX); });
-  const next = opts.active
-    ? [...base, PREORDER_FLAG_TAG, ...(opts.dispatchLabel ? [`${PREORDER_SHIPS_TAG_PREFIX}${opts.dispatchLabel}`] : [])]
-    : base;
+  const base = current.filter((t) => !isPreorderSystemTag(t));
+  let next = base;
+  if (opts.active) {
+    const sizeTags = (data.product.variants?.nodes ?? [])
+      .filter((v) => wanted.has(String(v.id ?? "").replace(/\D/g, "")))
+      .map((v) => `${PREORDER_SIZE_TAG_PREFIX}${String(v.title ?? "").trim()}`)
+      .filter((t) => t.length > PREORDER_SIZE_TAG_PREFIX.length);
+    next = [...base, PREORDER_FLAG_TAG, ...sizeTags, ...(opts.dispatchLabel ? [`${PREORDER_SHIPS_TAG_PREFIX}${opts.dispatchLabel}`] : [])];
+  }
+  next = Array.from(new Set(next));
   const same = next.length === current.length && next.every((t) => current.includes(t));
   if (same) return;
   const result = await graphql<{ productUpdate?: { userErrors?: Array<{ message?: string }> } }>(

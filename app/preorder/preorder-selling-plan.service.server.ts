@@ -159,7 +159,7 @@ export async function refreshPreorderSellingPlanDate(supplierOrderId: number) {
   const variantIds = order.lines.filter((l) => l.qtyOrdered - l.qtyReceived > 0).map((l) => String(l.variantId ?? "").trim()).filter(Boolean);
   await setVariantsPreorderMetafields(order.shop, token, variantIds, { preorder: true, dispatchLabel: preorderExpectedLabel(dispatch) })
     .catch((error) => console.warn("[preorder] dispatch metafield refresh failed:", error instanceof Error ? error.message : error));
-  await setProductPreorderTag(order.shop, token, order.productId, { active: true, dispatchLabel: preorderExpectedLabel(dispatch) })
+  await setProductPreorderTag(order.shop, token, order.productId, variantIds, { active: true, dispatchLabel: preorderExpectedLabel(dispatch) })
     .catch((error) => console.warn("[preorder] product tag refresh failed:", error instanceof Error ? error.message : error));
 }
 
@@ -266,7 +266,7 @@ export async function activatePreorderSellingPlan(input: {
     .catch((error) => console.warn("[preorder] variant pre-order metafields failed:", error instanceof Error ? error.message : error));
   // Product tag — the reliable signal the confirmation email reads (notification
   // Liquid reads product tags but not variant metafields).
-  await setProductPreorderTag(order.shop, accessToken, order.productId, { active: true, dispatchLabel: preorderExpectedLabel(setting?.shipDate ?? order.eta ?? null) })
+  await setProductPreorderTag(order.shop, accessToken, order.productId, variantIds, { active: true, dispatchLabel: preorderExpectedLabel(setting?.shipDate ?? order.eta ?? null) })
     .catch((error) => console.warn("[preorder] product pre-order tag failed:", error instanceof Error ? error.message : error));
 
   const existing = await getPreorderSellingPlanRegistryEntry(order.shop, order.id);
@@ -381,7 +381,7 @@ export async function deactivatePreorderSellingPlan(input: {
   // pre-order in the confirmation email.
   await setVariantsPreorderMetafields(order.shop, accessToken, variantIds, { preorder: false, dispatchLabel: null })
     .catch((error) => console.warn("[preorder deactivate] could not clear pre-order metafields:", error));
-  await setProductPreorderTag(order.shop, accessToken, order.productId, { active: false, dispatchLabel: null })
+  await setProductPreorderTag(order.shop, accessToken, order.productId, variantIds, { active: false, dispatchLabel: null })
     .catch((error) => console.warn("[preorder deactivate] could not clear product pre-order tag:", error));
 
   const data = await shopifyGraphql<{
