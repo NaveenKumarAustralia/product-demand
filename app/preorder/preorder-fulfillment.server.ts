@@ -131,7 +131,7 @@ export async function ensurePreorderMetafieldDefinitions(shop: string, token: st
             userErrors { code message }
           }
         }
-      `, { def: { name: d.name, namespace: d.namespace, key: d.key, description: d.description, type: d.type, ownerType: "PRODUCTVARIANT", access: { admin: "MERCHANT_READ_WRITE", storefront: "PUBLIC_READ" } } },
+      `, { def: { name: d.name, namespace: d.namespace, key: d.key, description: d.description, type: d.type, ownerType: "PRODUCTVARIANT" } },
     );
     const errs = result.metafieldDefinitionCreate?.userErrors ?? [];
     if (result.metafieldDefinitionCreate?.createdDefinition?.id) created.push(d.key);
