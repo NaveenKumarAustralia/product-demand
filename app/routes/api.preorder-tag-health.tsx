@@ -54,18 +54,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const found = gid ? tagsByGid.has(gid) : false;
     const tags = (gid && tagsByGid.get(gid)) || [];
     const preorderTags = tags.filter(isPreTag);
-    const sizeTags = tags.filter((t) => t.trim().toLowerCase().startsWith("pre-order:"));
-    const hasFlag = tags.some((t) => t.trim() === "Pre-order");
     const hasShips = tags.some((t) => t.trim().toLowerCase().startsWith("pre-order ships"));
-    const ok = found && hasFlag && hasShips && sizeTags.length > 0;
-    return { supplierOrderId: b.id, title: b.productTitle ?? null, productId: b.productId ?? null, found, preorderTags, sizeTagCount: sizeTags.length, hasFlag, hasShips, ok };
+    // With the live-stock design the only tag we manage is the ship date; the
+    // pre-order FLAG comes from the item being oversold, not a tag.
+    const ok = found && hasShips;
+    return { supplierOrderId: b.id, title: b.productTitle ?? null, productId: b.productId ?? null, found, preorderTags, hasShipsDateTag: hasShips, ok };
   });
 
   const summary = {
     liveBatches: results.length,
-    correctlyTagged: results.filter((r) => r.ok).length,
+    haveShipDateTag: results.filter((r) => r.ok).length,
     queryErrors: queryErrors.length ? queryErrors : undefined,
-    problems: results.filter((r) => !r.ok).map((r) => ({ supplierOrderId: r.supplierOrderId, title: r.title, reason: !r.found ? "product not returned by Shopify" : r.sizeTagCount === 0 ? "no Pre-order: <size> tags" : !r.hasFlag ? "no Pre-order flag" : !r.hasShips ? "no Pre-order ships tag" : "unknown" })),
+    problems: results.filter((r) => !r.ok).map((r) => ({ supplierOrderId: r.supplierOrderId, title: r.title, reason: !r.found ? "product not returned by Shopify" : "no Pre-order ships <date> tag" })),
   };
   return Response.json({ ok: true, summary, results }, { headers: { "Cache-Control": "no-store" } });
 };

@@ -134,31 +134,21 @@ export const isPreorderSystemTag = (t: string): boolean => {
  * pre-order tags when inactive. Read-modify-write; leaves merchant tags untouched.
  * Best-effort; needs write_products.
  */
-export async function setProductPreorderTag(shop: string, token: string, productId: string | null, variantIds: string[], opts: { active: boolean; dispatchLabel: string | null }): Promise<void> {
+export async function setProductPreorderTag(shop: string, token: string, productId: string | null, opts: { active: boolean; dispatchLabel: string | null }): Promise<void> {
   const gid = toProductGid(productId);
   if (!gid) return;
-  const wanted = new Set((variantIds ?? []).map((v) => String(v).replace(/\D/g, "")).filter(Boolean));
-  const data = await graphql<{ product?: { id?: string; tags?: string[]; variants?: { nodes?: Array<{ id?: string; title?: string; inventoryQuantity?: number }> } } }>(
-    shop, token, `query KePreorderProdTags($id: ID!) { product(id: $id) { id tags variants(first: 100) { nodes { id title inventoryQuantity } } } }`, { id: gid },
+  const data = await graphql<{ product?: { id?: string; tags?: string[] } }>(
+    shop, token, `query KePreorderProdTags($id: ID!) { product(id: $id) { id tags } }`, { id: gid },
   );
   if (!data.product?.id) return;
   const current = (data.product.tags ?? []).map((t) => String(t));
   const base = current.filter((t) => !isPreorderSystemTag(t));
-  let next = base;
-  if (opts.active) {
-    // Tag a size ONLY when it's a batch variant AND currently out of stock — a
-    // size is "on pre-order" exactly when it has no stock. In-stock sizes (even
-    // in the batch) get no tag, so an in-stock sale is never flagged.
-    const sizeTags = (data.product.variants?.nodes ?? [])
-      .filter((v) => wanted.has(String(v.id ?? "").replace(/\D/g, "")) && (Number(v.inventoryQuantity) || 0) <= 0)
-      .map((v) => `${PREORDER_SIZE_TAG_PREFIX}${String(v.title ?? "").trim()}`)
-      .filter((t) => t.length > PREORDER_SIZE_TAG_PREFIX.length);
-    // Only mark the product as pre-order if at least one size is actually OOS.
-    next = sizeTags.length
-      ? [...base, PREORDER_FLAG_TAG, ...sizeTags, ...(opts.dispatchLabel ? [`${PREORDER_SHIPS_TAG_PREFIX}${opts.dispatchLabel}`] : [])]
-      : base;
-  }
-  next = Array.from(new Set(next));
+  // Live stock in the email decides whether a LINE is a pre-order (variant
+  // oversold) — no per-size tags needed. The only tag we keep is the ship date,
+  // set once while the batch is live, so the email can show "ships <date>".
+  const next = Array.from(new Set(
+    opts.active && opts.dispatchLabel ? [...base, `${PREORDER_SHIPS_TAG_PREFIX}${opts.dispatchLabel}`] : base,
+  ));
   const same = next.length === current.length && next.every((t) => current.includes(t));
   if (same) return;
   const result = await graphql<{ productUpdate?: { userErrors?: Array<{ message?: string }> } }>(
