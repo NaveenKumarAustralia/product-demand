@@ -105,6 +105,42 @@ function toVariantGid(value: string) {
   return numeric ? `gid://shopify/ProductVariant/${numeric}` : null;
 }
 
+let _preorderDefsEnsured = false;
+
+/**
+ * Create the metafield DEFINITIONS for the pre-order variant metafields. Without
+ * a definition a metafield is "unstructured" — visible in the Admin API but NOT
+ * to Liquid, so the confirmation-email banner can't read it (the exact bug that
+ * left PayPal/Shop-Pay pre-orders getting a plain email). Creating the definition
+ * with storefront read access adopts the existing values and makes them Liquid-
+ * visible (theme + notifications), retroactively — no re-stamping needed.
+ * Idempotent: an already-created definition returns a TAKEN userError we ignore.
+ */
+export async function ensurePreorderMetafieldDefinitions(shop: string, token: string): Promise<{ created: string[]; existing: string[]; errors: string[] }> {
+  const defs = [
+    { name: "Pre-order", namespace: "karmaeast", key: "preorder", type: "boolean", description: "Marks a variant that is currently on pre-order (set by the pre-order app)." },
+    { name: "Pre-order dispatch", namespace: "karmaeast", key: "dispatch", type: "single_line_text_field", description: "Expected dispatch label for a pre-order variant, e.g. \"12 Oct 2026\"." },
+  ];
+  const created: string[] = [], existing: string[] = [], errors: string[] = [];
+  for (const d of defs) {
+    const result = await graphql<{ metafieldDefinitionCreate?: { createdDefinition?: { id?: string } | null; userErrors?: Array<{ code?: string; message?: string }> } }>(
+      shop, token, `#graphql
+        mutation KeDefCreate($def: MetafieldDefinitionInput!) {
+          metafieldDefinitionCreate(definition: $def) {
+            createdDefinition { id }
+            userErrors { code message }
+          }
+        }
+      `, { def: { name: d.name, namespace: d.namespace, key: d.key, description: d.description, type: d.type, ownerType: "PRODUCTVARIANT", access: { admin: "MERCHANT_READ_WRITE", storefront: "PUBLIC_READ" } } },
+    );
+    const errs = result.metafieldDefinitionCreate?.userErrors ?? [];
+    if (result.metafieldDefinitionCreate?.createdDefinition?.id) created.push(d.key);
+    else if (errs.some((e) => (e.code ?? "").toUpperCase() === "TAKEN")) existing.push(d.key);
+    else if (errs.length) errors.push(`${d.key}: ${errs.map((e) => e.message || e.code || "error").join("; ")}`);
+  }
+  return { created, existing, errors };
+}
+
 /**
  * Set the pre-order metafields on a batch's variants so the confirmation email
  * (and storefront) can detect a pre-order from the VARIANT itself — this makes
@@ -116,6 +152,13 @@ function toVariantGid(value: string) {
 export async function setVariantsPreorderMetafields(shop: string, token: string, variantIds: string[], opts: { preorder: boolean; dispatchLabel: string | null }): Promise<void> {
   const owners = Array.from(new Set(variantIds.map(toVariantGid).filter(Boolean))) as string[];
   if (!owners.length) return;
+  // Ensure the definitions exist once per process so the values are Liquid-visible
+  // (needed for the notification email to read them). Best-effort.
+  if (!_preorderDefsEnsured) {
+    _preorderDefsEnsured = true;
+    try { await ensurePreorderMetafieldDefinitions(shop, token); }
+    catch (e) { _preorderDefsEnsured = false; console.warn("[preorder] ensure metafield definitions failed:", e instanceof Error ? e.message : e); }
+  }
   const metafields = owners.flatMap((ownerId) => ([
     { ownerId, namespace: "karmaeast", key: "preorder", type: "boolean", value: opts.preorder ? "true" : "false" },
     { ownerId, namespace: "karmaeast", key: "dispatch", type: "single_line_text_field", value: opts.dispatchLabel ?? "" },
