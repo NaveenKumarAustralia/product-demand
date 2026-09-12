@@ -35,9 +35,10 @@ export async function setPreorderNotifyEnabled(enabled: boolean, actorName: stri
 // the WHOLE order (in-stock items too) so it all ships together when the batch
 // lands, instead of shipping the in-stock part separately. Saves a second parcel
 // when the pre-order stock is about to arrive anyway. 0 disables (always ship
-// in-stock immediately). Default 8 days.
+// in-stock immediately). Default 0 = OFF — only the pre-order line is held, the
+// in-stock items ship straight away. Set > 0 in settings to combine again.
 export const PREORDER_COMBINE_WINDOW_KEY = "preorder-combine-window-days-v1";
-export const PREORDER_COMBINE_WINDOW_DEFAULT = 8;
+export const PREORDER_COMBINE_WINDOW_DEFAULT = 0;
 
 export async function getPreorderCombineWindowDays(): Promise<number> {
   const setting = await prisma.portalSetting.findUnique({

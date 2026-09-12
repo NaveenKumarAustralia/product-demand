@@ -1,7 +1,7 @@
 import prisma from "./../db.server";
 import { KARMA_EAST_PREORDER_PLAN_PREFIX } from "./preorder-shopify-order-normalize";
 import { reservePreorderLine, PreorderCapacityError } from "./preorder-allocation.server";
-import { getOfflineToken, getAvailableAtLocation, addOrderTags, holdOrderOpenFulfillmentOrders } from "./preorder-fulfillment.server";
+import { getOfflineToken, getAvailableAtLocation, addOrderTags, holdPreorderLinesOnly } from "./preorder-fulfillment.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
 import { getPreorderLocationSettings, locationForMarket } from "./preorder-locations.server";
 import { marketFromDestination, type PreorderMarket } from "./preorder-rules.server";
@@ -156,27 +156,39 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
   const token = await getOfflineToken(shop);
   if (!token) return { scannedOrders, candidates, converted: 0, errors: [{ order: "-", error: "No offline token / missing scopes." }], applied: true, skippedNoScope: true };
   let converted = 0;
-  const taggedOrders = new Set<string>();
+  // Group candidates by order so we tag once and hold ONLY the pre-order lines
+  // (in-stock lines in the same order keep shipping now).
+  const byOrder = new Map<string, MissedLine[]>();
   for (const c of candidates) {
-    try {
-      await reservePreorderLine({
-        shop, shopifyOrderId: c.orderIdNumeric, shopifyOrderName: c.order,
-        shopifyLineItemId: c.lineId, productId: null, variantId: c.variantId,
-        variantTitle: c.size, sku: null, market: c.market, quantity: c.qty,
-        customerEmail: null, preferredSupplierOrderId: c.batchId,
-      });
-      converted += 1;
-    } catch (error) {
-      errors.push({ order: c.order, error: error instanceof PreorderCapacityError ? error.message : (error instanceof Error ? error.message : String(error)) });
-      continue;
-    }
-    if (!taggedOrders.has(c.orderIdNumeric)) {
-      taggedOrders.add(c.orderIdNumeric);
+    const list = byOrder.get(c.orderIdNumeric) ?? [];
+    list.push(c);
+    byOrder.set(c.orderIdNumeric, list);
+  }
+  for (const [orderIdNumeric, cs] of byOrder) {
+    const capturedLineIds: string[] = [];
+    const capturedBatchIds = new Set<number>();
+    for (const c of cs) {
       try {
-        await addOrderTags(shop, token, c.orderIdNumeric, ["pre-order", `pre-order-batch-${c.batchId}`, "pre-order-hold"]);
-        await holdOrderOpenFulfillmentOrders(shop, token, c.orderIdNumeric, "Captured missed pre-order — held until the batch lands");
+        await reservePreorderLine({
+          shop, shopifyOrderId: c.orderIdNumeric, shopifyOrderName: c.order,
+          shopifyLineItemId: c.lineId, productId: null, variantId: c.variantId,
+          variantTitle: c.size, sku: null, market: c.market, quantity: c.qty,
+          customerEmail: null, preferredSupplierOrderId: c.batchId,
+        });
+        converted += 1;
+        capturedLineIds.push(c.lineId);
+        capturedBatchIds.add(c.batchId);
       } catch (error) {
-        errors.push({ order: c.order, error: `tag/hold: ${error instanceof Error ? error.message : String(error)}` });
+        errors.push({ order: c.order, error: error instanceof PreorderCapacityError ? error.message : (error instanceof Error ? error.message : String(error)) });
+      }
+    }
+    if (capturedLineIds.length) {
+      const batchTags = Array.from(capturedBatchIds).map((id) => `pre-order-batch-${id}`);
+      try {
+        await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, "pre-order-hold"]);
+        await holdPreorderLinesOnly(shop, token, orderIdNumeric, capturedLineIds, "Captured missed pre-order — held until the batch lands");
+      } catch (error) {
+        errors.push({ order: cs[0].order, error: `tag/hold: ${error instanceof Error ? error.message : String(error)}` });
       }
     }
   }
@@ -226,8 +238,8 @@ export async function captureNoPlanLinesForOrder(
   const alreadyReserved = new Set((await prisma.preorderReservation.findMany({ where: { shopifyOrderId: orderIdNumeric }, select: { shopifyLineItemId: true } })).map((r) => r.shopifyLineItemId));
   const stockCache = new Map<string, number>();
   let captured = 0;
-  let tagged = false;
-  let taggedBatchId: number | null = null;
+  const capturedLineIds: string[] = [];
+  const capturedBatchIds = new Set<number>();
   for (const line of lines) {
     const vnum = numericId(line.variantId);
     const hits = variantToBatches.get(vnum);
@@ -245,19 +257,22 @@ export async function captureNoPlanLinesForOrder(
     try {
       await reservePreorderLine({ shop, shopifyOrderId: orderIdNumeric, shopifyOrderName: orderName, shopifyLineItemId: line.lineId, productId: null, variantId: line.variantId, variantTitle: line.size, sku: null, market: hit.market, quantity: line.qty, customerEmail: null, preferredSupplierOrderId: hit.batchId });
       captured += 1;
-      taggedBatchId = hit.batchId;
+      capturedLineIds.push(line.lineId);
+      capturedBatchIds.add(hit.batchId);
     } catch (error) {
       console.warn(`[preorder realtime capture] ${orderName} reserve failed:`, error instanceof PreorderCapacityError ? error.message : (error instanceof Error ? error.message : String(error)));
       continue;
     }
-    if (!tagged) {
-      tagged = true;
-      try {
-        await addOrderTags(shop, token, orderIdNumeric, ["pre-order", `pre-order-batch-${taggedBatchId}`, "pre-order-hold"]);
-        await holdOrderOpenFulfillmentOrders(shop, token, orderIdNumeric, "Captured missed pre-order (no selling plan) — held until the batch lands");
-      } catch (error) {
-        console.warn(`[preorder realtime capture] ${orderName} tag/hold failed:`, error instanceof Error ? error.message : String(error));
-      }
+  }
+  // Tag once, and hold ONLY the pre-order lines — in-stock lines in the same
+  // order keep shipping now (they're split into their own fulfilment order).
+  if (capturedLineIds.length) {
+    const batchTags = Array.from(capturedBatchIds).map((id) => `pre-order-batch-${id}`);
+    try {
+      await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, "pre-order-hold"]);
+      await holdPreorderLinesOnly(shop, token, orderIdNumeric, capturedLineIds, "Captured missed pre-order (no selling plan) — held until the batch lands");
+    } catch (error) {
+      console.warn(`[preorder realtime capture] ${orderName} tag/hold failed:`, error instanceof Error ? error.message : String(error));
     }
   }
   return { captured };

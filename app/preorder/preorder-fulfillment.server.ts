@@ -208,6 +208,76 @@ export async function holdOrderOpenFulfillmentOrders(shop: string, token: string
   return held;
 }
 
+/**
+ * Hold ONLY the pre-order lines of an order, leaving in-stock lines free to ship
+ * now. A no-plan order (Shop Pay / PayPal) has all items in one OPEN fulfilment
+ * order, so we SPLIT the pre-order lines into their own fulfilment order and hold
+ * just that; the remainder stays OPEN. `preorderLineItemIds` are numeric Shopify
+ * LineItem ids (the reserved pre-order lines). Returns how many FOs were held.
+ */
+export async function holdPreorderLinesOnly(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], reasonNotes: string): Promise<number> {
+  const wanted = new Set(preorderLineItemIds.map((id) => String(id).replace(/\D/g, "")).filter(Boolean));
+  if (!wanted.size) return 0;
+  const data = await graphql<{ order?: { fulfillmentOrders?: { nodes?: Array<{
+    id: string; status?: string;
+    lineItems?: { nodes?: Array<{ id: string; remainingQuantity?: number; lineItem?: { id?: string } }> };
+  }> } } }>(
+    shop, token, `#graphql
+      query PreorderFOLines($id: ID!) {
+        order(id: $id) {
+          fulfillmentOrders(first: 25) {
+            nodes { id status lineItems(first: 50) { nodes { id remainingQuantity lineItem { id } } } }
+          }
+        }
+      }
+    `, { id: `gid://shopify/Order/${orderIdNumeric}` },
+  );
+  const open = (data.order?.fulfillmentOrders?.nodes ?? []).filter((fo) => fo.status === "OPEN");
+  let held = 0;
+  for (const fo of open) {
+    const foLines = fo.lineItems?.nodes ?? [];
+    const preLines = foLines.filter((l) => wanted.has(String(l.lineItem?.id ?? "").replace(/\D/g, "")));
+    if (!preLines.length) continue; // no pre-order line here → leave OPEN (ships now)
+
+    let holdTargetId = fo.id;
+    // Mixed FO (has non-pre-order lines too) → split the pre-order lines into a
+    // new FO so the in-stock lines keep shipping. All lines are pre-order → hold
+    // the FO directly (no split needed).
+    const isMixed = preLines.length < foLines.length;
+    if (isMixed) {
+      const split = await graphql<{ fulfillmentOrderSplit?: {
+        fulfillmentOrderSplits?: Array<{ fulfillmentOrder?: { id?: string } }>;
+        userErrors?: Array<{ message?: string }>;
+      } }>(
+        shop, token, `#graphql
+          mutation PreorderSplitFO($splits: [FulfillmentOrderSplitInput!]!) {
+            fulfillmentOrderSplit(fulfillmentOrderSplits: $splits) {
+              fulfillmentOrderSplits { fulfillmentOrder { id } }
+              userErrors { message }
+            }
+          }
+        `, { splits: [{ fulfillmentOrderId: fo.id, fulfillmentOrderLineItems: preLines.map((l) => ({ id: l.id, quantity: Math.max(1, Number(l.remainingQuantity) || 1) })) }] },
+      );
+      const serr = split.fulfillmentOrderSplit?.userErrors;
+      if (serr?.length) throw new PreorderFulfillmentError(serr.map((e) => e.message || "split error").join("; "));
+      const newId = split.fulfillmentOrderSplit?.fulfillmentOrderSplits?.[0]?.fulfillmentOrder?.id;
+      if (newId) holdTargetId = newId;
+    }
+
+    const result = await graphql<{ fulfillmentOrderHold?: { userErrors?: Array<{ message?: string }> } }>(
+      shop, token, `#graphql
+        mutation PreorderHoldLine($id: ID!, $hold: FulfillmentOrderHoldInput!) {
+          fulfillmentOrderHold(id: $id, fulfillmentHold: $hold) { userErrors { message } }
+        }
+      `, { id: holdTargetId, hold: { reason: "OTHER", reasonNotes } },
+    );
+    const errs = result.fulfillmentOrderHold?.userErrors;
+    if (errs?.length) throw new PreorderFulfillmentError(errs.map((e) => e.message || "hold error").join("; "));
+    held += 1;
+  }
+  return held;
+}
+
 export async function addOrderTags(shop: string, token: string, orderIdNumeric: string, tags: string[]): Promise<void> {
   if (!tags.length) return;
   const result = await graphql<{ tagsAdd?: { userErrors?: Array<{ message?: string }> } }>(
