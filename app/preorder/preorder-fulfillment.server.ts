@@ -105,6 +105,47 @@ function toVariantGid(value: string) {
   return numeric ? `gid://shopify/ProductVariant/${numeric}` : null;
 }
 
+function toProductGid(value: string | null) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  if (text.startsWith("gid://shopify/Product/")) return text;
+  const numeric = text.replace(/[^0-9]/g, "");
+  return numeric ? `gid://shopify/Product/${numeric}` : null;
+}
+
+const PREORDER_FLAG_TAG = "Pre-order";
+const PREORDER_SHIPS_TAG_PREFIX = "Pre-order ships ";
+
+/**
+ * Tag/untag a product as a pre-order so the confirmation email can detect it
+ * RELIABLY (notification Liquid reads `line.product.tags`, unlike variant
+ * metafields). Adds `Pre-order` + `Pre-order ships <label>` when a batch is live
+ * and strips them when it isn't. Read-modify-write so a changed date replaces the
+ * old ships tag and unrelated tags are untouched. Best-effort; needs write_products.
+ */
+export async function setProductPreorderTag(shop: string, token: string, productId: string | null, opts: { active: boolean; dispatchLabel: string | null }): Promise<void> {
+  const gid = toProductGid(productId);
+  if (!gid) return;
+  const data = await graphql<{ product?: { id?: string; tags?: string[] } }>(
+    shop, token, `#graphql query KePreorderProdTags($id: ID!) { product(id: $id) { id tags } }`, { id: gid },
+  );
+  if (!data.product?.id) return;
+  const current = (data.product.tags ?? []).map((t) => String(t));
+  const base = current.filter((t) => { const s = t.trim(); return s !== PREORDER_FLAG_TAG && !s.startsWith(PREORDER_SHIPS_TAG_PREFIX); });
+  const next = opts.active
+    ? [...base, PREORDER_FLAG_TAG, ...(opts.dispatchLabel ? [`${PREORDER_SHIPS_TAG_PREFIX}${opts.dispatchLabel}`] : [])]
+    : base;
+  const same = next.length === current.length && next.every((t) => current.includes(t));
+  if (same) return;
+  const result = await graphql<{ productUpdate?: { userErrors?: Array<{ message?: string }> } }>(
+    shop, token, `#graphql
+      mutation KePreorderProdTagUpdate($input: ProductInput!) { productUpdate(input: $input) { userErrors { message } } }
+    `, { input: { id: gid, tags: next } },
+  );
+  const errs = result.productUpdate?.userErrors;
+  if (errs?.length) throw new PreorderFulfillmentError(errs.map((e) => e.message || "productUpdate error").join("; "));
+}
+
 let _preorderDefsEnsured = false;
 
 /**
