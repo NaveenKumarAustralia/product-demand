@@ -1,4 +1,5 @@
 import prisma from "../db.server";
+import { getPreorderCombineWindowDays } from "./preorder-storefront-settings.server";
 
 // Shopify write helpers for the pre-order auto-release: read stock at a location,
 // release fulfilment holds, and add/remove order tags. All require scopes the app
@@ -284,13 +285,17 @@ async function splitFulfillmentOrder(shop: string, token: string, foId: string, 
  * ENTIRELY pre-order — so we hold the right side by fact, never by guessing which
  * side of the split it is. Returns whether anything changed and how many FOs held.
  */
-export async function normalizeOrderPreorderHolds(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], reasonNotes: string): Promise<{ changed: boolean; held: number }> {
+export async function normalizeOrderPreorderHolds(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], reasonNotes: string): Promise<{ changed: boolean; held: number; fullyHeld: boolean }> {
   const wanted = new Set(preorderLineItemIds.map((id) => String(id).replace(/\D/g, "")).filter(Boolean));
-  if (!wanted.size) return { changed: false, held: 0 };
+  if (!wanted.size) return { changed: false, held: 0, fullyHeld: false };
   const isPre = (l: { lineItem?: { id?: string } }) => wanted.has(String(l.lineItem?.id ?? "").replace(/\D/g, ""));
 
   let fos = await fetchOrderFulfillmentOrders(shop, token, orderIdNumeric);
   const active = fos.filter((fo) => fo.status === "OPEN" || fo.status === "ON_HOLD");
+  // fullyHeld = the order is entirely pre-order (no in-stock line ships now). Used
+  // to decide the order-level `pre-order-hold` tag (Pick Pack sets the whole order
+  // aside) — only when there's nothing shipping now.
+  const fullyHeld = !active.some((fo) => (fo.lineItems?.nodes ?? []).some((l) => !isPre(l)));
   // Already correct? Every held FO is all-pre-order AND no OPEN FO holds a pre-order line.
   let correct = true;
   for (const fo of active) {
@@ -298,7 +303,7 @@ export async function normalizeOrderPreorderHolds(shop: string, token: string, o
     if (fo.status === "ON_HOLD" && lines.some((l) => !isPre(l))) correct = false; // in-stock held
     if (fo.status === "OPEN" && lines.some(isPre)) correct = false;                // pre-order not held
   }
-  if (correct) return { changed: false, held: 0 };
+  if (correct) return { changed: false, held: 0, fullyHeld };
 
   // (2) Release every held FO → OPEN + splittable.
   for (const fo of active) if (fo.status === "ON_HOLD") await releaseFulfillmentOrderGraceful(shop, token, fo.id);
@@ -318,13 +323,32 @@ export async function normalizeOrderPreorderHolds(shop: string, token: string, o
     const lines = fo.lineItems?.nodes ?? [];
     if (lines.length && lines.every(isPre)) { await holdFulfillmentOrderGraceful(shop, token, fo.id, reasonNotes); held += 1; }
   }
-  return { changed: true, held };
+  return { changed: true, held, fullyHeld };
 }
 
 /** Hold only the pre-order lines of a new order (thin wrapper over normalize). */
 export async function holdPreorderLinesOnly(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], reasonNotes: string): Promise<number> {
   const r = await normalizeOrderPreorderHolds(shop, token, orderIdNumeric, preorderLineItemIds, reasonNotes);
   return r.held;
+}
+
+/**
+ * The ONE pre-order hold policy, shared by both order paths:
+ *  - if the earliest pre-order dispatch is within the combine window → hold the
+ *    WHOLE order so it ships together;
+ *  - otherwise → hold ONLY the pre-order line(s); in-stock lines ship now.
+ * Returns whether the whole order ended up held, so the caller can decide the
+ * order-level `pre-order-hold` tag (Pick Pack sets the whole order aside).
+ */
+export async function applyPreorderHoldPolicy(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], earliestDispatchMs: number | null): Promise<{ wholeOrderHeld: boolean }> {
+  const windowDays = await getPreorderCombineWindowDays();
+  const combine = windowDays > 0 && earliestDispatchMs != null && earliestDispatchMs <= Date.now() + windowDays * 86400000;
+  if (combine) {
+    const held = await holdOrderOpenFulfillmentOrders(shop, token, orderIdNumeric, "Held to ship with the pre-order item in this order (combine window)");
+    return { wholeOrderHeld: held > 0 };
+  }
+  const r = await normalizeOrderPreorderHolds(shop, token, orderIdNumeric, preorderLineItemIds, "Pre-order — held until the batch lands");
+  return { wholeOrderHeld: r.fullyHeld };
 }
 
 async function holdFulfillmentOrderGraceful(shop: string, token: string, foId: string, reasonNotes: string): Promise<void> {

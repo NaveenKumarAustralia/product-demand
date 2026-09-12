@@ -368,9 +368,10 @@ export async function deactivatePreorderSellingPlan(input: {
   const accessToken = await offlineAccessToken(order.shop);
   await assertActivationScopes(order.shop, accessToken);
 
-  // Restore normal sold-out behaviour on the variants we opened for pre-order.
+  // Restore normal sold-out behaviour on EVERY variant in the batch (not just the
+  // still-outstanding ones) — a variant that fully received while live would keep
+  // a stray CONTINUE + pre-order flag/tag otherwise.
   const variantIds = order.lines
-    .filter((line) => line.qtyOrdered - line.qtyReceived > 0)
     .map((line) => String(line.variantId ?? "").trim())
     .filter(Boolean);
   await setVariantsInventoryPolicy(order.shop, accessToken, order.productId, variantIds, "DENY").catch((error) => {

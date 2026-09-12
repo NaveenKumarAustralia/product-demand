@@ -1,7 +1,7 @@
 import prisma from "./../db.server";
 import { KARMA_EAST_PREORDER_PLAN_PREFIX } from "./preorder-shopify-order-normalize";
 import { reservePreorderLine, PreorderCapacityError } from "./preorder-allocation.server";
-import { getOfflineToken, getAvailableAtLocation, addOrderTags, holdPreorderLinesOnly } from "./preorder-fulfillment.server";
+import { getOfflineToken, getAvailableAtLocation, addOrderTags, applyPreorderHoldPolicy } from "./preorder-fulfillment.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
 import { getPreorderLocationSettings, locationForMarket } from "./preorder-locations.server";
 import { marketFromDestination, type PreorderMarket } from "./preorder-rules.server";
@@ -50,12 +50,24 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
   ]);
   const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
   const liveIds = enabledSettings.map((s) => s.supplierOrderId).filter((id) => activatedIds.has(id));
-  const batches = liveIds.length
-    ? await prisma.supplierOrder.findMany({
-        where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } },
-        select: { id: true, destination: true, lines: { select: { variantId: true } } },
-      })
-    : [];
+  const [batches, batchSettings] = await Promise.all([
+    liveIds.length
+      ? prisma.supplierOrder.findMany({
+          where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } },
+          select: { id: true, destination: true, eta: true, lines: { select: { variantId: true } } },
+        })
+      : Promise.resolve([]),
+    liveIds.length
+      ? prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: liveIds } }, select: { supplierOrderId: true, shipDate: true } })
+      : Promise.resolve([]),
+  ]);
+  const shipByBatch = new Map(batchSettings.map((b) => [b.supplierOrderId, b.shipDate ? b.shipDate.getTime() : null]));
+  const dispatchMsForBatch = (id: number): number | null => {
+    const s = shipByBatch.get(id);
+    if (s != null) return s;
+    const b = batches.find((x) => x.id === id);
+    return b?.eta ? b.eta.getTime() : null;
+  };
   // variant → the live batch(es) it belongs to. Keyed by variant only (NOT by the
   // customer's market): the stock that fulfils a pre-order comes from the batch's
   // own warehouse, so a US customer buying an item whose only live batch is AU is
@@ -184,9 +196,13 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
     }
     if (capturedLineIds.length) {
       const batchTags = Array.from(capturedBatchIds).map((id) => `pre-order-batch-${id}`);
+      const earliestDispatchMs = Array.from(capturedBatchIds)
+        .map(dispatchMsForBatch)
+        .filter((ms): ms is number => ms != null)
+        .reduce<number | null>((min, ms) => (min == null || ms < min ? ms : min), null);
       try {
-        await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, "pre-order-hold"]);
-        await holdPreorderLinesOnly(shop, token, orderIdNumeric, capturedLineIds, "Captured missed pre-order — held until the batch lands");
+        const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, capturedLineIds, earliestDispatchMs);
+        await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, ...(wholeOrderHeld ? ["pre-order-hold"] : [])]);
       } catch (error) {
         errors.push({ order: cs[0].order, error: `tag/hold: ${error instanceof Error ? error.message : String(error)}` });
       }
@@ -212,10 +228,21 @@ export async function captureNoPlanLinesForOrder(
   const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
   const liveIds = enabledSettings.map((s) => s.supplierOrderId).filter((id) => activatedIds.has(id));
   if (!liveIds.length) return { captured: 0 };
-  const batches = await prisma.supplierOrder.findMany({
-    where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } },
-    select: { id: true, destination: true, lines: { select: { variantId: true } } },
-  });
+  const [batches, batchSettings] = await Promise.all([
+    prisma.supplierOrder.findMany({
+      where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } },
+      select: { id: true, destination: true, eta: true, lines: { select: { variantId: true } } },
+    }),
+    prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: liveIds } }, select: { supplierOrderId: true, shipDate: true } }),
+  ]);
+  // Earliest promised dispatch per batch (shipDate, else ETA) → for the combine window.
+  const shipByBatch = new Map(batchSettings.map((b) => [b.supplierOrderId, b.shipDate ? b.shipDate.getTime() : null]));
+  const dispatchMsForBatch = (id: number): number | null => {
+    const s = shipByBatch.get(id);
+    if (s != null) return s;
+    const b = batches.find((x) => x.id === id);
+    return b?.eta ? b.eta.getTime() : null;
+  };
   // Keyed by variant only — a US order that draws on an AU batch is still a real
   // pre-order (it ships from AU stock). Prefer the customer's own market when a
   // pool exists there; otherwise fall back to any live batch for that variant.
@@ -264,13 +291,19 @@ export async function captureNoPlanLinesForOrder(
       continue;
     }
   }
-  // Tag once, and hold ONLY the pre-order lines — in-stock lines in the same
-  // order keep shipping now (they're split into their own fulfilment order).
+  // Apply the shared hold policy (line-only, or whole-order if within the combine
+  // window), then tag. `pre-order-hold` (Pick Pack sets the whole order aside) is
+  // added ONLY when the whole order is actually held — a mixed order whose in-stock
+  // items ship now gets `pre-order` but not `pre-order-hold`.
   if (capturedLineIds.length) {
     const batchTags = Array.from(capturedBatchIds).map((id) => `pre-order-batch-${id}`);
+    const earliestDispatchMs = Array.from(capturedBatchIds)
+      .map(dispatchMsForBatch)
+      .filter((ms): ms is number => ms != null)
+      .reduce<number | null>((min, ms) => (min == null || ms < min ? ms : min), null);
     try {
-      await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, "pre-order-hold"]);
-      await holdPreorderLinesOnly(shop, token, orderIdNumeric, capturedLineIds, "Captured missed pre-order (no selling plan) — held until the batch lands");
+      const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, capturedLineIds, earliestDispatchMs);
+      await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, ...(wholeOrderHeld ? ["pre-order-hold"] : [])]);
     } catch (error) {
       console.warn(`[preorder realtime capture] ${orderName} tag/hold failed:`, error instanceof Error ? error.message : String(error));
     }
