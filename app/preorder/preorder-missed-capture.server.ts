@@ -327,12 +327,13 @@ export async function captureNoPlanLinesForOrder(
 // expected dispatch date.
 export async function listAffectedForFollowup(opts: { days?: number } = {}): Promise<{
   scannedOrders: number; orders: string[]; affected: Array<{ order: string; orderId: string; email: string | null; customerName: string | null; market: PreorderMarket; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }>;
+  liveBatchCount: number; variantsTracked: number; queryErrors: string[];
 }> {
   const days = Math.max(1, Math.min(120, Math.floor(opts.days ?? 14)));
   const session = await prisma.session.findFirst({
     where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true, accessToken: true },
   });
-  if (!session?.accessToken) return { scannedOrders: 0, orders: [], affected: [] };
+  if (!session?.accessToken) return { scannedOrders: 0, orders: [], affected: [], liveBatchCount: 0, variantsTracked: 0, queryErrors: ["no offline Shopify session"] };
   const { shop, accessToken } = session;
 
   const [enabledSettings, registry, batchSettings, locations] = await Promise.all([
@@ -361,10 +362,11 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
       variantToBatches.set(num, arr);
     }
   }
-  if (!variantToBatches.size) return { scannedOrders: 0, orders: [], affected: [] };
+  if (!variantToBatches.size) return { scannedOrders: 0, orders: [], affected: [], liveBatchCount: liveIds.length, variantsTracked: 0, queryErrors: [] };
 
   const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
   const affected: Array<{ order: string; orderId: string; email: string | null; customerName: string | null; market: PreorderMarket; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }> = [];
+  const queryErrors: string[] = [];
   const stockCache = new Map<string, number>();
   let scannedOrders = 0;
   let cursor: string | null = null;
@@ -384,7 +386,7 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
       }),
     });
     const json = await res.json() as { data?: { orders?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ id: string; name: string; email: string | null; cancelledAt: string | null; customer?: { firstName?: string | null; lastName?: string | null } | null; shippingAddress?: { countryCodeV2?: string | null } | null; billingAddress?: { countryCodeV2?: string | null } | null; lineItems?: { nodes?: Array<{ title: string | null; quantity: number; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> } }> } }; errors?: Array<{ message?: string }> };
-    if (json.errors?.length) break;
+    if (json.errors?.length) { queryErrors.push(...json.errors.map((e) => e.message || "Shopify GraphQL error")); break; }
     const nodes = json.data?.orders?.nodes ?? [];
     for (const order of nodes) {
       scannedOrders += 1;
@@ -419,7 +421,7 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
     cursor = pi.endCursor;
   }
   const orders = Array.from(new Set(affected.map((a) => a.order)));
-  return { scannedOrders, orders, affected };
+  return { scannedOrders, orders, affected, liveBatchCount: liveIds.length, variantsTracked: variantToBatches.size, queryErrors };
 }
 
 // Run the capture automatically so missed pre-orders (Shop Pay / quick-add /

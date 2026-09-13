@@ -21,8 +21,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true } });
   const shop = session?.shop ?? "";
 
-  const { scannedOrders, affected } = await listAffectedForFollowup({ days });
+  const { scannedOrders, affected, liveBatchCount, variantsTracked, queryErrors } = await listAffectedForFollowup({ days });
   const usa = affected.filter((a) => a.market === "USA");
+  const auCount = affected.filter((a) => a.market === "AU").length;
 
   // Group the affected lines by order so each customer is one card.
   const byOrder = new Map<string, { order: string; orderId: string; email: string | null; customerName: string | null; lines: Array<{ product: string | null; size: string | null; qty: number; dispatch: string | null }> }>();
@@ -94,10 +95,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     </div>
 
     ${orders.length === 0
-      ? `<div class="empty">🎉 No USA orders need follow-up in the last ${days} days.</div>`
+      ? `<div class="empty">${
+          queryErrors.length
+            ? `⚠️ Couldn't read orders from Shopify:<br><strong>${esc(queryErrors.join("; "))}</strong>`
+            : liveBatchCount === 0
+              ? `No live pre-order batches right now, so there's nothing to check.`
+              : variantsTracked === 0
+                ? `${liveBatchCount} live batch(es) found, but none have variants to match against.`
+                : scannedOrders === 0
+                  ? `Live batches found (${liveBatchCount}), but Shopify returned 0 paid orders in the last ${days} days — likely the app's order access is limited to a shorter window, or protected-order-data access. Tell me this and I'll fix the query.`
+                  : `🎉 No USA orders need follow-up in the last ${days} days.`
+        }</div>`
       : `<table><thead><tr><th>Order</th><th>Customer</th><th>Pre-order item(s)</th><th>Message</th></tr></thead><tbody>${rows}</tbody></table>`}
 
-    <p class="meta">Only lists items that are still out of stock (genuinely awaiting the batch). Refreshes live each time you open this page. Change the window with ?days=N (max 120).</p>
+    <p class="meta">Diagnostics — live batches: ${liveBatchCount} · variants tracked: ${variantsTracked} · paid orders scanned: ${scannedOrders} · AU matches (not shown): ${auCount}${queryErrors.length ? ` · errors: ${esc(queryErrors.join("; "))}` : ""}. Only lists items still out of stock (awaiting the batch). Live each load. Window: ?days=N (max 120).</p>
   </div>
   <script>
     function copyMsg(btn){
