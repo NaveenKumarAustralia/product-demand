@@ -326,7 +326,7 @@ export async function captureNoPlanLinesForOrder(
 // or shipped). Returns order #, customer email, product, size, and the batch's
 // expected dispatch date.
 export async function listAffectedForFollowup(opts: { days?: number } = {}): Promise<{
-  scannedOrders: number; orders: string[]; affected: Array<{ order: string; email: string | null; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }>;
+  scannedOrders: number; orders: string[]; affected: Array<{ order: string; orderId: string; email: string | null; customerName: string | null; market: PreorderMarket; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }>;
 }> {
   const days = Math.max(1, Math.min(120, Math.floor(opts.days ?? 14)));
   const session = await prisma.session.findFirst({
@@ -364,7 +364,7 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
   if (!variantToBatches.size) return { scannedOrders: 0, orders: [], affected: [] };
 
   const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
-  const affected: Array<{ order: string; email: string | null; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }> = [];
+  const affected: Array<{ order: string; orderId: string; email: string | null; customerName: string | null; market: PreorderMarket; product: string | null; size: string | null; qty: number; batchId: number; dispatch: string | null }> = [];
   const stockCache = new Map<string, number>();
   let scannedOrders = 0;
   let cursor: string | null = null;
@@ -376,14 +376,14 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
           query Affected($q: String!, $cursor: String) {
             orders(first: 100, after: $cursor, query: $q, sortKey: CREATED_AT, reverse: true) {
               pageInfo { hasNextPage endCursor }
-              nodes { name email cancelledAt shippingAddress { countryCodeV2 } billingAddress { countryCodeV2 }
+              nodes { id name email cancelledAt customer { firstName lastName } shippingAddress { countryCodeV2 } billingAddress { countryCodeV2 }
                 lineItems(first: 50) { nodes { title quantity variant { id title } sellingPlan { name } } } }
             }
           }`,
         variables: { q: `created_at:>=${sinceIso} financial_status:paid`, cursor },
       }),
     });
-    const json = await res.json() as { data?: { orders?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ name: string; email: string | null; cancelledAt: string | null; shippingAddress?: { countryCodeV2?: string | null } | null; billingAddress?: { countryCodeV2?: string | null } | null; lineItems?: { nodes?: Array<{ title: string | null; quantity: number; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> } }> } }; errors?: Array<{ message?: string }> };
+    const json = await res.json() as { data?: { orders?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ id: string; name: string; email: string | null; cancelledAt: string | null; customer?: { firstName?: string | null; lastName?: string | null } | null; shippingAddress?: { countryCodeV2?: string | null } | null; billingAddress?: { countryCodeV2?: string | null } | null; lineItems?: { nodes?: Array<{ title: string | null; quantity: number; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> } }> } }; errors?: Array<{ message?: string }> };
     if (json.errors?.length) break;
     const nodes = json.data?.orders?.nodes ?? [];
     for (const order of nodes) {
@@ -410,7 +410,8 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
           stockCache.set(stockKey, available);
         }
         if (available > 0) continue;
-        affected.push({ order: order.name, email: order.email, product: line.title, size: line.variant?.title ?? null, qty: line.quantity, batchId: hit.batchId, dispatch: hit.dispatch });
+        const customerName = [order.customer?.firstName, order.customer?.lastName].map((s) => (s ?? "").trim()).filter(Boolean).join(" ") || null;
+        affected.push({ order: order.name, orderId: numericId(order.id), email: order.email, customerName, market, product: line.title, size: line.variant?.title ?? null, qty: line.quantity, batchId: hit.batchId, dispatch: hit.dispatch });
       }
     }
     const pi = json.data?.orders?.pageInfo;
