@@ -5,6 +5,11 @@ import { getOfflineToken, getAvailableAtLocation, addOrderTags, applyPreorderHol
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
 import { getPreorderLocationSettings, locationForMarket } from "./preorder-locations.server";
 import { marketFromDestination, type PreorderMarket } from "./preorder-rules.server";
+import { preorderExpectedLabel } from "./preorder-selling-plan";
+
+// One pre-order line as the Klaviyo "Pre-order Placed" email needs it: the
+// product name, the size, and the batch's expected dispatch date (label text).
+export type PreorderPlacedItem = { title: string | null; size: string | null; dispatch: string | null };
 
 const API_VERSION = "2025-10";
 const numericId = (gid: string) => String(gid ?? "").split("/").pop()?.replace(/[^0-9]/g, "") ?? "";
@@ -218,8 +223,8 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
 export async function captureNoPlanLinesForOrder(
   shop: string, orderIdNumeric: string, orderName: string | null, market: PreorderMarket,
   lines: Array<{ lineId: string; variantId: string; qty: number; size: string | null; title: string | null }>,
-): Promise<{ captured: number }> {
-  if (!lines.length) return { captured: 0 };
+): Promise<{ captured: number; items: PreorderPlacedItem[] }> {
+  if (!lines.length) return { captured: 0, items: [] };
   const [enabledSettings, registry, locations] = await Promise.all([
     prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true } }),
     getPreorderSellingPlanRegistryEntries(shop),
@@ -227,7 +232,7 @@ export async function captureNoPlanLinesForOrder(
   ]);
   const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
   const liveIds = enabledSettings.map((s) => s.supplierOrderId).filter((id) => activatedIds.has(id));
-  if (!liveIds.length) return { captured: 0 };
+  if (!liveIds.length) return { captured: 0, items: [] };
   const [batches, batchSettings] = await Promise.all([
     prisma.supplierOrder.findMany({
       where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } },
@@ -258,15 +263,16 @@ export async function captureNoPlanLinesForOrder(
       variantToBatches.set(num, arr);
     }
   }
-  if (!variantToBatches.size) return { captured: 0 };
+  if (!variantToBatches.size) return { captured: 0, items: [] };
 
   const token = await getOfflineToken(shop);
-  if (!token) return { captured: 0 };
+  if (!token) return { captured: 0, items: [] };
   const alreadyReserved = new Set((await prisma.preorderReservation.findMany({ where: { shopifyOrderId: orderIdNumeric }, select: { shopifyLineItemId: true } })).map((r) => r.shopifyLineItemId));
   const stockCache = new Map<string, number>();
   let captured = 0;
   const capturedLineIds: string[] = [];
   const capturedBatchIds = new Set<number>();
+  const items: PreorderPlacedItem[] = [];
   for (const line of lines) {
     const vnum = numericId(line.variantId);
     const hits = variantToBatches.get(vnum);
@@ -286,6 +292,8 @@ export async function captureNoPlanLinesForOrder(
       captured += 1;
       capturedLineIds.push(line.lineId);
       capturedBatchIds.add(hit.batchId);
+      const ms = dispatchMsForBatch(hit.batchId);
+      items.push({ title: line.title, size: line.size, dispatch: ms != null ? preorderExpectedLabel(new Date(ms)) : null });
     } catch (error) {
       console.warn(`[preorder realtime capture] ${orderName} reserve failed:`, error instanceof PreorderCapacityError ? error.message : (error instanceof Error ? error.message : String(error)));
       continue;
@@ -308,7 +316,7 @@ export async function captureNoPlanLinesForOrder(
       console.warn(`[preorder realtime capture] ${orderName} tag/hold failed:`, error instanceof Error ? error.message : String(error));
     }
   }
-  return { captured };
+  return { captured, items };
 }
 
 // Read-only list of EVERY order that bought a live pre-order variant WITHOUT the

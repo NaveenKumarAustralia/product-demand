@@ -3,6 +3,7 @@ const KLAVIYO_REVISION = "2026-07-15";
 
 export const KLAVIYO_BACK_IN_STOCK_METRIC = "Karma East Back In Stock Available";
 export const KLAVIYO_PREORDER_UPDATE_METRIC = "Karma East Preorder Update";
+export const KLAVIYO_PREORDER_PLACED_METRIC = "Karma East Pre-order Placed";
 
 export type KlaviyoEventInput = {
   email: string;
@@ -83,6 +84,41 @@ export async function createKlaviyoEvent(input: KlaviyoEventInput) {
   }
 
   return { accepted: true as const, email, metric, uniqueId };
+}
+
+/**
+ * Fire a "Pre-order Placed" event the moment the app confirms an order contains
+ * a pre-order (i.e. a held/reserved pre-order line). This is how NO-PLAN orders
+ * (Shop Pay / PayPal / express — which Shopify's confirmation email cannot flag)
+ * tell the customer they've bought a pre-order: a Klaviyo flow on this metric
+ * sends a branded "your order includes a pre-order — ships <date>" email. The
+ * app is the source of truth (it held the order), so this is 100% reliable on
+ * every checkout path. Idempotent per order via unique_id.
+ */
+export function sendPreorderPlacedEvent(input: {
+  shop: string;
+  orderId: string;
+  orderName: string | null;
+  email: string;
+  market: "AU" | "USA";
+  items: Array<{ title: string | null; size: string | null; dispatch: string | null }>;
+}) {
+  return createKlaviyoEvent({
+    email: input.email,
+    metric: KLAVIYO_PREORDER_PLACED_METRIC,
+    uniqueId: `preorder-placed:${input.shop}:${input.orderId}`,
+    properties: {
+      shop: input.shop,
+      order_id: input.orderId,
+      order_name: input.orderName ?? null,
+      market: input.market,
+      // First item's date drives the headline; the full list is included so the
+      // Klaviyo template can list each pre-order line with its own dispatch date.
+      dispatch: input.items.find((i) => i.dispatch)?.dispatch ?? null,
+      items: input.items,
+      source: "karma-east-production-portal",
+    },
+  });
 }
 
 export function sendBackInStockAvailableEvent(input: {
