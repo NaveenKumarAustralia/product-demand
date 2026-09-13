@@ -24,7 +24,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true } });
   const shop = session?.shop ?? "";
 
-  const { scannedOrders, affected, liveBatchCount, variantsTracked, queryErrors } = await listAffectedForFollowup({ days });
+  const { scannedOrders, affected, liveBatchCount, variantsTracked, queryErrors, truncated, oldestScannedIso } = await listAffectedForFollowup({ days });
   const shownLines = marketFilter === "all" ? affected : affected.filter((a) => a.market === marketFilter);
   const usaCount = new Set(affected.filter((a) => a.market === "USA").map((a) => a.order)).size;
   const auCount = new Set(affected.filter((a) => a.market === "AU").map((a) => a.order)).size;
@@ -38,6 +38,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
   const orders = Array.from(byOrder.values());
 
+  // Independent cross-check: which of these orders has our system ALREADY reserved
+  // (captured + held)? A reservation is separate proof the order is a genuine
+  // pre-order. "Not captured" = it slipped past auto-capture and still needs it.
+  const orderIds = orders.map((o) => o.orderId).filter(Boolean);
+  const reserved = orderIds.length
+    ? await prisma.preorderReservation.findMany({ where: { shopifyOrderId: { in: orderIds }, status: "reserved" }, select: { shopifyOrderId: true } }).catch(() => [])
+    : [];
+  const capturedSet = new Set(reserved.map((r) => r.shopifyOrderId));
+  const heldCount = orders.filter((o) => capturedSet.has(o.orderId)).length;
+  const oldestScanned = oldestScannedIso ? new Date(oldestScannedIso).toISOString().slice(0, 10) : null;
+
   const messageFor = (g: (typeof orders)[number]) => {
     const name = (g.customerName ?? "").trim().split(" ")[0] || "there";
     const itemsText = g.lines.map((l) => `${l.product ?? "item"}${l.size ? ` (size ${l.size})` : ""}${l.dispatch ? ` — estimated dispatch ${l.dispatch}` : ""}`).join("; ");
@@ -49,9 +60,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const items = g.lines.map((l) => `<li>${esc(l.product ?? "item")}${l.size ? ` &middot; <strong>size ${esc(l.size)}</strong>` : ""} &times; ${esc(l.qty)}${l.dispatch ? ` <span class="disp">ships ~ ${esc(l.dispatch)}</span>` : ""}</li>`).join("");
     const msg = messageFor(g);
     const flag = g.market === "USA" ? "🇺🇸 USA" : "🇦🇺 AU";
+    const held = capturedSet.has(g.orderId);
+    const badge = held ? `<span class="badge ok" title="Our system has reserved &amp; held this order — confirmed pre-order">✓ holding</span>` : `<span class="badge warn" title="Not yet reserved by the system — run the capture-missed tool">⚠ not captured</span>`;
     return `
     <tr>
-      <td class="ord">${adminUrl ? `<a href="${esc(adminUrl)}" target="_blank" rel="noopener">${esc(g.order)}</a>` : esc(g.order)}<div class="mkt">${flag}</div></td>
+      <td class="ord">${adminUrl ? `<a href="${esc(adminUrl)}" target="_blank" rel="noopener">${esc(g.order)}</a>` : esc(g.order)}<div class="mkt">${flag}</div><div>${badge}</div></td>
       <td>${esc(g.customerName ?? "—")}<br><span class="email">${esc(g.email ?? "no email on order")}</span></td>
       <td><ul class="items">${items}</ul></td>
       <td class="msgcell">
@@ -92,6 +105,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     details{margin-top:8px}
     summary{cursor:pointer;color:var(--muted);font-size:12px}
     .msg{margin-top:6px;background:#faf9f6;border:1px solid var(--line);border-radius:6px;padding:10px;font-size:13px;color:#333;white-space:pre-wrap}
+    .badge{display:inline-block;margin-top:4px;font-size:11px;font-weight:700;padding:2px 7px;border-radius:999px}
+    .badge.ok{background:#e5f2ea;color:#2f6f43}
+    .badge.warn{background:#fdf0e3;color:#9a5b12}
+    .verify{background:#eef4f4;border:1px solid #cfe0df}
+    .verify li{margin:3px 0}
+    .warnbox{color:#9a5b12;font-weight:600}
     .empty{background:#fff;border:1px solid var(--line);border-radius:10px;padding:28px;text-align:center;color:var(--muted)}
     .meta{color:var(--muted);font-size:12px;margin-top:24px}
     @media print{.copy,summary,.tabs{display:none}details .msg{display:block}body{background:#fff}}
@@ -108,6 +127,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     <div class="card">
       <h2>What to tell each customer</h2>
       <p style="margin:0">These customers bought an item that is actually a <strong>pre-order</strong> (out of stock, being made), but their order didn't flag it as a pre-order at checkout — so they don't know. For each order below: contact the customer, let them know the item is a pre-order with the estimated dispatch date, and ask whether they're happy to <strong>wait</strong> or would prefer we <strong>cancel &amp; refund</strong> just that item. Use the <em>Copy message</em> button for a ready-to-send note (edit as you like).</p>
+    </div>
+
+    <div class="card verify">
+      <h2>How this list was checked</h2>
+      <p style="margin:0 0 8px">Every order here independently passes all three tests — that's what "the customer didn't know" means:</p>
+      <ul style="margin:0 0 10px">
+        <li><strong>No Karma East selling plan</strong> on the line → Shopify's confirmation email had nothing to flag, so they weren't told.</li>
+        <li><strong>Still unfulfilled</strong> → the item hasn't shipped; they're genuinely waiting (already-shipped orders are excluded).</li>
+        <li><strong>Out of stock</strong> at the fulfilment location → it's awaiting the batch, not shippable now.</li>
+      </ul>
+      <p style="margin:0 0 8px">Independent cross-check against our own records: <strong>${heldCount} of ${orders.length}</strong> shown ${orders.length === 1 ? "order is" : "orders are"} already <span class="badge ok">✓ holding</span> (the system reserved &amp; held them — separate proof they're real pre-orders). Any <span class="badge warn">⚠ not captured</span> slipped past auto-capture and should be reserved — run <code>/api/preorder-capture-missed?days=${days}&amp;apply=1</code>.</p>
+      <p style="margin:0" class="${truncated ? "warnbox" : ""}">Coverage: scanned <strong>${scannedOrders}</strong> paid orders${oldestScanned ? ` back to <strong>${esc(oldestScanned)}</strong>` : ""} in the last ${days} days. ${truncated ? "⚠ Hit the 2,000-order scan cap — orders OLDER than the date above were NOT checked, so a few older ones could be missing. Tell me and I'll raise the cap or you can narrow the window." : "✓ Full window covered — the scan reached the end, nothing older was skipped."}</p>
     </div>
 
     ${orders.length === 0
