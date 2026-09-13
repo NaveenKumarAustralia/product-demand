@@ -15,7 +15,6 @@ import { getOfflineToken, addOrderTags, holdOrderOpenFulfillmentOrders } from ".
 import { getPreorderCombineWindowDays } from "./preorder-storefront-settings.server";
 import { captureNoPlanLinesForOrder, type PreorderPlacedItem } from "./preorder-missed-capture.server";
 import { sendPreorderPlacedEvent } from "./preorder-klaviyo.server";
-import { preorderExpectedLabel } from "./preorder-selling-plan";
 
 const API_VERSION = "2025-10";
 
@@ -151,23 +150,25 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
   // instant the order lands — reserve + tag + hold. This is what makes every
   // checkout path a proper pre-order without waiting for the scheduler.
   let capturedMissed = 0;
-  const preorderItems: PreorderPlacedItem[] = [];
+  const noPlanItems: PreorderPlacedItem[] = [];
   if (normalized.noPlanLines.length) {
     try {
       const r = await captureNoPlanLinesForOrder(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.market, normalized.noPlanLines);
       capturedMissed = r.captured;
-      preorderItems.push(...r.items);
+      noPlanItems.push(...r.items);
     } catch (error) {
       console.warn("[preorder] real-time missed capture failed:", error instanceof Error ? error.message : error);
     }
   }
 
+  // Klaviyo "Pre-order Placed" email fires ONLY for NO-PLAN lines (Shop Pay /
+  // PayPal / express). Plan/button orders already show the pre-order block in the
+  // Shopify order-confirmation email, so we deliberately don't double-email them.
+  // A mixed order (plan + no-plan line) still notifies about its no-plan line only.
+  await firePreorderPlacedEvent(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.customerEmail, normalized.market, noPlanItems);
+
   // No lines carry our selling plan → nothing more to reserve via the plan path.
-  // Still notify the customer if we captured a no-plan pre-order line above.
-  if (!normalized.lines.length) {
-    await firePreorderPlacedEvent(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.customerEmail, normalized.market, preorderItems);
-    return { preorder: capturedMissed > 0, reservations: capturedMissed };
-  }
+  if (!normalized.lines.length) return { preorder: capturedMissed > 0, reservations: capturedMissed };
 
   // Tag the order so Pick Pack handles it: a fully pre-order order gets
   // `pre-order-hold` (Pick Pack sets it aside entirely); a mixed order gets
@@ -216,15 +217,10 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
         preferredSupplierOrderId: line.preferredSupplierOrderId,
       });
       reservations += rows.reduce((sum, row) => sum + row.quantity, 0);
-      let lineShipDate: string | Date | null = null;
       for (const row of rows) {
         const t = row.expectedShipDate ? new Date(row.expectedShipDate).getTime() : NaN;
-        if (Number.isFinite(t)) {
-          if (earliestShipMs === null || t < earliestShipMs) earliestShipMs = t;
-          if (lineShipDate === null) lineShipDate = row.expectedShipDate;
-        }
+        if (Number.isFinite(t) && (earliestShipMs === null || t < earliestShipMs)) earliestShipMs = t;
       }
-      preorderItems.push({ title: line.productTitle, size: line.variantTitle, dispatch: lineShipDate ? preorderExpectedLabel(lineShipDate) : null });
     }
 
     // "Combine window": for a MIXED order whose pre-order is due within N days,
@@ -250,7 +246,6 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
       }
     }
 
-    await firePreorderPlacedEvent(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.customerEmail, normalized.market, preorderItems);
     return { preorder: true, reservations, market: normalized.market };
   } catch (error) {
     await releasePreorderOrder(shop, normalized.shopifyOrderId).catch(() => undefined);
