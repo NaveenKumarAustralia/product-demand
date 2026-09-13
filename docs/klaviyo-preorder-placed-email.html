@@ -1,0 +1,96 @@
+<!--
+  Karma East — "Pre-order Placed" email for the Klaviyo flow.
+  Trigger metric: Karma East Pre-order Placed
+
+  Paste this whole file into a Klaviyo email's HTML editor
+  (Email action → Edit content → choose the "</> HTML" / plain HTML editor,
+   or a Text block set to HTML). Klaviyo fills in the {{ event.* }} values.
+
+  Available event properties:
+    {{ event.order_name }}   e.g. #386380K
+    {{ event.dispatch }}     first/earliest dispatch label, e.g. 12 Oct 2025
+    {{ event.market }}       AU or USA
+    {{ event.items }}        list of { title, size, dispatch }
+-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f2ee;margin:0;padding:24px 0;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background:#ffffff;border:1px solid #e7e3dc;">
+
+        <!-- Brand bar -->
+        <tr>
+          <td style="background:#006061;padding:22px 32px;">
+            <div style="font-family:Georgia,'Times New Roman',serif;font-size:22px;letter-spacing:3px;color:#ffffff;text-transform:uppercase;">Karma East</div>
+          </td>
+        </tr>
+
+        <!-- Heading -->
+        <tr>
+          <td style="padding:36px 32px 8px 32px;">
+            <div style="font-family:Georgia,'Times New Roman',serif;font-size:26px;line-height:1.25;color:#1c1c1c;">Your order includes a pre-order</div>
+          </td>
+        </tr>
+
+        <!-- Intro -->
+        <tr>
+          <td style="padding:6px 32px 0 32px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#4a4a4a;">
+            Thank you for your order <strong>{{ event.order_name|default:'' }}</strong>. One or more items in your order are <strong>pre-order</strong> pieces — reserved just for you and dispatched as soon as they arrive with us.
+          </td>
+        </tr>
+
+        <!-- Dispatch badge -->
+        <tr>
+          <td style="padding:24px 32px 0 32px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
+              <tr>
+                <td style="background:#eef4f4;border-left:4px solid #006061;padding:16px 20px;font-family:Arial,Helvetica,sans-serif;">
+                  <div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#006061;">Estimated dispatch</div>
+                  <div style="font-size:20px;color:#1c1c1c;margin-top:4px;">{{ event.dispatch|default:'We will confirm your date shortly' }}</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <!-- Pre-order items -->
+        <tr>
+          <td style="padding:28px 32px 0 32px;font-family:Arial,Helvetica,sans-serif;">
+            <div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#8a8a8a;border-bottom:1px solid #e7e3dc;padding-bottom:8px;">Pre-order items</div>
+            {% for item in event.items %}
+            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
+              <tr>
+                <td style="padding:12px 0;border-bottom:1px solid #f0ede7;">
+                  <div style="font-size:15px;color:#1c1c1c;">{{ item.title|default:'Pre-order item' }}{% if item.size %} &nbsp;·&nbsp; <span style="color:#6a6a6a;">Size {{ item.size }}</span>{% endif %}</div>
+                  {% if item.dispatch %}<div style="font-size:13px;color:#006061;margin-top:2px;">Ships around {{ item.dispatch }}</div>{% endif %}
+                </td>
+              </tr>
+            </table>
+            {% endfor %}
+          </td>
+        </tr>
+
+        <!-- Reassurance -->
+        <tr>
+          <td style="padding:26px 32px 0 32px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#4a4a4a;">
+            Any in-stock items in your order are on their way now and may arrive separately. There's nothing you need to do — we'll email you again when your pre-order ships. Dates are estimates and can shift slightly; we'll always keep you posted.
+          </td>
+        </tr>
+
+        <!-- Sign off -->
+        <tr>
+          <td style="padding:24px 32px 40px 32px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#4a4a4a;">
+            With love,<br><strong>The Karma East Team</strong>
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="background:#faf8f5;padding:20px 32px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9a9a9a;border-top:1px solid #e7e3dc;">
+            You're receiving this because you placed an order with Karma East.
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
