@@ -157,7 +157,7 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
   const noPlanItems: PreorderPlacedItem[] = [];
   if (normalized.noPlanLines.length) {
     try {
-      const r = await captureNoPlanLinesForOrder(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.market, normalized.noPlanLines);
+      const r = await captureNoPlanLinesForOrder(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.market, normalized.noPlanLines, normalized.customerEmail);
       capturedMissed = r.captured;
       noPlanItems.push(...r.items);
     } catch (error) {

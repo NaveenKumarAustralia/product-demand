@@ -16,7 +16,7 @@ const numericId = (gid: string) => String(gid ?? "").split("/").pop()?.replace(/
 
 type MissedLine = {
   order: string; orderIdNumeric: string; lineId: string; variantId: string; title: string | null; size: string | null;
-  qty: number; market: PreorderMarket; batchId: number; available: number;
+  qty: number; market: PreorderMarket; batchId: number; available: number; email: string | null;
 };
 
 /**
@@ -112,7 +112,7 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
             orders(first: 60, after: $cursor, query: $q, sortKey: CREATED_AT, reverse: true) {
               pageInfo { hasNextPage endCursor }
               nodes {
-                id name cancelledAt
+                id name email cancelledAt
                 shippingAddress { countryCodeV2 }
                 billingAddress { countryCodeV2 }
                 lineItems(first: 50) { nodes { id quantity title variant { id title } sellingPlan { name } } }
@@ -124,7 +124,7 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
       }),
     });
     const json = await res.json() as { data?: { orders?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{
-      id: string; name: string; cancelledAt: string | null;
+      id: string; name: string; email: string | null; cancelledAt: string | null;
       shippingAddress?: { countryCodeV2?: string | null } | null;
       billingAddress?: { countryCodeV2?: string | null } | null;
       lineItems?: { nodes?: Array<{ id: string; quantity: number; title: string | null; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> };
@@ -160,7 +160,7 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
           stockCache.set(stockKey, available);
         }
         if (available > 0) continue; // had stock → normal sale, not a pre-order
-        candidates.push({ order: order.name, orderIdNumeric, lineId, variantId: String(line.variant?.id ?? ""), title: line.title, size: line.variant?.title ?? null, qty: Number(line.quantity), market: hit.market, batchId: hit.batchId, available });
+        candidates.push({ order: order.name, orderIdNumeric, lineId, variantId: String(line.variant?.id ?? ""), title: line.title, size: line.variant?.title ?? null, qty: Number(line.quantity), market: hit.market, batchId: hit.batchId, available, email: order.email ?? null });
       }
     }
     const pi = json.data?.orders?.pageInfo;
@@ -190,7 +190,7 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
           shop, shopifyOrderId: c.orderIdNumeric, shopifyOrderName: c.order,
           shopifyLineItemId: c.lineId, productId: null, variantId: c.variantId,
           variantTitle: c.size, sku: null, market: c.market, quantity: c.qty,
-          customerEmail: null, preferredSupplierOrderId: c.batchId,
+          customerEmail: c.email, preferredSupplierOrderId: c.batchId,
         });
         converted += 1;
         capturedLineIds.push(c.lineId);
@@ -223,6 +223,7 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
 export async function captureNoPlanLinesForOrder(
   shop: string, orderIdNumeric: string, orderName: string | null, market: PreorderMarket,
   lines: Array<{ lineId: string; variantId: string; qty: number; size: string | null; title: string | null; image?: string | null }>,
+  customerEmail: string | null = null,
 ): Promise<{ captured: number; items: PreorderPlacedItem[] }> {
   if (!lines.length) return { captured: 0, items: [] };
   const [enabledSettings, registry, locations] = await Promise.all([
@@ -288,7 +289,7 @@ export async function captureNoPlanLinesForOrder(
     }
     if (available > 0) continue; // in-stock size → normal sale, not a pre-order
     try {
-      await reservePreorderLine({ shop, shopifyOrderId: orderIdNumeric, shopifyOrderName: orderName, shopifyLineItemId: line.lineId, productId: null, variantId: line.variantId, variantTitle: line.size, sku: null, market: hit.market, quantity: line.qty, customerEmail: null, preferredSupplierOrderId: hit.batchId });
+      await reservePreorderLine({ shop, shopifyOrderId: orderIdNumeric, shopifyOrderName: orderName, shopifyLineItemId: line.lineId, productId: null, variantId: line.variantId, variantTitle: line.size, sku: null, market: hit.market, quantity: line.qty, customerEmail, preferredSupplierOrderId: hit.batchId });
       captured += 1;
       capturedLineIds.push(line.lineId);
       capturedBatchIds.add(hit.batchId);
