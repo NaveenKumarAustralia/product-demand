@@ -379,13 +379,13 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
             orders(first: 100, after: $cursor, query: $q, sortKey: CREATED_AT, reverse: true) {
               pageInfo { hasNextPage endCursor }
               nodes { id name email cancelledAt shippingAddress { countryCodeV2 firstName lastName } billingAddress { countryCodeV2 firstName lastName }
-                lineItems(first: 50) { nodes { title quantity variant { id title } sellingPlan { name } } } }
+                lineItems(first: 50) { nodes { title quantity unfulfilledQuantity variant { id title } sellingPlan { name } } } }
             }
           }`,
         variables: { q: `created_at:>=${sinceIso} financial_status:paid`, cursor },
       }),
     });
-    const json = await res.json() as { data?: { orders?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ id: string; name: string; email: string | null; cancelledAt: string | null; shippingAddress?: { countryCodeV2?: string | null; firstName?: string | null; lastName?: string | null } | null; billingAddress?: { countryCodeV2?: string | null; firstName?: string | null; lastName?: string | null } | null; lineItems?: { nodes?: Array<{ title: string | null; quantity: number; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> } }> } }; errors?: Array<{ message?: string }> };
+    const json = await res.json() as { data?: { orders?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ id: string; name: string; email: string | null; cancelledAt: string | null; shippingAddress?: { countryCodeV2?: string | null; firstName?: string | null; lastName?: string | null } | null; billingAddress?: { countryCodeV2?: string | null; firstName?: string | null; lastName?: string | null } | null; lineItems?: { nodes?: Array<{ title: string | null; quantity: number; unfulfilledQuantity?: number | null; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> } }> } }; errors?: Array<{ message?: string }> };
     if (json.errors?.length) { queryErrors.push(...json.errors.map((e) => e.message || "Shopify GraphQL error")); break; }
     const nodes = json.data?.orders?.nodes ?? [];
     for (const order of nodes) {
@@ -395,6 +395,11 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
       const market: PreorderMarket = country === "US" ? "USA" : "AU";
       for (const line of order.lineItems?.nodes ?? []) {
         if ((line.sellingPlan?.name ?? "").startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX)) continue;
+        // Skip lines that have ALREADY shipped — those customers got their item
+        // (it was in stock at the time); it's only OOS now. Following them up to
+        // "wait or cancel" would be wrong. Only still-unfulfilled lines are
+        // genuinely waiting on the batch.
+        if (Number(line.unfulfilledQuantity ?? line.quantity ?? 0) <= 0) continue;
         const vnum = numericId(String(line.variant?.id ?? ""));
         const hits = variantToBatches.get(vnum);
         if (!hits?.length) continue;
