@@ -378,14 +378,14 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
           query Affected($q: String!, $cursor: String) {
             orders(first: 100, after: $cursor, query: $q, sortKey: CREATED_AT, reverse: true) {
               pageInfo { hasNextPage endCursor }
-              nodes { id name email cancelledAt customer { firstName lastName } shippingAddress { countryCodeV2 } billingAddress { countryCodeV2 }
+              nodes { id name email cancelledAt shippingAddress { countryCodeV2 firstName lastName } billingAddress { countryCodeV2 firstName lastName }
                 lineItems(first: 50) { nodes { title quantity variant { id title } sellingPlan { name } } } }
             }
           }`,
         variables: { q: `created_at:>=${sinceIso} financial_status:paid`, cursor },
       }),
     });
-    const json = await res.json() as { data?: { orders?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ id: string; name: string; email: string | null; cancelledAt: string | null; customer?: { firstName?: string | null; lastName?: string | null } | null; shippingAddress?: { countryCodeV2?: string | null } | null; billingAddress?: { countryCodeV2?: string | null } | null; lineItems?: { nodes?: Array<{ title: string | null; quantity: number; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> } }> } }; errors?: Array<{ message?: string }> };
+    const json = await res.json() as { data?: { orders?: { pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }; nodes?: Array<{ id: string; name: string; email: string | null; cancelledAt: string | null; shippingAddress?: { countryCodeV2?: string | null; firstName?: string | null; lastName?: string | null } | null; billingAddress?: { countryCodeV2?: string | null; firstName?: string | null; lastName?: string | null } | null; lineItems?: { nodes?: Array<{ title: string | null; quantity: number; variant?: { id?: string | null; title?: string | null } | null; sellingPlan?: { name?: string | null } | null }> } }> } }; errors?: Array<{ message?: string }> };
     if (json.errors?.length) { queryErrors.push(...json.errors.map((e) => e.message || "Shopify GraphQL error")); break; }
     const nodes = json.data?.orders?.nodes ?? [];
     for (const order of nodes) {
@@ -412,7 +412,8 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
           stockCache.set(stockKey, available);
         }
         if (available > 0) continue;
-        const customerName = [order.customer?.firstName, order.customer?.lastName].map((s) => (s ?? "").trim()).filter(Boolean).join(" ") || null;
+        const addr = order.shippingAddress ?? order.billingAddress ?? null;
+        const customerName = [addr?.firstName, addr?.lastName].map((s) => (s ?? "").trim()).filter(Boolean).join(" ") || null;
         affected.push({ order: order.name, orderId: numericId(order.id), email: order.email, customerName, market, product: line.title, size: line.variant?.title ?? null, qty: line.quantity, batchId: hit.batchId, dispatch: hit.dispatch });
       }
     }

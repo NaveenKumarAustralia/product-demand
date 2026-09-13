@@ -44,7 +44,6 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
         query PreorderOrder($id: ID!) {
           order(id: $id) {
             id name email
-            customer { firstName }
             shippingAddress { countryCodeV2 firstName }
             billingAddress { countryCodeV2 firstName }
             lineItems(first: 100) {
@@ -60,7 +59,6 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
   const json = await response.json() as {
     data?: { order?: {
       id: string; name: string | null; email: string | null;
-      customer?: { firstName?: string | null } | null;
       shippingAddress?: { countryCodeV2?: string | null; firstName?: string | null } | null;
       billingAddress?: { countryCodeV2?: string | null; firstName?: string | null } | null;
       lineItems?: { nodes?: Array<{
@@ -109,7 +107,7 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
     shopifyOrderId: numericId(order.id),
     shopifyOrderName: order.name ?? null,
     customerEmail: order.email ?? null,
-    customerFirstName: order.customer?.firstName ?? order.shippingAddress?.firstName ?? order.billingAddress?.firstName ?? null,
+    customerFirstName: order.shippingAddress?.firstName ?? order.billingAddress?.firstName ?? null,
     market,
     lines,
     noPlanLines,
