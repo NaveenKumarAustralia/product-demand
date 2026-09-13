@@ -29,15 +29,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const orderId = `test-${orderName.replace(/[^0-9a-zA-Z]/g, "")}-${email.length}`;
 
   try {
+    const sampleImg = "https://d3k81ch9hvuctc.cloudfront.net/company/Th9m73/images/afa9f413-912d-4b29-a659-dc11e54d92b7.png";
     const res = await sendPreorderPlacedEvent({
       shop: "karma-east-test",
       orderId,
       orderName,
       email,
+      customerName: url.searchParams.get("name") || "John",
       market: "AU",
       items: [
-        { title: "Pippa Dress Clematis", size: "2XL", dispatch: "12 Oct 2025" },
-        { title: "Maddison Dress Shikari", size: "M", dispatch: "12 Oct 2025" },
+        { title: "Pippa Dress Clematis", size: "2XL", dispatch: "12 Oct 2025", image: sampleImg },
+        { title: "Maddison Dress Shikari", size: "M", dispatch: "28 Sept 2025", image: sampleImg },
       ],
     });
     return Response.json(

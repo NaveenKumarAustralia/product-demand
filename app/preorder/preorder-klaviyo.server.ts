@@ -100,8 +100,9 @@ export function sendPreorderPlacedEvent(input: {
   orderId: string;
   orderName: string | null;
   email: string;
+  customerName?: string | null;
   market: "AU" | "USA";
-  items: Array<{ title: string | null; size: string | null; dispatch: string | null }>;
+  items: Array<{ title: string | null; size: string | null; dispatch: string | null; image?: string | null }>;
 }) {
   return createKlaviyoEvent({
     email: input.email,
@@ -111,6 +112,7 @@ export function sendPreorderPlacedEvent(input: {
       shop: input.shop,
       order_id: input.orderId,
       order_name: input.orderName ?? null,
+      customer_name: input.customerName ?? null,
       market: input.market,
       // First item's date drives the headline; the full list is included so the
       // Klaviyo template can list each pre-order line with its own dispatch date.

@@ -44,10 +44,11 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
         query PreorderOrder($id: ID!) {
           order(id: $id) {
             id name email
-            shippingAddress { countryCodeV2 }
-            billingAddress { countryCodeV2 }
+            customer { firstName }
+            shippingAddress { countryCodeV2 firstName }
+            billingAddress { countryCodeV2 firstName }
             lineItems(first: 100) {
-              nodes { id quantity sku title variant { id title } sellingPlan { name } }
+              nodes { id quantity sku title image { url } variant { id title } sellingPlan { name } }
             }
           }
         }
@@ -59,10 +60,12 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
   const json = await response.json() as {
     data?: { order?: {
       id: string; name: string | null; email: string | null;
-      shippingAddress?: { countryCodeV2?: string | null } | null;
-      billingAddress?: { countryCodeV2?: string | null } | null;
+      customer?: { firstName?: string | null } | null;
+      shippingAddress?: { countryCodeV2?: string | null; firstName?: string | null } | null;
+      billingAddress?: { countryCodeV2?: string | null; firstName?: string | null } | null;
       lineItems?: { nodes?: Array<{
         id: string; quantity: number; sku: string | null; title: string | null;
+        image?: { url?: string | null } | null;
         variant?: { id?: string | null; title?: string | null } | null;
         sellingPlan?: { name?: string | null } | null;
       }> };
@@ -99,12 +102,14 @@ async function fetchPreorderOrderViaGraphql(shop: string, orderIdNumeric: string
       qty: Number(line.quantity),
       title: line.title ?? null,
       size: line.variant?.title ?? null,
+      image: line.image?.url ?? null,
     }));
 
   return {
     shopifyOrderId: numericId(order.id),
     shopifyOrderName: order.name ?? null,
     customerEmail: order.email ?? null,
+    customerFirstName: order.customer?.firstName ?? order.shippingAddress?.firstName ?? order.billingAddress?.firstName ?? null,
     market,
     lines,
     noPlanLines,
@@ -123,12 +128,13 @@ async function firePreorderPlacedEvent(
   orderId: string,
   orderName: string | null,
   email: string | null,
+  customerName: string | null,
   market: "AU" | "USA",
   items: PreorderPlacedItem[],
 ) {
   if (!email || !items.length) return;
   try {
-    await sendPreorderPlacedEvent({ shop, orderId, orderName, email, market, items });
+    await sendPreorderPlacedEvent({ shop, orderId, orderName, email, customerName, market, items });
   } catch (error) {
     // Not connected yet (no KLAVIYO_PRIVATE_API_KEY) or a transient API error —
     // log and move on. The reservation/hold already succeeded.
@@ -165,7 +171,7 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
   // PayPal / express). Plan/button orders already show the pre-order block in the
   // Shopify order-confirmation email, so we deliberately don't double-email them.
   // A mixed order (plan + no-plan line) still notifies about its no-plan line only.
-  await firePreorderPlacedEvent(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.customerEmail, normalized.market, noPlanItems);
+  await firePreorderPlacedEvent(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.customerEmail, normalized.customerFirstName, normalized.market, noPlanItems);
 
   // No lines carry our selling plan → nothing more to reserve via the plan path.
   if (!normalized.lines.length) return { preorder: capturedMissed > 0, reservations: capturedMissed };

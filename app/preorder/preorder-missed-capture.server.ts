@@ -9,7 +9,7 @@ import { preorderExpectedLabel } from "./preorder-selling-plan";
 
 // One pre-order line as the Klaviyo "Pre-order Placed" email needs it: the
 // product name, the size, and the batch's expected dispatch date (label text).
-export type PreorderPlacedItem = { title: string | null; size: string | null; dispatch: string | null };
+export type PreorderPlacedItem = { title: string | null; size: string | null; dispatch: string | null; image: string | null };
 
 const API_VERSION = "2025-10";
 const numericId = (gid: string) => String(gid ?? "").split("/").pop()?.replace(/[^0-9]/g, "") ?? "";
@@ -222,7 +222,7 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
 // Same tight gates as the batch capture. Idempotent.
 export async function captureNoPlanLinesForOrder(
   shop: string, orderIdNumeric: string, orderName: string | null, market: PreorderMarket,
-  lines: Array<{ lineId: string; variantId: string; qty: number; size: string | null; title: string | null }>,
+  lines: Array<{ lineId: string; variantId: string; qty: number; size: string | null; title: string | null; image?: string | null }>,
 ): Promise<{ captured: number; items: PreorderPlacedItem[] }> {
   if (!lines.length) return { captured: 0, items: [] };
   const [enabledSettings, registry, locations] = await Promise.all([
@@ -293,7 +293,7 @@ export async function captureNoPlanLinesForOrder(
       capturedLineIds.push(line.lineId);
       capturedBatchIds.add(hit.batchId);
       const ms = dispatchMsForBatch(hit.batchId);
-      items.push({ title: line.title, size: line.size, dispatch: ms != null ? preorderExpectedLabel(new Date(ms)) : null });
+      items.push({ title: line.title, size: line.size, dispatch: ms != null ? preorderExpectedLabel(new Date(ms)) : null, image: line.image ?? null });
     } catch (error) {
       console.warn(`[preorder realtime capture] ${orderName} reserve failed:`, error instanceof PreorderCapacityError ? error.message : (error instanceof Error ? error.message : String(error)));
       continue;

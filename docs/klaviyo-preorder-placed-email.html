@@ -1,82 +1,948 @@
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f2ee;margin:0;padding:24px 0;">
-  <tr>
-    <td align="center">
-      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;background:#ffffff;border:1px solid #e7e3dc;">
-
-        <!-- Brand bar -->
-        <tr>
-          <td style="background:#006061;padding:22px 32px;">
-            <div style="font-family:Georgia,'Times New Roman',serif;font-size:22px;letter-spacing:3px;color:#ffffff;text-transform:uppercase;">Karma East</div>
-          </td>
-        </tr>
-
-        <!-- Heading -->
-        <tr>
-          <td style="padding:36px 32px 8px 32px;">
-            <div style="font-family:Georgia,'Times New Roman',serif;font-size:26px;line-height:1.25;color:#1c1c1c;">Your order includes a pre-order</div>
-          </td>
-        </tr>
-
-        <!-- Intro -->
-        <tr>
-          <td style="padding:6px 32px 0 32px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#4a4a4a;">
-            Thank you for your order <strong>{{ event.order_name|default:'' }}</strong>. One or more items in your order are <strong>pre-order</strong> pieces — reserved just for you and dispatched as soon as they arrive with us.
-          </td>
-        </tr>
-
-        <!-- Dispatch badge -->
-        <tr>
-          <td style="padding:24px 32px 0 32px;">
-            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
-              <tr>
-                <td style="background:#eef4f4;border-left:4px solid #006061;padding:16px 20px;font-family:Arial,Helvetica,sans-serif;">
-                  <div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#006061;">Estimated dispatch</div>
-                  <div style="font-size:20px;color:#1c1c1c;margin-top:4px;">{{ event.dispatch|default:'We will confirm your date shortly' }}</div>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
-
-        <!-- Pre-order items -->
-        <tr>
-          <td style="padding:28px 32px 0 32px;font-family:Arial,Helvetica,sans-serif;">
-            <div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#8a8a8a;border-bottom:1px solid #e7e3dc;padding-bottom:8px;">Pre-order items</div>
-            {% for item in event.items %}
-            <table role="presentation" cellpadding="0" cellspacing="0" width="100%">
-              <tr>
-                <td style="padding:12px 0;border-bottom:1px solid #f0ede7;">
-                  <div style="font-size:15px;color:#1c1c1c;">{{ item.title|default:'Pre-order item' }}{% if item.size %} &nbsp;·&nbsp; <span style="color:#6a6a6a;">Size {{ item.size }}</span>{% endif %}</div>
-                  {% if item.dispatch %}<div style="font-size:13px;color:#006061;margin-top:2px;">Ships around {{ item.dispatch }}</div>{% endif %}
-                </td>
-              </tr>
-            </table>
-            {% endfor %}
-          </td>
-        </tr>
-
-        <!-- Reassurance -->
-        <tr>
-          <td style="padding:26px 32px 0 32px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#4a4a4a;">
-            Any in-stock items in your order are on their way now and may arrive separately. There's nothing you need to do — we'll email you again when your pre-order ships. Dates are estimates and can shift slightly; we'll always keep you posted.
-          </td>
-        </tr>
-
-        <!-- Sign off -->
-        <tr>
-          <td style="padding:24px 32px 40px 32px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#4a4a4a;">
-            With love,<br><strong>The Karma East Team</strong>
-          </td>
-        </tr>
-
-        <!-- Footer -->
-        <tr>
-          <td style="background:#faf8f5;padding:20px 32px;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#9a9a9a;border-top:1px solid #e7e3dc;">
-            You're receiving this because you placed an order with Karma East.
-          </td>
-        </tr>
-
-      </table>
-    </td>
-  </tr>
+what i am worried about is that customer doesnt know that they are purchasing pre order. and i did change the email temnplate <!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:v="urn:schemas-microsoft-com:vml">
+<head>
+<title>
+</title>
+<!--[if !mso]><!-->
+<meta content="IE=edge" http-equiv="X-UA-Compatible"/>
+<!--<![endif]-->
+<meta content="text/html; charset=utf-8" http-equiv="Content-Type"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<!--[if mso]>
+<noscript>
+<xml>
+<o:OfficeDocumentSettings>
+<o:AllowPNG/>
+<o:PixelsPerInch>96</o:PixelsPerInch>
+</o:OfficeDocumentSettings>
+</xml>
+</noscript>
+<![endif]-->
+<!--[if lte mso 11]>
+<style type="text/css" data-inliner="ignore">
+.mj-outlook-group-fix { width:100% !important; }
+</style>
+<![endif]-->
+<!--[if !mso]><!--><!--<![endif]-->
+<style>a:not([name]) {color:#006061;text-decoration:underline}
+a:link {color:#006061;text-decoration:underline}
+a:visited {color:#006061;text-decoration:underline}
+a:active {color:#006061;text-decoration:underline}
+a:hover {color:#006061;text-decoration:underline}</style><style>@import url(https://static-forms.klaviyo.com/fonts/api/v1/Th9m73/custom_fonts.css);
+#outlook a {
+padding: 0
+}
+body {
+margin: 0;
+padding: 0;
+-webkit-text-size-adjust: 100%;
+-ms-text-size-adjust: 100%
+}
+table, td {
+border-collapse: collapse;
+mso-table-lspace: 0;
+mso-table-rspace: 0
+}
+img {
+border: 0;
+line-height: 100%;
+outline: none;
+text-decoration: none;
+-ms-interpolation-mode: bicubic
+}
+p {
+display: block;
+margin: 13px 0
+}
+@media only screen and (min-width: 480px) {
+.mj-column-per-100 {
+width: 100% !important;
+max-width: 100%
+}
+}
+.moz-text-html .mj-column-per-100 {
+width: 100% !important;
+max-width: 100%
+}
+@media only screen and (max-width: 480px) {
+div.kl-row.colstack div.kl-column {
+display: block !important;
+width: 100% !important
+}
+}
+@media only screen and (max-width: 480px) {
+.component-wrapper .mob-no-spc {
+padding-left: 0 !important;
+padding-right: 0 !important
+}
+}
+@media only screen and (max-width: 480px) {
+td.kl-img-base-auto-width {
+width: 100% !important
+}
+}
+.hlb-subblk td {
+word-break: normal
+}
+@media only screen and (max-width: 480px) {
+.hlb-wrapper .hlb-block-settings-content {
+padding: 9px !important
+}
+.hlb-logo {
+padding-bottom: 9px !important
+}
+.r2-tbl {
+width: 100%
+}
+.r2-tbl .lnk {
+width: 100%
+}
+.r2-tbl .hlb-subblk:last-child {
+padding-right: 0 !important
+}
+.r2-tbl .hlb-subblk {
+padding-right: 10px !important
+}
+.kl-hlb-stack {
+display: block !important;
+width: 100% !important;
+padding-right: 0 !important
+}
+.kl-hlb-stack.vspc {
+margin-bottom: 9px
+}
+.kl-hlb-wrap {
+display: inline-block !important;
+width: auto !important
+}
+.kl-hlb-no-wrap {
+display: table-cell !important
+}
+.kl-hlb-wrap.nospc.nospc {
+padding-right: 0 !important
+}
+}
+@media only screen and (max-width: 480px) {
+.kl-split-subblock.top .spacer, .kl-split-subblock.bottom .spacer {
+padding: 0 !important
+}
+.kl-split-subblock.top .spacer {
+padding-bottom: 9px !important
+}
+.kl-split-subblock.top {
+display: table-header-group !important;
+width: 100% !important
+}
+.kl-split-subblock.bottom {
+display: table-footer-group !important;
+width: 100% !important
+}
+}
+@media only screen and (max-width: 480px) {
+.kl-table-subblock.use-legacy-mobile-padding {
+padding-left: 9px !important;
+padding-right: 9px !important
+}
+}
+@media screen and (max-width: 480px) {
+.kl-sl-stk {
+display: block !important;
+width: 100% !important;
+padding: 0 0 9px !important;
+text-align: center !important
+}
+.kl-sl-stk.lbls {
+padding: 0 !important
+}
+.kl-sl-stk.spcblk {
+display: none !important
+}
+}
+.kl-button a {
+display: block !important
+}
+img {
+border: 0;
+height: auto;
+line-height: 100%;
+outline: none;
+text-decoration: none;
+max-width: 100%
+}
+.root-container {
+background-repeat: repeat !important;
+background-size: auto !important;
+background-position: left top !important
+}
+.root-container-spacing {
+padding-top: 0 !important;
+padding-bottom: 20px !important;
+font-size: 0 !important
+}
+.content-padding {
+padding-left: 0 !important;
+padding-right: 0 !important
+}
+.content-padding.first {
+padding-top: 0 !important
+}
+.content-padding.last {
+padding-bottom: 0 !important
+}
+@media only screen and (max-width: 480px) {
+td.mobile-only {
+display: table-cell !important
+}
+div.mobile-only {
+display: block !important
+}
+table.mobile-only {
+display: table !important
+}
+.desktop-only {
+display: none !important
+}
+}
+@media only screen and (max-width: 480px) {
+.table-mobile-only {
+display: table-cell !important;
+max-height: none !important
+}
+.table-mobile-only.block {
+display: block !important
+}
+.table-mobile-only.inline-block {
+display: inline-block !important
+}
+.table-desktop-only {
+max-height: 0 !important;
+display: none !important;
+mso-hide: all !important;
+overflow: hidden !important
+}
+}
+p {
+margin-left: 0;
+margin-right: 0;
+margin-top: 0;
+margin-bottom: 0;
+padding-bottom: 1em
+}
+@media only screen and (max-width: 480px) {
+body.mce-content-body, /* NOTE: needed for internal tinymce styles */.kl-text > div, .kl-table-subblock div, .kl-split-subblock > div {
+font-size: 15px !important;
+line-height: 1.5 !important
+}
+}
+h1 {
+color: #222;
+font-family: "Karla", Helvetica, Arial, sans-serif;
+font-size: 40px;
+font-style: Normal;
+font-weight: 500;
+line-height: 1.1;
+letter-spacing: 0;
+margin: 0;
+margin-bottom: 20px;
+text-align: left
+}
+@media only screen and (max-width: 480px) {
+h1 {
+font-size: 40px !important;
+line-height: 1.1 !important
+}
+}
+h2 {
+color: #000;
+font-family: "Kanit", "Helvetica Neue", Helvetica, Arial, sans-serif;
+font-size: 32px;
+font-style: Normal;
+font-weight: 500;
+line-height: 1.1;
+letter-spacing: 0;
+margin: 0;
+margin-bottom: 16px;
+text-align: left
+}
+@media only screen and (max-width: 480px) {
+h2 {
+font-size: 32px !important;
+line-height: 1.1 !important
+}
+}
+h3 {
+color: #222;
+font-family: "Karla", Helvetica, Arial, sans-serif;
+font-size: 24px;
+font-style: Normal;
+font-weight: 500;
+line-height: 1.5;
+letter-spacing: 0;
+margin: 0;
+margin-bottom: 12px;
+text-align: left
+}
+@media only screen and (max-width: 480px) {
+h3 {
+font-size: 24px !important;
+line-height: 1.5 !important
+}
+}
+h4 {
+color: #222;
+font-family: "Karla", Helvetica, Arial, sans-serif;
+font-size: 14px;
+font-style: Normal;
+font-weight: 500;
+line-height: 1.1;
+letter-spacing: 0;
+margin: 0;
+margin-bottom: 0;
+text-align: left
+}
+@media only screen and (max-width: 480px) {
+h4 {
+font-size: 14px !important;
+line-height: 1.5 !important
+}
+}
+@media only screen and (max-width: 480px) {
+.root-container {
+width: 100% !important
+}
+.root-container-spacing {
+padding: 10px !important
+}
+.content-padding {
+padding-left: 0 !important;
+padding-right: 0 !important
+}
+.content-padding.first {
+padding-top: 0 !important
+}
+.content-padding.last {
+padding-bottom: 0 !important
+}
+.kl-column > .component-wrapper {
+padding-left: 0 !important;
+padding-right: 0 !important;
+width: unset !important
+}
+.kl-text {
+padding-right: 18px !important;
+padding-left: 18px !important
+}
+}</style></head>
+<body style="word-spacing:normal;background-color:#FFFFFF;">
+<!-- TRACKING_PIXEL_TOP -->
+<div class="root-container" id="bodyTable" style="background-color:#FFFFFF;">
+<div class="root-container-spacing">
+<table align="center" border="0" cellpadding="0" cellspacing="0" class="kl-section" role="presentation" style="width:100%;">
+<tbody>
+<tr>
+<td>
+<!--[if mso | IE]><table align="center" border="0" cellpadding="0" cellspacing="0" class="kl-section-outlook" style="width:600px;" width="600" ><tr><td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;"><![endif]-->
+<div style="margin:0px auto;max-width:600px;">
+<table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+<tbody>
+<tr>
+<td style="border-left:solid 1px #006061;border-right:solid 1px #006061;border-top:solid 1px #006061;direction:ltr;font-size:0px;padding:0px;text-align:center;">
+<!--[if mso | IE]><table role="presentation" border="0" cellpadding="0" cellspacing="0"><table align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600" bgcolor="#FFFFFF" ><tr><td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;"><![endif]-->
+<div style="background:#FFFFFF;background-color:#FFFFFF;margin:0px auto;border-radius:0px 0px 0px 0px;max-width:600px;">
+<table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background:#FFFFFF;background-color:#FFFFFF;width:100%;border-radius:0px 0px 0px 0px;">
+<tbody>
+<tr>
+<td style="direction:ltr;font-size:0px;padding:20px 0;padding-bottom:0px;padding-left:0px;padding-right:0px;padding-top:0px;text-align:center;">
+<!--[if mso | IE]><table role="presentation" border="0" cellpadding="0" cellspacing="0"><![endif]-->
+<div class="content-padding first">
+<!--[if true]><table border="0" cellpadding="0" cellspacing="0" width="598" style="width:598px;direction:ltr"><tr><![endif]-->
+<div class="kl-row colstack" style="display:table;table-layout:fixed;width:100%;">
+<!--[if true]><td style="vertical-align:top;width:598px;"><![endif]-->
+<div class="kl-column" style="display:table-cell;vertical-align:top;width:100%;">
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:20px;padding-right:20px;padding-bottom:20px;padding-left:20px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="center" class="kl-image" style="font-size:0px;word-break:break-word;">
+<table border="0" cellpadding="0" cellspacing="0" style="border-collapse:collapse;border-spacing:0px;">
+<tbody>
+<tr>
+<td class="" style="border:0;padding:0px 0px 0px 0px;width:300px;" valign="top">
+<a class="kl-img-link" href="https://www.karmaeast.com.au/?link=logo" style="color:#006061; text-decoration:underline; display:block">
+<img alt="Karma East" src="https://d3k81ch9hvuctc.cloudfront.net/company/Th9m73/images/afa9f413-912d-4b29-a659-dc11e54d92b7.png" style="display:block;outline:none;text-decoration:none;height:auto;font-size:13px;width:100%;" title="Karma East" width="300"/>
+</a>
+</td>
+</tr>
+</tbody>
 </table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper hlb-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="hlb-block-settings-content" style="background-color:#006061;vertical-align:top;padding-top:8px;padding-right:4px;padding-bottom:8px;padding-left:4px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="top" class="kl-header-link-bar" style="font-size:0px;padding:0px 0px 0px 0px;word-break:break-word;">
+<table border="0" cellpadding="0" cellspacing="0" style="color:#000000;font-family:Ubuntu, Helvetica, Arial, sans-serif;font-size:13px;line-height:22px;table-layout:auto;width:100%;border:0;" width="100%">
+<tbody>
+<tr>
+<td>
+<table align="center" cellpadding="0" cellspacing="0" class="r2-tbl" style="table-layout:fixed;" width="100%">
+<tr style="text-align:center;">
+<td align="center" class="hlb-subblk" style="" valign="middle">
+<table border="0" cellpadding="0" cellspacing="0" class="lnk" style="border-collapse:separate;line-height:100%;">
+<tr>
+<td align="center" bgcolor="transparent" role="presentation" style="border:none;border-radius:5px;cursor:auto;font-style:Normal;mso-padding-alt:10px 10px 10px 10px;background:transparent;" valign="middle">
+<a href="https://www.karmaeast.com.au/collections/new-arrivals" style='color:#FFF; text-decoration:none; display:inline-block; background:transparent; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-size:14px; font-style:Normal; font-weight:400; line-height:100%; letter-spacing:1px; margin:0; text-transform:none; padding:10px 10px 10px 10px; mso-padding-alt:0; border-radius:5px' target="_blank">
+New Arrivals
+</a>
+</td>
+</tr>
+</table>
+</td>
+<td align="center" class="hlb-subblk" style="" valign="middle">
+<table border="0" cellpadding="0" cellspacing="0" class="lnk" style="border-collapse:separate;line-height:100%;">
+<tr>
+<td align="center" bgcolor="transparent" role="presentation" style="border:none;border-radius:5px;cursor:auto;font-style:Normal;mso-padding-alt:10px 10px 10px 10px;background:transparent;" valign="middle">
+<a href="https://www.karmaeast.com.au/collections/sale" style='color:#FFF; text-decoration:none; display:inline-block; background:transparent; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-size:14px; font-style:Normal; font-weight:400; line-height:100%; letter-spacing:1px; margin:0; text-transform:none; padding:10px 10px 10px 10px; mso-padding-alt:0; border-radius:5px' target="_blank">
+Sale
+</a>
+</td>
+</tr>
+</table>
+</td>
+<td align="center" class="hlb-subblk" style="" valign="middle">
+<table border="0" cellpadding="0" cellspacing="0" class="lnk" style="border-collapse:separate;line-height:100%;">
+<tr>
+<td align="center" bgcolor="transparent" role="presentation" style="border:none;border-radius:5px;cursor:auto;font-style:Normal;mso-padding-alt:10px 10px 10px 10px;background:transparent;" valign="middle">
+<a href="https://www.karmaeast.com.au/collections/all-dresses" style='color:#FFF; text-decoration:none; display:inline-block; background:transparent; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-size:14px; font-style:Normal; font-weight:400; line-height:100%; letter-spacing:1px; margin:0; text-transform:none; padding:10px 10px 10px 10px; mso-padding-alt:0; border-radius:5px' target="_blank">
+Dresses
+</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+</div>
+<!--[if true]></tr></table><![endif]-->
+</div>
+<!--[if mso | IE]></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<!--[if mso | IE]></td></tr></table></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<!--[if mso | IE]></td></tr></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+<table align="center" border="0" cellpadding="0" cellspacing="0" class="kl-section" role="presentation" style="width:100%;">
+<tbody>
+<tr>
+<td>
+<!--[if mso | IE]><table align="center" border="0" cellpadding="0" cellspacing="0" class="kl-section-outlook" style="width:600px;" width="600" ><tr><td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;"><![endif]-->
+<div style="margin:0px auto;max-width:600px;">
+<table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+<tbody>
+<tr>
+<td style="border-left:solid 1px #006061;border-right:solid 1px #006061;direction:ltr;font-size:0px;padding:0px;text-align:center;">
+<!--[if mso | IE]><table role="presentation" border="0" cellpadding="0" cellspacing="0"><table align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600" bgcolor="#FFFFFF" ><tr><td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;"><![endif]-->
+<div style="background:#FFFFFF;background-color:#FFFFFF;margin:0px auto;border-radius:0px 0px 0px 0px;max-width:600px;">
+<table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background:#FFFFFF;background-color:#FFFFFF;width:100%;border-radius:0px 0px 0px 0px;">
+<tbody>
+<tr>
+<td style="direction:ltr;font-size:0px;padding:20px 0;padding-bottom:0px;padding-left:0px;padding-right:0px;padding-top:0px;text-align:center;">
+<!--[if mso | IE]><table role="presentation" border="0" cellpadding="0" cellspacing="0"><![endif]-->
+<div class="content-padding">
+<!--[if true]><table border="0" cellpadding="0" cellspacing="0" width="598" style="width:598px;direction:ltr"><tr><![endif]-->
+<div class="kl-row colstack" style="display:table;table-layout:fixed;width:100%;">
+<!--[if true]><td style="vertical-align:top;width:598px;"><![endif]-->
+<div class="kl-column" style="display:table-cell;vertical-align:top;width:100%;">
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="background-color:#006061;vertical-align:top;padding-top:9px;padding-right:9px;padding-bottom:9px;padding-left:9px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="left" class="kl-text" style="font-size:0px;padding:0px;padding-top:0px;padding-right:0px;padding-bottom:0px;padding-left:0px;word-break:break-word;">
+<div style="font-family:'Karla', Helvetica, Arial, sans-serif;font-size:16px;font-style:Normal;font-weight:400;letter-spacing:0px;line-height:1.5;text-align:left;color:#222222;"><h4 style="text-align: center;"><span style="color: #ffffff; font-family: 'Josefin Sans', Arial, 'Helvetica Neue', Helvetica, sans-serif; font-weight: 400;">Designed in Australia | 60 Day Returns</span></h4></div>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:0px;padding-right:0px;padding-bottom:0px;padding-left:0px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td style="font-size:0px;word-break:break-word;">
+<div style="height:20px;line-height:20px;"> </div>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper kl-text-table-layout" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:0px;padding-right:0px;padding-bottom:0px;padding-left:0px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="left" class="kl-text" style="font-size:0px;padding:0px;padding-top:18px;padding-right:18px;padding-bottom:0px;padding-left:18px;word-break:break-word;">
+<div style="font-family:'Karla', Helvetica, Arial, sans-serif;font-size:16px;font-style:Normal;font-weight:400;letter-spacing:0px;line-height:1.5;text-align:left;color:#222222;">
+
+<p style="margin:0 0 12px;">Dear {{ event.customer_name|default:'there' }},</p>
+<h2 style="margin:0 0 10px;font-family:'Josefin Sans',Arial,Helvetica,sans-serif;font-weight:400;font-size:26px;line-height:1.2;color:#222222;">Your order includes a pre-order</h2>
+<p style="margin:0 0 16px;">Thank you for your order <strong>{{ event.order_name|default:'' }}</strong>. One or more items in your order are <strong>pre-order</strong> pieces and will be dispatched as soon as they arrive.</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;"><tr>
+<td style="background:#eef4f4;border-left:4px solid #006061;padding:16px 20px;">
+<div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#006061;">Estimated dispatch</div>
+<div style="font-size:20px;color:#222222;margin-top:4px;">{{ event.dispatch|default:'We will confirm your date shortly' }}</div>
+</td></tr></table>
+<div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#8a8a8a;border-bottom:1px solid #e7e3dc;padding-bottom:8px;margin-bottom:4px;">Pre-order items</div>
+{% for item in event.items %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-bottom:1px solid #f0ede7;"><tr>
+{% if item.image %}<td width="72" valign="top" style="padding:12px 14px 12px 0;"><img src="{{ item.image }}" alt="{{ item.title }}" width="64" style="display:block;width:64px;height:auto;border-radius:4px;"/></td>{% endif %}
+<td valign="middle" style="padding:12px 0;">
+<div style="font-size:15px;color:#222222;">{{ item.title|default:'Pre-order item' }}{% if item.size %} &nbsp;&middot;&nbsp; <span style="color:#6a6a6a;">Size {{ item.size }}</span>{% endif %}</div>
+{% if item.dispatch %}<div style="font-size:13px;color:#006061;margin-top:2px;">Ships around {{ item.dispatch }}</div>{% endif %}
+</td></tr></table>
+{% endfor %}
+<p style="margin:18px 0 0;">Any in-stock items in your order are on their way now and may arrive separately. There's nothing you need to do &mdash; we'll email you again when your pre-order ships. Dates are estimates and can shift slightly.</p>
+<p style="margin:16px 0 0;">Thank you,<br/><strong>The Karma East Team</strong></p>
+</div></td></tr></tbody></table></td></tr></tbody></table></div>
+</div>
+<!--[if true]></td><![endif]-->
+</div>
+<!--[if true]></tr></table><![endif]-->
+</div>
+<!--[if mso | IE]></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<!--[if mso | IE]></td></tr></table></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<!--[if mso | IE]></td></tr></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+<table align="center" border="0" cellpadding="0" cellspacing="0" class="kl-section" role="presentation" style="width:100%;">
+<tbody>
+<tr>
+<td>
+<!--[if mso | IE]><table align="center" border="0" cellpadding="0" cellspacing="0" class="kl-section-outlook" style="width:600px;" width="600" ><tr><td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;"><![endif]-->
+<div style="margin:0px auto;max-width:600px;">
+<table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+<tbody>
+<tr>
+<td style="border-bottom:solid 1px #006061;border-left:solid 1px #006061;border-right:solid 1px #006061;direction:ltr;font-size:0px;padding:0px;text-align:center;">
+<!--[if mso | IE]><table role="presentation" border="0" cellpadding="0" cellspacing="0"><table align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600" bgcolor="#006061" ><tr><td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;"><![endif]-->
+<div style="background:#006061;background-color:#006061;margin:0px auto;border-radius:0px 0px 0px 0px;max-width:600px;">
+<table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background:#006061;background-color:#006061;width:100%;border-radius:0px 0px 0px 0px;">
+<tbody>
+<tr>
+<td style="direction:ltr;font-size:0px;padding:20px 0;padding-bottom:0px;padding-left:0px;padding-right:0px;padding-top:0px;text-align:center;">
+<!--[if mso | IE]><table role="presentation" border="0" cellpadding="0" cellspacing="0"><![endif]-->
+<div class="content-padding last">
+<!--[if true]><table border="0" cellpadding="0" cellspacing="0" width="598" style="width:598px;direction:ltr"><tr><![endif]-->
+<div class="kl-row colstack" style="display:table;table-layout:fixed;width:100%;">
+<!--[if true]><td style="vertical-align:middle;width:598px;"><![endif]-->
+<div class="kl-column" style="display:table-cell;vertical-align:middle;width:100%;">
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:12px;padding-right:5px;padding-bottom:12px;padding-left:5px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td>
+<div style="width:100%;text-align:center">
+<!--[if true]><table style="all:unset;opacity:0;" border="0" cellpadding="0" cellspacing="0" ><tr><![endif]-->
+<!--[if !true]><!--><div class="lbls" style="display:inline-block;padding-right:10px;"><!--<![endif]-->
+<!--[if true]><td style="padding-right:10px;"><![endif]-->
+<div style="text-align: center;">
+<a href="https://www.karmaeast.com.au/pages/our-story" style="color:#006061; text-decoration:underline" target="_blank">
+<img alt="Ethically Crafted" src="https://d3k81ch9hvuctc.cloudfront.net/company/Th9m73/images/62b21fe8-ac0a-4d06-b7c3-116271cf60f8.png" style="width:50px;margin-bottom:5px;" width="50"/>
+</a>
+<div style="margin-bottom: 9px">
+<a href="https://www.karmaeast.com.au/pages/our-story" style='color:#FFF; text-decoration:none; text-align:center; font-size:11px; font-weight:400; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-style:Normal' target="_blank">
+Ethically Crafted
+</a>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+<!--[if !true]><!--></div><!--<![endif]-->
+<!--[if !true]><!--><div class="lbls spcblk" style="display:inline-block;"><!--<![endif]-->
+<!--[if true]><td style=""><![endif]-->
+<table align="left" border="0" cellpadding="0" cellspacing="0">
+<tbody><tr>
+<td width="10"></td>
+</tr></tbody>
+</table>
+<!--[if true]></td><![endif]-->
+<!--[if !true]><!--></div><!--<![endif]-->
+<!--[if !true]><!--><div class="lbls" style="display:inline-block;padding-right:10px;"><!--<![endif]-->
+<!--[if true]><td style="padding-right:10px;"><![endif]-->
+<div style="text-align: center;">
+<a href="https://www.karmaeast.com.au/pages/delivery" style="color:#006061; text-decoration:underline" target="_blank">
+<img alt="Free Shipping Offer" src="https://d3k81ch9hvuctc.cloudfront.net/company/Th9m73/images/919d54f8-97b8-469b-9b3c-e562f24562e6.png" style="width:50px;margin-bottom:5px;" width="50"/>
+</a>
+<div style="margin-bottom: 9px">
+<a href="https://www.karmaeast.com.au/pages/delivery" style='color:#FFF; text-decoration:none; text-align:center; font-size:11px; font-weight:400; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-style:Normal' target="_blank">
+Free Shipping Offer
+</a>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+<!--[if !true]><!--></div><!--<![endif]-->
+<!--[if !true]><!--><div class="lbls spcblk" style="display:inline-block;"><!--<![endif]-->
+<!--[if true]><td style=""><![endif]-->
+<table align="left" border="0" cellpadding="0" cellspacing="0">
+<tbody><tr>
+<td width="10"></td>
+</tr></tbody>
+</table>
+<!--[if true]></td><![endif]-->
+<!--[if !true]><!--></div><!--<![endif]-->
+<!--[if !true]><!--><div class="lbls" style="display:inline-block;"><!--<![endif]-->
+<!--[if true]><td style=""><![endif]-->
+<div style="text-align: center;">
+<a href="https://www.karmaeast.com.au/pages/returns" style="color:#006061; text-decoration:underline" target="_blank">
+<img alt="Easy 60 Day Returns" src="https://d3k81ch9hvuctc.cloudfront.net/company/Th9m73/images/c168d02d-8d4a-4c91-aea7-91a8ffbeb5ec.png" style="width:50px;margin-bottom:5px;" width="50"/>
+</a>
+<div style="margin-bottom: 9px">
+<a href="https://www.karmaeast.com.au/pages/returns" style='color:#FFF; text-decoration:none; text-align:center; font-size:11px; font-weight:400; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-style:Normal' target="_blank">
+Easy 60 Day Returns
+</a>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+<!--[if !true]><!--></div><!--<![endif]-->
+<!--[if true]></tr></table><![endif]-->
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:0px;padding-right:18px;padding-bottom:18px;padding-left:18px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="center" style="font-size:0px;padding:0px;word-break:break-word;">
+<p style="padding-bottom:0; border-top:solid 1px #FFF; font-size:1px; margin:0 auto; width:100%">
+</p>
+<!--[if mso | IE]><table align="center" border="0" cellpadding="0" cellspacing="0" style="border-top:solid 1px #FFFFFF;font-size:1px;margin:0px auto;width:562px;" role="presentation" width="562px" ><tr><td style="height:0;line-height:0;"> &nbsp;
+</td></tr></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+</div>
+<!--[if true]></tr></table><![endif]-->
+<!--[if true]><table border="0" cellpadding="0" cellspacing="0" width="598" style="width:598px;direction:ltr"><tr><![endif]-->
+<div class="kl-row colstack" style="display:table;table-layout:fixed;width:100%;">
+<!--[if true]><td style="vertical-align:middle;width:149.5px;"><![endif]-->
+<div class="kl-column" style="display:table-cell;vertical-align:middle;width:25%;">
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:0px;padding-right:0px;padding-bottom:0px;padding-left:0px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="center" class="kl-button" style="font-size:0px;padding:0px;word-break:break-word;" vertical-align="middle">
+<table border="0" cellpadding="0" cellspacing="0" style="border-collapse:separate;line-height:100%;">
+<tr>
+<td align="center" bgcolor="#006061" role="presentation" style="border:none;border-radius:0px;cursor:auto;font-style:Normal;mso-padding-alt:15px 40px 15px 40px;background:#006061;" valign="middle">
+<a href="https://www.karmaeast.com.au/collections/all-tops" style='color:#FFF; text-decoration:none; display:inline-block; background:#006061; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-size:13px; font-style:Normal; font-weight:400; line-height:100%; letter-spacing:0; margin:0; text-transform:none; padding:15px 40px 15px 40px; mso-padding-alt:0; border-radius:0' target="_blank">
+TOPS
+</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+<!--[if true]><td style="vertical-align:middle;width:149.5px;"><![endif]-->
+<div class="kl-column" style="display:table-cell;vertical-align:middle;width:25%;">
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:0px;padding-right:0px;padding-bottom:0px;padding-left:0px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="center" class="kl-button" style="font-size:0px;padding:0px;word-break:break-word;" vertical-align="middle">
+<table border="0" cellpadding="0" cellspacing="0" style="border-collapse:separate;line-height:100%;">
+<tr>
+<td align="center" bgcolor="#006061" role="presentation" style="border:none;border-radius:0px;cursor:auto;font-style:Normal;mso-padding-alt:15px 33px 15px 33px;background:#006061;" valign="middle">
+<a href="https://www.karmaeast.com.au/collections/all-pants" style='color:#FFF; text-decoration:none; display:inline-block; background:#006061; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-size:13px; font-style:Normal; font-weight:400; line-height:100%; letter-spacing:0; margin:0; text-transform:none; padding:15px 33px 15px 33px; mso-padding-alt:0; border-radius:0' target="_blank">
+BOTTOMS
+</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+<!--[if true]><td style="vertical-align:middle;width:149.5px;"><![endif]-->
+<div class="kl-column" style="display:table-cell;vertical-align:middle;width:25%;">
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:0px;padding-right:0px;padding-bottom:0px;padding-left:0px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="center" class="kl-button" style="font-size:0px;padding:0px;word-break:break-word;" vertical-align="middle">
+<table border="0" cellpadding="0" cellspacing="0" style="border-collapse:separate;line-height:100%;">
+<tr>
+<td align="center" bgcolor="#006061" role="presentation" style="border:none;border-radius:0px;cursor:auto;font-style:Normal;mso-padding-alt:15px 33px 15px 33px;background:#006061;" valign="middle">
+<a href="https://www.karmaeast.com.au/collections/all-dresses" style='color:#FFF; text-decoration:none; display:inline-block; background:#006061; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-size:13px; font-style:Normal; font-weight:400; line-height:100%; letter-spacing:0; margin:0; text-transform:none; padding:15px 33px 15px 33px; mso-padding-alt:0; border-radius:0' target="_blank">
+DRESSES
+</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+<!--[if true]><td style="vertical-align:middle;width:149.5px;"><![endif]-->
+<div class="kl-column" style="display:table-cell;vertical-align:middle;width:25%;">
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:0px;padding-right:0px;padding-bottom:0px;padding-left:0px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="center" class="kl-button" style="font-size:0px;padding:0px;word-break:break-word;" vertical-align="middle">
+<table border="0" cellpadding="0" cellspacing="0" style="border-collapse:separate;line-height:100%;">
+<tr>
+<td align="center" bgcolor="#006061" role="presentation" style="border:none;border-radius:0px;cursor:auto;font-style:Normal;mso-padding-alt:15px 26px 15px 26px;background:#006061;" valign="middle">
+<a href="https://www.karmaeast.com.au/collections/all-jewellery" style='color:#FFF; text-decoration:none; display:inline-block; background:#006061; font-family:"Josefin Sans", Arial, "Helvetica Neue", Helvetica, sans-serif; font-size:13px; font-style:Normal; font-weight:400; line-height:100%; letter-spacing:0; margin:0; text-transform:none; padding:15px 26px 15px 26px; mso-padding-alt:0; border-radius:0' target="_blank">
+ACCESSORIES
+</a>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+</div>
+<!--[if true]></tr></table><![endif]-->
+<!--[if true]><table border="0" cellpadding="0" cellspacing="0" width="598" style="width:598px;direction:ltr"><tr><![endif]-->
+<div class="kl-row colstack" style="display:table;table-layout:fixed;width:100%;">
+<!--[if true]><td style="vertical-align:middle;width:598px;"><![endif]-->
+<div class="kl-column" style="display:table-cell;vertical-align:middle;width:100%;">
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="vertical-align:top;padding-top:18px;padding-right:18px;padding-bottom:0px;padding-left:18px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td align="center" style="font-size:0px;padding:0px;word-break:break-word;">
+<p style="padding-bottom:0; border-top:solid 1px #FFF; font-size:1px; margin:0 auto; width:100%">
+</p>
+<!--[if mso | IE]><table align="center" border="0" cellpadding="0" cellspacing="0" style="border-top:solid 1px #FFFFFF;font-size:1px;margin:0px auto;width:562px;" role="presentation" width="562px" ><tr><td style="height:0;line-height:0;"> &nbsp;
+</td></tr></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="mj-column-per-100 mj-outlook-group-fix component-wrapper" style="font-size:0px;text-align:left;direction:ltr;vertical-align:top;width:100%;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;" width="100%">
+<tbody>
+<tr>
+<td class="" style="background-color:#006061;vertical-align:top;padding-top:9px;padding-right:9px;padding-bottom:9px;padding-left:9px;">
+<table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+<tbody>
+<tr>
+<td>
+<div style="width:100%;text-align:center">
+<!--[if true]><table style="all:unset;opacity:0;" border="0" cellpadding="0" cellspacing="0" ><tr><![endif]-->
+<!--[if !true]><!--><div class="" style="display:inline-block;padding-right:10px;"><!--<![endif]-->
+<!--[if true]><td style="padding-right:10px;"><![endif]-->
+<div style="text-align: center;">
+<a href="https://www.facebook.com/KarmaEast/" style="color:#006061; text-decoration:underline" target="_blank">
+<img alt="Facebook" src="https://d3k81ch9hvuctc.cloudfront.net/assets/email/buttons/subtleinverse/facebook_96.png" style="width:32px;" width="32"/>
+</a>
+</div>
+<!--[if true]></td><![endif]-->
+<!--[if !true]><!--></div><!--<![endif]-->
+<!--[if !true]><!--><div class="" style="display:inline-block;padding-right:10px;"><!--<![endif]-->
+<!--[if true]><td style="padding-right:10px;"><![endif]-->
+<div style="text-align: center;">
+<a href="https://www.instagram.com/karma_east" style="color:#006061; text-decoration:underline" target="_blank">
+<img alt="Instagram" src="https://d3k81ch9hvuctc.cloudfront.net/assets/email/buttons/subtleinverse/instagram_96.png" style="width:32px;" width="32"/>
+</a>
+</div>
+<!--[if true]></td><![endif]-->
+<!--[if !true]><!--></div><!--<![endif]-->
+<!--[if !true]><!--><div class="" style="display:inline-block;"><!--<![endif]-->
+<!--[if true]><td style=""><![endif]-->
+<div style="text-align: center;">
+<a href="mailto:info@karmaeast.com.au" style="color:#006061; text-decoration:underline" target="_blank">
+<img alt="Email" src="https://d3k81ch9hvuctc.cloudfront.net/assets/email/buttons/subtleinverse/email_96.png" style="width:32px;" width="32"/>
+</a>
+</div>
+<!--[if true]></td><![endif]-->
+<!--[if !true]><!--></div><!--<![endif]-->
+<!--[if true]></tr></table><![endif]-->
+</div>
+</td>
+</tr>
+</tbody>
+</table>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!--[if true]></td><![endif]-->
+</div>
+<!--[if true]></tr></table><![endif]-->
+</div>
+<!--[if mso | IE]></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<!--[if mso | IE]></td></tr></table></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+<!--[if mso | IE]></td></tr></table><![endif]-->
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<!-- TRACKING_PIXEL_BOTTOM -->
+</body>
+</html>
