@@ -5553,6 +5553,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           // Auto-lock on create so the portal can't overwrite the new product by
           // accident — Shopify is protected by default. Unlock to push from here.
           [COL_ROW_SHOPIFY_LOCKED]: "1",
+          [COL_ROW_SHOPIFY_EDITED]: "",
           ...(restockOrderId ? { [COL_ROW_RESTOCK_ORDER_ID]: restockOrderId } : {}),
           // The person who created the product in Shopify — replaces any
           // manually-typed "Created by" once the product actually exists.
@@ -5620,7 +5621,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // Re-lock after a successful push so the product rests protected again —
     // the portal shouldn't be able to overwrite it until explicitly unlocked.
-    rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1" };
+    rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_EDITED]: "" };
     await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
     return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId }] });
   }
@@ -5661,14 +5662,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!product?.id) {
       // Product was deleted in Shopify → clear the whole link so it can be made
       // again (same as the auto-prune), rather than unlocking a ghost.
-      rows[idx] = { ...row, [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "" };
+      rows[idx] = { ...row, [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_EDITED]: "" };
       await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
       return jsonResponse({ ok: true, index: idx, deleted: true });
     }
     const v0 = product.variants?.nodes?.[0] ?? {};
     const shopTags = Array.isArray(product.tags) ? product.tags.map((t) => String(t).trim()).filter(Boolean).filter((t) => { const s = t.toLowerCase(); return s !== "pre-order" && !s.startsWith("pre-order: ") && !s.startsWith("pre-order ships "); }).join(", ") : "";
-    // OVERWRITE the descriptive fields with Shopify's current values.
-    const pulled: Record<string, string> = {
+    // Shopify's current values for every field unlock CAN overwrite.
+    const shopifyValues: Record<string, string> = {
       description: String(product.descriptionHtml ?? ""),
       productType: String(product.productType ?? ""),
       vendor: String(product.vendor ?? ""),
@@ -5679,9 +5680,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
       countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
     };
-    rows[idx] = { ...row, ...pulled, [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: "" };
+    // Preserve the user's in-progress edits: pull from Shopify ONLY for fields the
+    // user did NOT edit while locked; leave edited fields as they are in the row.
+    const editedSet = new Set((row[COL_ROW_SHOPIFY_EDITED] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+    const pulled: Record<string, string> = {};
+    for (const [key, value] of Object.entries(shopifyValues)) {
+      if (!editedSet.has(key)) pulled[key] = value;
+    }
+    // If edits were preserved they still aren't in Shopify → keep the row "dirty"
+    // so it shows "Update in Shopify". No preserved edits → clean.
+    rows[idx] = { ...row, ...pulled, [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: editedSet.size ? "1" : "", [COL_ROW_SHOPIFY_EDITED]: "" };
     await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
-    return jsonResponse({ ok: true, index: idx, unlocked: true, fields: pulled });
+    return jsonResponse({ ok: true, index: idx, unlocked: true, fields: pulled, preserved: Array.from(editedSet) });
   }
 
   if (intent === "update_fabric_cell") {
@@ -9807,6 +9817,15 @@ const COL_ROW_SHOPIFY_DIRTY = "__shopifyDirty";
 // user unlocks to resume — unlocking first pulls Shopify's current values into
 // the row, then portal edits can be pushed again.
 const COL_ROW_SHOPIFY_LOCKED = "__shopifyLocked";
+// Comma-separated list of the Shopify-synced field ids the user has edited in the
+// portal WHILE the row was locked. On unlock we pull Shopify's current values only
+// for the fields NOT in this list, so in-progress portal edits are preserved
+// (Shopify fills in only what you didn't touch). Cleared on create/unlock/push.
+const COL_ROW_SHOPIFY_EDITED = "__shopifyEditedFields";
+// The row fields that `unlock_collection_row_shopify` OVERWRITES from Shopify —
+// i.e. the only fields at risk of being wiped by unlock. Kept in one place so the
+// edit-tracking (client) and the unlock pull (server) agree on the exact set.
+const SHOPIFY_UNLOCK_PULL_FIELDS = ["description", "productType", "vendor", "seoTitle", "seoDescription", "tags", "compareAtPrice", "hsCode", "countryOfOrigin"];
 // Id of the existing-product restock order auto-created when the product is
 // created in Shopify — so we don't seed it twice.
 const COL_ROW_RESTOCK_ORDER_ID = "__restockOrderId";
@@ -17661,6 +17680,13 @@ function CollectionSpreadsheetPage({
         // update push (an info column changed after creation). The per-product
         // workflow status is portal-only, so it never triggers a Shopify push.
         if (colId !== "__productStatus" && (patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
+        // While the row is LOCKED, remember which Shopify-synced fields the user
+        // edits, so a later Unlock keeps them instead of pulling Shopify over them.
+        if ((patched[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && SHOPIFY_UNLOCK_PULL_FIELDS.includes(colId)) {
+          const edited = new Set((patched[COL_ROW_SHOPIFY_EDITED] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+          edited.add(colId);
+          patched[COL_ROW_SHOPIFY_EDITED] = Array.from(edited).join(",");
+        }
         return patched;
       });
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
@@ -17676,6 +17702,13 @@ function CollectionSpreadsheetPage({
         if (i !== rowIdx) return r;
         const patched = { ...r, ...fields };
         if ((patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
+        // While locked, remember which Shopify-synced fields were edited so Unlock
+        // preserves them (same as updateCell, but for multi-field saves like SEO).
+        if ((patched[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1") {
+          const edited = new Set((patched[COL_ROW_SHOPIFY_EDITED] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+          for (const key of Object.keys(fields)) if (SHOPIFY_UNLOCK_PULL_FIELDS.includes(key)) edited.add(key);
+          if (edited.size) patched[COL_ROW_SHOPIFY_EDITED] = Array.from(edited).join(",");
+        }
         return patched;
       });
       persistRows(next, prev, `Undo edit on row ${rowIdx + 1}`);
@@ -17827,11 +17860,11 @@ function CollectionSpreadsheetPage({
     fd.set("rowIndex", String(idx));
     updateShopifyFetcher.submit(fd, { method: "post" });
   };
-  // Unlock a linked row → pull Shopify's current values into the row (replacing
-  // description, tags, type, SEO, etc.), then resume portal control.
+  // Unlock a linked row → pull Shopify's current values ONLY for fields you
+  // haven't edited (your in-progress edits are kept), then resume portal control.
   const unlockRow = (idx: number) => {
     if (!(rows[idx]?.[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
-    if (!window.confirm("Unlock and pull the latest from Shopify?\n\nThis replaces this row's description, tags, product type, vendor and SEO with Shopify's current values, then lets you push changes from the portal again.")) return;
+    if (!window.confirm("Unlock and pull the latest from Shopify?\n\nFields you've already edited here are KEPT. For everything you haven't touched (description, tags, product type, vendor, SEO, etc.), Shopify's current values are pulled in. Then you can push changes from the portal again.")) return;
     setPushStatus(null);
     setLockBusyIdx(idx);
     const fd = new FormData();
@@ -17851,10 +17884,11 @@ function CollectionSpreadsheetPage({
     if (typeof data.index !== "number") return;
     const i = data.index;
     if (data.unlocked) {
-      setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...(data.fields ?? {}), [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: "" }; return next; });
-      setPushStatus({ msg: "Unlocked — pulled the latest from Shopify. You can edit and push again.", tone: "ok" });
+      const preserved = Array.isArray((data as { preserved?: unknown }).preserved) ? (data as { preserved: string[] }).preserved : [];
+      setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...(data.fields ?? {}), [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: preserved.length ? "1" : "", [COL_ROW_SHOPIFY_EDITED]: "" }; return next; });
+      setPushStatus({ msg: preserved.length ? `Unlocked — kept your edit${preserved.length > 1 ? "s" : ""} and pulled the rest from Shopify. Press "Update in Shopify" to push.` : "Unlocked — pulled the latest from Shopify. You can edit and push again.", tone: "ok" });
     } else if (data.deleted) {
-      setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "" }; return next; });
+      setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_EDITED]: "" }; return next; });
       setPushStatus({ msg: "That product no longer exists in Shopify — unlinked. You can create it again.", tone: "ok" });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
