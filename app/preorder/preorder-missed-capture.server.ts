@@ -372,7 +372,13 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
   let truncated = false;
   let oldestScannedIso: string | null = null;
   let cursor: string | null = null;
-  for (let page = 0; page < 20; page += 1) {
+  // Up to 80 pages × 100 = 8000 orders. Because the query is bounded to the window
+  // (created_at:>=sinceIso), pagination normally ends naturally when the window is
+  // exhausted (hasNextPage=false) well before this — the cap is only a safety stop.
+  // If it IS hit, `truncated` is set so the report warns that older orders in the
+  // window weren't checked.
+  const MAX_PAGES = 80;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
     const res: Response = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
       method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
       body: JSON.stringify({
@@ -428,7 +434,7 @@ export async function listAffectedForFollowup(opts: { days?: number } = {}): Pro
     const pi = json.data?.orders?.pageInfo;
     if (!pi?.hasNextPage || !pi.endCursor) break;
     cursor = pi.endCursor;
-    if (page >= 19) truncated = true; // hit the 2000-order page cap with more still to scan
+    if (page >= MAX_PAGES - 1) truncated = true; // hit the page cap with more still to scan
   }
   const orders = Array.from(new Set(affected.map((a) => a.order)));
   return { scannedOrders, orders, affected, liveBatchCount: liveIds.length, variantsTracked: variantToBatches.size, queryErrors, truncated, oldestScannedIso };

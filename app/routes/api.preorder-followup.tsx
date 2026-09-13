@@ -138,7 +138,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         <li><strong>Out of stock</strong> at the fulfilment location → it's awaiting the batch, not shippable now.</li>
       </ul>
       <p style="margin:0 0 8px">Independent cross-check against our own records: <strong>${heldCount} of ${orders.length}</strong> shown ${orders.length === 1 ? "order is" : "orders are"} already <span class="badge ok">✓ holding</span> (the system reserved &amp; held them — separate proof they're real pre-orders). Any <span class="badge warn">⚠ not captured</span> slipped past auto-capture and should be reserved — run <code>/api/preorder-capture-missed?days=${days}&amp;apply=1</code>.</p>
-      <p style="margin:0" class="${truncated ? "warnbox" : ""}">Coverage: scanned <strong>${scannedOrders}</strong> paid orders${oldestScanned ? ` back to <strong>${esc(oldestScanned)}</strong>` : ""} in the last ${days} days. ${truncated ? "⚠ Hit the 2,000-order scan cap — orders OLDER than the date above were NOT checked, so a few older ones could be missing. Tell me and I'll raise the cap or you can narrow the window." : "✓ Full window covered — the scan reached the end, nothing older was skipped."}</p>
+      <p style="margin:0" class="${truncated ? "warnbox" : ""}">Coverage: scanned <strong>${scannedOrders}</strong> paid orders${oldestScanned ? ` back to <strong>${esc(oldestScanned)}</strong>` : ""} in the last ${days} days. ${truncated ? "⚠ Hit the scan cap — orders OLDER than the date above were NOT checked, so some older ones could be missing. Tell me and I'll raise the cap further." : "✓ Full window covered — the scan reached the end of the window, nothing older was skipped."}</p>
     </div>
 
     ${orders.length === 0
