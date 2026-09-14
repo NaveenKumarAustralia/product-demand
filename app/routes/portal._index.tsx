@@ -5517,6 +5517,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           tags
           vendor
           seo { title description }
+          category { id fullName }
+          metafields(first: 100, namespace: "shopify") {
+            nodes {
+              key type value
+              references(first: 40) { nodes { __typename ... on Metaobject { id displayName type } } }
+              reference { __typename ... on Metaobject { id displayName type } }
+            }
+          }
           variants(first: 1) {
             nodes {
               compareAtPrice
@@ -5533,6 +5541,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const product = json?.data?.product;
     if (!product) return jsonResponse({ ok: false, error: "not_found" });
     const v0 = product.variants?.nodes?.[0] ?? {};
+    // Category (taxonomy) node + its category metafields, copied VERBATIM (key,
+    // type, value) so we can write them back on the new product without needing
+    // to understand Shopify's internal reference format. We also keep each value's
+    // readable name + the reference metaobject type, for the editor popup later.
+    const catBlob = buildCategoryMetafieldBlob(product);
     // Rewrite the copied description so its print reference matches the new
     // row's product (print swap via AI); falls back to the verbatim copy.
     const newName = String(form.get("newName") ?? "").trim();
@@ -5550,6 +5563,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         compareAtPrice: v0.compareAtPrice ? String(v0.compareAtPrice) : "",
         hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
         countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
+        [COL_ROW_CATEGORY_METAFIELDS]: catBlob ? JSON.stringify(catBlob) : "",
       },
     });
   }
@@ -9920,6 +9934,36 @@ const COL_ROW_SHOPIFY_EDITED = "__shopifyEditedFields";
 // i.e. the only fields at risk of being wiped by unlock. Kept in one place so the
 // edit-tracking (client) and the unlock pull (server) agree on the exact set.
 const SHOPIFY_UNLOCK_PULL_FIELDS = ["description", "productType", "vendor", "seoTitle", "seoDescription", "tags", "compareAtPrice", "hsCode", "countryOfOrigin"];
+// JSON blob (stringified) holding the Shopify CATEGORY (taxonomy) node + its
+// category metafields copied from the "Duplicate from" source, so a new product
+// inherits Color/Fabric/Occasion/Neckline/lengths/etc. Written to Shopify on
+// create + Update. Editable via the Category-metafields popup.
+const COL_ROW_CATEGORY_METAFIELDS = "__categoryMetafields";
+type CategoryMetafieldEntry = { key: string; type: string; value: string; names: string[]; refType: string | null };
+type CategoryMetafieldBlob = { categoryId: string; categoryName: string; metafields: CategoryMetafieldEntry[] };
+// Build the category blob from a Shopify product node (category { id fullName } +
+// metafields(namespace:"shopify")). Copies key/type/value VERBATIM so the write
+// back needs no understanding of Shopify's internal reference format; also keeps
+// each value's readable name + reference metaobject type (for the editor pickers).
+function buildCategoryMetafieldBlob(product: any): CategoryMetafieldBlob | null {
+  const categoryId = String(product?.category?.id ?? "");
+  const mfNodes: any[] = product?.metafields?.nodes ?? [];
+  const metafields: CategoryMetafieldEntry[] = mfNodes
+    .filter((m) => String(m?.value ?? "").trim())
+    .map((m) => {
+      const refs = [...(m.references?.nodes ?? []), ...(m.reference ? [m.reference] : [])].filter(Boolean);
+      return {
+        key: String(m.key ?? ""),
+        type: String(m.type ?? ""),
+        value: String(m.value ?? ""),
+        names: refs.map((r: any) => String(r?.displayName ?? "")).filter(Boolean),
+        refType: (refs.find((r: any) => r?.type)?.type as string | undefined) ?? null,
+      };
+    })
+    .filter((m) => m.key && m.type && m.value);
+  if (!categoryId && !metafields.length) return null;
+  return { categoryId, categoryName: String(product?.category?.fullName ?? ""), metafields };
+}
 // Id of the existing-product restock order auto-created when the product is
 // created in Shopify — so we don't seed it twice.
 const COL_ROW_RESTOCK_ORDER_ID = "__restockOrderId";
@@ -10575,6 +10619,22 @@ async function createShopifyProductFromRow(
     };
     if (colour) pushMf("colour", colour);
     if (categories) pushMf("categories", categories);
+  }
+  // Shopify CATEGORY (taxonomy) node + its category metafields, copied from the
+  // "Duplicate from" source (and optionally edited in the popup). Set the category
+  // and write each metafield VERBATIM in the reserved `shopify` namespace, so the
+  // new product inherits Color / Fabric / Occasion / Neckline / lengths / etc.
+  const catRaw = (row[COL_ROW_CATEGORY_METAFIELDS] ?? "").trim();
+  if (catRaw) {
+    try {
+      const cat = JSON.parse(catRaw) as CategoryMetafieldBlob;
+      if (cat?.categoryId) input.category = cat.categoryId;
+      for (const mf of cat?.metafields ?? []) {
+        if (mf?.key && mf?.type && String(mf?.value ?? "").trim()) {
+          metafields.push({ namespace: "shopify", key: mf.key, type: mf.type, value: mf.value });
+        }
+      }
+    } catch { /* malformed blob → skip category rather than block the create */ }
   }
   if (metafields.length) input.metafields = metafields;
 
