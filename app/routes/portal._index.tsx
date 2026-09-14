@@ -5578,6 +5578,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     catch { return jsonResponse({ ok: false, error: "bad_blob" }); }
     const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
     if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+    // If the row has no copied category yet but IS linked to a Shopify product,
+    // pull the category + metafields live from that product so the popup can edit
+    // them (an already-created product that wasn't made via Duplicate from).
+    const optProductId = String(form.get("productId") ?? "").trim();
+    if ((!blob?.metafields?.length) && optProductId) {
+      const gid = optProductId.startsWith("gid://") ? optProductId : `gid://shopify/Product/${optProductId.replace(/\D/g, "")}`;
+      const pj = await shopifyGraphql<any>(session.shop, session.accessToken, `
+        query CatFromProduct($id: ID!) {
+          product(id: $id) {
+            category { id fullName }
+            metafields(first: 100, namespace: "shopify") {
+              nodes { key type value
+                references(first: 40) { nodes { __typename ... on Metaobject { id displayName type } } }
+                reference { __typename ... on Metaobject { id displayName type } }
+              }
+            }
+          }
+        }
+      `, { id: gid });
+      const rebuilt = buildCategoryMetafieldBlob(pj?.data?.product);
+      if (rebuilt) blob = rebuilt;
+    }
     const humanize = (key: string) => key.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
     const parseGids = (type: string, value: string): string[] => {
       if (type.startsWith("list.")) { try { const a = JSON.parse(value); return Array.isArray(a) ? a.map(String) : []; } catch { return []; } }
@@ -5609,7 +5631,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const current = currentGids.map((gid, i) => ({ gid, name: nameByGid.get(gid) ?? (mf.names?.[i] ?? gid) }));
       attributes.push({ key: mf.key, label: humanize(mf.key), type: mf.type, refType: mf.refType, isList, isReference, current, allowed });
     }
-    return jsonResponse({ ok: true, categoryName: blob?.categoryName ?? "", categoryId: blob?.categoryId ?? "", attributes });
+    return jsonResponse({ ok: true, categoryName: blob?.categoryName ?? "", categoryId: blob?.categoryId ?? "", attributes, blob });
   }
 
   if (intent === "push_collection_row_to_shopify" || intent === "push_collection_rows_to_shopify") {
@@ -18691,6 +18713,8 @@ function CollectionSpreadsheetPage({
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
                               <CollectionCategoryCell
                                 value={row[COL_ROW_CATEGORY_METAFIELDS] ?? ""}
+                                productId={linkedProductId ?? ""}
+                                linked={linked}
                                 onSave={(blob) => {
                                   setRows((prev) => {
                                     const next = prev.map((r, i) => {
@@ -19782,17 +19806,20 @@ function CollectionSeoCell({ title, description, onCommit, productName, productT
 // full picker per attribute (Color, Fabric, Occasion, Neckline, lengths…). Allowed
 // values are fetched live from the taxonomy metaobjects that back each attribute.
 type CatOptAttr = { key: string; label: string; type: string; refType: string | null; isList: boolean; isReference: boolean; current: Array<{ gid: string; name: string }>; allowed: Array<{ gid: string; name: string }> };
-function CollectionCategoryCell({ value, onSave }: { value: string; onSave: (blob: string) => void }) {
+function CollectionCategoryCell({ value, productId, linked, onSave }: { value: string; productId: string; linked: boolean; onSave: (blob: string) => void }) {
   const [open, setOpen] = useState(false);
-  const parsed = useMemo<CategoryMetafieldBlob | null>(() => { try { return value ? (JSON.parse(value) as CategoryMetafieldBlob) : null; } catch { return null; } }, [value]);
-  const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; attributes?: CatOptAttr[] }>();
+  const parsedRow = useMemo<CategoryMetafieldBlob | null>(() => { try { return value ? (JSON.parse(value) as CategoryMetafieldBlob) : null; } catch { return null; } }, [value]);
+  const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; attributes?: CatOptAttr[]; blob?: CategoryMetafieldBlob }>();
   const [sel, setSel] = useState<Record<string, string[]>>({});
   const [txt, setTxt] = useState<Record<string, string>>({});
   useEffect(() => {
-    if (open && parsed) optsFetcher.submit({ intent: "category_metafield_options", blob: value || "{}" }, { method: "post" });
+    if (open && (parsedRow || linked)) optsFetcher.submit({ intent: "category_metafield_options", blob: value || "{}", productId: productId || "" }, { method: "post" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
   const attrs = optsFetcher.data?.ok ? (optsFetcher.data.attributes ?? []) : [];
+  // The working blob: the row's copy, else the one the server resolved live from
+  // the linked product (so already-created products can be edited too).
+  const parsed = parsedRow ?? (optsFetcher.data?.ok ? (optsFetcher.data.blob ?? null) : null);
   useEffect(() => {
     if (optsFetcher.state === "idle" && optsFetcher.data?.ok) {
       const s: Record<string, string[]> = {}; const tx: Record<string, string> = {};
@@ -19831,12 +19858,14 @@ function CollectionCategoryCell({ value, onSave }: { value: string; onSave: (blo
   return (
     <>
       <div style={COLLECTION_POPUP_CELL_STYLE} onClick={() => setOpen(true)} title="Edit Shopify category metafields (Color, Fabric, Occasion, Neckline, lengths…)">
-        {parsed?.categoryId || (parsed?.metafields?.length ?? 0) > 0
+        {parsedRow?.categoryId || (parsedRow?.metafields?.length ?? 0) > 0
           ? <span style={{ display: "block" }}>
               <span style={{ fontWeight: 600, color: "#006061", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🏷 {catShort || "Category"}</span>
-              <span style={{ color: "#9ca3af", fontSize: 11 }}>{parsed?.metafields?.length ?? 0} field{(parsed?.metafields?.length ?? 0) === 1 ? "" : "s"} · edit</span>
+              <span style={{ color: "#9ca3af", fontSize: 11 }}>{parsedRow?.metafields?.length ?? 0} field{(parsedRow?.metafields?.length ?? 0) === 1 ? "" : "s"} · edit</span>
             </span>
-          : <span style={{ color: "#9ca3af" }}>— (duplicate to inherit)</span>}
+          : linked
+            ? <span style={{ fontWeight: 600, color: "#006061" }}>🏷 Edit category</span>
+            : <span style={{ color: "#9ca3af" }}>— (duplicate to inherit)</span>}
       </div>
       {open && typeof document !== "undefined" && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={() => setOpen(false)}>
@@ -19846,13 +19875,15 @@ function CollectionCategoryCell({ value, onSave }: { value: string; onSave: (blo
               <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", background: "#f3f4f6", padding: "3px 10px", borderRadius: 6 }}>{parsed?.categoryName || "No category"}</span>
             </div>
             <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
-              {!parsed
-                ? <div style={{ color: "#6b7280", fontSize: 13 }}>This row has no category yet. Use <strong>Duplicate from</strong> to copy a product’s category and its metafields, then edit them here.</div>
-                : loading
-                  ? <div style={{ color: "#6b7280", fontSize: 13 }}>Loading allowed values from Shopify…</div>
-                  : attrs.length === 0
-                    ? <div style={{ color: "#6b7280", fontSize: 13 }}>No category metafields found on the source product.</div>
-                    : attrs.map((a) => {
+              {loading
+                ? <div style={{ color: "#6b7280", fontSize: 13 }}>Loading category &amp; allowed values from Shopify…</div>
+                : attrs.length === 0
+                  ? (parsed
+                      ? <div style={{ color: "#6b7280", fontSize: 13 }}>No category metafields found.</div>
+                      : linked
+                        ? <div style={{ color: "#6b7280", fontSize: 13 }}>This product has no category set in Shopify yet. Set its category in Shopify (or duplicate from a product that has one), then edit here.</div>
+                        : <div style={{ color: "#6b7280", fontSize: 13 }}>This row has no category yet. Use <strong>Duplicate from</strong> to copy a product’s category and its metafields, then edit them here.</div>)
+                  : attrs.map((a) => {
                       const selected = sel[a.key] ?? [];
                       const avail = a.allowed.filter((v) => !selected.includes(v.gid));
                       return (
