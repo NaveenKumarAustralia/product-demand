@@ -10477,6 +10477,7 @@ type CollectionPushResult = {
   productId?: string;
   handle?: string;
   errors?: string[];
+  categoryErrors?: string[];
 };
 
 // Creates a Shopify product from a collection row. Title + Description
@@ -10721,13 +10722,14 @@ async function createShopifyProductFromRow(
   // and write each metafield VERBATIM in the reserved `shopify` namespace, so the
   // new product inherits Color / Fabric / Occasion / Neckline / lengths / etc.
   const catRaw = (row[COL_ROW_CATEGORY_METAFIELDS] ?? "").trim();
+  const categoryMfs: Array<{ namespace: string; key: string; type: string; value: string }> = [];
   if (catRaw) {
     try {
       const cat = JSON.parse(catRaw) as CategoryMetafieldBlob;
       if (cat?.categoryId) input.category = cat.categoryId;
       for (const mf of cat?.metafields ?? []) {
         if (mf?.key && mf?.type && String(mf?.value ?? "").trim()) {
-          metafields.push({ namespace: "shopify", key: mf.key, type: mf.type, value: mf.value });
+          categoryMfs.push({ namespace: "shopify", key: mf.key, type: mf.type, value: mf.value });
         }
       }
     } catch { /* malformed blob → skip category rather than block the create */ }
@@ -10749,7 +10751,26 @@ async function createShopifyProductFromRow(
   }
   const product = json?.data?.productSet?.product;
   if (!product?.id) return { ok: false, errors: ["Shopify returned no product"] };
-  return { ok: true, productId: String(product.id), handle: String(product.handle ?? "") };
+
+  // Category (taxonomy) metafields go through metafieldsSet AFTER the product +
+  // its category exist — the reliable path for the reserved `shopify` namespace
+  // (productSet's input.metafields silently drops them). Best-effort: the product
+  // is already created, so we surface any errors but don't fail the whole create.
+  let categoryErrors: string[] = [];
+  if (categoryMfs.length) {
+    const mfIn = categoryMfs.map((m) => ({ ownerId: String(product.id), namespace: m.namespace, key: m.key, type: m.type, value: m.value }));
+    const mfRes = await shopifyGraphql<any>(shop, accessToken, `
+      mutation KeSetCategoryMetafields($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields { id key namespace }
+          userErrors { field message }
+        }
+      }
+    `, { metafields: mfIn }).catch(() => null);
+    categoryErrors = (mfRes?.data?.metafieldsSet?.userErrors ?? []).map((e: { message?: string }) => e.message || "metafield error");
+    if (categoryErrors.length) console.warn("[collection category metafields] write errors:", categoryErrors);
+  }
+  return { ok: true, productId: String(product.id), handle: String(product.handle ?? ""), categoryErrors };
 }
 
 // Upload local image bytes to Shopify via a staged upload; returns the
