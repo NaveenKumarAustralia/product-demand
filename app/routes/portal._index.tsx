@@ -5518,9 +5518,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           vendor
           seo { title description }
           category { id fullName }
-          metafields(first: 100, namespace: "shopify") {
+          metafields(first: 250) {
             nodes {
-              key type value
+              namespace key type value
+              definition { name }
               references(first: 40) { nodes { __typename ... on Metaobject { id displayName type } } }
               reference { __typename ... on Metaobject { id displayName type } }
             }
@@ -5588,8 +5589,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         query CatFromProduct($id: ID!) {
           product(id: $id) {
             category { id fullName }
-            metafields(first: 100, namespace: "shopify") {
-              nodes { key type value
+            metafields(first: 250) {
+              nodes { namespace key type value
+                definition { name }
                 references(first: 40) { nodes { __typename ... on Metaobject { id displayName type } } }
                 reference { __typename ... on Metaobject { id displayName type } }
               }
@@ -5608,16 +5610,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const attributes = [] as Array<{ key: string; label: string; type: string; refType: string | null; isList: boolean; isReference: boolean; current: Array<{ gid: string; name: string }>; allowed: Array<{ gid: string; name: string }> }>;
     for (const mf of blob?.metafields ?? []) {
       const isList = mf.type.startsWith("list.");
-      const isReference = mf.type.includes("metaobject_reference") || mf.type.includes("_reference");
+      const isReference = mf.type.includes("metaobject_reference");
       const currentGids = parseGids(mf.type, mf.value);
+      const nameByGid = new Map<string, string>();
+      let refType = mf.refType;
+      // `references` come back null for these reserved metafields, so resolve the
+      // current value IDs directly → their display names AND the metaobject `type`
+      // (used below to list every allowed value for the picker).
+      if (isReference && currentGids.length) {
+        const r: any = await shopifyGraphql<any>(session.shop, session.accessToken,
+          `query($ids:[ID!]!){ nodes(ids:$ids){ __typename ... on Metaobject { id displayName type } } }`,
+          { ids: currentGids });
+        for (const n of r?.data?.nodes ?? []) {
+          if (!n?.id) continue;
+          nameByGid.set(String(n.id), String(n.displayName ?? n.id));
+          if (!refType && n.type) refType = String(n.type);
+        }
+      }
       let allowed: Array<{ gid: string; name: string }> = [];
-      if (isReference && mf.refType) {
-        // All allowed values for this attribute = every metaobject of its type.
+      if (isReference && refType) {
+        // Every allowed value for this attribute = all metaobjects of its type.
         let cursor: string | null = null;
-        for (let p = 0; p < 4; p += 1) {
+        for (let p = 0; p < 6; p += 1) {
           const res: any = await shopifyGraphql<any>(session.shop, session.accessToken,
             `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName } } }`,
-            { type: mf.refType, cursor });
+            { type: refType, cursor });
           for (const n of res?.data?.metaobjects?.nodes ?? []) if (n?.id) allowed.push({ gid: String(n.id), name: String(n.displayName ?? n.id) });
           const pi = res?.data?.metaobjects?.pageInfo;
           if (!pi?.hasNextPage || !pi.endCursor) break;
@@ -5625,11 +5642,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
         allowed.sort((a, b) => a.name.localeCompare(b.name));
       }
-      const nameByGid = new Map(allowed.map((a) => [a.gid, a.name]));
-      // Fall back to the names copied at duplicate time when the metaobject
-      // lookup can't resolve a current value.
+      for (const a of allowed) if (!nameByGid.has(a.gid)) nameByGid.set(a.gid, a.name);
       const current = currentGids.map((gid, i) => ({ gid, name: nameByGid.get(gid) ?? (mf.names?.[i] ?? gid) }));
-      attributes.push({ key: mf.key, label: humanize(mf.key), type: mf.type, refType: mf.refType, isList, isReference, current, allowed });
+      attributes.push({ key: mf.key, label: mf.label || humanize(mf.key), type: mf.type, refType, isList, isReference, current, allowed });
     }
     return jsonResponse({ ok: true, categoryName: blob?.categoryName ?? "", categoryId: blob?.categoryId ?? "", attributes, blob });
   }
@@ -10005,7 +10020,7 @@ const SHOPIFY_UNLOCK_PULL_FIELDS = ["description", "productType", "vendor", "seo
 // inherits Color/Fabric/Occasion/Neckline/lengths/etc. Written to Shopify on
 // create + Update. Editable via the Category-metafields popup.
 const COL_ROW_CATEGORY_METAFIELDS = "__categoryMetafields";
-type CategoryMetafieldEntry = { key: string; type: string; value: string; names: string[]; refType: string | null };
+type CategoryMetafieldEntry = { key: string; type: string; value: string; names: string[]; refType: string | null; label?: string };
 type CategoryMetafieldBlob = { categoryId: string; categoryName: string; metafields: CategoryMetafieldEntry[] };
 // Build the category blob from a Shopify product node (category { id fullName } +
 // metafields(namespace:"shopify")). Copies key/type/value VERBATIM so the write
@@ -10015,7 +10030,10 @@ function buildCategoryMetafieldBlob(product: any): CategoryMetafieldBlob | null 
   const categoryId = String(product?.category?.id ?? "");
   const mfNodes: any[] = product?.metafields?.nodes ?? [];
   const metafields: CategoryMetafieldEntry[] = mfNodes
-    .filter((m) => String(m?.value ?? "").trim())
+    // Category metafields live in the reserved `shopify` namespace. (Filtering the
+    // Shopify query BY that namespace returns nothing, so we fetch all metafields
+    // and filter here.)
+    .filter((m) => String(m?.namespace ?? "") === "shopify" && String(m?.value ?? "").trim())
     .map((m) => {
       const refs = [...(m.references?.nodes ?? []), ...(m.reference ? [m.reference] : [])].filter(Boolean);
       return {
@@ -10024,6 +10042,7 @@ function buildCategoryMetafieldBlob(product: any): CategoryMetafieldBlob | null 
         value: String(m.value ?? ""),
         names: refs.map((r: any) => String(r?.displayName ?? "")).filter(Boolean),
         refType: (refs.find((r: any) => r?.type)?.type as string | undefined) ?? null,
+        label: String(m?.definition?.name ?? "") || undefined,
       };
     })
     .filter((m) => m.key && m.type && m.value);
