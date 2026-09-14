@@ -19926,14 +19926,15 @@ function CollectionCategoryCell({ value, productId, linked, onSave }: { value: s
       </div>
       {open && typeof document !== "undefined" && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={() => setOpen(false)}>
-          <div style={{ background: "#fff", borderRadius: 12, width: 680, maxWidth: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+          <div style={{ background: "#fff", borderRadius: 12, width: 780, maxWidth: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
             <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb", fontWeight: 700, fontSize: 15, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span>Category metafields</span>
-              <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", background: "#f3f4f6", padding: "3px 10px", borderRadius: 6 }}>{parsed?.categoryName || "No category"}</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", background: "#f3f4f6", padding: "4px 12px", borderRadius: 8 }}>{parsed?.categoryName ? parsed.categoryName.split(">").map((s) => s.trim()).slice(-2).reverse().join(" in ") : "No category"}</span>
             </div>
-            <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
-              <div style={{ borderBottom: "1px solid #eef0f0", paddingBottom: 14 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Copy category &amp; fields from another product</div>
+            <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+              <details style={{ borderBottom: "1px solid #eef0f0", paddingBottom: 12 }}>
+                <summary style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", cursor: "pointer" }}>Copy category &amp; fields from another product</summary>
+                <div style={{ marginTop: 8 }}>
                 <input value={q} onChange={(e) => { setQ(e.target.value); runSearch(e.target.value); }} placeholder="Search a product that has the right category…" style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 12px", fontSize: 14, boxSizing: "border-box" }} />
                 {q.trim().length >= 2 && (
                   <div style={{ marginTop: 6, maxHeight: 180, overflowY: "auto", border: (dupSearch.data?.products?.length ?? 0) ? "1px solid #eef0f0" : "none", borderRadius: 8 }}>
@@ -19946,7 +19947,8 @@ function CollectionCategoryCell({ value, productId, linked, onSave }: { value: s
                     {dupSearch.state === "idle" && (dupSearch.data?.products?.length ?? 0) === 0 && <div style={{ padding: "6px 8px", color: "#9ca3af", fontSize: 12 }}>No matches</div>}
                   </div>
                 )}
-              </div>
+                </div>
+              </details>
               {loading
                 ? <div style={{ color: "#6b7280", fontSize: 13 }}>Loading category &amp; allowed values from Shopify…</div>
                 : attrs.length === 0
@@ -19958,21 +19960,24 @@ function CollectionCategoryCell({ value, productId, linked, onSave }: { value: s
                   : attrs.map((a) => {
                       const selected = sel[a.key] ?? [];
                       const avail = a.allowed.filter((v) => !selected.includes(v.gid));
+                      const showAdd = (a.isList || selected.length === 0) && avail.length > 0;
                       return (
-                        <div key={a.key}>
-                          <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 6 }}>{a.label}</div>
-                          {a.isReference
-                            ? <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                                {selected.map((gid) => { const nm = a.allowed.find((v) => v.gid === gid)?.name ?? a.current.find((c) => c.gid === gid)?.name ?? gid; return <span key={gid}>{chip(nm, () => setSel((p) => ({ ...p, [a.key]: (p[a.key] ?? []).filter((g) => g !== gid) })))}</span>; })}
-                                {(a.isList || selected.length === 0) && avail.length > 0 && (
-                                  <select value="" onChange={(e) => { const g = e.target.value; if (!g) return; setSel((p) => ({ ...p, [a.key]: a.isList ? [...(p[a.key] ?? []), g] : [g] })); }} style={{ border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", fontSize: 12 }}>
-                                    <option value="">+ add{a.isList ? "" : " / change"}…</option>
-                                    {avail.map((v) => <option key={v.gid} value={v.gid}>{v.name}</option>)}
-                                  </select>
-                                )}
-                                {a.allowed.length === 0 && selected.length === 0 && <span style={{ color: "#9ca3af", fontSize: 12 }}>no values</span>}
-                              </div>
-                            : <input value={txt[a.key] ?? ""} onChange={(e) => setTxt((p) => ({ ...p, [a.key]: e.target.value }))} style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 12px", fontSize: 14, boxSizing: "border-box" }} />}
+                        <div key={a.key} style={{ display: "flex", gap: 16, alignItems: "flex-start" }}>
+                          <div style={{ width: 170, flexShrink: 0, fontSize: 14, color: "#303030", paddingTop: 9 }}>{a.label}</div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            {a.isReference
+                              ? <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", border: "1px solid #d1d5db", borderRadius: 8, padding: "7px 10px", minHeight: 38 }}>
+                                  {selected.map((gid) => { const nm = a.allowed.find((v) => v.gid === gid)?.name ?? a.current.find((c) => c.gid === gid)?.name ?? gid; return <span key={gid}>{chip(nm, () => setSel((p) => ({ ...p, [a.key]: (p[a.key] ?? []).filter((g) => g !== gid) })))}</span>; })}
+                                  {showAdd && (
+                                    <select value="" onChange={(e) => { const g = e.target.value; if (!g) return; setSel((p) => ({ ...p, [a.key]: a.isList ? [...(p[a.key] ?? []), g] : [g] })); }} style={{ border: "none", background: "transparent", color: "#5b6b69", fontSize: 13, cursor: "pointer", padding: "2px 4px", outline: "none" }}>
+                                      <option value="">+ add{a.isList ? "" : " / change"}…</option>
+                                      {avail.map((v) => <option key={v.gid} value={v.gid}>{v.name}</option>)}
+                                    </select>
+                                  )}
+                                  {selected.length === 0 && !showAdd && <span style={{ color: "#9ca3af", fontSize: 13 }}>—</span>}
+                                </div>
+                              : <input value={txt[a.key] ?? ""} onChange={(e) => setTxt((p) => ({ ...p, [a.key]: e.target.value }))} style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 12px", fontSize: 14, boxSizing: "border-box" }} />}
+                          </div>
                         </div>
                       );
                     })}
