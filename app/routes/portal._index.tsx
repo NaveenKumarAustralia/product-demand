@@ -779,6 +779,41 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       return fallback ? { ...order, productType: fallback } : { ...order, productType: null };
     });
   }
+  // Restock page: the row image is a snapshot saved when the product was first
+  // added, so it goes stale when the Shopify product photo is changed later.
+  // Refresh it LIVE from Shopify in ONE batched call (deduped by product) and
+  // override the stored URL for display, so the latest product picture always
+  // shows. Display-only — the stored value (incl. any manual image on custom
+  // rows without a productId) is left untouched.
+  if (page === "restock") {
+    const toGid = (p: string) => {
+      const t = (p ?? "").trim();
+      if (t.startsWith("gid://")) return t;
+      const n = t.replace(/\D/g, "");
+      return n ? `gid://shopify/Product/${n}` : "";
+    };
+    const gids = Array.from(new Set(orders.map((o) => toGid(o.productId ?? "")).filter(Boolean)));
+    if (gids.length) {
+      const sess = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" }, select: { shop: true, accessToken: true } }).catch(() => null);
+      if (sess?.shop && sess.accessToken) {
+        const freshByGid = new Map<string, string>();
+        for (let i = 0; i < gids.length; i += 100) {
+          const res = await shopifyGraphql<{ data?: { nodes?: Array<{ id?: string; featuredImage?: { url?: string | null } | null } | null> } }>(
+            sess.shop, sess.accessToken,
+            `query($ids:[ID!]!){ nodes(ids:$ids){ ... on Product { id featuredImage { url } } } }`,
+            { ids: gids.slice(i, i + 100) },
+          ).catch(() => null);
+          for (const n of res?.data?.nodes ?? []) { if (n?.id && n.featuredImage?.url) freshByGid.set(n.id, String(n.featuredImage.url)); }
+        }
+        if (freshByGid.size) {
+          orders = orders.map((order) => {
+            const fresh = freshByGid.get(toGid(order.productId ?? ""));
+            return fresh && fresh !== order.productImageUrl ? { ...order, productImageUrl: fresh } : order;
+          });
+        }
+      }
+    }
+  }
   // Defensive: hydrate shippingMethod from the DB in case the Prisma client
   // wasn't regenerated on this environment to know about the field. The
   // ADD COLUMN IF NOT EXISTS makes this safe on a stale schema too.
