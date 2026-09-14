@@ -15667,7 +15667,6 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "countryOfOrigin", label: "Country of Origin", width: 130 },
   { id: "compareAtPrice", label: "Compare at price", type: "number", width: 110 },
   { id: "complProducts", label: "Compl. products", type: "tickbox", width: 110 },
-  { id: "colour", label: "Colour", width: 90 },
   { id: "seoTitle", label: "SEO Title", width: 160 },
   { id: "seoDescription", label: "SEO Description", width: 200 },
   { id: "schedules", label: "Schedules", type: "tickbox", width: 90 },
@@ -15831,6 +15830,10 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   // so it doesn't linger as a raw-JSON text column.
   const allocIdx = cols.findIndex((c) => c.id === "allocation");
   if (allocIdx !== -1) cols.splice(allocIdx, 1);
+  // Colour column removed — the Shopify category metafield "Color" replaces it.
+  // Drop it from any collection that saved it (row data stays in JSON, unshown).
+  const colourIdx = cols.findIndex((c) => c.id === "colour");
+  if (colourIdx !== -1) cols.splice(colourIdx, 1);
   insertAfter("price", { id: "priceRupees", label: "Price ₹", type: "number", width: 90 });
   insertAfter("priceRupees", { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 });
   insertAfter("duplicateFrom", { id: "categoryMetafields", label: "Category metafields", width: 180 });
@@ -19947,10 +19950,6 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiFetcher.state, aiFetcher.data]);
-  useEffect(() => {
-    if (open && (parsedRow || linked)) optsFetcher.submit({ intent: "category_metafield_options", blob: value || "{}", productId: productId || "" }, { method: "post" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
   const attrs = optsFetcher.data?.ok ? (optsFetcher.data.attributes ?? []) : [];
   const addableAll = optsFetcher.data?.ok ? (optsFetcher.data.addable ?? []) : [];
   const [addedKeys, setAddedKeys] = useState<string[]>([]);
@@ -19960,23 +19959,46 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
   const [catQ, setCatQ] = useState("");
   const runCatSearch = (v: string) => { if (v.trim().length >= 2) taxSearch.submit({ intent: "taxonomy_category_search", q: v.trim() }, { method: "post" }); };
   const pickCategory = (c: { id: string; fullName: string }) => { setCatQ(""); setPickedCat(c); setAddedKeys([]); optsFetcher.submit({ intent: "category_metafield_options", blob: "{}", categoryId: c.id }, { method: "post" }); };
-  // The working blob: the row's copy, else the one the server resolved live from
-  // the linked product (so already-created products can be edited too).
+  // INSTANT fields from the saved row blob (no Shopify wait) — names are stored
+  // on the row. The Shopify fetch below only adds the "+ add" value lists +
+  // addable fields in the background; it never blocks showing the fields.
+  const rowAttrs = useMemo<CatOptAttr[]>(() => {
+    return (parsedRow?.metafields ?? []).map((mf) => {
+      const isList = mf.type.startsWith("list.");
+      const isReference = mf.type.includes("metaobject_reference");
+      let gids: string[] = [];
+      if (isList) { try { const a = JSON.parse(mf.value); gids = Array.isArray(a) ? a.map(String) : []; } catch { gids = []; } }
+      else gids = mf.value ? [mf.value] : [];
+      const current = gids.map((g, i) => ({ gid: g, name: mf.names?.[i] ?? g }));
+      return { key: mf.key, label: mf.label || mf.key, type: mf.type, refType: mf.refType ?? null, isList, isReference, current, allowed: [] };
+    });
+  }, [parsedRow]);
   const parsed = parsedRow ?? (optsFetcher.data?.ok ? (optsFetcher.data.blob ?? null) : null);
+  // On open: seed the selection from the row blob immediately, and kick off the
+  // background options fetch (for allowed values + addable fields).
   useEffect(() => {
-    if (optsFetcher.state === "idle" && optsFetcher.data?.ok) {
-      const s: Record<string, string[]> = {}; const tx: Record<string, string> = {};
-      for (const a of optsFetcher.data.attributes ?? []) {
-        if (a.isReference) s[a.key] = a.current.map((c) => c.gid);
-        else tx[a.key] = a.current[0]?.name ?? "";
-      }
-      setSel(s); setTxt(tx); setAddedKeys([]);
-    }
+    if (!open) return;
+    const s: Record<string, string[]> = {}; const tx: Record<string, string> = {};
+    for (const a of rowAttrs) { if (a.isReference) s[a.key] = a.current.map((c) => c.gid); else tx[a.key] = a.current[0]?.name ?? ""; }
+    setSel(s); setTxt(tx); setAddedKeys([]);
+    if (parsedRow || linked) optsFetcher.submit({ intent: "category_metafield_options", blob: value || "{}", productId: productId || "" }, { method: "post" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  // When the server responds for a row that had NO blob (copy-from-product or a
+  // freshly-picked category), seed the selection from the server attributes.
+  useEffect(() => {
+    if (optsFetcher.state !== "idle" || !optsFetcher.data?.ok || parsedRow) return;
+    const s: Record<string, string[]> = {}; const tx: Record<string, string> = {};
+    for (const a of optsFetcher.data.attributes ?? []) { if (a.isReference) s[a.key] = a.current.map((c) => c.gid); else tx[a.key] = a.current[0]?.name ?? ""; }
+    setSel(s); setTxt(tx);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [optsFetcher.state, optsFetcher.data]);
   const loading = optsFetcher.state !== "idle";
-  // Present fields + any addable fields the user has added this session.
-  const shownAttrs = [...attrs, ...addableAll.filter((a) => addedKeys.includes(a.key))];
+  // Fields to show: the row's fields instantly, each upgraded with the server's
+  // allowed-value list when it arrives; else the server attributes.
+  const serverByKey = new Map(attrs.map((a) => [a.key, a]));
+  const displayAttrs = rowAttrs.length ? rowAttrs.map((a) => serverByKey.get(a.key) ?? a) : attrs;
+  const shownAttrs = [...displayAttrs, ...addableAll.filter((a) => addedKeys.includes(a.key))];
   const addableRemaining = addableAll.filter((a) => !addedKeys.includes(a.key));
   const effCategoryId = parsed?.categoryId || pickedCat?.id || optsFetcher.data?.categoryId || "";
   const effCategoryName = parsed?.categoryName || pickedCat?.fullName || optsFetcher.data?.categoryName || "";
@@ -19986,7 +20008,7 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
       if (a.isReference) {
         const gids = sel[a.key] ?? [];
         if (!gids.length) return null;
-        const names = gids.map((g) => a.allowed.find((v) => v.gid === g)?.name ?? g);
+        const names = gids.map((g) => a.allowed.find((v) => v.gid === g)?.name ?? a.current.find((c) => c.gid === g)?.name ?? g);
         return { key: a.key, type: a.type, value: a.isList ? JSON.stringify(gids) : (gids[0] ?? ""), names, refType: a.refType ?? null } as CategoryMetafieldEntry;
       }
       const v = (txt[a.key] ?? "").trim();
@@ -20058,11 +20080,13 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
                   )}
                 </div>
               )}
-              {loading
-                ? <div style={{ color: "#6b7280", fontSize: 13 }}>Loading category &amp; allowed values from Shopify…</div>
-                : !effCategoryId
-                  ? null
-                  : shownAttrs.map((a) => {
+              {shownAttrs.length === 0 && loading && effCategoryId
+                ? <div style={{ color: "#6b7280", fontSize: 13 }}>Loading fields from Shopify…</div>
+                : null}
+              {shownAttrs.length > 0 && loading && (
+                <div style={{ color: "#9ca3af", fontSize: 12 }}>Loading value options…</div>
+              )}
+              {shownAttrs.map((a) => {
                       const selected = sel[a.key] ?? [];
                       const avail = a.allowed.filter((v) => !selected.includes(v.gid));
                       const showAdd = (a.isList || selected.length === 0) && avail.length > 0;
