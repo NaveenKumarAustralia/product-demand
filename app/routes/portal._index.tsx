@@ -5607,6 +5607,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (type.startsWith("list.")) { try { const a = JSON.parse(value); return Array.isArray(a) ? a.map(String) : []; } catch { return []; } }
       return value ? [value] : [];
     };
+    // These taxonomy-value metaobjects DON'T expose displayName — the readable
+    // label ("Adults", "Cotton", "Round"…) lives in one of their `fields`.
+    const moName = (n: any): string => {
+      const dn = String(n?.displayName ?? "").trim();
+      if (dn) return dn;
+      const fields: any[] = n?.fields ?? [];
+      const pref = fields.find((f) => ["name", "label", "value", "title"].includes(String(f?.key)) && String(f?.value ?? "").trim());
+      if (pref) return String(pref.value);
+      const first = fields.find((f) => String(f?.value ?? "").trim() && !String(f?.value ?? "").startsWith("gid://"));
+      return first ? String(first.value) : String(n?.id ?? "");
+    };
     const attributes = [] as Array<{ key: string; label: string; type: string; refType: string | null; isList: boolean; isReference: boolean; current: Array<{ gid: string; name: string }>; allowed: Array<{ gid: string; name: string }> }>;
     for (const mf of blob?.metafields ?? []) {
       const isList = mf.type.startsWith("list.");
@@ -5615,15 +5626,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const nameByGid = new Map<string, string>();
       let refType = mf.refType;
       // `references` come back null for these reserved metafields, so resolve the
-      // current value IDs directly → their display names AND the metaobject `type`
-      // (used below to list every allowed value for the picker).
+      // current value IDs directly → their names (from fields) AND the metaobject
+      // `type` (used below to list every allowed value for the picker).
       if (isReference && currentGids.length) {
         const r: any = await shopifyGraphql<any>(session.shop, session.accessToken,
-          `query($ids:[ID!]!){ nodes(ids:$ids){ __typename ... on Metaobject { id displayName type } } }`,
+          `query($ids:[ID!]!){ nodes(ids:$ids){ __typename ... on Metaobject { id displayName type fields { key value } } } }`,
           { ids: currentGids });
         for (const n of r?.data?.nodes ?? []) {
           if (!n?.id) continue;
-          nameByGid.set(String(n.id), String(n.displayName ?? n.id));
+          nameByGid.set(String(n.id), moName(n));
           if (!refType && n.type) refType = String(n.type);
         }
       }
@@ -5633,9 +5644,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         let cursor: string | null = null;
         for (let p = 0; p < 6; p += 1) {
           const res: any = await shopifyGraphql<any>(session.shop, session.accessToken,
-            `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName } } }`,
+            `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName fields { key value } } } }`,
             { type: refType, cursor });
-          for (const n of res?.data?.metaobjects?.nodes ?? []) if (n?.id) allowed.push({ gid: String(n.id), name: String(n.displayName ?? n.id) });
+          for (const n of res?.data?.metaobjects?.nodes ?? []) if (n?.id) allowed.push({ gid: String(n.id), name: moName(n) });
           const pi = res?.data?.metaobjects?.pageInfo;
           if (!pi?.hasNextPage || !pi.endCursor) break;
           cursor = pi.endCursor;
