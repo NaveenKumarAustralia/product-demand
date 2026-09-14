@@ -520,6 +520,65 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       console.error("Active user tracking failed", error);
       return [] as ActivePortalUser[];
     });
+  // Restock page: backfill any restock line missing its SKU or barcode from
+  // Shopify — matched by the variant's real ID (robust; no size-name guessing),
+  // falling back to the size label for older synthetic lines. Fills BLANKS ONLY
+  // (never overwrites an existing value) and PERSISTS the fill so it's fixed
+  // everywhere (Packing, exports). Only fetches products that actually have a
+  // gap, so once codes exist it stops doing Shopify work.
+  if (page === "restock" && allOrders.length) {
+    const toGid = (p: string) => { const t = (p ?? "").trim(); if (t.startsWith("gid://")) return t; const n = t.replace(/\D/g, ""); return n ? `gid://shopify/Product/${n}` : ""; };
+    const gapProductGids = new Set<string>();
+    for (const o of allOrders) {
+      const pg = toGid(o.productId ?? "");
+      if (!pg) continue;
+      for (const ln of o.lines ?? []) {
+        if (!(ln.sku ?? "").trim() || !(ln.barcode ?? "").trim()) { gapProductGids.add(pg); break; }
+      }
+    }
+    if (gapProductGids.size) {
+      const sess = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" }, select: { shop: true, accessToken: true } }).catch(() => null);
+      if (sess?.shop && sess.accessToken) {
+        type Code = { sku: string | null; barcode: string | null };
+        const codesByProduct = new Map<string, { byId: Map<string, Code>; bySize: Map<string, Code> }>();
+        const gids = Array.from(gapProductGids);
+        for (let i = 0; i < gids.length; i += 10) {
+          const res = await shopifyGraphql<{ data?: { nodes?: Array<{ id?: string; variants?: { nodes?: Array<{ id?: string; title?: string; sku?: string | null; barcode?: string | null }> } } | null> } }>(
+            sess.shop, sess.accessToken,
+            `query($ids:[ID!]!){ nodes(ids:$ids){ ... on Product { id variants(first:50){ nodes { id title sku barcode } } } } }`,
+            { ids: gids.slice(i, i + 10) },
+          ).catch(() => null);
+          for (const n of res?.data?.nodes ?? []) {
+            if (!n?.id) continue;
+            const byId = new Map<string, Code>();
+            const bySize = new Map<string, Code>();
+            for (const v of n.variants?.nodes ?? []) {
+              const code: Code = { sku: (v.sku ?? "").trim() || null, barcode: (v.barcode ?? "").trim() || null };
+              if (v.id) byId.set(String(v.id), code);
+              const sizeKey = normalizeVariantSizeLabel(String(v.title ?? ""));
+              if (sizeKey) bySize.set(sizeKey, code);
+            }
+            codesByProduct.set(n.id, { byId, bySize });
+          }
+        }
+        for (const o of allOrders) {
+          const codes = codesByProduct.get(toGid(o.productId ?? ""));
+          if (!codes) continue;
+          for (const ln of o.lines ?? []) {
+            const hasSku = (ln.sku ?? "").trim();
+            const hasBar = (ln.barcode ?? "").trim();
+            if (hasSku && hasBar) continue;
+            const match = codes.byId.get(String(ln.variantId)) ?? codes.bySize.get(normalizeVariantSizeLabel(ln.variantTitle ?? ""));
+            if (!match) continue;
+            const data: { sku?: string; barcode?: string } = {};
+            if (!hasSku && match.sku) { ln.sku = match.sku; data.sku = match.sku; }
+            if (!hasBar && match.barcode) { ln.barcode = match.barcode; data.barcode = match.barcode; }
+            if (data.sku || data.barcode) void prisma.orderLine.update({ where: { id: ln.id }, data }).catch(() => {});
+          }
+        }
+      }
+    }
+  }
   const normalizedOrders = allOrders
     .map((order) => ({
       ...order,
