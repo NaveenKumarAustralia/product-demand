@@ -19812,6 +19812,12 @@ function CollectionCategoryCell({ value, productId, linked, onSave }: { value: s
   const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; attributes?: CatOptAttr[]; blob?: CategoryMetafieldBlob }>();
   const [sel, setSel] = useState<Record<string, string[]>>({});
   const [txt, setTxt] = useState<Record<string, string>>({});
+  // "Copy category from another product" — reuses the duplicate-search route and
+  // pulls that product's category + metafields (verbatim) into this popup.
+  const dupSearch = useFetcher<{ products?: DuplicateProductSummary[] }>();
+  const [q, setQ] = useState("");
+  const runSearch = (v: string) => { if (v.trim().length >= 2) dupSearch.load(`/api/collection-duplicate-search?q=${encodeURIComponent(v.trim())}`); };
+  const pickSource = (p: DuplicateProductSummary) => { setQ(""); optsFetcher.submit({ intent: "category_metafield_options", blob: "{}", productId: p.id }, { method: "post" }); };
   useEffect(() => {
     if (open && (parsedRow || linked)) optsFetcher.submit({ intent: "category_metafield_options", blob: value || "{}", productId: productId || "" }, { method: "post" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -19875,6 +19881,21 @@ function CollectionCategoryCell({ value, productId, linked, onSave }: { value: s
               <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", background: "#f3f4f6", padding: "3px 10px", borderRadius: 6 }}>{parsed?.categoryName || "No category"}</span>
             </div>
             <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
+              <div style={{ borderBottom: "1px solid #eef0f0", paddingBottom: 14 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Copy category &amp; fields from another product</div>
+                <input value={q} onChange={(e) => { setQ(e.target.value); runSearch(e.target.value); }} placeholder="Search a product that has the right category…" style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 12px", fontSize: 14, boxSizing: "border-box" }} />
+                {q.trim().length >= 2 && (
+                  <div style={{ marginTop: 6, maxHeight: 180, overflowY: "auto", border: (dupSearch.data?.products?.length ?? 0) ? "1px solid #eef0f0" : "none", borderRadius: 8 }}>
+                    {(dupSearch.data?.products ?? []).slice(0, 12).map((p) => (
+                      <div key={p.id} onClick={() => pickSource(p)} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", cursor: "pointer", borderBottom: "1px solid #f3f4f6" }}>
+                        {p.thumbnail ? <img src={p.thumbnail} alt="" style={{ width: 28, height: 34, objectFit: "cover", borderRadius: 4 }} /> : null}
+                        <span style={{ fontSize: 13 }}>{p.title}</span>
+                      </div>
+                    ))}
+                    {dupSearch.state === "idle" && (dupSearch.data?.products?.length ?? 0) === 0 && <div style={{ padding: "6px 8px", color: "#9ca3af", fontSize: 12 }}>No matches</div>}
+                  </div>
+                )}
+              </div>
               {loading
                 ? <div style={{ color: "#6b7280", fontSize: 13 }}>Loading category &amp; allowed values from Shopify…</div>
                 : attrs.length === 0
