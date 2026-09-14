@@ -5657,7 +5657,58 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const current = currentGids.map((gid, i) => ({ gid, name: nameByGid.get(gid) ?? (mf.names?.[i] ?? gid) }));
       attributes.push({ key: mf.key, label: mf.label || humanize(mf.key), type: mf.type, refType, isList, isReference, current, allowed });
     }
-    return jsonResponse({ ok: true, categoryName: blob?.categoryName ?? "", categoryId: blob?.categoryId ?? "", attributes, blob });
+
+    // ADDABLE fields: the category's FULL attribute set (from the taxonomy) minus
+    // the ones already present. Map each taxonomy attribute (by name) to its
+    // metaobject type via the store's metaobject definitions, then list its
+    // allowed values — so the popup can offer "+ add field" like Shopify.
+    const addable = [] as typeof attributes;
+    const catId = blob?.categoryId || String(form.get("categoryId") ?? "").trim();
+    if (catId) {
+      try {
+        const [taxRes, defRes] = await Promise.all([
+          shopifyGraphql<any>(session.shop, session.accessToken, `query($id:ID!){ node(id:$id){ ... on TaxonomyCategory { attributes(first:120){ nodes { __typename ... on TaxonomyChoiceListAttribute { name } } } } } }`, { id: catId }),
+          shopifyGraphql<any>(session.shop, session.accessToken, `query{ metaobjectDefinitions(first:250){ nodes { type name } } }`, {}),
+        ]);
+        const typeByName = new Map<string, string>();
+        for (const d of defRes?.data?.metaobjectDefinitions?.nodes ?? []) {
+          const ty = String(d?.type ?? ""); const nm = String(d?.name ?? "");
+          if (ty.startsWith("shopify--") && nm) typeByName.set(nm.toLowerCase(), ty);
+        }
+        const presentKeys = new Set(attributes.map((a) => a.key));
+        for (const n of taxRes?.data?.node?.attributes?.nodes ?? []) {
+          if (n?.__typename !== "TaxonomyChoiceListAttribute") continue;
+          const label = String(n?.name ?? ""); if (!label) continue;
+          const ty = typeByName.get(label.toLowerCase()); if (!ty) continue;
+          const key = ty.replace(/^shopify--/, "");
+          if (presentKeys.has(key)) continue;
+          let allowed: Array<{ gid: string; name: string }> = [];
+          let cursor: string | null = null;
+          for (let p = 0; p < 6; p += 1) {
+            const res: any = await shopifyGraphql<any>(session.shop, session.accessToken, `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName fields { key value } } } }`, { type: ty, cursor });
+            for (const m of res?.data?.metaobjects?.nodes ?? []) if (m?.id) allowed.push({ gid: String(m.id), name: moName(m) });
+            const pi = res?.data?.metaobjects?.pageInfo; if (!pi?.hasNextPage || !pi.endCursor) break; cursor = pi.endCursor;
+          }
+          allowed.sort((a, b) => a.name.localeCompare(b.name));
+          addable.push({ key, label, type: "list.metaobject_reference", refType: ty, isList: true, isReference: true, current: [], allowed });
+        }
+        addable.sort((a, b) => a.label.localeCompare(b.label));
+      } catch { /* taxonomy/addable is best-effort — never block the editor */ }
+    }
+
+    return jsonResponse({ ok: true, categoryName: blob?.categoryName ?? "", categoryId: catId, attributes, addable, blob });
+  }
+
+  if (intent === "taxonomy_category_search") {
+    // Search Shopify's product taxonomy so a from-scratch row can be given a
+    // category. Returns leaf-ish categories with their full path.
+    const q = String(form.get("q") ?? "").trim();
+    if (q.length < 2) return jsonResponse({ ok: true, categories: [] });
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+    const r = await shopifyGraphql<any>(session.shop, session.accessToken, `query($q:String!){ taxonomy { categories(first:25, search:$q){ nodes { id fullName isLeaf } } } }`, { q });
+    const categories = (r?.data?.taxonomy?.categories?.nodes ?? []).map((c: any) => ({ id: String(c?.id ?? ""), fullName: String(c?.fullName ?? "") })).filter((c: any) => c.id && c.fullName);
+    return jsonResponse({ ok: true, categories });
   }
 
   if (intent === "push_collection_row_to_shopify" || intent === "push_collection_rows_to_shopify") {
@@ -19861,7 +19912,7 @@ type CatOptAttr = { key: string; label: string; type: string; refType: string | 
 function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { value: string; productId: string; linked: boolean; ctx: { name: string; productType: string; fabric: string; description: string }; onSave: (blob: string) => void }) {
   const [open, setOpen] = useState(false);
   const parsedRow = useMemo<CategoryMetafieldBlob | null>(() => { try { return value ? (JSON.parse(value) as CategoryMetafieldBlob) : null; } catch { return null; } }, [value]);
-  const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; attributes?: CatOptAttr[]; blob?: CategoryMetafieldBlob }>();
+  const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; categoryId?: string; attributes?: CatOptAttr[]; addable?: CatOptAttr[]; blob?: CategoryMetafieldBlob }>();
   const [sel, setSel] = useState<Record<string, string[]>>({});
   const [txt, setTxt] = useState<Record<string, string>>({});
   // "Copy category from another product" — reuses the duplicate-search route and
@@ -19901,6 +19952,14 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
   const attrs = optsFetcher.data?.ok ? (optsFetcher.data.attributes ?? []) : [];
+  const addableAll = optsFetcher.data?.ok ? (optsFetcher.data.addable ?? []) : [];
+  const [addedKeys, setAddedKeys] = useState<string[]>([]);
+  const [pickedCat, setPickedCat] = useState<{ id: string; fullName: string } | null>(null);
+  // From-scratch category picker (search Shopify's taxonomy).
+  const taxSearch = useFetcher<{ ok?: boolean; categories?: Array<{ id: string; fullName: string }> }>();
+  const [catQ, setCatQ] = useState("");
+  const runCatSearch = (v: string) => { if (v.trim().length >= 2) taxSearch.submit({ intent: "taxonomy_category_search", q: v.trim() }, { method: "post" }); };
+  const pickCategory = (c: { id: string; fullName: string }) => { setCatQ(""); setPickedCat(c); setAddedKeys([]); optsFetcher.submit({ intent: "category_metafield_options", blob: "{}", categoryId: c.id }, { method: "post" }); };
   // The working blob: the row's copy, else the one the server resolved live from
   // the linked product (so already-created products can be edited too).
   const parsed = parsedRow ?? (optsFetcher.data?.ok ? (optsFetcher.data.blob ?? null) : null);
@@ -19911,27 +19970,31 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
         if (a.isReference) s[a.key] = a.current.map((c) => c.gid);
         else tx[a.key] = a.current[0]?.name ?? "";
       }
-      setSel(s); setTxt(tx);
+      setSel(s); setTxt(tx); setAddedKeys([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [optsFetcher.state, optsFetcher.data]);
   const loading = optsFetcher.state !== "idle";
-  const catShort = (parsed?.categoryName ?? "").split(/[>›]/).pop()?.trim() || parsed?.categoryName || "";
+  // Present fields + any addable fields the user has added this session.
+  const shownAttrs = [...attrs, ...addableAll.filter((a) => addedKeys.includes(a.key))];
+  const addableRemaining = addableAll.filter((a) => !addedKeys.includes(a.key));
+  const effCategoryId = parsed?.categoryId || pickedCat?.id || optsFetcher.data?.categoryId || "";
+  const effCategoryName = parsed?.categoryName || pickedCat?.fullName || optsFetcher.data?.categoryName || "";
+  const catShort = (effCategoryName || "").split(/[>›]/).pop()?.trim() || effCategoryName || "";
   const save = () => {
-    if (!parsed) { setOpen(false); return; }
-    const nameByKey: Record<string, Map<string, string>> = {};
-    for (const a of attrs) nameByKey[a.key] = new Map(a.allowed.map((v) => [v.gid, v.name]));
-    const newMfs = parsed.metafields.map((mf) => {
-      const a = attrs.find((x) => x.key === mf.key);
-      if (!a) return mf;
+    const mfs = shownAttrs.map((a) => {
       if (a.isReference) {
-        const gids = sel[mf.key] ?? [];
-        return { ...mf, value: a.isList ? JSON.stringify(gids) : (gids[0] ?? ""), names: gids.map((g) => nameByKey[mf.key]?.get(g) ?? g) };
+        const gids = sel[a.key] ?? [];
+        if (!gids.length) return null;
+        const names = gids.map((g) => a.allowed.find((v) => v.gid === g)?.name ?? g);
+        return { key: a.key, type: a.type, value: a.isList ? JSON.stringify(gids) : (gids[0] ?? ""), names, refType: a.refType ?? null } as CategoryMetafieldEntry;
       }
-      const v = (txt[mf.key] ?? "").trim();
-      return { ...mf, value: v, names: v ? [v] : [] };
-    }).filter((mf) => String(mf.value ?? "").trim() && mf.value !== "[]");
-    onSave(JSON.stringify({ ...parsed, metafields: newMfs }));
+      const v = (txt[a.key] ?? "").trim();
+      if (!v) return null;
+      return { key: a.key, type: a.type, value: v, names: [v], refType: a.refType ?? null } as CategoryMetafieldEntry;
+    }).filter((mf): mf is CategoryMetafieldEntry => Boolean(mf) && String(mf!.value ?? "").trim() !== "" && mf!.value !== "[]");
+    if (!effCategoryId && !mfs.length) { setOpen(false); return; }
+    onSave(JSON.stringify({ categoryId: effCategoryId, categoryName: effCategoryName, metafields: mfs }));
     setOpen(false);
   };
   const chip = (name: string, onRemove?: () => void) => (
@@ -19960,7 +20023,7 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
                 {attrs.length > 0 && (
                   <button type="button" onClick={runAi} disabled={aiFetcher.state !== "idle"} title="Let AI pick fitting values for each field from Shopify's allowed options" style={{ border: "none", borderRadius: 6, cursor: aiFetcher.state !== "idle" ? "wait" : "pointer", fontSize: 12, fontWeight: 700, color: "#fff", background: aiFetcher.state !== "idle" ? "#9ca3af" : "#111827", padding: "5px 12px" }}>{aiFetcher.state !== "idle" ? "Thinking…" : "✨ AI suggest"}</button>
                 )}
-                <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", background: "#f3f4f6", padding: "4px 12px", borderRadius: 8 }}>{parsed?.categoryName ? parsed.categoryName.split(">").map((s) => s.trim()).slice(-2).reverse().join(" in ") : "No category"}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", background: "#f3f4f6", padding: "4px 12px", borderRadius: 8 }}>{effCategoryName ? effCategoryName.split(">").map((s) => s.trim()).slice(-2).reverse().join(" in ") : "No category"}</span>
               </span>
             </div>
             <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
@@ -19981,15 +20044,25 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
                 )}
                 </div>
               </details>
+              {!effCategoryId && !loading && (
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 6 }}>Choose a category</div>
+                  <input value={catQ} onChange={(e) => { setCatQ(e.target.value); runCatSearch(e.target.value); }} placeholder="Search Shopify categories (e.g. Dresses, Tops, Pants)…" style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 12px", fontSize: 14, boxSizing: "border-box" }} />
+                  {catQ.trim().length >= 2 && (
+                    <div style={{ marginTop: 6, maxHeight: 220, overflowY: "auto", border: (taxSearch.data?.categories?.length ?? 0) ? "1px solid #eef0f0" : "none", borderRadius: 8 }}>
+                      {(taxSearch.data?.categories ?? []).map((c) => (
+                        <div key={c.id} onClick={() => pickCategory(c)} style={{ padding: "7px 10px", cursor: "pointer", borderBottom: "1px solid #f3f4f6", fontSize: 13 }}>{c.fullName}</div>
+                      ))}
+                      {taxSearch.state === "idle" && (taxSearch.data?.categories?.length ?? 0) === 0 && <div style={{ padding: "7px 10px", color: "#9ca3af", fontSize: 12 }}>No matches</div>}
+                    </div>
+                  )}
+                </div>
+              )}
               {loading
                 ? <div style={{ color: "#6b7280", fontSize: 13 }}>Loading category &amp; allowed values from Shopify…</div>
-                : attrs.length === 0
-                  ? (parsed
-                      ? <div style={{ color: "#6b7280", fontSize: 13 }}>No category metafields found.</div>
-                      : linked
-                        ? <div style={{ color: "#6b7280", fontSize: 13 }}>This product has no category set in Shopify yet. Set its category in Shopify (or duplicate from a product that has one), then edit here.</div>
-                        : <div style={{ color: "#6b7280", fontSize: 13 }}>This row has no category yet. Use <strong>Duplicate from</strong> to copy a product’s category and its metafields, then edit them here.</div>)
-                  : attrs.map((a) => {
+                : !effCategoryId
+                  ? null
+                  : shownAttrs.map((a) => {
                       const selected = sel[a.key] ?? [];
                       const avail = a.allowed.filter((v) => !selected.includes(v.gid));
                       const showAdd = (a.isList || selected.length === 0) && avail.length > 0;
@@ -20013,10 +20086,19 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
                         </div>
                       );
                     })}
+              {effCategoryId && !loading && addableRemaining.length > 0 && (
+                <div style={{ display: "flex", gap: 16, alignItems: "center", borderTop: "1px solid #eef0f0", paddingTop: 12 }}>
+                  <div style={{ width: 170, flexShrink: 0, fontSize: 13, color: "#6b7280" }}>Add a field</div>
+                  <select value="" onChange={(e) => { const k = e.target.value; if (!k) return; setAddedKeys((prev) => [...prev, k]); setSel((p) => ({ ...p, [k]: [] })); }} style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 12px", fontSize: 14, background: "#fff" }}>
+                    <option value="">+ add a field…</option>
+                    {addableRemaining.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
+                  </select>
+                </div>
+              )}
             </div>
             <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <button type="button" onClick={() => setOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
-              <button type="button" onClick={save} disabled={!parsed} style={{ background: parsed ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: parsed ? "pointer" : "default" }}>Save</button>
+              <button type="button" onClick={save} disabled={!effCategoryId} style={{ background: effCategoryId ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: effCategoryId ? "pointer" : "default" }}>Save</button>
             </div>
           </div>
         </div>,
