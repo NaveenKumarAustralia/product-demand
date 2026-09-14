@@ -18766,6 +18766,7 @@ function CollectionSpreadsheetPage({
                                 value={row[COL_ROW_CATEGORY_METAFIELDS] ?? ""}
                                 productId={linkedProductId ?? ""}
                                 linked={linked}
+                                ctx={{ name: row.name ?? "", productType: row.productType ?? "", fabric: row.fabric ?? "", description: row.description ?? "" }}
                                 onSave={(blob) => {
                                   setRows((prev) => {
                                     const next = prev.map((r, i) => {
@@ -19857,7 +19858,7 @@ function CollectionSeoCell({ title, description, onCommit, productName, productT
 // full picker per attribute (Color, Fabric, Occasion, Neckline, lengths…). Allowed
 // values are fetched live from the taxonomy metaobjects that back each attribute.
 type CatOptAttr = { key: string; label: string; type: string; refType: string | null; isList: boolean; isReference: boolean; current: Array<{ gid: string; name: string }>; allowed: Array<{ gid: string; name: string }> };
-function CollectionCategoryCell({ value, productId, linked, onSave }: { value: string; productId: string; linked: boolean; onSave: (blob: string) => void }) {
+function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { value: string; productId: string; linked: boolean; ctx: { name: string; productType: string; fabric: string; description: string }; onSave: (blob: string) => void }) {
   const [open, setOpen] = useState(false);
   const parsedRow = useMemo<CategoryMetafieldBlob | null>(() => { try { return value ? (JSON.parse(value) as CategoryMetafieldBlob) : null; } catch { return null; } }, [value]);
   const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; attributes?: CatOptAttr[]; blob?: CategoryMetafieldBlob }>();
@@ -19869,6 +19870,32 @@ function CollectionCategoryCell({ value, productId, linked, onSave }: { value: s
   const [q, setQ] = useState("");
   const runSearch = (v: string) => { if (v.trim().length >= 2) dupSearch.load(`/api/collection-duplicate-search?q=${encodeURIComponent(v.trim())}`); };
   const pickSource = (p: DuplicateProductSummary) => { setQ(""); optsFetcher.submit({ intent: "category_metafield_options", blob: "{}", productId: p.id }, { method: "post" }); };
+  // ✨ AI suggest — asks the model to pick fitting values (from each field's
+  // allowed list) for this product, then applies them to the selection.
+  const aiFetcher = useFetcher<{ ok?: boolean; picks?: Record<string, string[]>; error?: string }>();
+  const runAi = () => {
+    const attrsPayload = attrs.filter((a) => a.isReference && a.allowed.length).map((a) => ({ key: a.key, label: a.label, isList: a.isList, allowed: a.allowed.map((v) => v.name) }));
+    if (!attrsPayload.length) return;
+    aiFetcher.submit({ productName: ctx.name || "", productType: ctx.productType || "", fabric: ctx.fabric || "", description: ctx.description || "", attributes: JSON.stringify(attrsPayload) }, { method: "post", action: "/api/category-metafield-ai" });
+  };
+  useEffect(() => {
+    if (aiFetcher.state !== "idle" || !aiFetcher.data?.ok || !aiFetcher.data.picks) return;
+    const picks = aiFetcher.data.picks;
+    setSel((prev) => {
+      const next = { ...prev };
+      for (const a of attrs) {
+        const names = picks[a.key];
+        if (!names?.length) continue;
+        const gidByName = new Map(a.allowed.map((v) => [v.name.toLowerCase(), v.gid]));
+        const gids = names.map((n) => gidByName.get(String(n).toLowerCase())).filter((g): g is string => Boolean(g));
+        if (!gids.length) continue;
+        const existing = next[a.key] ?? [];
+        next[a.key] = a.isList ? Array.from(new Set([...existing, ...gids])) : [gids[0]];
+      }
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiFetcher.state, aiFetcher.data]);
   useEffect(() => {
     if (open && (parsedRow || linked)) optsFetcher.submit({ intent: "category_metafield_options", blob: value || "{}", productId: productId || "" }, { method: "post" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -19927,9 +19954,14 @@ function CollectionCategoryCell({ value, productId, linked, onSave }: { value: s
       {open && typeof document !== "undefined" && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={() => setOpen(false)}>
           <div style={{ background: "#fff", borderRadius: 12, width: 780, maxWidth: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb", fontWeight: 700, fontSize: 15, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb", fontWeight: 700, fontSize: 15, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
               <span>Category metafields</span>
-              <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", background: "#f3f4f6", padding: "4px 12px", borderRadius: 8 }}>{parsed?.categoryName ? parsed.categoryName.split(">").map((s) => s.trim()).slice(-2).reverse().join(" in ") : "No category"}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                {attrs.length > 0 && (
+                  <button type="button" onClick={runAi} disabled={aiFetcher.state !== "idle"} title="Let AI pick fitting values for each field from Shopify's allowed options" style={{ border: "none", borderRadius: 6, cursor: aiFetcher.state !== "idle" ? "wait" : "pointer", fontSize: 12, fontWeight: 700, color: "#fff", background: aiFetcher.state !== "idle" ? "#9ca3af" : "#111827", padding: "5px 12px" }}>{aiFetcher.state !== "idle" ? "Thinking…" : "✨ AI suggest"}</button>
+                )}
+                <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", background: "#f3f4f6", padding: "4px 12px", borderRadius: 8 }}>{parsed?.categoryName ? parsed.categoryName.split(">").map((s) => s.trim()).slice(-2).reverse().join(" in ") : "No category"}</span>
+              </span>
             </div>
             <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
               <details style={{ borderBottom: "1px solid #eef0f0", paddingBottom: 12 }}>
