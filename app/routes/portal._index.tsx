@@ -5568,6 +5568,50 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   }
 
+  if (intent === "category_metafield_options") {
+    // For the Category-metafields popup editor: given the row's category blob,
+    // return per-attribute the current values + the FULL list of allowed values
+    // (fetched live from the taxonomy metaobjects that back each attribute), so
+    // the popup can offer real pickers like Shopify's own editor.
+    let blob: CategoryMetafieldBlob;
+    try { blob = JSON.parse(String(form.get("blob") ?? "{}")) as CategoryMetafieldBlob; }
+    catch { return jsonResponse({ ok: false, error: "bad_blob" }); }
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+    const humanize = (key: string) => key.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    const parseGids = (type: string, value: string): string[] => {
+      if (type.startsWith("list.")) { try { const a = JSON.parse(value); return Array.isArray(a) ? a.map(String) : []; } catch { return []; } }
+      return value ? [value] : [];
+    };
+    const attributes = [] as Array<{ key: string; label: string; type: string; refType: string | null; isList: boolean; isReference: boolean; current: Array<{ gid: string; name: string }>; allowed: Array<{ gid: string; name: string }> }>;
+    for (const mf of blob?.metafields ?? []) {
+      const isList = mf.type.startsWith("list.");
+      const isReference = mf.type.includes("metaobject_reference") || mf.type.includes("_reference");
+      const currentGids = parseGids(mf.type, mf.value);
+      let allowed: Array<{ gid: string; name: string }> = [];
+      if (isReference && mf.refType) {
+        // All allowed values for this attribute = every metaobject of its type.
+        let cursor: string | null = null;
+        for (let p = 0; p < 4; p += 1) {
+          const res: any = await shopifyGraphql<any>(session.shop, session.accessToken,
+            `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName } } }`,
+            { type: mf.refType, cursor });
+          for (const n of res?.data?.metaobjects?.nodes ?? []) if (n?.id) allowed.push({ gid: String(n.id), name: String(n.displayName ?? n.id) });
+          const pi = res?.data?.metaobjects?.pageInfo;
+          if (!pi?.hasNextPage || !pi.endCursor) break;
+          cursor = pi.endCursor;
+        }
+        allowed.sort((a, b) => a.name.localeCompare(b.name));
+      }
+      const nameByGid = new Map(allowed.map((a) => [a.gid, a.name]));
+      // Fall back to the names copied at duplicate time when the metaobject
+      // lookup can't resolve a current value.
+      const current = currentGids.map((gid, i) => ({ gid, name: nameByGid.get(gid) ?? (mf.names?.[i] ?? gid) }));
+      attributes.push({ key: mf.key, label: humanize(mf.key), type: mf.type, refType: mf.refType, isList, isReference, current, allowed });
+    }
+    return jsonResponse({ ok: true, categoryName: blob?.categoryName ?? "", categoryId: blob?.categoryId ?? "", attributes });
+  }
+
   if (intent === "push_collection_row_to_shopify" || intent === "push_collection_rows_to_shopify") {
     // Collections → Shopify: turn one row (single intent) or every
     // unsynced row (batch intent) into a Shopify product. Successful
@@ -15487,6 +15531,7 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "maniPicsTaken", label: "mani Pics Taken", width: 130 },
   { id: "loadingNotes", label: "Loading Notes", width: 140 },
   { id: "duplicateFrom", label: "DUPLICATE FROM", width: 140 },
+  { id: "categoryMetafields", label: "Category metafields", width: 180 },
   { id: "modelHeightSize", label: "Model height and size", width: 130 },
   { id: "createdBy", label: "Created by", width: 100 },
   { id: "link", label: "Open in Shopify", type: "readonly", width: 130 },
@@ -15664,6 +15709,7 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   if (allocIdx !== -1) cols.splice(allocIdx, 1);
   insertAfter("price", { id: "priceRupees", label: "Price ₹", type: "number", width: 90 });
   insertAfter("priceRupees", { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 });
+  insertAfter("duplicateFrom", { id: "categoryMetafields", label: "Category metafields", width: 180 });
   // Factory Notes was added later as the leftmost column. Drop it in
   // at index 0 for existing collections so staff don't have to drag
   // it to the front manually.
@@ -18640,6 +18686,27 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
+                        if (col.id === "categoryMetafields") {
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionCategoryCell
+                                value={row[COL_ROW_CATEGORY_METAFIELDS] ?? ""}
+                                onSave={(blob) => {
+                                  setRows((prev) => {
+                                    const next = prev.map((r, i) => {
+                                      if (i !== rIdx) return r;
+                                      const patched: Record<string, string> = { ...r, [COL_ROW_CATEGORY_METAFIELDS]: blob };
+                                      if ((patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
+                                      return patched;
+                                    });
+                                    persistRows(next, prev, `Edit category metafields on row ${rIdx + 1}`);
+                                    return next;
+                                  });
+                                }}
+                              />
+                            </Td>
+                          );
+                        }
                         if (col.id === "eta") {
                           const shipmentEta = linkedProductId ? (etaByProductId[linkedProductId] ?? null) : null;
                           const shipment = linkedProductId ? (shipmentByProductId[linkedProductId] ?? null) : null;
@@ -19702,6 +19769,114 @@ function CollectionSeoCell({ title, description, onCommit, productName, productT
             <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <button type="button" onClick={() => setOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
               <button type="button" onClick={save} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Save</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+// Category-metafields editor: shows the copied Shopify category + a popup with a
+// full picker per attribute (Color, Fabric, Occasion, Neckline, lengths…). Allowed
+// values are fetched live from the taxonomy metaobjects that back each attribute.
+type CatOptAttr = { key: string; label: string; type: string; refType: string | null; isList: boolean; isReference: boolean; current: Array<{ gid: string; name: string }>; allowed: Array<{ gid: string; name: string }> };
+function CollectionCategoryCell({ value, onSave }: { value: string; onSave: (blob: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const parsed = useMemo<CategoryMetafieldBlob | null>(() => { try { return value ? (JSON.parse(value) as CategoryMetafieldBlob) : null; } catch { return null; } }, [value]);
+  const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; attributes?: CatOptAttr[] }>();
+  const [sel, setSel] = useState<Record<string, string[]>>({});
+  const [txt, setTxt] = useState<Record<string, string>>({});
+  useEffect(() => {
+    if (open && parsed) optsFetcher.submit({ intent: "category_metafield_options", blob: value || "{}" }, { method: "post" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  const attrs = optsFetcher.data?.ok ? (optsFetcher.data.attributes ?? []) : [];
+  useEffect(() => {
+    if (optsFetcher.state === "idle" && optsFetcher.data?.ok) {
+      const s: Record<string, string[]> = {}; const tx: Record<string, string> = {};
+      for (const a of optsFetcher.data.attributes ?? []) {
+        if (a.isReference) s[a.key] = a.current.map((c) => c.gid);
+        else tx[a.key] = a.current[0]?.name ?? "";
+      }
+      setSel(s); setTxt(tx);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [optsFetcher.state, optsFetcher.data]);
+  const loading = optsFetcher.state !== "idle";
+  const catShort = (parsed?.categoryName ?? "").split(/[>›]/).pop()?.trim() || parsed?.categoryName || "";
+  const save = () => {
+    if (!parsed) { setOpen(false); return; }
+    const nameByKey: Record<string, Map<string, string>> = {};
+    for (const a of attrs) nameByKey[a.key] = new Map(a.allowed.map((v) => [v.gid, v.name]));
+    const newMfs = parsed.metafields.map((mf) => {
+      const a = attrs.find((x) => x.key === mf.key);
+      if (!a) return mf;
+      if (a.isReference) {
+        const gids = sel[mf.key] ?? [];
+        return { ...mf, value: a.isList ? JSON.stringify(gids) : (gids[0] ?? ""), names: gids.map((g) => nameByKey[mf.key]?.get(g) ?? g) };
+      }
+      const v = (txt[mf.key] ?? "").trim();
+      return { ...mf, value: v, names: v ? [v] : [] };
+    }).filter((mf) => String(mf.value ?? "").trim() && mf.value !== "[]");
+    onSave(JSON.stringify({ ...parsed, metafields: newMfs }));
+    setOpen(false);
+  };
+  const chip = (name: string, onRemove?: () => void) => (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "#eef2f2", border: "1px solid #d7e0df", borderRadius: 6, padding: "3px 8px", fontSize: 12, color: "#1c2222" }}>
+      {name}{onRemove && <span onClick={onRemove} style={{ cursor: "pointer", color: "#6b7674", fontWeight: 700 }}>×</span>}
+    </span>
+  );
+  return (
+    <>
+      <div style={COLLECTION_POPUP_CELL_STYLE} onClick={() => setOpen(true)} title="Edit Shopify category metafields (Color, Fabric, Occasion, Neckline, lengths…)">
+        {parsed?.categoryId || (parsed?.metafields?.length ?? 0) > 0
+          ? <span style={{ display: "block" }}>
+              <span style={{ fontWeight: 600, color: "#006061", display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🏷 {catShort || "Category"}</span>
+              <span style={{ color: "#9ca3af", fontSize: 11 }}>{parsed?.metafields?.length ?? 0} field{(parsed?.metafields?.length ?? 0) === 1 ? "" : "s"} · edit</span>
+            </span>
+          : <span style={{ color: "#9ca3af" }}>— (duplicate to inherit)</span>}
+      </div>
+      {open && typeof document !== "undefined" && createPortal(
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }} onClick={() => setOpen(false)}>
+          <div style={{ background: "#fff", borderRadius: 12, width: 680, maxWidth: "100%", maxHeight: "88vh", overflowY: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid #e5e7eb", fontWeight: 700, fontSize: 15, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>Category metafields</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", background: "#f3f4f6", padding: "3px 10px", borderRadius: 6 }}>{parsed?.categoryName || "No category"}</span>
+            </div>
+            <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 18 }}>
+              {!parsed
+                ? <div style={{ color: "#6b7280", fontSize: 13 }}>This row has no category yet. Use <strong>Duplicate from</strong> to copy a product’s category and its metafields, then edit them here.</div>
+                : loading
+                  ? <div style={{ color: "#6b7280", fontSize: 13 }}>Loading allowed values from Shopify…</div>
+                  : attrs.length === 0
+                    ? <div style={{ color: "#6b7280", fontSize: 13 }}>No category metafields found on the source product.</div>
+                    : attrs.map((a) => {
+                      const selected = sel[a.key] ?? [];
+                      const avail = a.allowed.filter((v) => !selected.includes(v.gid));
+                      return (
+                        <div key={a.key}>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: "#374151", marginBottom: 6 }}>{a.label}</div>
+                          {a.isReference
+                            ? <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                                {selected.map((gid) => { const nm = a.allowed.find((v) => v.gid === gid)?.name ?? a.current.find((c) => c.gid === gid)?.name ?? gid; return <span key={gid}>{chip(nm, () => setSel((p) => ({ ...p, [a.key]: (p[a.key] ?? []).filter((g) => g !== gid) })))}</span>; })}
+                                {(a.isList || selected.length === 0) && avail.length > 0 && (
+                                  <select value="" onChange={(e) => { const g = e.target.value; if (!g) return; setSel((p) => ({ ...p, [a.key]: a.isList ? [...(p[a.key] ?? []), g] : [g] })); }} style={{ border: "1px solid #d1d5db", borderRadius: 6, padding: "4px 8px", fontSize: 12 }}>
+                                    <option value="">+ add{a.isList ? "" : " / change"}…</option>
+                                    {avail.map((v) => <option key={v.gid} value={v.gid}>{v.name}</option>)}
+                                  </select>
+                                )}
+                                {a.allowed.length === 0 && selected.length === 0 && <span style={{ color: "#9ca3af", fontSize: 12 }}>no values</span>}
+                              </div>
+                            : <input value={txt[a.key] ?? ""} onChange={(e) => setTxt((p) => ({ ...p, [a.key]: e.target.value }))} style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 12px", fontSize: 14, boxSizing: "border-box" }} />}
+                        </div>
+                      );
+                    })}
+            </div>
+            <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" onClick={() => setOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+              <button type="button" onClick={save} disabled={!parsed} style={{ background: parsed ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: parsed ? "pointer" : "default" }}>Save</button>
             </div>
           </div>
         </div>,
