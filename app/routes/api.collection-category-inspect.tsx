@@ -75,20 +75,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const t = await gql(shop, accessToken, `
       query CatAttrs($id: ID!) {
         node(id: $id) {
-          __typename
           ... on TaxonomyCategory {
             id fullName
-            attributes(first: 80) {
-              nodes {
-                __typename
-                ... on TaxonomyAttribute {
-                  id name
-                  ... on Node { id }
-                }
-              }
-            }
+            attributes(first: 100) { nodes { __typename } }
           }
         }
+        tca: __type(name: "TaxonomyCategoryAttribute") { kind possibleTypes { name } fields { name } }
+        ta: __type(name: "TaxonomyAttribute") { kind fields { name type { kind name ofType { name kind ofType { name } } } } possibleTypes { name } }
+        tcla: __type(name: "TaxonomyChoiceListAttribute") { fields { name type { kind name ofType { name } } } }
+        tv: __type(name: "TaxonomyValue") { fields { name } }
       }
     `, { id: categoryId });
     taxonomy = t.json;
