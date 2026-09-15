@@ -5750,7 +5750,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         .map(({ i }) => i);
     }
 
-    const results: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }> = [];
+    const results: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string; categoryAttempted?: number; categoryWrote?: number; categoryErrors?: string[] }> = [];
     const now = new Date().toISOString();
     for (const idx of targetIndexes) {
       const row = rows[idx];
