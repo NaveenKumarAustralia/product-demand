@@ -5495,10 +5495,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "duplicate_from_shopify_product") {
-    // For the Collections "Duplicate From" picker: given a Shopify
-    // product GID, return the fields we want to copy into a row:
-    // descriptionHtml, productType, tags, hsCode, countryCodeOfOrigin,
-    // compareAtPrice. Colour is intentionally NOT copied.
+    // Collections "Duplicate From": copy EVERYTHING duplicatable from the source
+    // product into the row — description, type, tags, vendor, SEO, compare-at, HS
+    // code, country, AND the category node + all its category metafields (one
+    // unit). Colour + price/qty/SKU stay portal-managed.
     const productId = String(form.get("productId") ?? "").trim();
     if (!productId) return jsonResponse({ ok: false, error: "no_product" });
     const session = await prisma.session.findFirst({
@@ -5506,67 +5506,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       orderBy: { isOnline: "asc" },
     }).catch(() => null);
     if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
-
-    const json = await shopifyGraphql<any>(session.shop, session.accessToken, `
-      query DuplicateFromProduct($id: ID!) {
-        product(id: $id) {
-          id
-          title
-          descriptionHtml
-          productType
-          tags
-          vendor
-          seo { title description }
-          category { id fullName }
-          metafields(first: 250) {
-            nodes {
-              namespace key type value
-              definition { name }
-              references(first: 40) { nodes { __typename ... on Metaobject { id displayName type } } }
-              reference { __typename ... on Metaobject { id displayName type } }
-            }
-          }
-          variants(first: 1) {
-            nodes {
-              compareAtPrice
-              inventoryItem {
-                harmonizedSystemCode
-                countryCodeOfOrigin
-              }
-            }
-          }
-        }
-      }
-    `, { id: productId });
-
-    const product = json?.data?.product;
-    if (!product) return jsonResponse({ ok: false, error: "not_found" });
-    const v0 = product.variants?.nodes?.[0] ?? {};
-    // Category (taxonomy) node + its category metafields, copied VERBATIM (key,
-    // type, value) so we can write them back on the new product without needing
-    // to understand Shopify's internal reference format. We also keep each value's
-    // readable name + the reference metaobject type, for the editor popup later.
-    const catBlob = buildCategoryMetafieldBlob(product);
-    // Rewrite the copied description so its print reference matches the new
-    // row's product (print swap via AI); falls back to the verbatim copy.
+    const gid = productId.startsWith("gid://") ? productId : `gid://shopify/Product/${productId.replace(/\D/g, "")}`;
     const newName = String(form.get("newName") ?? "").trim();
-    const description = await adaptDuplicatedDescription(String(product.title ?? ""), newName, String(product.descriptionHtml ?? ""));
-    return jsonResponse({
-      ok: true,
-      fields: {
-        description,
-        productType: String(product.productType ?? ""),
-        // Never copy the pre-order system tags onto a duplicated/new product.
-        tags: Array.isArray(product.tags) ? product.tags.filter((t: unknown) => { const s = String(t).trim().toLowerCase(); return s !== "pre-order" && !s.startsWith("pre-order: ") && !s.startsWith("pre-order ships "); }).join(", ") : "",
-        vendor: String(product.vendor ?? ""),
-        seoTitle: String(product.seo?.title ?? ""),
-        seoDescription: String(product.seo?.description ?? ""),
-        compareAtPrice: v0.compareAtPrice ? String(v0.compareAtPrice) : "",
-        hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
-        countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
-        [COL_ROW_CATEGORY_METAFIELDS]: catBlob ? JSON.stringify(catBlob) : "",
-      },
-    });
+    const fields = await fetchDuplicateFieldsFromProduct(session.shop, session.accessToken, gid, newName);
+    if (!fields) return jsonResponse({ ok: false, error: "not_found" });
+    return jsonResponse({ ok: true, fields });
   }
 
   if (intent === "category_metafield_options") {
@@ -5758,6 +5702,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if ((row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) {
         results.push({ index: idx, ok: true, productId: row[COL_ROW_SHOPIFY_PRODUCT_ID] });
         continue;
+      }
+      // Duplicate safety net: if this row was set to duplicate from a product
+      // (even just a suggestion the user never clicked "apply"), fill EVERY empty
+      // duplicate field — including the category metafields — from that source
+      // before creating, so "set a source → Create" copies everything. Manual
+      // edits (non-empty fields) are never overwritten.
+      const dupId = (row[COL_ROW_DUPLICATE_FROM_ID] ?? "").trim();
+      if (dupId) {
+        const dupGid = dupId.startsWith("gid://") ? dupId : `gid://shopify/Product/${dupId.replace(/\D/g, "")}`;
+        const dup = await fetchDuplicateFieldsFromProduct(session.shop, session.accessToken, dupGid, row.name ?? "").catch(() => null);
+        if (dup) for (const [k, v] of Object.entries(dup)) { if (String(v ?? "").trim() && !String(row[k] ?? "").trim()) { row[k] = v; rows[idx] = row; } }
       }
       const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush, thbPerAud: thbPerAudForPush, currency: isJJNewPush ? "THB" : "INR", productInfo: productInfoForPush ?? undefined });
       if (res.ok && res.productId) {
@@ -10082,6 +10037,11 @@ const SHOPIFY_UNLOCK_PULL_FIELDS = ["description", "productType", "vendor", "seo
 // inherits Color/Fabric/Occasion/Neckline/lengths/etc. Written to Shopify on
 // create + Update. Editable via the Category-metafields popup.
 const COL_ROW_CATEGORY_METAFIELDS = "__categoryMetafields";
+// The Shopify product GID this row is duplicated from (remembered even when the
+// user only picks a suggestion without applying it). At Create, any empty
+// duplicate field — including the category metafields — is filled from it, so
+// "set a duplicate source → Create" copies everything without a separate click.
+const COL_ROW_DUPLICATE_FROM_ID = "__duplicateFromId";
 type CategoryMetafieldEntry = { key: string; type: string; value: string; names: string[]; refType: string | null; label?: string };
 type CategoryMetafieldBlob = { categoryId: string; categoryName: string; metafields: CategoryMetafieldEntry[] };
 // Build the category blob from a Shopify product node (category { id fullName } +
@@ -10577,6 +10537,54 @@ async function getProductMetafieldTypes(shop: string, accessToken: string): Prom
   for (const n of json?.data?.metafieldDefinitions?.nodes ?? []) { if (n.key) map[n.key] = n.type?.name ?? ""; }
   cache._shop = shop; cache._at = Date.now(); cache._map = map;
   return map;
+}
+
+// Pull EVERYTHING duplicatable from a Shopify product into a row-fields object:
+// description (AI print-swapped to the new name), product type, tags, vendor, SEO,
+// compare-at price, HS code, country of origin — AND the category node + all its
+// category metafields (as the __categoryMetafields blob). Category is NOT a
+// separate thing; it's just part of the same copy. Used by the Duplicate-from
+// picker and by Create (to fill anything the user didn't apply by hand).
+async function fetchDuplicateFieldsFromProduct(shop: string, accessToken: string, productGid: string, newName: string): Promise<Record<string, string> | null> {
+  const json = await shopifyGraphql<any>(shop, accessToken, `
+    query DupAllFields($id: ID!) {
+      product(id: $id) {
+        id title descriptionHtml productType vendor tags
+        seo { title description }
+        category { id fullName }
+        metafields(first: 250) {
+          nodes {
+            namespace key type value
+            definition { name }
+            references(first: 40) { nodes { __typename ... on Metaobject { id displayName type } } }
+            reference { __typename ... on Metaobject { id displayName type } }
+          }
+        }
+        variants(first: 1) { nodes { compareAtPrice inventoryItem { harmonizedSystemCode countryCodeOfOrigin } } }
+      }
+    }
+  `, { id: productGid });
+  const product = json?.data?.product;
+  if (!product) return null;
+  const v0 = product.variants?.nodes?.[0] ?? {};
+  const description = await adaptDuplicatedDescription(String(product.title ?? ""), newName, String(product.descriptionHtml ?? ""));
+  const tags = Array.isArray(product.tags)
+    ? product.tags.map((t: unknown) => String(t).trim()).filter(Boolean).filter((t: string) => { const s = t.toLowerCase(); return s !== "pre-order" && !s.startsWith("pre-order: ") && !s.startsWith("pre-order ships "); }).join(", ")
+    : "";
+  const catBlob = buildCategoryMetafieldBlob(product);
+  return {
+    description,
+    productType: String(product.productType ?? ""),
+    tags,
+    vendor: String(product.vendor ?? ""),
+    seoTitle: String(product.seo?.title ?? ""),
+    seoDescription: String(product.seo?.description ?? ""),
+    compareAtPrice: v0.compareAtPrice ? String(v0.compareAtPrice) : "",
+    hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
+    countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
+    [COL_ROW_CATEGORY_METAFIELDS]: catBlob ? JSON.stringify(catBlob) : "",
+    [COL_ROW_DUPLICATE_FROM_ID]: productGid,
+  };
 }
 
 async function createShopifyProductFromRow(
@@ -18823,6 +18831,14 @@ function CollectionSpreadsheetPage({
                                     return next;
                                   });
                                 }}
+                                onSuggest={(sourceId) => {
+                                  setRows((prev) => {
+                                    if ((prev[rIdx]?.[COL_ROW_DUPLICATE_FROM_ID] ?? "") === sourceId) return prev;
+                                    const next = prev.map((r, i) => (i === rIdx ? { ...r, [COL_ROW_DUPLICATE_FROM_ID]: sourceId } : r));
+                                    persistRows(next, prev, `Set duplicate source on row ${rIdx + 1}`);
+                                    return next;
+                                  });
+                                }}
                               />
                             </Td>
                           );
@@ -21280,11 +21296,13 @@ function CollectionDuplicateFromCell({
   currentName,
   styleHint,
   onPick,
+  onSuggest,
 }: {
   value: string;
   currentName: string;
   styleHint: string;
   onPick: (label: string, fields: Record<string, string>) => void;
+  onSuggest?: (sourceId: string) => void;
 }) {
   const searchFetcher = useFetcher<{ products?: DuplicateProductSummary[]; error?: string }>();
   const pickFetcher = useFetcher<{ ok?: boolean; fields?: Record<string, string>; error?: string }>();
@@ -21350,7 +21368,12 @@ function CollectionDuplicateFromCell({
   useEffect(() => {
     if (suggestFetcher.state !== "idle") return;
     const list = suggestFetcher.data?.products ?? [];
-    if (list.length > 0) setSuggestion(list[0]);
+    if (list.length > 0) {
+      setSuggestion(list[0]);
+      // Remember the source on the row so Create can fill everything (incl.
+      // category) from it even if the user never clicks "apply".
+      onSuggest?.(list[0].id);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [suggestFetcher.state, suggestFetcher.data]);
 
