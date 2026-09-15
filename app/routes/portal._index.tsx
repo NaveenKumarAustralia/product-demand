@@ -5810,7 +5810,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           // manually-typed "Created by" once the product actually exists.
           ...(currentUser?.name ? { createdBy: currentUser.name } : {}),
         };
-        results.push({ index: idx, ok: true, productId: res.productId });
+        results.push({ index: idx, ok: true, productId: res.productId, categoryAttempted: res.categoryAttempted, categoryWrote: res.categoryWrote, categoryErrors: res.categoryErrors });
       } else {
         results.push({ index: idx, ok: false, errors: res.errors });
       }
@@ -5874,7 +5874,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // the portal shouldn't be able to overwrite it until explicitly unlocked.
     rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_EDITED]: "" };
     await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
-    return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId }] });
+    return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId, categoryAttempted: res.categoryAttempted, categoryWrote: res.categoryWrote, categoryErrors: res.categoryErrors }] });
   }
 
   if (intent === "unlock_collection_row_shopify") {
@@ -10529,6 +10529,8 @@ type CollectionPushResult = {
   handle?: string;
   errors?: string[];
   categoryErrors?: string[];
+  categoryAttempted?: number;
+  categoryWrote?: number;
 };
 
 // Creates a Shopify product from a collection row. Title + Description
@@ -10808,6 +10810,8 @@ async function createShopifyProductFromRow(
   // (productSet's input.metafields silently drops them). Best-effort: the product
   // is already created, so we surface any errors but don't fail the whole create.
   let categoryErrors: string[] = [];
+  let categoryWrote = 0;
+  const categoryAttempted = categoryMfs.length;
   if (categoryMfs.length) {
     const mfIn = categoryMfs.map((m) => ({ ownerId: String(product.id), namespace: m.namespace, key: m.key, type: m.type, value: m.value }));
     const mfRes = await shopifyGraphql<any>(shop, accessToken, `
@@ -10817,11 +10821,12 @@ async function createShopifyProductFromRow(
           userErrors { field message }
         }
       }
-    `, { metafields: mfIn }).catch(() => null);
-    categoryErrors = (mfRes?.data?.metafieldsSet?.userErrors ?? []).map((e: { message?: string }) => e.message || "metafield error");
-    if (categoryErrors.length) console.warn("[collection category metafields] write errors:", categoryErrors);
+    `, { metafields: mfIn }).catch((e) => { categoryErrors.push(e instanceof Error ? e.message : String(e)); return null; });
+    categoryErrors = categoryErrors.concat((mfRes?.data?.metafieldsSet?.userErrors ?? []).map((e: { field?: string[]; message?: string }) => `${(e.field ?? []).join(".")}: ${e.message || "metafield error"}`));
+    categoryWrote = (mfRes?.data?.metafieldsSet?.metafields ?? []).length;
+    console.log(`[collection category metafields] product ${product.id}: attempted ${categoryAttempted}, wrote ${categoryWrote}${categoryErrors.length ? `, errors: ${categoryErrors.join("; ")}` : ""}`);
   }
-  return { ok: true, productId: String(product.id), handle: String(product.handle ?? ""), categoryErrors };
+  return { ok: true, productId: String(product.id), handle: String(product.handle ?? ""), categoryErrors, categoryAttempted, categoryWrote };
 }
 
 // Upload local image bytes to Shopify via a staged upload; returns the
@@ -17494,9 +17499,9 @@ function CollectionSpreadsheetPage({
   // page. "Show more" reveals the next batch.
   const ROW_RENDER_STEP = 60;
   const [renderLimit, setRenderLimit] = useState(ROW_RENDER_STEP);
-  const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string }>; error?: string }>();
+  const pushFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string; categoryAttempted?: number; categoryWrote?: number; categoryErrors?: string[] }>; error?: string }>();
   // "Update in Shopify" for already-linked rows whose info was edited.
-  const updateShopifyFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; productId?: string }>; error?: string }>();
+  const updateShopifyFetcher = useFetcher<{ ok?: boolean; results?: Array<{ index: number; ok: boolean; productId?: string; categoryAttempted?: number; categoryWrote?: number; categoryErrors?: string[] }>; error?: string }>();
   const backfillFetcher = useFetcher<{ ok?: boolean; updatedRows?: number; filledFields?: number; linked?: number; error?: string }>();
   // Lock/unlock a linked row (freeze Shopify pushes / resume + pull from Shopify).
   const lockFetcher = useFetcher<{ ok?: boolean; index?: number; locked?: boolean; unlocked?: boolean; deleted?: boolean; fields?: Record<string, string>; error?: string }>();
@@ -18232,7 +18237,11 @@ function CollectionSpreadsheetPage({
         }
         return next;
       });
-      setPushStatus({ msg: "Pushed to Shopify and locked again.", tone: "ok" });
+      const r0 = data.results[0];
+      const catErr = r0?.categoryErrors ?? [];
+      if (catErr.length) setPushStatus({ msg: `Pushed, but category metafields failed: ${catErr.join("; ")}`, tone: "err" });
+      else if ((r0?.categoryAttempted ?? 0) > 0) setPushStatus({ msg: `Pushed to Shopify and locked. Category: wrote ${r0?.categoryWrote ?? 0}/${r0?.categoryAttempted} field(s).`, tone: "ok" });
+      else setPushStatus({ msg: "Pushed to Shopify and locked again.", tone: "ok" });
     } else if (data.error) {
       setPushStatus({ msg: `Update failed — ${data.error}`, tone: "err" });
     }
@@ -18260,10 +18269,15 @@ function CollectionSpreadsheetPage({
           failures.push(`Row ${r.index + 1}: ${(r.errors ?? []).join("; ") || "Unknown error"}`);
         }
       }
+      const catErr = data.results!.flatMap((r) => r.categoryErrors ?? []);
+      const catAttempted = data.results!.reduce((s, r) => s + (r.categoryAttempted ?? 0), 0);
+      const catWrote = data.results!.reduce((s, r) => s + (r.categoryWrote ?? 0), 0);
       if (failures.length) {
         setPushStatus({ msg: `${okCount} created. ${failures.length} failed — ${failures[0]}`, tone: "err" });
+      } else if (catErr.length) {
+        setPushStatus({ msg: `${okCount} created, but category metafields failed: ${catErr.join("; ")}`, tone: "err" });
       } else {
-        setPushStatus({ msg: `${okCount} product${okCount === 1 ? "" : "s"} created as DRAFT in Shopify`, tone: "ok" });
+        setPushStatus({ msg: `${okCount} product${okCount === 1 ? "" : "s"} created as DRAFT${catAttempted > 0 ? ` · category: wrote ${catWrote}/${catAttempted} field(s)` : " · no category on the row"}`, tone: "ok" });
       }
       return next;
     });
