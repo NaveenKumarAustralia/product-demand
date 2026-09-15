@@ -20110,19 +20110,25 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
                         </div>
                       );
                     })}
-              {effCategoryId && !loading && addableRemaining.length > 0 && (
-                <div style={{ display: "flex", gap: 16, alignItems: "center", borderTop: "1px solid #eef0f0", paddingTop: 12 }}>
-                  <div style={{ width: 170, flexShrink: 0, fontSize: 13, color: "#6b7280" }}>Add a field</div>
-                  <select value="" onChange={(e) => { const k = e.target.value; if (!k) return; setAddedKeys((prev) => [...prev, k]); setSel((p) => ({ ...p, [k]: [] })); }} style={{ border: "1px solid #d1d5db", borderRadius: 8, padding: "8px 12px", fontSize: 14, background: "#fff" }}>
-                    <option value="">+ add a field…</option>
-                    {addableRemaining.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
-                  </select>
+              {effCategoryId && (
+                <div style={{ borderTop: "1px solid #eef0f0", paddingTop: 14, display: "flex", alignItems: "center", gap: 10 }}>
+                  {addableRemaining.length > 0 ? (
+                    <select value="" onChange={(e) => { const k = e.target.value; if (!k) return; setAddedKeys((prev) => [...prev, k]); setSel((p) => ({ ...p, [k]: [] })); }} style={{ border: "1px dashed #9aa8a6", borderRadius: 8, padding: "9px 14px", fontSize: 14, fontWeight: 600, color: "#006061", background: "#f4faf9", cursor: "pointer" }}>
+                      <option value="">＋ Add a field…</option>
+                      {addableRemaining.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
+                    </select>
+                  ) : (
+                    <span style={{ fontSize: 13, color: "#9ca3af" }}>{loading ? "Loading more fields…" : "All available fields are shown."}</span>
+                  )}
                 </div>
               )}
             </div>
-            <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button type="button" onClick={() => setOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
-              <button type="button" onClick={save} disabled={!effCategoryId} style={{ background: effCategoryId ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: effCategoryId ? "pointer" : "default" }}>Save</button>
+            <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <button type="button" onClick={() => { if (window.confirm("Clear the category and ALL its metafields from this row?")) { setSel({}); setTxt({}); setAddedKeys([]); setPickedCat(null); onSave(""); setOpen(false); } }} style={{ background: "transparent", border: "none", color: "#b42318", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Clear all</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="button" onClick={() => setOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+                <button type="button" onClick={save} disabled={!effCategoryId} style={{ background: effCategoryId ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: effCategoryId ? "pointer" : "default" }}>Save</button>
+              </div>
             </div>
           </div>
         </div>,
