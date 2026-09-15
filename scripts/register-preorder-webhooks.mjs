@@ -8,6 +8,9 @@ const REQUIRED = [
   { topic: "ORDERS_CREATE", path: "/webhooks/app/orders-create" },
   { topic: "ORDERS_CANCELLED", path: "/webhooks/app/orders-cancelled" },
   { topic: "ORDERS_FULFILLED", path: "/webhooks/app/orders-fulfilled" },
+  // Two-way Collections sync: a product saved in Shopify updates its locked
+  // collection row(s). Handled by /app/routes/webhooks.app.products-update.tsx.
+  { topic: "PRODUCTS_UPDATE", path: "/webhooks/app/products-update" },
 ];
 
 function appOrigin() {
