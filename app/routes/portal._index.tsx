@@ -5623,18 +5623,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
       let allowed: Array<{ gid: string; name: string }> = [];
       if (isReference && refType) {
-        // Every allowed value for this attribute = all metaobjects of its type.
-        let cursor: string | null = null;
-        for (let p = 0; p < 6; p += 1) {
-          const res: any = await shopifyGraphql<any>(session.shop, session.accessToken,
-            `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName fields { key value } } } }`,
-            { type: refType, cursor });
-          for (const n of res?.data?.metaobjects?.nodes ?? []) if (n?.id) allowed.push({ gid: String(n.id), name: moName(n) });
-          const pi = res?.data?.metaobjects?.pageInfo;
-          if (!pi?.hasNextPage || !pi.endCursor) break;
-          cursor = pi.endCursor;
-        }
-        allowed.sort((a, b) => a.name.localeCompare(b.name));
+        // Every allowed value for this attribute = all metaobjects of its type (cached).
+        allowed = await getAllowedMetaobjectValues(session.shop, session.accessToken, refType, moName);
       }
       for (const a of allowed) if (!nameByGid.has(a.gid)) nameByGid.set(a.gid, a.name);
       const current = currentGids.map((gid, i) => ({ gid, name: nameByGid.get(gid) ?? (mf.names?.[i] ?? gid) }));
@@ -5673,15 +5663,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const refType = `shopify--${def.key}`;
           const isReference = def.mfType.includes("metaobject_reference");
           let allowed: Array<{ gid: string; name: string }> = [];
-          if (isReference) {
-            let cursor: string | null = null;
-            for (let p = 0; p < 6; p += 1) {
-              const res: any = await shopifyGraphql<any>(session.shop, session.accessToken, `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName fields { key value } } } }`, { type: refType, cursor });
-              for (const m of res?.data?.metaobjects?.nodes ?? []) if (m?.id) allowed.push({ gid: String(m.id), name: moName(m) });
-              const pi = res?.data?.metaobjects?.pageInfo; if (!pi?.hasNextPage || !pi.endCursor) break; cursor = pi.endCursor;
-            }
-            allowed.sort((a, b) => a.name.localeCompare(b.name));
-          }
+          if (isReference) allowed = await getAllowedMetaobjectValues(session.shop, session.accessToken, refType, moName);
           addable.push({ key: def.key, label, type: def.mfType, refType: isReference ? refType : null, isList: def.mfType.startsWith("list."), isReference, current: [], allowed });
         }
         addable.sort((a, b) => a.label.localeCompare(b.label));
@@ -5742,7 +5724,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         .map(({ i }) => i);
     }
 
-    const results: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string; categoryAttempted?: number; categoryWrote?: number; categoryErrors?: string[] }> = [];
+    const results: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string; categoryAttempted?: number; categoryWrote?: number; categoryErrors?: string[]; filled?: Record<string, string> }> = [];
+    // Content fields the duplicate-at-create may have filled in — echoed back so the
+    // client can show them immediately (no page refresh needed).
+    const CREATE_FILLED_FIELDS = ["description", "tags", "seoTitle", "seoDescription", "productType", "vendor", "hsCode", "countryOfOrigin", "compareAtPrice", "categories", COL_ROW_CATEGORY_METAFIELDS, COL_ROW_DUPLICATE_FROM_ID];
     const now = new Date().toISOString();
     for (const idx of targetIndexes) {
       const row = rows[idx];
@@ -5823,7 +5808,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           // manually-typed "Created by" once the product actually exists.
           ...(currentUser?.name ? { createdBy: currentUser.name } : {}),
         };
-        results.push({ index: idx, ok: true, productId: res.productId, categoryAttempted: res.categoryAttempted, categoryWrote: res.categoryWrote, categoryErrors: res.categoryErrors });
+        const filled: Record<string, string> = {};
+        for (const k of CREATE_FILLED_FIELDS) { const v = String(rows[idx][k] ?? ""); if (v) filled[k] = v; }
+        results.push({ index: idx, ok: true, productId: res.productId, categoryAttempted: res.categoryAttempted, categoryWrote: res.categoryWrote, categoryErrors: res.categoryErrors, filled });
       } else {
         results.push({ index: idx, ok: false, errors: res.errors });
       }
@@ -10637,6 +10624,28 @@ async function getProductMetafieldTypes(shop: string, accessToken: string): Prom
 // category metafields (as the __categoryMetafields blob). Category is NOT a
 // separate thing; it's just part of the same copy. Used by the Duplicate-from
 // picker and by Create (to fill anything the user didn't apply by hand).
+// Store-global metaobject value lists (all Colours, all Fabrics, all Necklines…)
+// back the category-metafield pickers. They're identical for every product and
+// rarely change, so cache them briefly — this is what made the popup "a bit slow"
+// (it re-paginated every list on every open). Keyed by shop + metaobject type.
+const categoryAllowedCache = new Map<string, { at: number; values: Array<{ gid: string; name: string }> }>();
+const CATEGORY_ALLOWED_TTL_MS = 10 * 60 * 1000;
+async function getAllowedMetaobjectValues(shop: string, accessToken: string, refType: string, moName: (n: any) => string): Promise<Array<{ gid: string; name: string }>> {
+  const key = `${shop}::${refType}`;
+  const hit = categoryAllowedCache.get(key);
+  if (hit && Date.now() - hit.at < CATEGORY_ALLOWED_TTL_MS) return hit.values;
+  const values: Array<{ gid: string; name: string }> = [];
+  let cursor: string | null = null;
+  for (let p = 0; p < 6; p += 1) {
+    const res: any = await shopifyGraphql<any>(shop, accessToken, `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName fields { key value } } } }`, { type: refType, cursor });
+    for (const n of res?.data?.metaobjects?.nodes ?? []) if (n?.id) values.push({ gid: String(n.id), name: moName(n) });
+    const pi: any = res?.data?.metaobjects?.pageInfo; if (!pi?.hasNextPage || !pi.endCursor) break; cursor = pi.endCursor;
+  }
+  values.sort((a, b) => a.name.localeCompare(b.name));
+  categoryAllowedCache.set(key, { at: Date.now(), values });
+  return values;
+}
+
 async function fetchDuplicateFieldsFromProduct(shop: string, accessToken: string, productGid: string, newName: string): Promise<Record<string, string> | null> {
   const json = await shopifyGraphql<any>(shop, accessToken, `
     query DupAllFields($id: ID!) {
@@ -18384,6 +18393,9 @@ function CollectionSpreadsheetPage({
         if (r.ok && r.productId && next[r.index]) {
           next[r.index] = {
             ...next[r.index],
+            // Content the duplicate filled at create (description/tags/category/…) —
+            // apply it so it shows immediately, no page refresh needed.
+            ...((r as { filled?: Record<string, string> }).filled ?? {}),
             [COL_ROW_SHOPIFY_PRODUCT_ID]: r.productId,
             [COL_ROW_SHOPIFY_CREATED_AT]: now,
             [COL_ROW_SHOPIFY_STATUS]: "DRAFT",
