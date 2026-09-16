@@ -9885,6 +9885,25 @@ async function pruneDeletedShopifyLinks(shop: string, accessToken: string, rows:
       [COL_ROW_SHOPIFY_STATUS]: "",
       [COL_ROW_SHOPIFY_DIRTY]: "",
       [COL_ROW_SHOPIFY_LOCKED]: "",
+      [COL_ROW_SHOPIFY_EDITED]: "",
+      // Also WIPE the Shopify-derived content so the row is clean for a re-create.
+      // Otherwise leftover description / tags / SEO / category from the deleted
+      // product read as "not empty" and BLOCK the duplicate from re-filling them
+      // (the reported bug). Portal-managed fields — name, price, sizes, SKU/
+      // barcode, images, notes — are kept, and __duplicateFromId is kept so a
+      // re-create re-duplicates cleanly.
+      description: "",
+      tags: "",
+      seoTitle: "",
+      seoDescription: "",
+      productType: "",
+      vendor: "",
+      hsCode: "",
+      countryOfOrigin: "",
+      compareAtPrice: "",
+      categories: "",
+      colour: "",
+      [COL_ROW_CATEGORY_METAFIELDS]: "",
     };
     removed += 1;
   }
