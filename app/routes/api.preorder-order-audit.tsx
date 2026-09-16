@@ -32,7 +32,45 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const tokens = Array.from(new Set(
     (url.searchParams.get("orders") ?? "").split(/[\s,]+/).map((s) => s.trim().replace(/^#/, "")).filter(Boolean),
   ));
-  if (!tokens.length) return Response.json({ ok: false, error: "Pass ?orders=385992,386250,… (comma or space separated)." }, { status: 400 });
+  const batchIdsParam = Array.from(new Set(
+    (url.searchParams.get("batch") ?? url.searchParams.get("batches") ?? "").split(/[\s,]+/).map((s) => Number(s.replace(/[^0-9]/g, ""))).filter((n) => Number.isFinite(n) && n > 0),
+  ));
+
+  // BATCH MODE: ?batch=1281 (or batch=1281,954) → reconcile EVERY size in that
+  // production batch at once (incoming vs reserved vs available/oversold), no order
+  // numbers needed. Pure DB — this is the true picture of what's committed.
+  if (batchIdsParam.length) {
+    const bufferRows = await prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: batchIdsParam } }, select: { supplierOrderId: true, safetyBufferPercent: true, safetyBufferQty: true, enabled: true, shipDate: true } });
+    const bufferBy = new Map(bufferRows.map((b) => [b.supplierOrderId, b]));
+    const orders = await prisma.supplierOrder.findMany({
+      where: { id: { in: batchIdsParam } },
+      select: { id: true, productTitle: true, destination: true, status: true, eta: true, lines: { select: { variantId: true, variantTitle: true, qtyOrdered: true, qtyReceived: true } } },
+    });
+    const batches = [];
+    for (const o of orders) {
+      const buf = bufferBy.get(o.id);
+      const sizes = [];
+      for (const l of o.lines) {
+        const incoming = Math.max(0, l.qtyOrdered - l.qtyReceived);
+        const reservedAgg = await prisma.preorderReservation.aggregate({
+          where: { supplierOrderId: o.id, variantId: { in: variantIdCandidates(l.variantId) }, status: "reserved" },
+          _sum: { quantity: true },
+        });
+        const reservedQty = reservedAgg._sum.quantity ?? 0;
+        const cap = calculatePreorderCapacity({ confirmedIncomingQty: incoming, reservedQty, safetyBufferPercent: buf?.safetyBufferPercent ?? 0, safetyBufferQty: buf?.safetyBufferQty ?? null });
+        sizes.push({ size: l.variantTitle, qtyOrdered: l.qtyOrdered, qtyReceived: l.qtyReceived, incomingRemaining: incoming, reservedQty, safetyBufferQty: cap.safetyBufferQty, availableToPreorder: cap.availableToPreorder, oversoldBy: cap.overallocatedBy });
+      }
+      batches.push({ batchId: o.id, productTitle: o.productTitle, destination: o.destination, status: o.status, enabled: buf?.enabled ?? null, shipDate: buf?.shipDate ?? o.eta ?? null, sizes });
+    }
+    const oversold = batches.flatMap((b) => b.sizes.filter((s: any) => s.oversoldBy > 0).map((s: any) => `batch ${b.batchId} ${b.productTitle ?? ""} ${s.size ?? ""} oversold by ${s.oversoldBy}`.trim()));
+    return Response.json({
+      ok: true,
+      summary: { batchesChecked: batchIdsParam.length, oversoldSizes: oversold.length, oversold, note: "reservedQty = pre-orders committed against this size. oversoldBy>0 means more reserved than (incoming − buffer)." },
+      batches,
+    }, { headers: { "Cache-Control": "no-store" } });
+  }
+
+  if (!tokens.length) return Response.json({ ok: false, error: "Pass ?orders=385992,386250,… OR ?batch=1281 (all sizes in a production batch)." }, { status: 400 });
 
   const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true, accessToken: true } });
   if (!session?.shop || !session.accessToken) return Response.json({ ok: false, error: "No offline Shopify session." }, { status: 500 });
