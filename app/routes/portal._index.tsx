@@ -5602,45 +5602,54 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       attributes.push({ key: mf.key, label: mf.label || humanize(mf.key), type: mf.type, refType, isList, isReference, current, allowed });
     }
 
-    // ADDABLE fields: the category's FULL attribute set (from the taxonomy) minus
-    // the ones already present. Map each taxonomy attribute (by name) to its
-    // metaobject type via the store's metaobject definitions, then list its
-    // allowed values — so the popup can offer "+ add field" like Shopify.
+    // ADDABLE fields: the category's FULL attribute set minus the ones already
+    // present, so the popup can offer "+ add field" like Shopify (Care
+    // instructions, Pants/Top length, Back design, Hemline style, Size type…).
+    // Source of the full set = the product metafield DEFINITIONS in the reserved
+    // `shopify` namespace (they exist for every attribute of a category the store
+    // uses, filled or not); scoped to THIS category via the taxonomy attribute
+    // names. `metaobjects(type)` lists each field's allowed values.
     const addable = [] as typeof attributes;
+    let addableDebug = "";
     const catId = blob?.categoryId || String(form.get("categoryId") ?? "").trim();
     if (catId) {
       try {
         const [taxRes, defRes] = await Promise.all([
           shopifyGraphql<any>(session.shop, session.accessToken, `query($id:ID!){ node(id:$id){ ... on TaxonomyCategory { attributes(first:120){ nodes { __typename ... on TaxonomyChoiceListAttribute { name } } } } } }`, { id: catId }),
-          shopifyGraphql<any>(session.shop, session.accessToken, `query{ metaobjectDefinitions(first:250){ nodes { type name } } }`, {}),
+          shopifyGraphql<any>(session.shop, session.accessToken, `query{ metafieldDefinitions(ownerType: PRODUCT, first: 250){ nodes { namespace key name type { name } } } }`, {}),
         ]);
-        const typeByName = new Map<string, string>();
-        for (const d of defRes?.data?.metaobjectDefinitions?.nodes ?? []) {
-          const ty = String(d?.type ?? ""); const nm = String(d?.name ?? "");
-          if (ty.startsWith("shopify--") && nm) typeByName.set(nm.toLowerCase(), ty);
+        // name(lower) → { key, mfType } from the shopify-namespace product metafield definitions.
+        const defByName = new Map<string, { key: string; mfType: string }>();
+        for (const d of defRes?.data?.metafieldDefinitions?.nodes ?? []) {
+          if (String(d?.namespace ?? "") !== "shopify") continue;
+          const key = String(d?.key ?? ""); const nm = String(d?.name ?? "");
+          if (key && nm) defByName.set(nm.toLowerCase(), { key, mfType: String(d?.type?.name ?? "list.metaobject_reference") });
         }
+        const taxNames: string[] = (taxRes?.data?.node?.attributes?.nodes ?? []).filter((n: any) => n?.__typename === "TaxonomyChoiceListAttribute").map((n: any) => String(n?.name ?? "")).filter(Boolean);
         const presentKeys = new Set(attributes.map((a) => a.key));
-        for (const n of taxRes?.data?.node?.attributes?.nodes ?? []) {
-          if (n?.__typename !== "TaxonomyChoiceListAttribute") continue;
-          const label = String(n?.name ?? ""); if (!label) continue;
-          const ty = typeByName.get(label.toLowerCase()); if (!ty) continue;
-          const key = ty.replace(/^shopify--/, "");
-          if (presentKeys.has(key)) continue;
+        addableDebug = `tax:${taxNames.length} shopifyDefs:${defByName.size}`;
+        for (const label of taxNames) {
+          const def = defByName.get(label.toLowerCase()); if (!def) continue;
+          if (presentKeys.has(def.key)) continue;
+          const refType = `shopify--${def.key}`;
+          const isReference = def.mfType.includes("metaobject_reference");
           let allowed: Array<{ gid: string; name: string }> = [];
-          let cursor: string | null = null;
-          for (let p = 0; p < 6; p += 1) {
-            const res: any = await shopifyGraphql<any>(session.shop, session.accessToken, `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName fields { key value } } } }`, { type: ty, cursor });
-            for (const m of res?.data?.metaobjects?.nodes ?? []) if (m?.id) allowed.push({ gid: String(m.id), name: moName(m) });
-            const pi = res?.data?.metaobjects?.pageInfo; if (!pi?.hasNextPage || !pi.endCursor) break; cursor = pi.endCursor;
+          if (isReference) {
+            let cursor: string | null = null;
+            for (let p = 0; p < 6; p += 1) {
+              const res: any = await shopifyGraphql<any>(session.shop, session.accessToken, `query($type:String!,$cursor:String){ metaobjects(type:$type, first:250, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes { id displayName fields { key value } } } }`, { type: refType, cursor });
+              for (const m of res?.data?.metaobjects?.nodes ?? []) if (m?.id) allowed.push({ gid: String(m.id), name: moName(m) });
+              const pi = res?.data?.metaobjects?.pageInfo; if (!pi?.hasNextPage || !pi.endCursor) break; cursor = pi.endCursor;
+            }
+            allowed.sort((a, b) => a.name.localeCompare(b.name));
           }
-          allowed.sort((a, b) => a.name.localeCompare(b.name));
-          addable.push({ key, label, type: "list.metaobject_reference", refType: ty, isList: true, isReference: true, current: [], allowed });
+          addable.push({ key: def.key, label, type: def.mfType, refType: isReference ? refType : null, isList: def.mfType.startsWith("list."), isReference, current: [], allowed });
         }
         addable.sort((a, b) => a.label.localeCompare(b.label));
-      } catch { /* taxonomy/addable is best-effort — never block the editor */ }
+      } catch (e) { addableDebug = `err:${e instanceof Error ? e.message : String(e)}`; }
     }
 
-    return jsonResponse({ ok: true, categoryName: blob?.categoryName ?? "", categoryId: catId, attributes, addable, blob });
+    return jsonResponse({ ok: true, categoryName: blob?.categoryName ?? "", categoryId: catId, attributes, addable, addableDebug, blob });
   }
 
   if (intent === "taxonomy_category_search") {
@@ -19945,7 +19954,7 @@ type CatOptAttr = { key: string; label: string; type: string; refType: string | 
 function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { value: string; productId: string; linked: boolean; ctx: { name: string; productType: string; fabric: string; description: string }; onSave: (blob: string) => void }) {
   const [open, setOpen] = useState(false);
   const parsedRow = useMemo<CategoryMetafieldBlob | null>(() => { try { return value ? (JSON.parse(value) as CategoryMetafieldBlob) : null; } catch { return null; } }, [value]);
-  const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; categoryId?: string; attributes?: CatOptAttr[]; addable?: CatOptAttr[]; blob?: CategoryMetafieldBlob }>();
+  const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; categoryId?: string; attributes?: CatOptAttr[]; addable?: CatOptAttr[]; addableDebug?: string; blob?: CategoryMetafieldBlob }>();
   const [sel, setSel] = useState<Record<string, string[]>>({});
   const [txt, setTxt] = useState<Record<string, string>>({});
   // "Copy category from another product" — reuses the duplicate-search route and
@@ -20148,7 +20157,7 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
                       {addableRemaining.map((a) => <option key={a.key} value={a.key}>{a.label}</option>)}
                     </select>
                   ) : (
-                    <span style={{ fontSize: 13, color: "#9ca3af" }}>{loading ? "Loading more fields…" : "All available fields are shown."}</span>
+                    <span style={{ fontSize: 13, color: "#9ca3af" }}>{loading ? "Loading more fields…" : `All available fields are shown.${optsFetcher.data?.addableDebug ? ` (${optsFetcher.data.addableDebug})` : ""}`}</span>
                   )}
                 </div>
               )}
