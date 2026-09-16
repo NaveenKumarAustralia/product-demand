@@ -36,9 +36,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     (url.searchParams.get("batch") ?? url.searchParams.get("batches") ?? "").split(/[\s,]+/).map((s) => Number(s.replace(/[^0-9]/g, ""))).filter((n) => Number.isFinite(n) && n > 0),
   ));
 
+  const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true, accessToken: true } });
+  if (!session?.shop || !session.accessToken) return Response.json({ ok: false, error: "No offline Shopify session." }, { status: 500 });
+  const { shop, accessToken } = session;
+  const gql = async (query: string, variables: Record<string, unknown>) => {
+    const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+      body: JSON.stringify({ query, variables }),
+    });
+    return res.json() as Promise<any>;
+  };
+
   // BATCH MODE: ?batch=1281 (or batch=1281,954) → reconcile EVERY size in that
   // production batch at once (incoming vs reserved vs available/oversold), no order
-  // numbers needed. Pure DB — this is the true picture of what's committed.
+  // numbers needed. Also pulls Shopify's LIVE available per size so you can see how
+  // the app's reservations line up with Shopify's (often-negative) inventory.
   if (batchIdsParam.length) {
     const bufferRows = await prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: batchIdsParam } }, select: { supplierOrderId: true, safetyBufferPercent: true, safetyBufferQty: true, enabled: true, shipDate: true } });
     const bufferBy = new Map(bufferRows.map((b) => [b.supplierOrderId, b]));
@@ -46,6 +58,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       where: { id: { in: batchIdsParam } },
       select: { id: true, productTitle: true, destination: true, status: true, eta: true, lines: { select: { variantId: true, variantTitle: true, qtyOrdered: true, qtyReceived: true } } },
     });
+    // Shopify's LIVE available per variant (total across locations). Negative =
+    // oversold (bought past on-hand while inventory policy is "continue selling").
+    const allVariantGids = Array.from(new Set(
+      orders.flatMap((o) => o.lines.map((l) => { const n = numericId(l.variantId); return n ? `gid://shopify/ProductVariant/${n}` : ""; }).filter(Boolean)),
+    ));
+    const shopifyAvail = new Map<string, number>();
+    for (let i = 0; i < allVariantGids.length; i += 100) {
+      const chunk = allVariantGids.slice(i, i + 100);
+      const j = await gql(`query VAvail($ids: [ID!]!) { nodes(ids: $ids) { ... on ProductVariant { id inventoryQuantity } } }`, { ids: chunk }).catch(() => null);
+      for (const n of j?.data?.nodes ?? []) { const num = numericId(String(n?.id ?? "")); if (num) shopifyAvail.set(num, Number(n?.inventoryQuantity ?? 0)); }
+    }
     const batches = [];
     for (const o of orders) {
       const buf = bufferBy.get(o.id);
@@ -58,7 +81,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         });
         const reservedQty = reservedAgg._sum.quantity ?? 0;
         const cap = calculatePreorderCapacity({ confirmedIncomingQty: incoming, reservedQty, safetyBufferPercent: buf?.safetyBufferPercent ?? 0, safetyBufferQty: buf?.safetyBufferQty ?? null });
-        sizes.push({ size: l.variantTitle, qtyOrdered: l.qtyOrdered, qtyReceived: l.qtyReceived, incomingRemaining: incoming, reservedQty, safetyBufferQty: cap.safetyBufferQty, availableToPreorder: cap.availableToPreorder, oversoldBy: cap.overallocatedBy });
+        sizes.push({ size: l.variantTitle, qtyOrdered: l.qtyOrdered, qtyReceived: l.qtyReceived, incomingRemaining: incoming, reservedQty, safetyBufferQty: cap.safetyBufferQty, availableToPreorder: cap.availableToPreorder, oversoldBy: cap.overallocatedBy, shopifyAvailable: shopifyAvail.get(numericId(l.variantId)) ?? null });
       }
       batches.push({ batchId: o.id, productTitle: o.productTitle, destination: o.destination, status: o.status, enabled: buf?.enabled ?? null, shipDate: buf?.shipDate ?? o.eta ?? null, sizes });
     }
@@ -71,17 +94,6 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   if (!tokens.length) return Response.json({ ok: false, error: "Pass ?orders=385992,386250,… OR ?batch=1281 (all sizes in a production batch)." }, { status: 400 });
-
-  const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true, accessToken: true } });
-  if (!session?.shop || !session.accessToken) return Response.json({ ok: false, error: "No offline Shopify session." }, { status: 500 });
-  const { shop, accessToken } = session;
-  const gql = async (query: string, variables: Record<string, unknown>) => {
-    const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
-      method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
-      body: JSON.stringify({ query, variables }),
-    });
-    return res.json() as Promise<any>;
-  };
 
   // Live batch map: variant → the enabled+activated batch(es) it belongs to, plus
   // that batch's incoming/received/buffer for the capacity math.
