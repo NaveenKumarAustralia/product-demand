@@ -10044,14 +10044,17 @@ const SHOPIFY_UNLOCK_PULL_FIELDS = ["description", "productType", "vendor", "seo
 // Columns that PUSH to the Shopify product — editing these on a LOCKED row is
 // blocked until the row is unlocked (then they push on "Update in Shopify").
 // Everything NOT in here (status, sample, loading notes, factory notes, ETA,
-// fabric, mani pics, release, model height, etc.) is portal-only and always
-// editable, because it never touches Shopify. Size-quantity columns are added
-// programmatically below since they drive the product's variants.
+// fabric, release, model height, etc.) is portal-only and always editable,
+// because it never touches Shopify.
+//   • Product IMAGES (modelPicture) ARE guarded — they overwrite the Shopify
+//     product media on push, so they need an unlock first (user asked Sep 16).
+//   • Size-quantity columns are NOT guarded — we don't load inventory from the
+//     Collections page, so editing a size qty on a created product does nothing
+//     to Shopify (user confirmed Sep 16). They stay freely editable when locked.
 const SHOPIFY_SYNCED_COLUMN_IDS = new Set<string>([
   "name", "sku", "barcode", "description", "productType", "vendor", "tags",
   "seoTitle", "seoDescription", "price", "priceRupees", "compareAtPrice",
-  "hsCode", "countryOfOrigin", "categories", "colour",
-  "freeSize", "xs", "s", "m", "l", "xl", "xxl", "xxxl", "sm", "ml", "lxl",
+  "hsCode", "countryOfOrigin", "categories", "colour", "modelPicture",
 ]);
 // JSON blob (stringified) holding the Shopify CATEGORY (taxonomy) node + its
 // category metafields copied from the "Duplicate from" source, so a new product
@@ -10588,7 +10591,10 @@ async function fetchDuplicateFieldsFromProduct(shop: string, accessToken: string
   const product = json?.data?.product;
   if (!product) return null;
   const v0 = product.variants?.nodes?.[0] ?? {};
-  const description = await adaptDuplicatedDescription(String(product.title ?? ""), newName, String(product.descriptionHtml ?? ""));
+  // Copy the description VERBATIM (full HTML incl. bullet lists / links) — the
+  // user edits the print wording manually, so we must not alter it here. (Was
+  // previously AI-rewritten to swap the print name, which dropped bullet lists.)
+  const description = String(product.descriptionHtml ?? "");
   const tags = Array.isArray(product.tags)
     ? product.tags.map((t: unknown) => String(t).trim()).filter(Boolean).filter((t: string) => { const s = t.toLowerCase(); return s !== "pre-order" && !s.startsWith("pre-order: ") && !s.startsWith("pre-order ships "); }).join(", ")
     : "";
@@ -15686,13 +15692,11 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "priceRupees", label: "Price ₹", type: "number", width: 90 },
   { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 },
   { id: "eta", label: "ETA", type: "date", width: 90 },
-  { id: "maniPicsTaken", label: "mani Pics Taken", width: 130 },
   { id: "loadingNotes", label: "Loading Notes", width: 140 },
   { id: "duplicateFrom", label: "DUPLICATE FROM", width: 140 },
   { id: "categoryMetafields", label: "Category metafields", width: 180 },
   { id: "modelHeightSize", label: "Model height and size", width: 130 },
   { id: "createdBy", label: "Created by", width: 100 },
-  { id: "link", label: "Open in Shopify", type: "readonly", width: 130 },
   { id: "description", label: "Description", width: 200 },
   { id: "categories", label: "Categories", width: 130 },
   { id: "productType", label: "Product type", width: 120 },
@@ -15868,6 +15872,13 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   // Drop it from any collection that saved it (row data stays in JSON, unshown).
   const colourIdx = cols.findIndex((c) => c.id === "colour");
   if (colourIdx !== -1) cols.splice(colourIdx, 1);
+  // "mani Pics Taken" and "Open in Shopify" columns removed (Sep 16 2026, user
+  // asked — not needed). Drop them from any collection that saved them; row data
+  // stays in JSON (unshown) and the storefront link is still reachable elsewhere.
+  for (const dropId of ["maniPicsTaken", "link"]) {
+    const idx = cols.findIndex((c) => c.id === dropId);
+    if (idx !== -1) cols.splice(idx, 1);
+  }
   insertAfter("price", { id: "priceRupees", label: "Price ₹", type: "number", width: 90 });
   insertAfter("priceRupees", { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 });
   insertAfter("duplicateFrom", { id: "categoryMetafields", label: "Category metafields", width: 180 });
@@ -18036,8 +18047,12 @@ function CollectionSpreadsheetPage({
         // SKUs and <base><size> barcodes for every ordered size — no need to
         // press a button. Only runs when the SKU holds a recognisable base
         // number, so custom SKUs are never overwritten.
+        // Don't regenerate SKU/barcode on a LOCKED linked row: SKU/barcode are
+        // Shopify-bound (guarded), and size qtys are freely editable, so a size
+        // edit must not silently rewrite the locked SKU/barcode. (Unlock first.)
+        const lockedLinked = (patched[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
         const isQtyCol = COLLECTION_QTY_COLUMN_IDS.includes(colId);
-        if (isQtyCol || colId === "sku") {
+        if ((isQtyCol || colId === "sku") && !lockedLinked) {
           const base = deriveCollectionSkuBase(patched.sku ?? "");
           if (base) {
             const gen = buildCollectionSkuBarcode(patched, base);
@@ -21296,34 +21311,6 @@ function CollectionImageManagerModal({
 // colours/motifs). Rewrite it with AI so it references the NEW product's print
 // instead, keeping every garment detail (fit, fabric, care, model, bullets)
 // unchanged. Returns the original HTML untouched if AI is unavailable or errors.
-async function adaptDuplicatedDescription(sourceTitle: string, newName: string, descriptionHtml: string): Promise<string> {
-  const key = process.env.ANTHROPIC_API_KEY;
-  const src = (descriptionHtml ?? "").trim();
-  if (!key || !src || !newName.trim() || !sourceTitle.trim()) return descriptionHtml;
-  // Best-effort new print name: the words in the new name that aren't shared
-  // with the source title (the style words are shared; the print differs).
-  const srcWords = new Set(sourceTitle.toLowerCase().split(/\s+/).filter(Boolean));
-  const newPrint = (newName.trim().split(/\s+/).filter((w) => !srcWords.has(w.toLowerCase())).join(" ").trim()
-    || newName.trim().split(/\s+/).slice(-1)[0] || "").trim();
-  if (!newPrint) return descriptionHtml;
-  const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
-  const system = "You adapt product descriptions for a women's fashion brand when the SAME garment is offered in a new print/pattern. Keep every garment detail identical — fit, silhouette, fabric composition, waistband, styling suggestions, care instructions, model height/size, and any bullet list — and change ONLY the wording that refers to the print: its name and any description of its specific colours or motifs. Never invent specific colours or motifs for the new print; if the new print's look isn't given, refer to it by name (e.g. \"the <print> print\") and drop the specific colour/motif clause. Output ONLY the description as HTML in the same structure and length as the input — no preamble, quotes, or labels.";
-  const user = `Original product: "${sourceTitle}"\nNew product: "${newName}" (its print is "${newPrint}")\n\nThe new product is the SAME garment in a different print. Rewrite the description below for the new product: replace the original print's name and every reference to its specific colours/motifs with a reference to the "${newPrint}" print by name. Keep all other wording exactly.\n\nOriginal description (HTML):\n${src}`;
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({ model, max_tokens: 800, system, messages: [{ role: "user", content: user }] }),
-    });
-    if (!res.ok) return descriptionHtml;
-    const json = await res.json() as { content?: Array<{ type?: string; text?: string }> };
-    const text = (json.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "").join("").trim();
-    return text || descriptionHtml;
-  } catch {
-    return descriptionHtml;
-  }
-}
-
 // Duplicate From: opens a modal picker, searches recent Shopify
 // products by STYLE (the style name from product info matched against
 // the row's name — e.g. "Corduroy Jacket Black" matches style
