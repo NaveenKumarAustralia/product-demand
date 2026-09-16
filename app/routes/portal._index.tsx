@@ -5759,8 +5759,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const dupId = (row[COL_ROW_DUPLICATE_FROM_ID] ?? "").trim();
       if (dupId) {
         const dupGid = dupId.startsWith("gid://") ? dupId : `gid://shopify/Product/${dupId.replace(/\D/g, "")}`;
-        const dup = await fetchDuplicateFieldsFromProduct(session.shop, session.accessToken, dupGid, row.name ?? "").catch(() => null);
-        if (dup) for (const [k, v] of Object.entries(dup)) { if (String(v ?? "").trim() && !String(row[k] ?? "").trim()) { row[k] = v; rows[idx] = row; } }
+        // One retry: Shopify can be slow, and a silent timeout here is what left the
+        // description (and category) unfilled on a duplicate.
+        let dup = await fetchDuplicateFieldsFromProduct(session.shop, session.accessToken, dupGid, row.name ?? "").catch(() => null);
+        if (!dup) dup = await fetchDuplicateFieldsFromProduct(session.shop, session.accessToken, dupGid, row.name ?? "").catch(() => null);
+        if (dup) for (const [k, v] of Object.entries(dup)) {
+          // A field is fillable when it's empty. For DESCRIPTION we also treat HTML
+          // that strips to no visible text (a stray "<p></p>"/"<br>") as empty, so
+          // the source's full description — including the bullet list — always lands
+          // instead of being blocked by an invisible placeholder.
+          const rowEmpty = k === "description" ? !stripHtmlToText(String(row[k] ?? "")) : !String(row[k] ?? "").trim();
+          if (String(v ?? "").trim() && rowEmpty) { row[k] = v; rows[idx] = row; }
+        }
       }
       const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush, thbPerAud: thbPerAudForPush, currency: isJJNewPush ? "THB" : "INR", productInfo: productInfoForPush ?? undefined });
       if (res.ok && res.productId) {
