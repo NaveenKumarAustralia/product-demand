@@ -63,11 +63,44 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const allVariantGids = Array.from(new Set(
       orders.flatMap((o) => o.lines.map((l) => { const n = numericId(l.variantId); return n ? `gid://shopify/ProductVariant/${n}` : ""; }).filter(Boolean)),
     ));
-    const shopifyAvail = new Map<string, number>();
-    for (let i = 0; i < allVariantGids.length; i += 100) {
-      const chunk = allVariantGids.slice(i, i + 100);
-      const j = await gql(`query VAvail($ids: [ID!]!) { nodes(ids: $ids) { ... on ProductVariant { id inventoryQuantity } } }`, { ids: chunk }).catch(() => null);
-      for (const n of j?.data?.nodes ?? []) { const num = numericId(String(n?.id ?? "")); if (num) shopifyAvail.set(num, Number(n?.inventoryQuantity ?? 0)); }
+    // Shopify's live inventory per variant: available, on-hand and committed
+    // (summed across locations). on_hand = physically counted; committed = in
+    // unfulfilled orders; available = on_hand − committed. Negative available =
+    // oversold. This is what lets us see EXACTLY why the number is what it is.
+    const shopInv = new Map<string, { available: number; onHand: number; committed: number }>();
+    for (let i = 0; i < allVariantGids.length; i += 50) {
+      const chunk = allVariantGids.slice(i, i + 50);
+      const j = await gql(`query VInv($ids: [ID!]!) {
+        nodes(ids: $ids) { ... on ProductVariant { id inventoryQuantity
+          inventoryItem { inventoryLevels(first: 20) { nodes { quantities(names: ["on_hand","committed","available"]) { name quantity } } } } } }
+      }`, { ids: chunk }).catch(() => null);
+      for (const n of j?.data?.nodes ?? []) {
+        const num = numericId(String(n?.id ?? "")); if (!num) continue;
+        let onHand = 0, committed = 0, avail = 0;
+        for (const lvl of n?.inventoryItem?.inventoryLevels?.nodes ?? []) {
+          for (const q of lvl?.quantities ?? []) {
+            if (q?.name === "on_hand") onHand += Number(q.quantity ?? 0);
+            else if (q?.name === "committed") committed += Number(q.quantity ?? 0);
+            else if (q?.name === "available") avail += Number(q.quantity ?? 0);
+          }
+        }
+        // Fall back to inventoryQuantity for available if levels didn't return it.
+        shopInv.set(num, { available: avail || Number(n?.inventoryQuantity ?? 0), onHand, committed });
+      }
+    }
+    // Pre-order reservations for this batch, split by status per size, so you can
+    // see how many are STILL WAITING vs already SHIPPED (fulfilled) vs cancelled.
+    const statusGroups = await prisma.preorderReservation.groupBy({
+      by: ["variantTitle", "status"],
+      where: { supplierOrderId: { in: batchIdsParam } },
+      _sum: { quantity: true },
+    });
+    const statusBySize = new Map<string, Record<string, number>>();
+    for (const g of statusGroups) {
+      const sz = String(g.variantTitle ?? "").trim(); if (!sz) continue;
+      const rec = statusBySize.get(sz) ?? {};
+      rec[g.status] = (rec[g.status] ?? 0) + (g._sum.quantity ?? 0);
+      statusBySize.set(sz, rec);
     }
     const batches = [];
     for (const o of orders) {
@@ -81,7 +114,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         });
         const reservedQty = reservedAgg._sum.quantity ?? 0;
         const cap = calculatePreorderCapacity({ confirmedIncomingQty: incoming, reservedQty, safetyBufferPercent: buf?.safetyBufferPercent ?? 0, safetyBufferQty: buf?.safetyBufferQty ?? null });
-        sizes.push({ size: l.variantTitle, qtyOrdered: l.qtyOrdered, qtyReceived: l.qtyReceived, incomingRemaining: incoming, reservedQty, safetyBufferQty: cap.safetyBufferQty, availableToPreorder: cap.availableToPreorder, oversoldBy: cap.overallocatedBy, shopifyAvailable: shopifyAvail.get(numericId(l.variantId)) ?? null });
+        const inv = shopInv.get(numericId(l.variantId)) ?? null;
+        const byStatus = statusBySize.get(String(l.variantTitle ?? "").trim()) ?? {};
+        const shippedQty = byStatus["fulfilled"] ?? 0;
+        const totalPreordersEver = reservedQty + shippedQty + (byStatus["released"] ?? 0);
+        sizes.push({
+          size: l.variantTitle, qtyOrdered: l.qtyOrdered, qtyReceived: l.qtyReceived, incomingRemaining: incoming,
+          reservedWaiting: reservedQty, shippedAlready: shippedQty, cancelled: byStatus["released"] ?? 0, totalPreordersEver,
+          availableToPreorder: cap.availableToPreorder, oversoldBy: cap.overallocatedBy,
+          shopifyAvailable: inv?.available ?? null, shopifyOnHand: inv?.onHand ?? null, shopifyCommitted: inv?.committed ?? null,
+        });
       }
       batches.push({ batchId: o.id, productTitle: o.productTitle, destination: o.destination, status: o.status, enabled: buf?.enabled ?? null, shipDate: buf?.shipDate ?? o.eta ?? null, sizes });
     }
