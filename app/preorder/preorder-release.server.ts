@@ -11,6 +11,7 @@ import {
 } from "./preorder-fulfillment.server";
 import { getPreorderCombineWindowDays } from "./preorder-storefront-settings.server";
 import type { PreorderMarket } from "./preorder-rules.server";
+import { selectFifoReleasableOrders, type ReleasableOrder } from "./preorder-release-fifo";
 
 // Backfill for the "combine mixed orders" feature: hold the in-stock items of
 // EXISTING open pre-order orders (whose pre-order is due within the combine
@@ -102,17 +103,18 @@ export async function resplitHeldPreorderOrders(opts: { apply?: boolean } = {}):
   return { scanned, fixed, errors, skippedNoScope, applied: opts.apply === true, fixedOrders, errorDetails };
 }
 
-// When a batch's stock lands in Shopify (available at the market's location covers
-// the reservations), release the Shopify fulfilment hold on those orders and tag
-// them `pre-order-ready-batch-N` so Pick Pack picks & dispatches them (which fires
-// Shopify's native shipping-confirmation email at dispatch). Idempotent via
-// PreorderReservation.readyAt; safe to run on a timer. Degrades gracefully if the
-// write_orders / fulfilment scopes aren't granted yet (logs, leaves readyAt null,
-// retries next cycle once the app is re-authed).
+// Release waiting pre-order orders whenever spare units exist at the market's
+// location — whether from the batch landing OR a single return coming back in
+// (Redo / Shopify returns restock the unit → available goes up → the OLDEST
+// waiting order for that size is released, hold removed, so Pick Pack ships it).
+// FIFO: a returned unit goes to the oldest order first. Spare units = the location
+// available MINUS units already released-but-not-yet-picked (so we never promise
+// the same physical unit to two orders). Idempotent via PreorderReservation.readyAt;
+// safe on a timer. Degrades gracefully if fulfilment scopes aren't granted yet.
 export async function releaseArrivedPreorders(): Promise<{ releasedOrders: number; errors: number; skippedNoScope: boolean }> {
   const pending = await prisma.preorderReservation.findMany({
     where: { status: "reserved", readyAt: null },
-    select: { id: true, shop: true, shopifyOrderId: true, supplierOrderId: true, variantId: true, market: true, quantity: true },
+    select: { id: true, shop: true, shopifyOrderId: true, supplierOrderId: true, variantId: true, market: true, quantity: true, reservedAt: true },
   });
   if (!pending.length) return { releasedOrders: 0, errors: 0, skippedNoScope: false };
 
@@ -123,6 +125,7 @@ export async function releaseArrivedPreorders(): Promise<{ releasedOrders: numbe
     byShop.set(row.shop, list);
   }
 
+  const groupKey = (r: { supplierOrderId: number; variantId: string; market: string }) => `${r.supplierOrderId}::${r.variantId}::${r.market}`;
   let releasedOrders = 0;
   let errors = 0;
   let skippedNoScope = false;
@@ -132,21 +135,25 @@ export async function releaseArrivedPreorders(): Promise<{ releasedOrders: numbe
     if (!token) { skippedNoScope = true; continue; }
     const locations = await getPreorderLocationSettings();
 
-    // Which (batch, variant) groups have enough stock at their market's location?
-    const groupKey = (r: { supplierOrderId: number; variantId: string; market: string }) => `${r.supplierOrderId}::${r.variantId}::${r.market}`;
-    const groups = new Map<string, { supplierOrderId: number; variantId: string; market: string; reserved: number }>();
-    for (const r of rows) {
-      const key = groupKey(r);
-      const g = groups.get(key) ?? { supplierOrderId: r.supplierOrderId, variantId: r.variantId, market: r.market, reserved: 0 };
-      g.reserved += r.quantity;
-      groups.set(key, g);
-    }
+    // Units ALREADY released for this group but not yet picked/fulfilled — those
+    // physical units are already promised, so subtract them from the location's
+    // available before handing spare units to more orders (no double-release).
+    const promised = await prisma.preorderReservation.findMany({
+      where: { shop, status: "reserved", readyAt: { not: null }, fulfilledAt: null },
+      select: { supplierOrderId: true, variantId: true, market: true, quantity: true },
+    });
+    const promisedByGroup = new Map<string, number>();
+    for (const p of promised) promisedByGroup.set(groupKey(p), (promisedByGroup.get(groupKey(p)) ?? 0) + p.quantity);
 
+    // Spare-unit budget per (batch, variant, market): location available minus the
+    // already-promised units. >0 means a unit is free to hand to a waiting order.
+    const groups = new Map<string, { variantId: string; market: string }>();
+    for (const r of rows) if (!groups.has(groupKey(r))) groups.set(groupKey(r), { variantId: r.variantId, market: r.market });
     const stockCache = new Map<string, number>();
-    const arrivedGroups = new Set<string>();
+    const budgetByGroup = new Map<string, number>();
     for (const [key, g] of groups) {
       const locationId = locationForMarket(locations, g.market as PreorderMarket);
-      if (!locationId) continue; // market not live
+      if (!locationId) continue; // market not live → no budget (0)
       const stockKey = `${g.variantId}::${locationId}`;
       let available = stockCache.get(stockKey);
       if (available === undefined) {
@@ -159,40 +166,40 @@ export async function releaseArrivedPreorders(): Promise<{ releasedOrders: numbe
         }
         stockCache.set(stockKey, available);
       }
-      if (available >= g.reserved && available > 0) arrivedGroups.add(key);
+      budgetByGroup.set(key, Math.max(0, available - (promisedByGroup.get(key) ?? 0)));
     }
+    if (![...budgetByGroup.values()].some((v) => v > 0)) continue; // no spare units anywhere
 
-    if (!arrivedGroups.size) continue;
-
-    // An order is releasable only when EVERY one of its pending pre-order lines
-    // is in an arrived group (so we never half-release a multi-batch order).
-    const byOrder = new Map<string, typeof rows>();
+    // Build one releasable-order per Shopify order (oldest reservation wins FIFO).
+    const byOrder = new Map<string, ReleasableOrder>();
     for (const r of rows) {
-      const list = byOrder.get(r.shopifyOrderId) ?? [];
-      list.push(r);
-      byOrder.set(r.shopifyOrderId, list);
+      const o = byOrder.get(r.shopifyOrderId) ?? { orderId: r.shopifyOrderId, oldestReservedMs: Number.MAX_SAFE_INTEGER, rowIds: [], needByGroup: {}, readyTags: [] };
+      o.rowIds.push(r.id);
+      o.needByGroup[groupKey(r)] = (o.needByGroup[groupKey(r)] ?? 0) + r.quantity;
+      const ms = r.reservedAt ? new Date(r.reservedAt).getTime() : Number.MAX_SAFE_INTEGER;
+      if (ms < o.oldestReservedMs) o.oldestReservedMs = ms;
+      const tag = `pre-order-ready-batch-${r.supplierOrderId}`;
+      if (!o.readyTags.includes(tag)) o.readyTags.push(tag);
+      byOrder.set(r.shopifyOrderId, o);
     }
 
-    for (const [orderId, orderRows] of byOrder) {
-      const allArrived = orderRows.every((r) => arrivedGroups.has(groupKey(r)));
-      if (!allArrived) continue;
-
-      const readyTags = Array.from(new Set(orderRows.map((r) => `pre-order-ready-batch-${r.supplierOrderId}`)));
+    const toRelease = selectFifoReleasableOrders([...byOrder.values()], budgetByGroup);
+    for (const order of toRelease) {
       try {
-        await releaseOrderPreorderHolds(shop, token, orderId);
-        await addOrderTags(shop, token, orderId, readyTags);
-        await removeOrderTags(shop, token, orderId, ["pre-order-hold"]);
+        await releaseOrderPreorderHolds(shop, token, order.orderId);
+        await addOrderTags(shop, token, order.orderId, order.readyTags);
+        await removeOrderTags(shop, token, order.orderId, ["pre-order-hold"]);
         await prisma.preorderReservation.updateMany({
-          where: { id: { in: orderRows.map((r) => r.id) } },
+          where: { id: { in: order.rowIds } },
           data: { readyAt: new Date() },
         });
         releasedOrders += 1;
-        console.log(`[preorder release] ${shop} order ${orderId}: released + tagged ${readyTags.join(", ")}`);
+        console.log(`[preorder release] ${shop} order ${order.orderId}: released (FIFO) + tagged ${order.readyTags.join(", ")}`);
       } catch (error) {
         // Most likely a missing scope before re-auth — leave readyAt null to retry.
         const message = error instanceof Error ? error.message : String(error);
         if (/access denied|not approved|scope/i.test(message)) skippedNoScope = true;
-        console.warn(`[preorder release] ${shop} order ${orderId} failed:`, message);
+        console.warn(`[preorder release] ${shop} order ${order.orderId} failed:`, message);
         errors += 1;
       }
     }
