@@ -11,7 +11,7 @@ import { VisionBoardV2Panel } from "../portal-vision-board";
 import { PreordersDashboard } from "../portal-preorders";
 import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server";
 import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
-import { marketFromDestination } from "../preorder/preorder-rules.server";
+import { marketFromDestination, calculatePreorderCapacity } from "../preorder/preorder-rules.server";
 import { releaseArrivedPreorders } from "../preorder/preorder-release.server";
 import { unauthenticated } from "../shopify.server";
 import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
@@ -1130,25 +1130,64 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // preorder enabled, is it live on Shopify (selling-plan registry), the
   // customer dispatch date, and which market the destination maps to. Two cheap
   // lookups keyed by the order (batch) id; only for the restock page.
-  const preorderByOrderId: Record<number, { enabled: boolean; activated: boolean; shipDate: string | null; market: "AU" | "USA" | null }> = {};
+  const preorderByOrderId: Record<number, { enabled: boolean; activated: boolean; shipDate: string | null; market: "AU" | "USA" | null; reservedBySize?: Record<string, { reserved: number; available: number }> }> = {};
   if (isRestockPage && orders.length) {
     const orderIds = orders.map((o) => o.id);
-    const [batchSettings, registryEntries] = await Promise.all([
+    const [batchSettings, registryEntries, reservedGroups] = await Promise.all([
       prisma.preorderBatchSetting.findMany({
         where: { supplierOrderId: { in: orderIds } },
-        select: { supplierOrderId: true, enabled: true, shipDate: true },
+        select: { supplierOrderId: true, enabled: true, shipDate: true, safetyBufferPercent: true, safetyBufferQty: true },
       }),
       getPreorderSellingPlanRegistryEntries(orders[0]?.shop),
+      // Reserved pre-order units per (batch, size) — powers the restock-page
+      // "reserved / available" readout so staff can see what's committed against
+      // each incoming size without opening the pre-order dashboard.
+      prisma.preorderReservation.groupBy({
+        by: ["supplierOrderId", "variantTitle"],
+        where: { supplierOrderId: { in: orderIds }, status: "reserved" },
+        _sum: { quantity: true },
+      }),
     ]);
     const settingById = new Map(batchSettings.map((setting) => [setting.supplierOrderId, setting]));
     const activatedIds = new Set(registryEntries.map((entry) => entry.supplierOrderId));
+    // reserved[orderId][size] = units reserved.
+    const reservedByOrderSize = new Map<number, Map<string, number>>();
+    for (const g of reservedGroups) {
+      const size = String(g.variantTitle ?? "").trim();
+      if (!size) continue;
+      const m = reservedByOrderSize.get(g.supplierOrderId) ?? new Map<string, number>();
+      m.set(size, (m.get(size) ?? 0) + (g._sum.quantity ?? 0));
+      reservedByOrderSize.set(g.supplierOrderId, m);
+    }
     for (const order of orders) {
       const setting = settingById.get(order.id);
+      // Per-size available-to-preorder = ordered − buffer − reserved (same math as
+      // the storefront/dashboard), only for sizes that actually have reservations.
+      const reservedSizes = reservedByOrderSize.get(order.id);
+      let reservedBySize: Record<string, { reserved: number; available: number }> | undefined;
+      if (reservedSizes && reservedSizes.size) {
+        const orderedBySize = order.lines.reduce<Record<string, number>>((acc, ln) => {
+          const sz = String(ln.variantTitle ?? "").trim();
+          if (sz) acc[sz] = (acc[sz] ?? 0) + Math.max(0, ln.qtyOrdered - ln.qtyReceived);
+          return acc;
+        }, {});
+        reservedBySize = {};
+        for (const [size, reserved] of reservedSizes) {
+          const cap = calculatePreorderCapacity({
+            confirmedIncomingQty: orderedBySize[size] ?? 0,
+            reservedQty: reserved,
+            safetyBufferPercent: setting?.safetyBufferPercent ?? 0,
+            safetyBufferQty: setting?.safetyBufferQty ?? null,
+          });
+          reservedBySize[size] = { reserved, available: cap.availableToPreorder };
+        }
+      }
       preorderByOrderId[order.id] = {
         enabled: setting?.enabled === true,
         activated: activatedIds.has(order.id),
         shipDate: setting?.shipDate ? setting.shipDate.toISOString() : null,
         market: marketFromDestination(order.destination),
+        reservedBySize,
       };
     }
   }
@@ -27821,7 +27860,7 @@ function OrderRow({
   onDuplicate?: (orderId: number) => void;
   celebrating?: boolean;
   canManagePreorder?: boolean;
-  preorder?: { enabled: boolean; activated: boolean; shipDate: string | null; market: "AU" | "USA" | null };
+  preorder?: { enabled: boolean; activated: boolean; shipDate: string | null; market: "AU" | "USA" | null; reservedBySize?: Record<string, { reserved: number; available: number }> };
 }) {
   const fetcher = useFetcher();
   const trRef = useRef<HTMLTableRowElement | null>(null);
@@ -28047,7 +28086,7 @@ function OrderRow({
         {/* Size columns */}
         {sizes.map((sz, sizeIndex) => (
           <Td key={sz} rowIndex={rowIndex} colIndex={5 + sizeIndex} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField={`Qty (${sz})`} historyEntityName={order.productTitle}>
-            <QtyCell orderId={order.id} size={sz} value={qtyBySize[sz] ?? 0} restockSettings={restockSettings} />
+            <QtyCell orderId={order.id} size={sz} value={qtyBySize[sz] ?? 0} restockSettings={restockSettings} preorderSize={preorder?.reservedBySize?.[sz]} />
           </Td>
         ))}
 
@@ -29785,7 +29824,7 @@ function TitleManualPriceInput({ onSave }: { onSave: (rupees: number) => void })
   );
 }
 
-function QtyCell({ orderId, size, value, restockSettings, loaded }: { orderId: number; size: string; value: number; restockSettings: RestockSettings; loaded?: boolean }) {
+function QtyCell({ orderId, size, value, restockSettings, loaded, preorderSize }: { orderId: number; size: string; value: number; restockSettings: RestockSettings; loaded?: boolean; preorderSize?: { reserved: number; available: number } }) {
   const fetcher = useFetcher();
   // Controlled so a typed number is never lost. We only re-sync from the saved
   // `value` when the user isn't typing here AND no save is in flight —
@@ -29810,33 +29849,46 @@ function QtyCell({ orderId, size, value, restockSettings, loaded }: { orderId: n
   const numericCurrent = Number(draft) || 0;
 
   return (
-    <input
-      type="text"
-      inputMode="numeric"
-      pattern="[0-9]*"
-      value={draft}
-      onFocus={() => { focusedRef.current = true; }}
-      onChange={(e) => setDraft(e.currentTarget.value.replace(/\D/g, ""))}
-      onBlur={(e) => {
-        focusedRef.current = false;
-        const next = e.currentTarget.value;
-        if (next === (value ? String(value) : "")) return; // unchanged — skip save
-        // Remember what we saved, normalised the same way `incoming` is (0 → "").
-        const savedNum = Number(next) || 0;
-        submittedRef.current = savedNum > 0 ? String(savedNum) : "";
-        submitPortalCell(
-          fetcher,
-          { intent: "update_qty", orderId, size, value: next },
-          { label: "Undo quantity", fields: { intent: "update_qty", orderId, size, value } },
-        );
-      }}
-      style={{
-        ...s.qtyInput,
-        ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
-        ...(numericCurrent > 0 ? { color: restockSettings.quantityFontColor } : {}),
-        ...(loaded ? { color: "#fff" } : {}),
-      }}
-    />
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
+      <input
+        type="text"
+        inputMode="numeric"
+        pattern="[0-9]*"
+        value={draft}
+        onFocus={() => { focusedRef.current = true; }}
+        onChange={(e) => setDraft(e.currentTarget.value.replace(/\D/g, ""))}
+        onBlur={(e) => {
+          focusedRef.current = false;
+          const next = e.currentTarget.value;
+          if (next === (value ? String(value) : "")) return; // unchanged — skip save
+          // Remember what we saved, normalised the same way `incoming` is (0 → "").
+          const savedNum = Number(next) || 0;
+          submittedRef.current = savedNum > 0 ? String(savedNum) : "";
+          submitPortalCell(
+            fetcher,
+            { intent: "update_qty", orderId, size, value: next },
+            { label: "Undo quantity", fields: { intent: "update_qty", orderId, size, value } },
+          );
+        }}
+        style={{
+          ...s.qtyInput,
+          ...(numericCurrent > 0 ? s.qtyInputActive : s.qtyInputZero),
+          ...(numericCurrent > 0 ? { color: restockSettings.quantityFontColor } : {}),
+          ...(loaded ? { color: "#fff" } : {}),
+        }}
+      />
+      {/* Pre-order readout: units reserved against this incoming size, and how
+          many are still free to pre-order. Red when nothing is left (fully
+          committed / oversold). Only shown when there ARE reservations. */}
+      {preorderSize && preorderSize.reserved > 0 ? (
+        <span
+          title={`${preorderSize.reserved} pre-ordered · ${preorderSize.available} still available to pre-order (out of ${value} incoming)`}
+          style={{ fontSize: 9, fontWeight: 700, lineHeight: 1.1, whiteSpace: "nowrap", padding: "1px 3px", borderRadius: 4, background: preorderSize.available <= 0 ? "#fee2e2" : "#e0f2fe", color: preorderSize.available <= 0 ? "#b91c1c" : "#0369a1" }}
+        >
+          🔖{preorderSize.reserved}·{preorderSize.available}
+        </span>
+      ) : null}
+    </div>
   );
 }
 
