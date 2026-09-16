@@ -296,7 +296,18 @@ export async function captureNoPlanLinesForOrder(
       const ms = dispatchMsForBatch(hit.batchId);
       items.push({ title: line.title, size: line.size, dispatch: ms != null ? preorderExpectedLabel(new Date(ms)) : null, image: line.image ?? null });
     } catch (error) {
-      console.warn(`[preorder realtime capture] ${orderName} reserve failed:`, error instanceof PreorderCapacityError ? error.message : (error instanceof Error ? error.message : String(error)));
+      const reason = error instanceof PreorderCapacityError ? error.message : (error instanceof Error ? error.message : String(error));
+      console.warn(`[preorder realtime capture] ${orderName} reserve failed:`, reason);
+      // Make the miss VISIBLE (not just a console line): a no-plan pre-order that
+      // could NOT be reserved — usually because the batch is at capacity — is a
+      // "ghost" (placed in Shopify, oversold, not counted against the batch). Log
+      // it like the plan path does so staff can see and follow up. Best-effort.
+      await prisma.activityLog.create({
+        data: {
+          userName: "Shopify webhook", action: "preorder_allocation_failed", entity: "shopify_order",
+          entityId: orderIdNumeric, entityName: orderName, field: "reservation (no-plan capture)", toValue: reason,
+        },
+      }).catch(() => undefined);
       continue;
     }
   }
