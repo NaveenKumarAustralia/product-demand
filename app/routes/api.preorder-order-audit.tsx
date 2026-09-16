@@ -135,7 +135,66 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }, { headers: { "Cache-Control": "no-store" } });
   }
 
-  if (!tokens.length) return Response.json({ ok: false, error: "Pass ?orders=385992,386250,… OR ?batch=1281 (all sizes in a production batch)." }, { status: 400 });
+  // HOLD-CHECK MODE: ?holds=1178 (optionally &size=3XL) → for every still-waiting
+  // reserved order in that batch, show its Shopify fulfilment-order hold status +
+  // tags, so we can see WHICH orders aren't on hold (and therefore why Shopify's
+  // "committed" is higher than expected). Read-only.
+  const holdsBatch = Number((url.searchParams.get("holds") ?? "").replace(/[^0-9]/g, ""));
+  if (Number.isFinite(holdsBatch) && holdsBatch > 0) {
+    const sizeFilter = (url.searchParams.get("size") ?? "").trim().toLowerCase();
+    const reservations = await prisma.preorderReservation.findMany({
+      where: { supplierOrderId: holdsBatch, status: "reserved" },
+      select: { shopifyOrderId: true, shopifyOrderName: true, shopifyLineItemId: true, variantTitle: true, quantity: true, reservedAt: true },
+      orderBy: { reservedAt: "asc" },
+    });
+    const filtered = sizeFilter ? reservations.filter((r) => String(r.variantTitle ?? "").trim().toLowerCase() === sizeFilter) : reservations;
+    // Group by order (an order may have several pre-order lines).
+    const byOrder = new Map<string, typeof filtered>();
+    for (const r of filtered) { const a = byOrder.get(r.shopifyOrderId) ?? []; a.push(r); byOrder.set(r.shopifyOrderId, a); }
+
+    const rows = [];
+    for (const [orderId, rs] of byOrder) {
+      const j = await gql(`query OrderHolds($id: ID!) {
+        order(id: $id) { id name tags displayFulfillmentStatus
+          fulfillmentOrders(first: 25) { nodes { id status
+            lineItems(first: 50) { nodes { remainingQuantity lineItem { id } } } } } }
+      }`, { id: `gid://shopify/Order/${orderId}` }).catch(() => null);
+      const order = j?.data?.order;
+      const preLineIds = new Set(rs.map((r) => r.shopifyLineItemId));
+      const fos = (order?.fulfillmentOrders?.nodes ?? []).map((fo: any) => {
+        const lineIds = (fo.lineItems?.nodes ?? []).map((n: any) => numericId(String(n?.lineItem?.id ?? ""))).filter(Boolean);
+        const hasPreLine = lineIds.some((id: string) => preLineIds.has(id));
+        return { status: fo.status, hasPreorderLine: hasPreLine, lineIds };
+      });
+      const preFos = fos.filter((f: any) => f.hasPreorderLine);
+      const heldPre = preFos.filter((f: any) => f.status === "ON_HOLD").length;
+      const openPre = preFos.filter((f: any) => f.status === "OPEN").length;
+      const tags: string[] = order?.tags ?? [];
+      rows.push({
+        order: order?.name ?? orderId, orderId,
+        sizes: rs.map((r) => r.variantTitle),
+        reservedAt: rs[0]?.reservedAt,
+        fulfillmentStatus: order?.displayFulfillmentStatus ?? null,
+        hasPreorderHoldTag: tags.includes("pre-order-hold"),
+        hasPreorderTag: tags.some((t) => t === "pre-order" || t.startsWith("pre-order-")),
+        preorderFulfillmentOrders: preFos.map((f: any) => f.status),
+        verdict: !order ? "order not found in Shopify"
+          : preFos.length === 0 ? "🟠 no fulfilment order holds the pre-order line (likely already picked/split or shipped)"
+          : openPre > 0 && heldPre === 0 ? "🔴 NOT held — pre-order line is OPEN (would be picked as normal; hold missing)"
+          : openPre > 0 ? "🟠 partially held — some pre-order fulfilment orders OPEN"
+          : "🟢 held correctly",
+      });
+    }
+    const notHeld = rows.filter((r) => String(r.verdict).startsWith("🔴") || String(r.verdict).startsWith("🟠"));
+    return Response.json({
+      ok: true,
+      summary: { batch: holdsBatch, size: sizeFilter || "(all sizes)", ordersChecked: rows.length, notFullyHeld: notHeld.length,
+        note: "🟢 = pre-order line is on hold (correct). 🔴/🟠 = hold missing or partial → shows as Shopify 'committed' and can be picked early. Likely causes: order placed before hold logic, a scope gap when it landed, or the line was split/edited." },
+      orders: rows,
+    }, { headers: { "Cache-Control": "no-store" } });
+  }
+
+  if (!tokens.length) return Response.json({ ok: false, error: "Pass ?orders=385992,386250,… OR ?batch=1281 OR ?holds=1281&size=3XL (hold status per order)." }, { status: 400 });
 
   // Live batch map: variant → the enabled+activated batch(es) it belongs to, plus
   // that batch's incoming/received/buffer for the capacity math.
