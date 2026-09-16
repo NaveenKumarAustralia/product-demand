@@ -10041,6 +10041,18 @@ const COL_ROW_SHOPIFY_EDITED = "__shopifyEditedFields";
 // i.e. the only fields at risk of being wiped by unlock. Kept in one place so the
 // edit-tracking (client) and the unlock pull (server) agree on the exact set.
 const SHOPIFY_UNLOCK_PULL_FIELDS = ["description", "productType", "vendor", "seoTitle", "seoDescription", "tags", "compareAtPrice", "hsCode", "countryOfOrigin"];
+// Columns that PUSH to the Shopify product — editing these on a LOCKED row is
+// blocked until the row is unlocked (then they push on "Update in Shopify").
+// Everything NOT in here (status, sample, loading notes, factory notes, ETA,
+// fabric, mani pics, release, model height, etc.) is portal-only and always
+// editable, because it never touches Shopify. Size-quantity columns are added
+// programmatically below since they drive the product's variants.
+const SHOPIFY_SYNCED_COLUMN_IDS = new Set<string>([
+  "name", "sku", "barcode", "description", "productType", "vendor", "tags",
+  "seoTitle", "seoDescription", "price", "priceRupees", "compareAtPrice",
+  "hsCode", "countryOfOrigin", "categories", "colour",
+  "freeSize", "xs", "s", "m", "l", "xl", "xxl", "xxxl", "sm", "ml", "lxl",
+]);
 // JSON blob (stringified) holding the Shopify CATEGORY (taxonomy) node + its
 // category metafields copied from the "Duplicate from" source, so a new product
 // inherits Color/Fabric/Occasion/Neckline/lengths/etc. Written to Shopify on
@@ -17994,6 +18006,14 @@ function CollectionSpreadsheetPage({
   // render, defeating memo.
   const updateCell = useCallback((rowIdx: number, colId: string, value: string) => {
     setRows((prev) => {
+      // Locked row + a Shopify-bound field → block the edit; the row must be
+      // unlocked first (then it pushes on "Update in Shopify"). Portal-only
+      // fields (status, sample, notes, loading, etc.) edit freely even when locked.
+      const cur = prev[rowIdx];
+      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && SHOPIFY_SYNCED_COLUMN_IDS.has(colId)) {
+        setTimeout(() => setPushStatus({ msg: "🔒 This product is locked. Click “Unlock to edit” in the Name column first — your changes then push when you press “Update in Shopify.”", tone: "err" }), 0);
+        return prev;
+      }
       const next = prev.map((r, i) => {
         if (i !== rowIdx) return r;
         const patched: Record<string, string> = { ...r, [colId]: value };
@@ -18047,6 +18067,11 @@ function CollectionSpreadsheetPage({
   // cell (page title + meta description) so both persist together.
   const updateRowFields = useCallback((rowIdx: number, fields: Record<string, string>) => {
     setRows((prev) => {
+      const cur = prev[rowIdx];
+      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && Object.keys(fields).some((k) => SHOPIFY_SYNCED_COLUMN_IDS.has(k))) {
+        setTimeout(() => setPushStatus({ msg: "🔒 This product is locked. Click “Unlock to edit” in the Name column first — your changes then push when you press “Update in Shopify.”", tone: "err" }), 0);
+        return prev;
+      }
       const next = prev.map((r, i) => {
         if (i !== rowIdx) return r;
         const patched = { ...r, ...fields };
@@ -18859,6 +18884,7 @@ function CollectionSpreadsheetPage({
                                 value={row[COL_ROW_CATEGORY_METAFIELDS] ?? ""}
                                 productId={linkedProductId ?? ""}
                                 linked={linked}
+                                locked={(row[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && !!(row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()}
                                 ctx={{ name: row.name ?? "", productType: row.productType ?? "", fabric: row.fabric ?? "", description: row.description ?? "" }}
                                 onSave={(blob) => {
                                   setRows((prev) => {
@@ -19951,7 +19977,7 @@ function CollectionSeoCell({ title, description, onCommit, productName, productT
 // full picker per attribute (Color, Fabric, Occasion, Neckline, lengths…). Allowed
 // values are fetched live from the taxonomy metaobjects that back each attribute.
 type CatOptAttr = { key: string; label: string; type: string; refType: string | null; isList: boolean; isReference: boolean; current: Array<{ gid: string; name: string }>; allowed: Array<{ gid: string; name: string }> };
-function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { value: string; productId: string; linked: boolean; ctx: { name: string; productType: string; fabric: string; description: string }; onSave: (blob: string) => void }) {
+function CollectionCategoryCell({ value, productId, linked, locked, ctx, onSave }: { value: string; productId: string; linked: boolean; locked: boolean; ctx: { name: string; productType: string; fabric: string; description: string }; onSave: (blob: string) => void }) {
   const [open, setOpen] = useState(false);
   const parsedRow = useMemo<CategoryMetafieldBlob | null>(() => { try { return value ? (JSON.parse(value) as CategoryMetafieldBlob) : null; } catch { return null; } }, [value]);
   const optsFetcher = useFetcher<{ ok?: boolean; categoryName?: string; categoryId?: string; attributes?: CatOptAttr[]; addable?: CatOptAttr[]; addableDebug?: string; blob?: CategoryMetafieldBlob }>();
@@ -20088,6 +20114,11 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
               </span>
             </div>
             <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+              {locked && (
+                <div style={{ background: "#fef3f2", border: "1px solid #fecdc9", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#b42318" }}>
+                  🔒 This product is locked. Click <strong>“Unlock to edit”</strong> in the Name column to change these — you're viewing Shopify's current values.
+                </div>
+              )}
               <details style={{ borderBottom: "1px solid #eef0f0", paddingBottom: 12 }}>
                 <summary style={{ fontSize: 12, fontWeight: 600, color: "#6b7280", cursor: "pointer" }}>Copy category &amp; fields from another product</summary>
                 <div style={{ marginTop: 8 }}>
@@ -20163,10 +20194,10 @@ function CollectionCategoryCell({ value, productId, linked, ctx, onSave }: { val
               )}
             </div>
             <div style={{ padding: "12px 18px", borderTop: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-              <button type="button" onClick={() => { if (window.confirm("Clear the category and ALL its metafields from this row?")) { setSel({}); setTxt({}); setAddedKeys([]); setPickedCat(null); onSave(""); setOpen(false); } }} style={{ background: "transparent", border: "none", color: "#b42318", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Clear all</button>
+              <button type="button" disabled={locked} onClick={() => { if (window.confirm("Clear the category and ALL its metafields from this row?")) { setSel({}); setTxt({}); setAddedKeys([]); setPickedCat(null); onSave(""); setOpen(false); } }} style={{ background: "transparent", border: "none", color: locked ? "#d1a3a0" : "#b42318", fontSize: 13, fontWeight: 600, cursor: locked ? "default" : "pointer" }}>Clear all</button>
               <div style={{ display: "flex", gap: 8 }}>
                 <button type="button" onClick={() => setOpen(false)} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 13, cursor: "pointer" }}>Cancel</button>
-                <button type="button" onClick={save} disabled={!effCategoryId} style={{ background: effCategoryId ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: effCategoryId ? "pointer" : "default" }}>Save</button>
+                <button type="button" onClick={save} disabled={!effCategoryId || locked} title={locked ? "Unlock the row first" : undefined} style={{ background: (effCategoryId && !locked) ? "#0d9488" : "#9ca3af", color: "#fff", border: "none", borderRadius: 7, padding: "8px 18px", fontSize: 13, fontWeight: 700, cursor: (effCategoryId && !locked) ? "pointer" : "default" }}>Save</button>
               </div>
             </div>
           </div>
