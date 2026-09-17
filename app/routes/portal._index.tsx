@@ -30278,19 +30278,19 @@ function JJOrderRow({
         {linked
           ? <span style={{ fontSize: 13, wordBreak: "break-word", display: "block", width: "100%", textAlign: "center" }}>{order.productTitle}</span>
           : <JJFieldCell orderId={order.id} field="name" value={order.productTitle ?? ""} placeholder="Product name" />}
-        {/* Shopify inventory dropdown toggle — admins/superadmins only, linked rows. */}
+        {/* Shopify inventory toggle — just the arrow in the bottom-right corner of
+            the name cell (same as the Existing Products Restock sheet). Admins/
+            superadmins only, linked rows. */}
         {canSeeInventory && (
-          <div style={{ display: "flex", justifyContent: "center", marginTop: 4 }}>
-            <button
-              type="button"
-              onClick={toggleInventory}
-              style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "1px solid #cbd5e1", borderRadius: 6, padding: "1px 7px", fontSize: 10, fontWeight: 700, color: restockSettings.inventoryArrowColor || "#0e7490", cursor: "pointer", whiteSpace: "nowrap" }}
-              aria-label={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
-              title={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
-            >
-              {inventoryOpen ? "▲" : "▼"} Shopify stock
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={toggleInventory}
+            style={{ position: "absolute", bottom: 2, right: 4, background: "none", border: "none", padding: 0, fontSize: 12, lineHeight: 1, fontWeight: 700, color: restockSettings.inventoryArrowColor || "#0e7490", cursor: "pointer" }}
+            aria-label={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
+            title={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
+          >
+            {inventoryOpen ? "▲" : "▼"}
+          </button>
         )}
         {/* Destination stamp overlay — centred across the frozen columns,
             pinned to the bottom, same treatment as the restock sheet. */}
