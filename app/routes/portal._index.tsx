@@ -30213,7 +30213,27 @@ function JJOrderRow({
   // restock sheet.
   const destinationStamp = destinationStampStyle(destinationLocal, restockSettings.destinationOptions);
   const destinationRowBg = destinationStamp ? { background: destinationStamp.rowBg } : undefined;
+  // On-demand Shopify inventory dropdown — same as the Existing Products Restock
+  // sheet. Admins/superadmins only (isAdmin), and only for rows linked to a Shopify
+  // product. Fetched lazily on first open, cached after.
+  const inventoryFetcher = useFetcher<{ variantsBySize?: Record<string, number>; total?: number }>();
+  const [inventoryOpen, setInventoryOpen] = useState(false);
+  const fetchedInventory = inventoryFetcher.data?.variantsBySize ?? null;
+  const inventoryLoading = inventoryFetcher.state !== "idle";
+  const inventoryBySize: Record<string, number | null> = fetchedInventory
+    ? Object.fromEntries(sizes.map((sz) => [sz, fetchedInventory[sz] ?? 0]))
+    : Object.fromEntries(sizes.map((sz) => [sz, null]));
+  const inventoryTotal = fetchedInventory ? (inventoryFetcher.data?.total ?? 0) : 0;
+  const canSeeInventory = isAdmin && linked && !!order.productId;
+  const toggleInventory = () => setInventoryOpen((cur) => {
+    const next = !cur;
+    if (next && !fetchedInventory && order.productId && inventoryFetcher.state === "idle") {
+      inventoryFetcher.load(`/api/product-inventory?productId=${encodeURIComponent(order.productId)}`);
+    }
+    return next;
+  });
   return (
+    <>
     <tr style={{ ...s.row, ...(destinationStamp ? { background: destinationStamp.rowBg } : {}) }}>
       <td
         style={{ ...s.td, textAlign: "center", ...frozenTd(0), ...destinationRowBg }}
@@ -30258,6 +30278,20 @@ function JJOrderRow({
         {linked
           ? <span style={{ fontSize: 13, wordBreak: "break-word", display: "block", width: "100%", textAlign: "center" }}>{order.productTitle}</span>
           : <JJFieldCell orderId={order.id} field="name" value={order.productTitle ?? ""} placeholder="Product name" />}
+        {/* Shopify inventory dropdown toggle — admins/superadmins only, linked rows. */}
+        {canSeeInventory && (
+          <div style={{ display: "flex", justifyContent: "center", marginTop: 4 }}>
+            <button
+              type="button"
+              onClick={toggleInventory}
+              style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "1px solid #cbd5e1", borderRadius: 6, padding: "1px 7px", fontSize: 10, fontWeight: 700, color: restockSettings.inventoryArrowColor || "#0e7490", cursor: "pointer", whiteSpace: "nowrap" }}
+              aria-label={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
+              title={inventoryOpen ? "Hide Shopify inventory" : "Show Shopify inventory"}
+            >
+              {inventoryOpen ? "▲" : "▼"} Shopify stock
+            </button>
+          </div>
+        )}
         {/* Destination stamp overlay — centred across the frozen columns,
             pinned to the bottom, same treatment as the restock sheet. */}
         {destinationStamp && (
@@ -30411,6 +30445,23 @@ function JJOrderRow({
         )}
       </td>
     </tr>
+    {inventoryOpen && canSeeInventory && (
+      <tr style={s.inventoryRow}>
+        <td style={s.inventoryBlankCell} />
+        <td style={s.inventoryBlankCell} />
+        <td style={s.inventoryBlankCell} />
+        <td style={s.inventoryBlankCell} />
+        <td style={s.inventoryLabelCell}>Shopify</td>
+        {sizes.map((size) => (
+          <td key={size} style={{ ...s.td, ...s.inventoryQtyCell }}>
+            {inventoryLoading && !fetchedInventory ? "…" : (inventoryBySize[size] == null ? "—" : inventoryBySize[size])}
+          </td>
+        ))}
+        <td style={{ ...s.td, ...s.inventoryQtyCell }}><span style={s.total}>{inventoryLoading && !fetchedInventory ? "…" : inventoryTotal}</span></td>
+        <td style={s.td} colSpan={5 + (canLoadInventory ? 1 : 0)} />
+      </tr>
+    )}
+    </>
   );
 }
 
