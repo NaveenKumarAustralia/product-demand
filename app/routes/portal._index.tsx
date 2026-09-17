@@ -16763,6 +16763,16 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     next.set("collectionId", String(id));
     setSearchParams(next, { replace: false });
   };
+  // JJ New Products is a SINGLE inbox sheet — no tile landing. Auto-open the
+  // primary (lowest-id) jj-new collection so the user lands straight on the sheet.
+  useEffect(() => {
+    if (collectionKind !== "jj-new" || selectedId || !collections.length) return;
+    const primary = collections.reduce((a, b) => (a.id <= b.id ? a : b));
+    const next = new URLSearchParams(searchParams);
+    next.set("collectionId", String(primary.id));
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collectionKind, selectedId, collections]);
   const closeCollection = () => {
     const next = new URLSearchParams(searchParams);
     next.delete("collectionId");
@@ -16859,7 +16869,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         photoShoots={photoShoots}
         etaByProductId={etaByProductId}
         shipmentByProductId={shipmentByProductId}
-        onBack={closeCollection}
+        onBack={collectionKind === "jj-new" ? undefined : closeCollection}
         canSeeProductStatus={canSeeProductStatus}
         hidePhotoShootToggle={hidePhotoShootToggle}
         costCurrency={costCurrency}
@@ -17578,7 +17588,7 @@ function CollectionSpreadsheetPage({
   photoShoots: PhotoShootListItem[];
   etaByProductId: Record<string, string>;
   shipmentByProductId: Record<string, { label: string; partial: boolean }>;
-  onBack: () => void;
+  onBack?: () => void;
   onLocalNameChange: (name: string) => void;
   onSetFabricLink: (fabricName: string, fabricKey: string) => void;
   hidePhotoShootToggle?: boolean;
@@ -18038,7 +18048,7 @@ function CollectionSpreadsheetPage({
   useEffect(() => {
     if (moveFetcher.state !== "idle" || !moveFetcher.data?.ok) return;
     if (moveFetcher.data.deletedSource) {
-      onBack();
+      onBack?.();
       return;
     }
     setSelectedRowIdxs(new Set());
@@ -18487,11 +18497,13 @@ function CollectionSpreadsheetPage({
       )}
       <div style={{ ...s.productInfoToolbar, flexShrink: 0 }}>
         <div style={s.productInfoToolbarLeft}>
-          <button
-            type="button"
-            onClick={onBack}
-            style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-          >← Collections</button>
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+            >← Collections</button>
+          )}
           <div>
             {editingName ? (
               <input
