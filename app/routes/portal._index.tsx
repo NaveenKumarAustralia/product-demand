@@ -12358,6 +12358,10 @@ export default function PortalDashboard() {
               const n = collections.reduce((sum: number, c: { rowCount?: number }) => sum + (c.rowCount || 0), 0);
               return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} row{n === 1 ? "" : "s"}</span>;
             })()}
+            {page === "collections" && (() => {
+              const n = collections.length;
+              return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} collection{n === 1 ? "" : "s"}</span>;
+            })()}
             {isRestockPage && (() => {
               const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
               const showFiltered = filtersActive && (
@@ -16943,13 +16947,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           few collections (which left big empty gaps top and bottom). */}
       <div style={{ ...s.productInfoPage, flex: 1, minHeight: 0, alignContent: "start" }}>
       <div style={s.productInfoToolbar}>
+        {/* Fabric filter sits on the LEFT; the name tile is gone (the count shows
+            next to the page title). Upload/Import removed — Add Collection stays. */}
         <div style={s.productInfoToolbarLeft}>
-          <div>
-            <h2 style={s.productInfoHeading}>Collections</h2>
-            <div style={s.productInfoMeta}>{collections.length} collection{collections.length !== 1 ? "s" : ""}</div>
-          </div>
-        </div>
-        <div style={s.productInfoActions}>
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
             Fabric
             <select
@@ -16963,61 +16963,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               <option value="on_order">On order</option>
             </select>
           </label>
-          {isAdmin && (
-            <>
-              <button
-                type="button"
-                onClick={() => {
-                  if (tabImportFetcher.state !== "idle") return;
-                  tabImportInputRef.current?.click();
-                }}
-                disabled={tabImportFetcher.state !== "idle"}
-                style={{
-                  background: "#0d9488", color: "#fff", border: "none",
-                  borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600,
-                  cursor: tabImportFetcher.state !== "idle" ? "wait" : "pointer",
-                }}
-                title="Upload ONE tab's XLSX (downloaded from Google Sheets) to create the collection — text + images + fabric pictures all in one go"
-              >
-                {tabImportFetcher.state !== "idle" ? "Importing…" : "Upload tab (creates collection)"}
-              </button>
-              <input
-                ref={tabImportInputRef}
-                type="file"
-                accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  e.target.value = "";
-                  if (!f) return;
-                  if (!window.confirm(`Create collection(s) from "${f.name}"?\n\nFor each worksheet in the file:\n• Reads text into matching portal columns\n• Reads images and assigns them to MODEL PICTURE + FABRIC columns by anchor\n• Pre-links rows whose Link column has a Shopify URL\n• Replaces MODEL PICTURE with Shopify images for linked rows\n\nName collisions get "(2)", "(3)" suffix — won't overwrite existing collections.`)) return;
-                  const fd = new FormData();
-                  fd.set("intent", "import_collection_from_xlsx");
-                  fd.set("xlsx", f);
-                  tabImportFetcher.submit(fd, { method: "post", encType: "multipart/form-data" });
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  if (importFetcher.state !== "idle") return;
-                  const tab = window.prompt("Import ONE tab from the Google Sheet.\n\nType the tab name EXACTLY as it appears in the sheet (including any emoji/✅):")?.trim();
-                  if (!tab) return;
-                  const sheetUrl = window.prompt("Google Sheet URL? Leave blank to use the default master sheet.", "")?.trim() ?? "";
-                  importFetcher.submit({ intent: "import_collections_from_google_sheet", tab, ...(sheetUrl ? { sheetUrl } : {}) }, { method: "post" });
-                }}
-                disabled={importFetcher.state !== "idle"}
-                style={{
-                  background: "#0d9488", color: "#fff", border: "none",
-                  borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600,
-                  cursor: importFetcher.state !== "idle" ? "wait" : "pointer",
-                }}
-                title="Import one tab live from the Google Sheet (no XLSX download). Text + Shopify-linked images; add other images via the Dropbox picker."
-              >
-                {importFetcher.state !== "idle" ? "Importing…" : "Import one tab (Google Sheet)"}
-              </button>
-            </>
-          )}
+        </div>
+        <div style={s.productInfoActions}>
           <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
             Add Collection
           </button>
