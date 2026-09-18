@@ -9,6 +9,7 @@ import { syncOrderNoteMessages, syncEntityNoteMessages, syncSampleIterationMessa
 import { randomUUID } from "node:crypto";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { PreordersDashboard } from "../portal-preorders";
+import AiChat from "../ai/AiChat";
 import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server";
 import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
 import { marketFromDestination, calculatePreorderCapacity } from "../preorder/preorder-rules.server";
@@ -7192,9 +7193,10 @@ const ALL_NAV_ITEMS = [
   { id: "visionboard", label: "Vision Board", href: "/portal?page=visionboard", superadminOnly: true },
   { id: "collections", label: "Collections", href: "/portal?page=collections" },
   { id: "dropbox", label: "Dropbox", href: "/portal?page=dropbox" },
+  { id: "ai", label: "AI Assistant", href: "/portal?page=ai" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "reorder", "preorders", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "reorder", "preorders", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox", "ai"];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -11938,6 +11940,9 @@ export default function PortalDashboard() {
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(savedColumnWidths);
   const [searchTitleInput, setSearchTitleInput] = useState(searchTitle);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
+  // AI assistant popup (opens from the ✨ icon in the header; same conversation
+  // as the full AI Assistant page).
+  const [aiOpen, setAiOpen] = useState(false);
   const canLoadPackingInventory = canPortalUserLoadPackingInventory(users, currentUser);
   // Optimistic copy of the restock orders so "Split to destination" shows
   // instantly instead of waiting ~5s for the (heavy) loader to revalidate. The
@@ -12102,6 +12107,7 @@ export default function PortalDashboard() {
     : page === "notes" ? "All Notes"
     : page === "search" ? "Search"
     : page === "dropbox" ? "Dropbox"
+    : page === "ai" ? "AI Assistant"
     : page === "photoshoot" ? "Photo Shoots"
     : page === "newproduct" ? "New Product Orders"
     : page === "jj-restock" ? (selectedProductGroup || "JJ Order")
@@ -12110,6 +12116,7 @@ export default function PortalDashboard() {
     .map((id) => ALL_NAV_ITEMS.find((item) => item.id === id))
     .filter(Boolean)
     .filter((item) => {
+      if (item!.id === "ai") return true; // AI Assistant is available to every user
       if ((item as { superadminOnly?: boolean }).superadminOnly) return currentUser?.role === "superadmin";
       return currentUser?.role === "superadmin" || Boolean(currentUser?.pageAccess[item!.id]);
     }) as typeof ALL_NAV_ITEMS[number][];
@@ -12526,6 +12533,14 @@ export default function PortalDashboard() {
                 >← Restock</button>
               )}
               {(isRestockPage || page === "packing" || page === "fabric" || page === "productinfo") && <PortalUndoButton />}
+              {/* AI assistant — opens a chat popup (same conversation as the AI
+                  Assistant page). Available on every page, next to the search. */}
+              <button
+                type="button"
+                onClick={() => setAiOpen((v) => !v)}
+                title="Ask the AI assistant"
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, background: aiOpen ? "#0f766e" : "#fff", color: aiOpen ? "#fff" : "#0f766e", border: "1px solid #0f766e", borderRadius: 8, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}
+              >✨ AI</button>
               <MessagesMenu messages={messages} />
               <ThreadPanel users={users} currentUser={currentUser} />
               <div style={s.activeUsers} title="Currently active">
@@ -12542,6 +12557,8 @@ export default function PortalDashboard() {
             </div>
           </div>
         </header>
+
+        {aiOpen && page !== "ai" && <AiChat variant="popup" onClose={() => setAiOpen(false)} />}
 
         {page === "restock" && (
           <div style={s.restockFilterBar}>
@@ -12735,6 +12752,10 @@ export default function PortalDashboard() {
           </div>
         ) : page === "dropbox" ? (
           <DropboxPanel />
+        ) : page === "ai" ? (
+          <div style={{ height: "100%", minHeight: 0, maxWidth: 860, width: "100%", margin: "0 auto" }}>
+            <AiChat variant="page" />
+          </div>
         ) : page === "preorders" && preorderDashboard ? (
           <PreordersDashboard data={preorderDashboard} search={preorderSearch} />
         ) : page === "reorder" ? (
