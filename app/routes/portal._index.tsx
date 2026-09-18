@@ -11890,6 +11890,7 @@ export default function PortalDashboard() {
   // JJ search — lifted so it can live in the header (same spot/style as the
   // Existing Products Restock search).
   const [jjSearch, setJjSearch] = useState("");
+  const [collectionSearch, setCollectionSearch] = useState("");
   const [reorderSearch, setReorderSearch] = useState("");
   const [preorderSearch, setPreorderSearch] = useState("");
   useEffect(() => {
@@ -12504,6 +12505,18 @@ export default function PortalDashboard() {
                   />
                 </label>
               )}
+              {page === "collections" && (
+                <label style={s.filterLabel}>
+                  Search
+                  <input
+                    type="search"
+                    value={collectionSearch}
+                    onChange={(event) => setCollectionSearch(event.currentTarget.value)}
+                    style={s.searchInput}
+                    placeholder="Collection name"
+                  />
+                </label>
+              )}
               {page === "preorders" && (
                 <label style={s.filterLabel}>
                   Search
@@ -12739,6 +12752,7 @@ export default function PortalDashboard() {
                 shipmentByProductId={collectionShipmentByProductId}
                 collectionGroups={collectionGroups}
                 canSeeProductStatus={Boolean(currentUser?.admin || currentUser?.canSeeProductStatus)}
+                search={collectionSearch}
               />
             </div>
           </div>
@@ -16762,7 +16776,7 @@ function useProgressiveReveal(total: number, resetKey: string, step = TILE_RENDE
   }, [limit, total, step]);
   return Math.min(limit, total);
 }
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], canSeeProductStatus = false }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; canSeeProductStatus?: boolean }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], canSeeProductStatus = false, search = "" }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; canSeeProductStatus?: boolean; search?: string }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -17057,7 +17071,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
       )}
 
       {(() => {
-        const visibleCollections = collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter));
+        const searchQ = search.trim().toLowerCase();
+        const visibleCollections = collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter) && (!searchQ || (c.name ?? "").toLowerCase().includes(searchQ)));
         const card = (c: CollectionListItem) => (
           <CollectionCard
             key={c.id}
@@ -17135,8 +17150,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           <div>
             {selectionBar}
             <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
-              {/* Group tiles (folders) first, then ungrouped collections. */}
-              {!showHidden && groups.map((g) => {
+              {/* Group tiles (folders) first, then ungrouped collections. While
+                  searching, folders are hidden and matches show directly (below). */}
+              {!showHidden && !searchQ && groups.map((g) => {
                 const memberCount = g.collectionIds.length;
                 const cover = collections.find((c) => g.collectionIds.includes(c.id) && c.hasThumbnail);
                 return (
@@ -17158,10 +17174,12 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                   </div>
                 );
               })}
-              {visibleCollections.filter((c) => showHidden || !groupedIds.has(c.id)).slice(0, tileLimit).map(card)}
-              {visibleCollections.filter((c) => showHidden || !groupedIds.has(c.id)).length === 0 && groups.length === 0 && (
+              {/* When searching, show every matching collection (even ones inside a
+                  group); otherwise hide grouped ones (they live in their folder). */}
+              {visibleCollections.filter((c) => searchQ || showHidden || !groupedIds.has(c.id)).slice(0, tileLimit).map(card)}
+              {visibleCollections.filter((c) => searchQ || showHidden || !groupedIds.has(c.id)).length === 0 && (searchQ || groups.length === 0) && (
                 <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-                  {fabricStatusFilter ? "No collections with this fabric status." : showHidden ? "No hidden collections." : "No collections yet. Click Add Collection to create your first one."}
+                  {searchQ ? `No collections match "${search.trim()}".` : fabricStatusFilter ? "No collections with this fabric status." : showHidden ? "No hidden collections." : "No collections yet. Click Add Collection to create your first one."}
                 </div>
               )}
             </div>
