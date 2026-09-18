@@ -19145,6 +19145,7 @@ function CollectionSpreadsheetPage({
                             collectionId={listItem.id}
                             rowName={row.name ?? row.title ?? ""}
                             threadCounts={threadCounts}
+                            costCurrency={costCurrency}
                           />
                         );
                         // Name cell needs the table-cell "height: 1" trick so the
@@ -19544,6 +19545,7 @@ function CollectionCellInner({
   collectionId,
   rowName,
   threadCounts,
+  costCurrency = "INR",
 }: {
   value: string;
   type: CollectionColumnDef["type"];
@@ -19558,6 +19560,7 @@ function CollectionCellInner({
   collectionId?: number;
   rowName?: string;
   threadCounts?: Map<string, { total: number; unread: number }>;
+  costCurrency?: "INR" | "THB";
 }) {
   const onCommit = useCallback((next: string) => updateCell(rowIndex, columnId, next), [updateCell, rowIndex, columnId]);
   // Notes columns get the shared @-mention textarea (same UX as the
@@ -19639,9 +19642,12 @@ function CollectionCellInner({
   // Text becomes a textarea so long content wraps when the column is
   // resized narrower instead of overflowing or getting cut off.
   if (type === "number") {
-    // Number cells are the size variant qty columns (XS, S, M, …).
-    // User wanted these 4pt bigger than the text cells.
-    return (
+    // Number cells are the size qty columns AND the money columns. Money columns
+    // get a currency symbol prefix: A$ for price/compare-at (AUD), ₹ or ฿ for the
+    // production price (rupees for Collections, baht for JJ New Products).
+    const moneySymbol = columnId === "priceRupees" ? (costCurrency === "THB" ? "฿" : "₹")
+      : (columnId === "price" || columnId === "compareAtPrice") ? "A$" : "";
+    const numberInput = (
       <input
         type="number"
         value={draft}
@@ -19651,7 +19657,8 @@ function CollectionCellInner({
         className="no-number-arrows"
         placeholder={placeholder || undefined}
         style={{
-          width: "100%", border: "none", outline: "none",
+          ...(moneySymbol ? { flex: 1, minWidth: 0 } : { width: "100%" }),
+          border: "none", outline: "none",
           padding: "1px 2px",
           // Number / qty cells stay slightly larger than text cells
           // (the +2px was a deliberate "qty stands out" bump).
@@ -19664,6 +19671,13 @@ function CollectionCellInner({
           textAlign: "center",
         }}
       />
+    );
+    if (!moneySymbol) return numberInput;
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
+        {draft.trim() && <span style={{ fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)", fontWeight: 600, color: "var(--portal-table-text-color, #1f2937)", whiteSpace: "nowrap" }}>{moneySymbol}</span>}
+        {numberInput}
+      </div>
     );
   }
   // SKU column gets a small "Generate" button when the value is a
@@ -20343,7 +20357,7 @@ function CollectionPriceAudCell({ rupees, inrPerAud, currency = "INR", thbPerAud
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, padding: "1px 2px" }}>
       <span style={{ fontSize: "var(--portal-table-font-size, 14px)", fontWeight: 700, color: "var(--portal-table-text-color, #111827)" }}>
-        {aud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+        A${aud.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
       </span>
       {effectiveRate != null && effectiveRate > 0 && (
         <span style={{ fontSize: 10, color: "#9ca3af" }}>
@@ -20445,27 +20459,34 @@ function CollectionPriceRupeesCell({
   }, [productInfo.categories, styleOverrideId]);
   return (
     <div style={{ display: "flex", flexDirection: "column", width: "100%", gap: 2 }} onContextMenu={openBreakdown}>
-      <input
-        type="number"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => { if (draft !== value) onCommit(draft); }}
-        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-        onContextMenu={openBreakdown}
-        className="no-number-arrows"
-        placeholder={autoValue || undefined}
-        title={costBreakdown ? "Right-click (or click the fabric name below) for the cost breakdown / change fabric" : undefined}
-        style={{
-          width: "100%", border: "none", outline: "none",
-          padding: "1px 2px",
-          fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)",
-          color: "var(--portal-table-text-color, #1f2937)",
-          fontWeight: 600,
-          fontFamily: "inherit",
-          background: "transparent", boxSizing: "border-box",
-          textAlign: "center",
-        }}
-      />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
+        {/* ₹ prefix so the amount reads as rupees (this cell is only rendered for
+            INR collections; JJ uses ฿ on its own path). */}
+        {(draft.trim() || autoValue) && (
+          <span style={{ fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)", fontWeight: 600, color: "var(--portal-table-text-color, #1f2937)" }}>₹</span>
+        )}
+        <input
+          type="number"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => { if (draft !== value) onCommit(draft); }}
+          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+          onContextMenu={openBreakdown}
+          className="no-number-arrows"
+          placeholder={autoValue || undefined}
+          title={costBreakdown ? "Right-click (or click the fabric name below) for the cost breakdown / change fabric" : undefined}
+          style={{
+            flex: 1, minWidth: 0, border: "none", outline: "none",
+            padding: "1px 2px",
+            fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)",
+            color: "var(--portal-table-text-color, #1f2937)",
+            fontWeight: 600,
+            fontFamily: "inherit",
+            background: "transparent", boxSizing: "border-box",
+            textAlign: "center",
+          }}
+        />
+      </div>
       {showPicker && (
         <CostFallbacks
           productInfo={productInfo}
