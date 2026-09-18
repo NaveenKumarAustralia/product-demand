@@ -16941,15 +16941,16 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
-      {!hidePhotoShootToggle && <CollectionsPhotoShootToggle active="collections" />}
       {/* alignContent:start so the toolbar + card grid hug the top instead of
           the grid tracks stretching to fill the height when there are only a
           few collections (which left big empty gaps top and bottom). */}
       <div style={{ ...s.productInfoPage, flex: 1, minHeight: 0, alignContent: "start" }}>
       <div style={s.productInfoToolbar}>
-        {/* Fabric filter sits on the LEFT; the name tile is gone (the count shows
-            next to the page title). Upload/Import removed — Add Collection stays. */}
-        <div style={s.productInfoToolbarLeft}>
+        {/* Collections / Photo Shoot toggle sits far LEFT, then the Fabric filter.
+            The name tile is gone (the count shows next to the page title).
+            Upload/Import removed — Add Collection stays. */}
+        <div style={{ ...s.productInfoToolbarLeft, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          {!hidePhotoShootToggle && <CollectionsPhotoShootToggle active="collections" />}
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
             Fabric
             <select
