@@ -18650,18 +18650,6 @@ function CollectionSpreadsheetPage({
               <option value="__new" style={{ color: "#111827", background: "#fff" }}>+ New shoot…</option>
             </select>
           )}
-          {loaded && (() => {
-            const emptyCount = rows.filter(isCollectionRowEmpty).length;
-            if (emptyCount === 0) return null;
-            return (
-              <button
-                type="button"
-                onClick={removeEmptyRows}
-                style={{ background: "transparent", color: "#b91c1c", border: "1px solid #fca5a5", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-                title="Delete rows that have no content and no Shopify product"
-              >Remove {emptyCount} empty row{emptyCount === 1 ? "" : "s"}</button>
-            );
-          })()}
           <button
             type="button"
             onClick={pushAllUnsynced}
