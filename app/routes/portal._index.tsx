@@ -4226,60 +4226,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
     }
 
-    // Map each ordered size to its Collections size column id.
-    const sizeToColId = new Map<string, string>();
-    for (const [colId, label] of COLLECTION_SIZE_COLUMN_LABELS) sizeToColId.set(label.toUpperCase(), colId);
-    const sizeAliases: Record<string, string> = { XXL: "2XL", XXXL: "3XL", "S-M": "S/M", "M-L": "M/L", "L-XL": "L/XL" };
-    const colIdForSize = (size: string): string | null => {
-      const key = (size ?? "").trim().toUpperCase();
-      return sizeToColId.get(key) ?? sizeToColId.get(sizeAliases[key] ?? "") ?? null;
-    };
-
-    const qtyByColId: Record<string, string> = {};
-    const lineByColId = new Map<string, (typeof order.lines)[number]>();
-    for (const line of order.lines) {
-      const colId = colIdForSize(line.variantTitle);
-      if (!colId) continue;
-      if (!lineByColId.has(colId)) lineByColId.set(colId, line);
-      const qty = line.qtyOrdered || 0;
-      if (qty > 0) qtyByColId[colId] = String((Number(qtyByColId[colId] ?? 0) || 0) + qty);
-    }
-
-    // Per-size SKU / barcode → the sheet's SKU/Barcode cells as one line per
-    // ordered size, in the sheet's size-column order (so createShopifyProductFromRow
-    // maps them to the right variant). Filled in per variant on the JJ order row.
-    const skuLines: string[] = [];
-    const barcodeLines: string[] = [];
-    for (const [colId] of COLLECTION_SIZE_COLUMN_LABELS) {
-      if (!qtyByColId[colId]) continue;
-      const l = lineByColId.get(colId);
-      skuLines.push((l?.sku ?? "").trim());
-      barcodeLines.push((l?.barcode ?? "").trim());
-    }
-    const skuVal = skuLines.some(Boolean) ? skuLines.join("\n") : "";
-    const barcodeVal = barcodeLines.some(Boolean) ? barcodeLines.join("\n") : "";
-
-    // Product image → the sheet's Picture (modelPicture) column. Images picked
-    // on the JJ row are stored in the collection image table, so we can pass the
-    // key straight through (served on demand); a plain URL becomes a thumb.
-    const imgUrl = (order.productImageUrl ?? "").trim();
-    let modelPicture = "";
-    if (imgUrl) {
-      const keyMatch = imgUrl.match(/\/portal\/collection-image\/(.+)$/);
-      const entry: CollectionImageEntry = keyMatch ? { thumb: "", key: keyMatch[1] } : { thumb: imgUrl };
-      modelPicture = serializeMultiImageValue([entry]);
-    }
-
     const rows = normalizeCollectionRows(inbox.rows);
     const existingIdx = rows.findIndex((r) => String(r[COL_ROW_JJ_ORDER_ID] ?? "").trim() === String(orderId));
-    const rowData: Record<string, string> = {
-      name: order.productTitle || "New product",
-      ...qtyByColId,
-      ...(skuVal ? { sku: skuVal } : {}),
-      ...(barcodeVal ? { barcode: barcodeVal } : {}),
-      ...(modelPicture ? { modelPicture } : {}),
-      [COL_ROW_JJ_ORDER_ID]: String(orderId),
-    };
+    const rowData = buildJJNewProductRowData(order);
     if (existingIdx >= 0) {
       // Re-sync: keep any details already filled in, refresh name + quantities.
       const prev = rows[existingIdx];
@@ -4426,9 +4375,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // them, and they bloat this response.
     const collection = await prisma.collection.findUnique({
       where: { id },
-      select: { id: true, name: true, rows: true, columns: true, createdAt: true, updatedAt: true },
+      select: { id: true, name: true, kind: true, rows: true, columns: true, createdAt: true, updatedAt: true },
     }).catch(() => null);
     if (!collection) return jsonResponse({ collection: null });
+    // JJ New Products inbox: auto-fill any OPEN JJ order not yet in Shopify before
+    // returning rows, so unlinked JJ products appear here without a manual send.
+    if ((collection as { kind?: string }).kind === "jj-new") {
+      try {
+        const r = await syncUnlinkedJJOrdersToNewProducts();
+        if (r.added > 0) {
+          const fresh = await prisma.collection.findUnique({ where: { id }, select: { rows: true } });
+          if (fresh) (collection as { rows: unknown }).rows = fresh.rows;
+        }
+      } catch (e) {
+        console.warn("[get_collection_full] JJ new-products auto-sync failed:", e);
+      }
+    }
     // Chunked image migration: move inline base64 images out to the
     // CollectionImage table a batch at a time so a heavy collection never ships
     // tens of MB (which hangs the browser) and no single request times out.
@@ -9839,6 +9801,90 @@ async function shopifyGraphql<T>(
 // 250. Best-effort and safe: on ANY API/network error it changes nothing, so a
 // live product is never unlinked because of a transient failure. Mutates `rows`
 // in place; returns whether anything changed.
+// Build a JJ New Products inbox row from a JJ supplier order: name, per-size
+// quantities mapped to the sheet's size columns, per-size SKU/barcode, product
+// image, and the __jjOrderId back-link. Shared by the manual "Send to New
+// Products" action and the automatic sync so they stay identical.
+function buildJJNewProductRowData(order: { id: number; productTitle: string | null; productImageUrl: string | null; lines: Array<{ variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number }> }): Record<string, string> {
+  const sizeToColId = new Map<string, string>();
+  for (const [colId, label] of COLLECTION_SIZE_COLUMN_LABELS) sizeToColId.set(label.toUpperCase(), colId);
+  const sizeAliases: Record<string, string> = { XXL: "2XL", XXXL: "3XL", "S-M": "S/M", "M-L": "M/L", "L-XL": "L/XL" };
+  const colIdForSize = (size: string): string | null => {
+    const key = (size ?? "").trim().toUpperCase();
+    return sizeToColId.get(key) ?? sizeToColId.get(sizeAliases[key] ?? "") ?? null;
+  };
+  const qtyByColId: Record<string, string> = {};
+  const lineByColId = new Map<string, (typeof order.lines)[number]>();
+  for (const line of order.lines) {
+    const colId = colIdForSize(line.variantTitle);
+    if (!colId) continue;
+    if (!lineByColId.has(colId)) lineByColId.set(colId, line);
+    const qty = line.qtyOrdered || 0;
+    if (qty > 0) qtyByColId[colId] = String((Number(qtyByColId[colId] ?? 0) || 0) + qty);
+  }
+  const skuLines: string[] = [];
+  const barcodeLines: string[] = [];
+  for (const [colId] of COLLECTION_SIZE_COLUMN_LABELS) {
+    if (!qtyByColId[colId]) continue;
+    const l = lineByColId.get(colId);
+    skuLines.push((l?.sku ?? "").trim());
+    barcodeLines.push((l?.barcode ?? "").trim());
+  }
+  const skuVal = skuLines.some(Boolean) ? skuLines.join("\n") : "";
+  const barcodeVal = barcodeLines.some(Boolean) ? barcodeLines.join("\n") : "";
+  const imgUrl = (order.productImageUrl ?? "").trim();
+  let modelPicture = "";
+  if (imgUrl) {
+    const keyMatch = imgUrl.match(/\/portal\/collection-image\/(.+)$/);
+    const entry: CollectionImageEntry = keyMatch ? { thumb: "", key: keyMatch[1] } : { thumb: imgUrl };
+    modelPicture = serializeMultiImageValue([entry]);
+  }
+  return {
+    name: order.productTitle || "New product",
+    ...qtyByColId,
+    ...(skuVal ? { sku: skuVal } : {}),
+    ...(barcodeVal ? { barcode: barcodeVal } : {}),
+    ...(modelPicture ? { modelPicture } : {}),
+    [COL_ROW_JJ_ORDER_ID]: String(order.id),
+  };
+}
+
+const JJ_NEW_AUTOADDED_KEY = "jj-new-autoadded";
+// Auto-fill: every OPEN JJ order not linked to a Shopify product is a "new
+// product" and gets a row in the JJ New Products inbox automatically, so staff
+// don't have to Send-to-New-Products by hand. Idempotent (matches by __jjOrderId).
+// Respects deletions: any order that has EVER been in the inbox is remembered (a
+// portal setting) and never re-added — so removing a row makes it stay removed.
+async function syncUnlinkedJJOrdersToNewProducts(): Promise<{ added: number }> {
+  const jjOrders = await prisma.supplierOrder.findMany({
+    where: { status: "open", supplier: { equals: "jj", mode: "insensitive" }, productId: "" },
+    include: { lines: { orderBy: { id: "asc" } } },
+  }).catch(() => []);
+  if (!jjOrders.length) return { added: 0 };
+  let inbox = await prisma.collection.findFirst({ where: { kind: "jj-new" }, orderBy: { sortOrder: "asc" } });
+  if (!inbox) {
+    const count = await prisma.collection.count();
+    inbox = await prisma.collection.create({ data: { name: "JJ New Products", kind: "jj-new", sortOrder: count, columns: DEFAULT_COLLECTION_COLUMNS as unknown as object, rows: [] as unknown as object } });
+  }
+  const rows = normalizeCollectionRows(inbox.rows);
+  const present = new Set(rows.map((r) => String(r[COL_ROW_JJ_ORDER_ID] ?? "").trim()).filter(Boolean));
+  const seenSetting = await prisma.portalSetting.findUnique({ where: { key: JJ_NEW_AUTOADDED_KEY }, select: { value: true } }).catch(() => null);
+  const seen = new Set<string>((Array.isArray(seenSetting?.value) ? seenSetting!.value as unknown[] : []).map(String));
+  let seenChanged = false;
+  // Remember everything already in the sheet, so a later manual delete isn't undone.
+  for (const id of present) if (!seen.has(id)) { seen.add(id); seenChanged = true; }
+  let added = 0;
+  for (const order of jjOrders) {
+    const idStr = String(order.id);
+    if (present.has(idStr) || seen.has(idStr)) continue; // already there, or removed on purpose
+    rows.push(buildJJNewProductRowData(order));
+    seen.add(idStr); seenChanged = true; added += 1;
+  }
+  if (added) await prisma.collection.update({ where: { id: inbox.id }, data: { rows: rows as unknown as object, updatedAt: new Date() } });
+  if (seenChanged) await prisma.portalSetting.upsert({ where: { key: JJ_NEW_AUTOADDED_KEY }, create: { key: JJ_NEW_AUTOADDED_KEY, value: Array.from(seen) }, update: { value: Array.from(seen) } }).catch(() => {});
+  return { added };
+}
+
 async function pruneDeletedShopifyLinks(shop: string, accessToken: string, rows: Array<Record<string, string>>): Promise<{ changed: boolean; removed: number }> {
   const linked: Array<{ idx: number; gid: string }> = [];
   rows.forEach((row, idx) => {
