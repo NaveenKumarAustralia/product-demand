@@ -164,21 +164,30 @@ RULES: You can only READ data, never change it. Never invent numbers — if you 
 // ── The chat turn ─────────────────────────────────────────────────────────────
 type ApiContentBlock = { type: string; text?: string; id?: string; name?: string; input?: Record<string, unknown>; tool_use_id?: string; content?: unknown };
 
-export async function runAssistantTurn(request: Request, userMessage: string): Promise<{ ok: true; reply: string; history: AiChatMessage[] } | { ok: false; error: string }> {
+export type Attachment = { name: string; mediaType: string; data: string; kind: "image" | "pdf" };
+
+export async function runAssistantTurn(request: Request, userMessage: string, attachments: Attachment[] = []): Promise<{ ok: true; reply: string; history: AiChatMessage[] } | { ok: false; error: string }> {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return { ok: false, error: "AI isn't configured (missing ANTHROPIC_API_KEY)." };
   const user = await currentPortalUser(request);
   if (!user) return { ok: false, error: "Not signed in." };
   const text = userMessage.trim();
-  if (!text) return { ok: false, error: "Empty message." };
+  if (!text && !attachments.length) return { ok: false, error: "Empty message." };
 
   const history = await loadHistory(user.id);
   const recent = history.slice(-CONTEXT_TURNS * 2);
-  // Build the running messages array for the API (tool-use blocks live only inside
-  // this turn; we persist just the final user + assistant text).
+  // This turn's user message = the attachments (image / PDF blocks) + the text.
+  // Attachments are only sent for THIS turn (Claude reads them); history stores a
+  // text note of what was attached, not the raw bytes (keeps storage small).
+  const userContent: unknown[] = [];
+  for (const att of attachments) {
+    if (att.kind === "image") userContent.push({ type: "image", source: { type: "base64", media_type: att.mediaType, data: att.data } });
+    else if (att.kind === "pdf") userContent.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: att.data } });
+  }
+  userContent.push({ type: "text", text: text || "Please look at the attached file(s)." });
   const apiMessages: Array<{ role: "user" | "assistant"; content: unknown }> = [
     ...recent.map((m) => ({ role: m.role, content: m.content })),
-    { role: "user" as const, content: text },
+    { role: "user" as const, content: userContent },
   ];
   const today = new Date().toISOString().slice(0, 10);
   const system = `${PORTAL_GUIDE}\n\nYou are speaking with ${user.name}. Today is ${today}.`;
@@ -212,7 +221,8 @@ export async function runAssistantTurn(request: Request, userMessage: string): P
     }
     if (!reply) reply = "Sorry — I couldn't put together an answer for that. Try rephrasing?";
     const now = Date.now();
-    const nextHistory: AiChatMessage[] = [...history, { role: "user", content: text, ts: now }, { role: "assistant", content: reply, ts: now + 1 }];
+    const attNote = attachments.length ? `${text ? "\n" : ""}📎 ${attachments.map((a) => a.name).join(", ")}` : "";
+    const nextHistory: AiChatMessage[] = [...history, { role: "user", content: `${text}${attNote}`.trim(), ts: now }, { role: "assistant", content: reply, ts: now + 1 }];
     await saveHistory(user.id, nextHistory);
     return { ok: true, reply, history: nextHistory };
   } catch (e) {

@@ -37,9 +37,17 @@ export default function AiChat({ variant = "page", onClose }: { variant?: "page"
   const [messages, setMessages] = useState<Msg[]>([]);
   const [name, setName] = useState<string>("");
   const [input, setInput] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [dragOver, setDragOver] = useState(false);
   const [pending, setPending] = useState<string | null>(null); // optimistic user message
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const loadedRef = useRef(false);
+  const addFiles = (list: FileList | File[] | null) => {
+    if (!list) return;
+    const ok = Array.from(list).filter((f) => f.type.startsWith("image/") || f.type === "application/pdf");
+    if (ok.length) setFiles((prev) => [...prev, ...ok].slice(0, 6));
+  };
 
   useEffect(() => { if (!loadedRef.current) { loadedRef.current = true; loadFetcher.load("/api/ai-chat"); } }, [loadFetcher]);
   useEffect(() => {
@@ -66,18 +74,30 @@ export default function AiChat({ variant = "page", onClose }: { variant?: "page"
 
   const send = () => {
     const text = input.trim();
-    if (!text || sending) return;
-    setPending(text);
+    if ((!text && !files.length) || sending) return;
+    setPending(`${text}${files.length ? `${text ? "\n" : ""}📎 ${files.map((f) => f.name).join(", ")}` : ""}`.trim());
+    const fd = new FormData();
+    fd.set("message", text);
+    files.forEach((f) => fd.append("files", f));
     setInput("");
-    sendFetcher.submit({ message: text }, { method: "post", action: "/api/ai-chat" });
+    setFiles([]);
+    sendFetcher.submit(fd, { method: "post", action: "/api/ai-chat", encType: "multipart/form-data" });
   };
 
   const shell: React.CSSProperties = variant === "popup"
     ? { position: "fixed", right: 20, bottom: 20, width: 400, maxWidth: "calc(100vw - 40px)", height: 560, maxHeight: "calc(100vh - 120px)", zIndex: 2147483000, borderRadius: 14, boxShadow: "0 12px 40px rgba(0,0,0,0.28)", background: "#fff", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid #e5e7eb" }
-    : { display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "#fff", borderRadius: 12, border: "1px solid #e5e7eb", overflow: "hidden" };
+    : { position: "relative", display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "#fff", borderRadius: 12, border: "1px solid #e5e7eb", overflow: "hidden" };
 
   return (
-    <div style={shell}>
+    <div
+      style={shell}
+      onDragOver={(e) => { e.preventDefault(); if (!dragOver) setDragOver(true); }}
+      onDragLeave={(e) => { if (e.currentTarget === e.target) setDragOver(false); }}
+      onDrop={(e) => { e.preventDefault(); setDragOver(false); addFiles(e.dataTransfer.files); }}
+    >
+      {dragOver && (
+        <div style={{ position: "absolute", inset: 0, zIndex: 20, background: "rgba(15,118,110,0.12)", border: "2px dashed #0f766e", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "#0f766e", fontWeight: 700, pointerEvents: "none" }}>Drop an image or PDF…</div>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderBottom: "1px solid #eef0f2", background: "#0f766e", color: "#fff", flexShrink: 0 }}>
         <span style={{ fontSize: 16 }}>✨</span>
         <span style={{ fontWeight: 700, fontSize: 14 }}>AI Assistant</span>
@@ -121,16 +141,31 @@ export default function AiChat({ variant = "page", onClose }: { variant?: "page"
         )}
       </div>
 
-      <div style={{ display: "flex", gap: 8, padding: 12, borderTop: "1px solid #eef0f2", flexShrink: 0, background: "#fff" }}>
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder="Ask anything…"
-          rows={1}
-          style={{ flex: 1, resize: "none", border: "1px solid #d1d5db", borderRadius: 8, padding: "9px 11px", fontSize: 13.5, fontFamily: "inherit", outline: "none", maxHeight: 120 }}
-        />
-        <button type="button" onClick={send} disabled={sending || !input.trim()} style={{ background: sending || !input.trim() ? "#9ca3af" : "#0f766e", color: "#fff", border: "none", borderRadius: 8, padding: "0 16px", fontSize: 14, fontWeight: 700, cursor: sending || !input.trim() ? "default" : "pointer" }}>➤</button>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, borderTop: "1px solid #eef0f2", flexShrink: 0, background: "#fff" }}>
+        {files.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {files.map((f, i) => (
+              <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "3px 8px", fontSize: 11, color: "#334155", maxWidth: 180 }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.type === "application/pdf" ? "📄" : "🖼️"} {f.name}</span>
+                <button type="button" onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))} style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+          <input ref={fileInputRef} type="file" accept="image/*,application/pdf" multiple style={{ display: "none" }} onChange={(e) => { addFiles(e.target.files); e.target.value = ""; }} />
+          <button type="button" onClick={() => fileInputRef.current?.click()} title="Attach image or PDF" style={{ background: "#fff", border: "1px solid #d1d5db", borderRadius: 8, width: 38, height: 38, fontSize: 17, cursor: "pointer", color: "#475569", flexShrink: 0 }}>📎</button>
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            onPaste={(e) => { const imgs = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); addFiles(imgs); } }}
+            placeholder="Ask anything, or drop an image / PDF…"
+            rows={1}
+            style={{ flex: 1, resize: "none", border: "1px solid #d1d5db", borderRadius: 8, padding: "9px 11px", fontSize: 13.5, fontFamily: "inherit", outline: "none", maxHeight: 120 }}
+          />
+          <button type="button" onClick={send} disabled={sending || (!input.trim() && !files.length)} style={{ background: sending || (!input.trim() && !files.length) ? "#9ca3af" : "#0f766e", color: "#fff", border: "none", borderRadius: 8, padding: "0 16px", height: 38, fontSize: 14, fontWeight: 700, cursor: sending || (!input.trim() && !files.length) ? "default" : "pointer" }}>➤</button>
+        </div>
       </div>
     </div>
   );
