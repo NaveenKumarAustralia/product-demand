@@ -12354,17 +12354,30 @@ export default function PortalDashboard() {
         <header style={s.pageHeader}>
           <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
             <h1 style={s.pageTitle}>{(() => {
-              // Inside a collection group, the page title becomes the group's name.
-              const gid = searchParams.get("groupId");
-              const grp = page === "collections" && gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
-              return grp ? grp.name : activePageTitle;
+              // Inside an open collection → its name; inside a group → the group's
+              // name; otherwise the plain page title.
+              if (page === "collections") {
+                const cid = searchParams.get("collectionId");
+                if (cid) { const c = collections.find((x: { id: number; name: string }) => x.id === Number(cid)); if (c) return c.name; }
+                const gid = searchParams.get("groupId");
+                const grp = gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
+                if (grp) return grp.name;
+              }
+              return activePageTitle;
             })()}</h1>
             {page === "jj-new-products" && (() => {
               const n = collections.reduce((sum: number, c: { rowCount?: number }) => sum + (c.rowCount || 0), 0);
               return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} row{n === 1 ? "" : "s"}</span>;
             })()}
             {page === "collections" && (() => {
-              // Inside a group folder, show THAT group's count; otherwise the total.
+              // Open collection → its product count; group → its collection count;
+              // otherwise the total collection count.
+              const cid = searchParams.get("collectionId");
+              if (cid) {
+                const c = collections.find((x: { id: number; rowCount?: number }) => x.id === Number(cid));
+                const n = c?.rowCount ?? 0;
+                return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} product{n === 1 ? "" : "s"}</span>;
+              }
               const gid = searchParams.get("groupId");
               const grp = gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
               const n = grp ? grp.collectionIds.length : collections.length;
@@ -17662,6 +17675,17 @@ function CollectionSpreadsheetPage({
   const otherCollections = allCollections.filter((c) => c.id !== listItem.id);
   const [columns, setColumns] = useState<CollectionColumnDef[]>(DEFAULT_COLLECTION_COLUMNS);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
+  const [sheetSearchParams, setSheetSearchParams] = useSearchParams();
+  // Jump to the Photo Shoot page from the sheet toolbar (standalone button — the
+  // Collections side is already reachable via the "← Collections" back button).
+  const goToPhotoShoot = () => {
+    const next = new URLSearchParams(sheetSearchParams);
+    next.set("page", "photoshoot");
+    next.delete("collectionId");
+    next.delete("shootId");
+    next.delete("groupId");
+    setSheetSearchParams(next);
+  };
   // Filter the table by STATUS and/or SAMPLE chip value (e.g. "Photo
   // shoot"). Empty string = no filter on that column; both apply together.
   const [statusFilter, setStatusFilter] = useState("");
@@ -18546,14 +18570,11 @@ function CollectionSpreadsheetPage({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
-      {/* Top row: the Collections / Photo Shoot menu. */}
-      {!hidePhotoShootToggle && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", flexShrink: 0 }}>
-          <CollectionsPhotoShootToggle active="collections" />
-        </div>
-      )}
       <div style={{ ...s.productInfoToolbar, flexShrink: 0 }}>
-        <div style={s.productInfoToolbarLeft}>
+        {/* Left: "← Collections" (the Collections nav), a Photo Shoot button, then
+            the Status/Sample filters. The collection name + product count moved up
+            to the page-title header, so no name tile here. */}
+        <div style={{ ...s.productInfoToolbarLeft, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           {onBack && (
             <button
               type="button"
@@ -18561,39 +18582,12 @@ function CollectionSpreadsheetPage({
               style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
             >← Collections</button>
           )}
-          {/* Name "tile" — hidden on JJ New Products (its title + row count live in
-              the page header). On JJ the Status/Sample filters sit here on the left. */}
-          {isJjNew ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>{filterControls}</div>
-          ) : (
-            <div>
-              {editingName ? (
-                <input
-                  autoFocus
-                  value={nameDraft}
-                  onChange={(e) => setNameDraft(e.target.value)}
-                  onBlur={saveName}
-                  onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(listItem.name); setEditingName(false); } }}
-                  style={{ ...s.productInfoHeading, border: "1px solid #d1d5db", borderRadius: 6, padding: "2px 8px" }}
-                />
-              ) : (
-                <h2 style={{ ...s.productInfoHeading, cursor: "pointer", margin: 0 }} onClick={() => setEditingName(true)} title="Click to rename">
-                  {listItem.name || "Untitled"}
-                </h2>
-              )}
-              <div style={s.productInfoMeta}>
-                {statusFilter || sampleFilter
-                  ? `${rows.filter(rowMatchesFilters).length} of ${rows.length} row${rows.length !== 1 ? "s" : ""}`
-                  : `${rows.length} row${rows.length !== 1 ? "s" : ""}`}
-                {selectedRowIdxs.size > 0 ? ` · ${selectedRowIdxs.size} selected` : ""}
-              </div>
-            </div>
+          {!hidePhotoShootToggle && (
+            <button type="button" onClick={goToPhotoShoot} style={{ padding: "8px 20px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer" }}>Photo Shoot</button>
           )}
+          {filterControls}
         </div>
         <div style={s.productInfoActions}>
-          {/* Status/Sample filters live on the RIGHT for regular collections; on JJ
-              New Products they moved to the left (above), so skip them here. */}
-          {!isJjNew && filterControls}
           {selectedRowIdxs.size > 0 && (
             <select
               value=""
@@ -18656,24 +18650,6 @@ function CollectionSpreadsheetPage({
               <option value="__new" style={{ color: "#111827", background: "#fff" }}>+ New shoot…</option>
             </select>
           )}
-          {!isJjNew && (
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
-            >Set cover image</button>
-          )}
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            style={{ display: "none" }}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) void handleCoverUpload(file);
-              e.target.value = "";
-            }}
-          />
           {loaded && (() => {
             const emptyCount = rows.filter(isCollectionRowEmpty).length;
             if (emptyCount === 0) return null;
@@ -18686,22 +18662,6 @@ function CollectionSpreadsheetPage({
               >Remove {emptyCount} empty row{emptyCount === 1 ? "" : "s"}</button>
             );
           })()}
-          {!isJjNew && (
-            <button
-              type="button"
-              onClick={backfillFromShopify}
-              disabled={isBackfilling || !loaded}
-              style={{
-                background: "transparent", color: "#0d9488",
-                border: "1px solid #5eead4", borderRadius: 6,
-                padding: "6px 12px", fontSize: 13, fontWeight: 600,
-                cursor: isBackfilling ? "wait" : "pointer",
-              }}
-              title="Pull tags, description, product type, HS code, etc. FROM Shopify INTO the linked rows. Fills empty fields only (tags merged); never pushes."
-            >
-              {isBackfilling ? "Backfilling…" : "⤓ Backfill from Shopify"}
-            </button>
-          )}
           <button
             type="button"
             onClick={pushAllUnsynced}
