@@ -12353,7 +12353,12 @@ export default function PortalDashboard() {
         )}
         <header style={s.pageHeader}>
           <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
-            <h1 style={s.pageTitle}>{activePageTitle}</h1>
+            <h1 style={s.pageTitle}>{(() => {
+              // Inside a collection group, the page title becomes the group's name.
+              const gid = searchParams.get("groupId");
+              const grp = page === "collections" && gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
+              return grp ? grp.name : activePageTitle;
+            })()}</h1>
             {page === "jj-new-products" && (() => {
               const n = collections.reduce((sum: number, c: { rowCount?: number }) => sum + (c.rowCount || 0), 0);
               return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} row{n === 1 ? "" : "s"}</span>;
@@ -16959,7 +16964,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             <>
               <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#374151" }}>← All collections</button>
               <button type="button" onClick={() => { const next = new URLSearchParams(searchParams); next.set("page", "photoshoot"); next.delete("collectionId"); next.delete("shootId"); next.delete("groupId"); setSearchParams(next); }} style={{ padding: "8px 20px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer" }}>Photo Shoot</button>
-              <h2 style={{ ...s.productInfoHeading, margin: 0 }}>{openGroup.name}</h2>
               <button type="button" onClick={() => renameGroup(openGroup.id)} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Rename</button>
               <button type="button" onClick={() => { if (window.confirm("Ungroup — put these collections back as individual tiles?")) ungroup(openGroup.id); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Ungroup</button>
             </>
