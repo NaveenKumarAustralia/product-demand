@@ -12361,7 +12361,7 @@ export default function PortalDashboard() {
             {page === "collections" && (() => {
               // Inside a group folder, show THAT group's count; otherwise the total.
               const gid = searchParams.get("groupId");
-              const grp = gid ? collectionGroups.find((g) => g.id === gid) : null;
+              const grp = gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
               const n = grp ? grp.collectionIds.length : collections.length;
               return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} collection{n === 1 ? "" : "s"}</span>;
             })()}
