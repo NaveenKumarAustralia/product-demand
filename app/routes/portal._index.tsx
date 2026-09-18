@@ -16789,6 +16789,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const removeFromGroup = (collectionId: number) => saveGroups(groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => id !== collectionId) })));
   const ungroup = (groupId: string) => { saveGroups(groups.filter((g) => g.id !== groupId)); openGroupNav(null); };
   const renameGroup = (groupId: string) => { const g = groups.find((x) => x.id === groupId); if (!g) return; const name = window.prompt("Rename group:", g.name)?.trim(); if (!name) return; saveGroups(groups.map((x) => x.id === groupId ? { ...x, name } : x)); };
+  // The group folder currently open (if any) — drives the toolbar (its nav +
+  // title + rename/ungroup + count all live in the bar instead of a separate row).
+  const openGroup = groupIdParam ? (groups.find((g) => g.id === groupIdParam) ?? null) : null;
   // Combine (MERGE) the selected collections into ONE: every row moves into the
   // earliest-ordered selected collection and the others are deleted. Different
   // from a group (which keeps the tiles separate under one folder) — this leaves
@@ -16945,24 +16948,36 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           few collections (which left big empty gaps top and bottom). */}
       <div style={{ ...s.productInfoPage, flex: 1, minHeight: 0, alignContent: "start" }}>
       <div style={s.productInfoToolbar}>
-        {/* Collections / Photo Shoot toggle sits far LEFT, then the Fabric filter.
-            The name tile is gone (the count shows next to the page title).
-            Upload/Import removed — Add Collection stays. */}
+        {/* Left of the bar: normally the Collections/Photo Shoot toggle + Fabric
+            filter. When a GROUP folder is open, it becomes the group nav instead —
+            "← All collections", the group name, Rename, Ungroup, and its count. */}
         <div style={{ ...s.productInfoToolbarLeft, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          {!hidePhotoShootToggle && <CollectionsPhotoShootToggle active="collections" />}
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
-            Fabric
-            <select
-              value={fabricStatusFilter}
-              onChange={(e) => setFabricStatusFilter(e.target.value)}
-              style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: fabricStatusFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
-              title="Show collections by fabric status"
-            >
-              <option value="">All</option>
-              <option value="in_stock">In stock</option>
-              <option value="on_order">On order</option>
-            </select>
-          </label>
+          {openGroup ? (
+            <>
+              <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#374151" }}>← All collections</button>
+              <h2 style={{ ...s.productInfoHeading, margin: 0 }}>{openGroup.name}</h2>
+              <span style={{ color: "#6b7280", fontSize: 12, fontWeight: 600 }}>{openGroup.collectionIds.length} collection{openGroup.collectionIds.length !== 1 ? "s" : ""}</span>
+              <button type="button" onClick={() => renameGroup(openGroup.id)} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Rename</button>
+              <button type="button" onClick={() => { if (window.confirm("Ungroup — put these collections back as individual tiles?")) ungroup(openGroup.id); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Ungroup</button>
+            </>
+          ) : (
+            <>
+              {!hidePhotoShootToggle && <CollectionsPhotoShootToggle active="collections" />}
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
+                Fabric
+                <select
+                  value={fabricStatusFilter}
+                  onChange={(e) => setFabricStatusFilter(e.target.value)}
+                  style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: fabricStatusFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
+                  title="Show collections by fabric status"
+                >
+                  <option value="">All</option>
+                  <option value="in_stock">In stock</option>
+                  <option value="on_order">On order</option>
+                </select>
+              </label>
+            </>
+          )}
         </div>
         <div style={s.productInfoActions}>
           <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
@@ -17002,7 +17017,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
 
       {(() => {
         const visibleCollections = collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter));
-        const openGroup = groups.find((g) => g.id === groupIdParam) ?? null;
         const card = (c: CollectionListItem) => (
           <CollectionCard
             key={c.id}
@@ -17063,13 +17077,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           const members = visibleCollections.filter((c) => openGroup.collectionIds.includes(c.id));
           return (
             <div>
-              <div style={{ margin: "0 14px 12px", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={smallBtn}>← All collections</button>
-                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 800, color: "#111827" }}>{openGroup.name}</h3>
-                <span style={{ color: "#6b7280", fontSize: 12 }}>{openGroup.collectionIds.length} collections</span>
-                <button type="button" onClick={() => renameGroup(openGroup.id)} style={smallBtn}>Rename</button>
-                <button type="button" onClick={() => { if (window.confirm("Ungroup — put these collections back as individual tiles?")) ungroup(openGroup.id); }} style={smallBtn}>Ungroup</button>
-              </div>
+              {/* Group nav (← All collections / name / Rename / Ungroup / count) now
+                  lives in the top toolbar; only the tiles render here. */}
               {selectionBar}
               <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
                 {members.map(card)}
