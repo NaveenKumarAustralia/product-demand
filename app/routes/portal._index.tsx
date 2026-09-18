@@ -12706,7 +12706,8 @@ export default function PortalDashboard() {
           </div>
         ) : page === "photoshoot" ? (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
-            <CollectionsPhotoShootToggle active="photoshoot" />
+            {/* The Collections/Photo Shoot toggle is rendered INSIDE PhotoShootPanel's
+                toolbar (far left), so no separate row here. */}
             <div style={{ flex: 1, minHeight: 0 }}>
               <PhotoShootPanel photoShoots={photoShoots} productInfo={productInfo} savedColumnWidths={photoShootColumnWidths} />
             </div>
@@ -16660,11 +16661,9 @@ function PhotoShootPanel({ photoShoots, productInfo, savedColumnWidths }: { phot
   return (
     <div style={s.productInfoPage}>
       <div style={s.productInfoToolbar}>
-        <div style={s.productInfoToolbarLeft}>
-          <div>
-            <h2 style={s.productInfoHeading}>Photo Shoots</h2>
-            <div style={s.productInfoMeta}>{shoots.length} shoot{shoots.length !== 1 ? "s" : ""}</div>
-          </div>
+        {/* Collections / Photo Shoot toggle far left; name tile + shoot count removed. */}
+        <div style={{ ...s.productInfoToolbarLeft, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <CollectionsPhotoShootToggle active="photoshoot" />
         </div>
         <div style={s.productInfoActions}>
           <button type="button" style={s.primaryActionButton} onClick={addShoot}>
