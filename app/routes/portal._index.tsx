@@ -362,6 +362,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     } catch (e) {
       console.warn("[collection kind] column ensure failed:", e);
     }
+    // JJ New Products: auto-fill unlinked JJ orders BEFORE the row-count query below
+    // so the page-title total is accurate and the sheet is pre-populated on open.
+    if (page === "jj-new-products") {
+      try { await syncUnlinkedJJOrdersToNewProducts(); } catch (e) { console.warn("[jj-new auto-sync] loader failed:", e); }
+    }
   }
   const collectionsPromise = isCollectionsPage
     ? prisma.$queryRawUnsafe<Array<{
@@ -12349,6 +12354,10 @@ export default function PortalDashboard() {
         <header style={s.pageHeader}>
           <div style={{ display: "flex", alignItems: "baseline", flexWrap: "wrap", gap: 12 }}>
             <h1 style={s.pageTitle}>{activePageTitle}</h1>
+            {page === "jj-new-products" && (() => {
+              const n = collections.reduce((sum: number, c: { rowCount?: number }) => sum + (c.rowCount || 0), 0);
+              return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} row{n === 1 ? "" : "s"}</span>;
+            })()}
             {isRestockPage && (() => {
               const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
               const showFiltered = filtersActive && (
@@ -17646,6 +17655,10 @@ function CollectionSpreadsheetPage({
   canSeeProductStatus?: boolean;
 }) {
   const isThb = costCurrency === "THB";
+  // JJ New Products sheet (the only THB collection). Used to tidy its toolbar:
+  // no duplicate name tile (the count sits by the page title), no Set-cover /
+  // Backfill buttons, and the Status/Sample filters moved to the left.
+  const isJjNew = costCurrency === "THB";
   // Show "Price ฿" instead of "Price ₹" on the JJ New Products sheet.
   const displayCol = <T extends { id: string; label: string }>(col: T): T =>
     isThb && col.id === "priceRupees" ? { ...col, label: "Price ฿" } : col;
@@ -18533,6 +18546,41 @@ function CollectionSpreadsheetPage({
     document.addEventListener("mouseup", handleUp);
   };
 
+  // Status + Sample filter dropdowns — placed on the right for regular collections
+  // and on the left for JJ New Products (same controls either way).
+  const filterControls = (
+    <>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
+        Status
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: statusFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
+          title="Filter rows by status"
+        >
+          <option value="">All statuses</option>
+          {localStatusOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </label>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
+        Sample
+        <select
+          value={sampleFilter}
+          onChange={(e) => setSampleFilter(e.target.value)}
+          style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: sampleFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
+          title="Filter rows by sample"
+        >
+          <option value="">All samples</option>
+          {localSampleOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+      </label>
+    </>
+  );
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, gap: 12 }}>
       {/* Top row: the Collections / Photo Shoot menu. */}
@@ -18550,58 +18598,39 @@ function CollectionSpreadsheetPage({
               style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
             >← Collections</button>
           )}
-          <div>
-            {editingName ? (
-              <input
-                autoFocus
-                value={nameDraft}
-                onChange={(e) => setNameDraft(e.target.value)}
-                onBlur={saveName}
-                onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(listItem.name); setEditingName(false); } }}
-                style={{ ...s.productInfoHeading, border: "1px solid #d1d5db", borderRadius: 6, padding: "2px 8px" }}
-              />
-            ) : (
-              <h2 style={{ ...s.productInfoHeading, cursor: "pointer", margin: 0 }} onClick={() => setEditingName(true)} title="Click to rename">
-                {listItem.name || "Untitled"}
-              </h2>
-            )}
-            <div style={s.productInfoMeta}>
-              {statusFilter || sampleFilter
-                ? `${rows.filter(rowMatchesFilters).length} of ${rows.length} row${rows.length !== 1 ? "s" : ""}`
-                : `${rows.length} row${rows.length !== 1 ? "s" : ""}`}
-              {selectedRowIdxs.size > 0 ? ` · ${selectedRowIdxs.size} selected` : ""}
+          {/* Name "tile" — hidden on JJ New Products (its title + row count live in
+              the page header). On JJ the Status/Sample filters sit here on the left. */}
+          {isJjNew ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>{filterControls}</div>
+          ) : (
+            <div>
+              {editingName ? (
+                <input
+                  autoFocus
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onBlur={saveName}
+                  onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); if (e.key === "Escape") { setNameDraft(listItem.name); setEditingName(false); } }}
+                  style={{ ...s.productInfoHeading, border: "1px solid #d1d5db", borderRadius: 6, padding: "2px 8px" }}
+                />
+              ) : (
+                <h2 style={{ ...s.productInfoHeading, cursor: "pointer", margin: 0 }} onClick={() => setEditingName(true)} title="Click to rename">
+                  {listItem.name || "Untitled"}
+                </h2>
+              )}
+              <div style={s.productInfoMeta}>
+                {statusFilter || sampleFilter
+                  ? `${rows.filter(rowMatchesFilters).length} of ${rows.length} row${rows.length !== 1 ? "s" : ""}`
+                  : `${rows.length} row${rows.length !== 1 ? "s" : ""}`}
+                {selectedRowIdxs.size > 0 ? ` · ${selectedRowIdxs.size} selected` : ""}
+              </div>
             </div>
-          </div>
+          )}
         </div>
         <div style={s.productInfoActions}>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
-            Status
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: statusFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
-              title="Filter rows by status"
-            >
-              <option value="">All statuses</option>
-              {localStatusOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
-            Sample
-            <select
-              value={sampleFilter}
-              onChange={(e) => setSampleFilter(e.target.value)}
-              style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: sampleFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
-              title="Filter rows by sample"
-            >
-              <option value="">All samples</option>
-              {localSampleOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-          </label>
+          {/* Status/Sample filters live on the RIGHT for regular collections; on JJ
+              New Products they moved to the left (above), so skip them here. */}
+          {!isJjNew && filterControls}
           {selectedRowIdxs.size > 0 && (
             <select
               value=""
@@ -18664,11 +18693,13 @@ function CollectionSpreadsheetPage({
               <option value="__new" style={{ color: "#111827", background: "#fff" }}>+ New shoot…</option>
             </select>
           )}
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
-          >Set cover image</button>
+          {!isJjNew && (
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+            >Set cover image</button>
+          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -18692,20 +18723,22 @@ function CollectionSpreadsheetPage({
               >Remove {emptyCount} empty row{emptyCount === 1 ? "" : "s"}</button>
             );
           })()}
-          <button
-            type="button"
-            onClick={backfillFromShopify}
-            disabled={isBackfilling || !loaded}
-            style={{
-              background: "transparent", color: "#0d9488",
-              border: "1px solid #5eead4", borderRadius: 6,
-              padding: "6px 12px", fontSize: 13, fontWeight: 600,
-              cursor: isBackfilling ? "wait" : "pointer",
-            }}
-            title="Pull tags, description, product type, HS code, etc. FROM Shopify INTO the linked rows. Fills empty fields only (tags merged); never pushes."
-          >
-            {isBackfilling ? "Backfilling…" : "⤓ Backfill from Shopify"}
-          </button>
+          {!isJjNew && (
+            <button
+              type="button"
+              onClick={backfillFromShopify}
+              disabled={isBackfilling || !loaded}
+              style={{
+                background: "transparent", color: "#0d9488",
+                border: "1px solid #5eead4", borderRadius: 6,
+                padding: "6px 12px", fontSize: 13, fontWeight: 600,
+                cursor: isBackfilling ? "wait" : "pointer",
+              }}
+              title="Pull tags, description, product type, HS code, etc. FROM Shopify INTO the linked rows. Fills empty fields only (tags merged); never pushes."
+            >
+              {isBackfilling ? "Backfilling…" : "⤓ Backfill from Shopify"}
+            </button>
+          )}
           <button
             type="button"
             onClick={pushAllUnsynced}
