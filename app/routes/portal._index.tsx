@@ -11891,6 +11891,9 @@ export default function PortalDashboard() {
   // Existing Products Restock search).
   const [jjSearch, setJjSearch] = useState("");
   const [collectionSearch, setCollectionSearch] = useState("");
+  // Totals (pieces + value) for the OPEN collection sheet — bubbled up from
+  // CollectionSpreadsheetPage so the page header can show them next to the title.
+  const [collectionTotals, setCollectionTotals] = useState<{ qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null>(null);
   const [reorderSearch, setReorderSearch] = useState("");
   const [preorderSearch, setPreorderSearch] = useState("");
   useEffect(() => {
@@ -12384,7 +12387,16 @@ export default function PortalDashboard() {
               if (cid) {
                 const c = collections.find((x: { id: number; rowCount?: number }) => x.id === Number(cid));
                 const n = c?.rowCount ?? 0;
-                return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} product{n === 1 ? "" : "s"}</span>;
+                const t = collectionTotals;
+                const sym = t?.currency === "THB" ? "฿" : "₹";
+                return (
+                  <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>
+                    {n.toLocaleString()} product{n === 1 ? "" : "s"}
+                    {t && t.qty > 0 ? ` · ${t.qty.toLocaleString()} pcs` : ""}
+                    {t && t.cost > 0 ? ` · ${sym}${Math.round(t.cost).toLocaleString()}` : ""}
+                    {t && t.aud > 0 ? ` · $${Math.round(t.aud).toLocaleString()} AUD` : ""}
+                  </span>
+                );
               }
               const gid = searchParams.get("groupId");
               const grp = gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
@@ -12753,6 +12765,7 @@ export default function PortalDashboard() {
                 collectionGroups={collectionGroups}
                 canSeeProductStatus={Boolean(currentUser?.admin || currentUser?.canSeeProductStatus)}
                 search={collectionSearch}
+                onTotalsChange={setCollectionTotals}
               />
             </div>
           </div>
@@ -16776,7 +16789,7 @@ function useProgressiveReveal(total: number, resetKey: string, step = TILE_RENDE
   }, [limit, total, step]);
   return Math.min(limit, total);
 }
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], canSeeProductStatus = false, search = "" }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; canSeeProductStatus?: boolean; search?: string }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], canSeeProductStatus = false, search = "", onTotalsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -16993,6 +17006,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         thbPerAudCachedRate={thbPerAudCachedRate}
         onLocalNameChange={(name) => handleRename(selectedCollection.id, name)}
         onSetFabricLink={(fabricName, fabricKey) => handleSetFabricLink(selectedCollection.id, fabricName, fabricKey)}
+        onTotalsChange={onTotalsChange}
       />
     );
   }
@@ -17645,6 +17659,7 @@ function CollectionSpreadsheetPage({
   costCurrency = "INR",
   thbPerAudCachedRate = null,
   canSeeProductStatus = false,
+  onTotalsChange,
 }: {
   listItem: CollectionListItem;
   collectionSettings: CollectionSettings;
@@ -17668,6 +17683,9 @@ function CollectionSpreadsheetPage({
   thbPerAudCachedRate?: number | null;
   // Whether the current account may see the per-product status chip.
   canSeeProductStatus?: boolean;
+  // Bubble up the sheet's total quantity + value so the page header (next to the
+  // title / product count) can show them, like the restock page. null = clear.
+  onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void;
 }) {
   const isThb = costCurrency === "THB";
   // JJ New Products sheet (the only THB collection). Used to tidy its toolbar:
@@ -17957,6 +17975,26 @@ function CollectionSpreadsheetPage({
     if (!rupees) return "";
     return String(Math.round(rupees));
   }, [styleCostLookup]);
+  // Sheet totals for the page header: total pieces + total production cost (₹/฿)
+  // and its AUD value — per-piece cost is the manual Price cell, else the auto
+  // style+fabric cost (same numbers the Unit A$ column shows). Bubbled up on change.
+  useEffect(() => {
+    if (!onTotalsChange) return;
+    if (!loaded) return; // wait until the real rows are in (not the empty seed)
+    let qty = 0;
+    let cost = 0;
+    for (const row of rows) {
+      const rowQty = sumCollectionRowQuantity(row);
+      if (rowQty <= 0) continue;
+      const manual = Number(row.priceRupees ?? "") || 0;
+      const per = manual > 0 ? manual : (Number(autoPriceRupees(row.name ?? row.title ?? "", (row.styleOverrideId ?? "").trim() || undefined)) || 0);
+      qty += rowQty;
+      cost += per * rowQty;
+    }
+    const aud = (isThb ? convertBahtToAud(cost, thbPerAudCachedRate) : convertRupeesToAud(cost, inrPerAudCachedRate)) || 0;
+    onTotalsChange({ qty, cost, aud, currency: isThb ? "THB" : "INR" });
+    return () => onTotalsChange(null);
+  }, [rows, loaded, isThb, inrPerAudCachedRate, thbPerAudCachedRate, autoPriceRupees, onTotalsChange]);
   // Reset a row's Price ₹ back to AUTOMATIC (the style+fabric cost). Clears
   // any manual/sheet price override on this title AND drops in the pure fabric
   // cost right away, so a stuck imported price can be replaced by the computed
