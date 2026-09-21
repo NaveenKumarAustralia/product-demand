@@ -12378,7 +12378,7 @@ export default function PortalDashboard() {
             })()}</h1>
             {page === "jj-new-products" && (() => {
               const n = collections.reduce((sum: number, c: { rowCount?: number }) => sum + (c.rowCount || 0), 0);
-              return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} row{n === 1 ? "" : "s"}</span>;
+              return <span style={{ fontSize: 14, fontWeight: 600, color: "#ffffff" }}>{n.toLocaleString()} row{n === 1 ? "" : "s"}</span>;
             })()}
             {page === "collections" && (() => {
               // Open collection → its product count; group → its collection count;
@@ -12390,7 +12390,7 @@ export default function PortalDashboard() {
                 const t = collectionTotals;
                 const sym = t?.currency === "THB" ? "฿" : "₹";
                 return (
-                  <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>
+                  <span style={{ fontSize: 14, fontWeight: 600, color: "#ffffff" }}>
                     {n.toLocaleString()} product{n === 1 ? "" : "s"}
                     {t && t.qty > 0 ? ` · ${t.qty.toLocaleString()} pcs` : ""}
                     {t && t.cost > 0 ? ` · ${sym}${Math.round(t.cost).toLocaleString()}` : ""}
@@ -12401,7 +12401,7 @@ export default function PortalDashboard() {
               const gid = searchParams.get("groupId");
               const grp = gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
               const n = grp ? grp.collectionIds.length : collections.length;
-              return <span style={{ fontSize: 14, fontWeight: 600, color: "#6b7280" }}>{n.toLocaleString()} collection{n === 1 ? "" : "s"}</span>;
+              return <span style={{ fontSize: 14, fontWeight: 600, color: "#ffffff" }}>{n.toLocaleString()} collection{n === 1 ? "" : "s"}</span>;
             })()}
             {isRestockPage && (() => {
               const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
