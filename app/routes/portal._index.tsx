@@ -2838,28 +2838,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!since || !until) return jsonResponse({ ok: false, error: "bad_input" });
     const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
     if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
-    // Only three calls are on the critical path now: the cached stock snapshot,
-    // one PRODUCT-LEVEL sold query, and the selling-days query — all queried
-    // directly from the store. The per-SIZE sold breakdown is NOT fetched here
-    // any more; it loads lazily when a row is expanded. The dashboard endpoints
-    // are used only as a fallback (below), not awaited in parallel, so a cold
-    // dashboard service can't slow every page load.
-    const [stockProducts, soldDirect, sellingDaysDirect] = await Promise.all([
+    // Both heavy inputs are now CACHED per (shop, window): the stock snapshot and
+    // the sell-through reports (product-level sold + selling-days). So the first
+    // load warms them, and every pagination / filter tweak / repeat visit within
+    // the TTL is instant — the client does the per-row arithmetic. `refresh=1`
+    // re-pulls both. Dashboard endpoints stay a fallback inside getReorderReports.
+    const [stockProducts, reports] = await Promise.all([
       getAllShopifyProductsWithInventory(session.shop, session.accessToken, refresh).catch(() => [] as ReorderStockProduct[]),
-      fetchReorderSalesByProductDirect(session.shop, session.accessToken, since, until),
-      fetchReorderSellingDaysDirect(session.shop, session.accessToken, since, until),
+      getReorderReports(session.shop, session.accessToken, since, until, refresh),
     ]);
-    // Fall back to the dashboard ONLY when the direct query failed (rare), and
-    // sequentially so we never wait on it unless we have to.
-    let soldByProduct: Record<string, number> | null = soldDirect;
-    if (soldByProduct === null) soldByProduct = sumVariantMapToProduct(await fetchReorderSalesAllVariants(since, until));
-    // Direct query carries the measured first-sale day + date; dashboard fallback
-    // is just a days number. Flatten to a plain days map for the rate math, and
-    // keep the direct first-sale timestamps for the "days counting" popover.
-    let sellingDaysByProd: Record<string, number> | null = sellingDaysDirect
-      ? Object.fromEntries(Object.entries(sellingDaysDirect).map(([k, v]) => [k, v.days]))
-      : null;
-    if (sellingDaysByProd === null) sellingDaysByProd = await fetchReorderSellingDays(since, until);
+    const soldByProduct = reports.soldByProduct;
+    const sellingDaysByProd = reports.sellingDaysByProd;
+    const sellingDaysDirect = reports.sellingDaysDirect;
     const lookbackDays = Math.max(1, Math.round((new Date(until).getTime() - new Date(since).getTime()) / 86400000));
     const numId = (id: string) => id.replace(/[^0-9]/g, "");
     const enriched = stockProducts.map((p) => {
@@ -9455,6 +9445,43 @@ async function fetchReorderSellingDaysDirect(shop: string, token: string, since:
     console.warn("[reorder selling-days direct]", e);
     return null;
   }
+}
+
+// ─── Cached sell-through reports for the Reorder Planner overview ─────────────
+// The two ShopifyQL queries (product-level sold + per-day selling-days) are the
+// slow part of the overview — a few seconds each, and they were re-run on every
+// page load and every pagination step. Cache the resolved maps per (shop, window)
+// like the stock snapshot, so pagination / filter tweaks / repeat visits are
+// instant. Mirrors how the ecommerce dashboard serves its reports fast. Refresh
+// (or a new date window) bypasses the cache.
+type ReorderReports = {
+  soldByProduct: Record<string, number> | null;
+  sellingDaysByProd: Record<string, number> | null;
+  sellingDaysDirect: Record<string, { days: number; firstMs: number }> | null;
+};
+let _reorderReportCache: { at: number; shop: string; since: string; until: string; data: ReorderReports } | null = null;
+const REORDER_REPORT_TTL_MS = 15 * 60 * 1000;
+async function getReorderReports(shop: string, token: string, since: string, until: string, force: boolean): Promise<ReorderReports> {
+  const c = _reorderReportCache;
+  if (!force && c && c.shop === shop && c.since === since && c.until === until && Date.now() - c.at < REORDER_REPORT_TTL_MS) {
+    return c.data;
+  }
+  // Direct ShopifyQL first (in parallel); dashboard endpoints are the fallback and
+  // are only awaited when the direct query failed (never on the hot path).
+  const [soldDirect, sellingDaysDirect] = await Promise.all([
+    fetchReorderSalesByProductDirect(shop, token, since, until),
+    fetchReorderSellingDaysDirect(shop, token, since, until),
+  ]);
+  let soldByProduct: Record<string, number> | null = soldDirect;
+  if (soldByProduct === null) soldByProduct = sumVariantMapToProduct(await fetchReorderSalesAllVariants(since, until));
+  let sellingDaysByProd: Record<string, number> | null = sellingDaysDirect
+    ? Object.fromEntries(Object.entries(sellingDaysDirect).map(([k, v]) => [k, v.days]))
+    : null;
+  if (sellingDaysByProd === null) sellingDaysByProd = await fetchReorderSellingDays(since, until);
+  const data: ReorderReports = { soldByProduct, sellingDaysByProd, sellingDaysDirect };
+  // Don't cache a total failure (both null) — let the next load retry.
+  if (soldByProduct || sellingDaysByProd) _reorderReportCache = { at: Date.now(), shop, since, until, data };
+  return data;
 }
 
 // ─── All-products stock snapshot for the Reorder Planner overview ─────────────
