@@ -145,8 +145,11 @@ export async function releaseArrivedPreorders(): Promise<{ releasedOrders: numbe
     const promisedByGroup = new Map<string, number>();
     for (const p of promised) promisedByGroup.set(groupKey(p), (promisedByGroup.get(groupKey(p)) ?? 0) + p.quantity);
 
-    // Spare-unit budget per (batch, variant, market): location available minus the
-    // already-promised units. >0 means a unit is free to hand to a waiting order.
+    // Spare-unit budget per (batch, variant, market): physical ON-HAND stock minus
+    // the already-promised units. We use ON-HAND (not "available"): when a batch
+    // lands, Shopify commits the new units to these very held pre-order orders, so
+    // "available" reads 0 even though the physical unit exists for the order — which
+    // used to leave a size unreleased when only 1 unit landed (e.g. Katie Dress S).
     const groups = new Map<string, { variantId: string; market: string }>();
     for (const r of rows) if (!groups.has(groupKey(r))) groups.set(groupKey(r), { variantId: r.variantId, market: r.market });
     const stockCache = new Map<string, number>();
@@ -158,7 +161,7 @@ export async function releaseArrivedPreorders(): Promise<{ releasedOrders: numbe
       let available = stockCache.get(stockKey);
       if (available === undefined) {
         try {
-          available = await getAvailableAtLocation(shop, token, g.variantId, locationId);
+          available = await getAvailableAtLocation(shop, token, g.variantId, locationId, "on_hand");
         } catch (error) {
           console.warn(`[preorder release] stock check failed (${shop} ${g.variantId}):`, error instanceof Error ? error.message : error);
           errors += 1;

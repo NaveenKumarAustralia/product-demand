@@ -51,7 +51,14 @@ function locationGid(value: string | null) {
 }
 
 /** Available stock for a variant at a specific location. Needs read_inventory (we have it). */
-export async function getAvailableAtLocation(shop: string, token: string, variantId: string, locationId: string | null): Promise<number> {
+// Read a variant's inventory at a location. `quantityName` picks which figure:
+//   • "available" (default) = on-hand − committed (what's free to sell). Used by
+//     the OOS / capture / storefront checks.
+//   • "on_hand" = the physical count regardless of what's committed. Used by the
+//     pre-order RELEASE: when a batch lands, Shopify commits the new units to the
+//     held pre-order orders, so "available" drops to 0 even though the physical
+//     unit exists FOR that order — on-hand is the correct "has stock arrived" signal.
+export async function getAvailableAtLocation(shop: string, token: string, variantId: string, locationId: string | null, quantityName: "available" | "on_hand" = "available"): Promise<number> {
   const loc = locationGid(locationId);
   if (!loc) return 0;
   const data = await graphql<{
@@ -59,7 +66,7 @@ export async function getAvailableAtLocation(shop: string, token: string, varian
   }>(shop, token, `#graphql
     query PreorderStock($id: ID!) {
       productVariant(id: $id) {
-        inventoryItem { inventoryLevels(first: 50) { nodes { location { id } quantities(names: ["available"]) { name quantity } } } }
+        inventoryItem { inventoryLevels(first: 50) { nodes { location { id } quantities(names: [${JSON.stringify(quantityName)}]) { name quantity } } } }
       }
     }
   `, { id: variantGid(variantId) });
@@ -67,7 +74,7 @@ export async function getAvailableAtLocation(shop: string, token: string, varian
   for (const node of data.productVariant?.inventoryItem?.inventoryLevels?.nodes ?? []) {
     if (node.location?.id !== loc) continue;
     for (const q of node.quantities ?? []) {
-      if (q.name === "available" && Number.isFinite(Number(q.quantity))) available += Number(q.quantity);
+      if (q.name === quantityName && Number.isFinite(Number(q.quantity))) available += Number(q.quantity);
     }
   }
   return Math.max(0, Math.floor(available));
