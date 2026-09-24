@@ -6,7 +6,7 @@ import { requirePreorderPortalUser } from "../preorder/preorder-portal-auth.serv
 // Auto-generation (and the "Generate" button) hand out this number then advance it.
 //   View:  /api/collection-sku-counter
 //   Set:   /api/collection-sku-counter?set=1500   (next product becomes K1500 / 1500)
-const KEY = "collection-auto-sku-next";
+const KEY = "collection-auto-sku-next-v2";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const actor = await requirePreorderPortalUser(request);
@@ -23,5 +23,5 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const s = await prisma.portalSetting.findUnique({ where: { key: KEY }, select: { value: true } }).catch(() => null);
   const stored = (s?.value && typeof s.value === "object" && !Array.isArray(s.value)) ? Number((s.value as { next?: unknown }).next) : null;
-  return Response.json({ ok: true, storedNext: stored, note: "storedNext is the raw saved counter. Values ≥ 100000 are ignored by the app (it restarts at 5000). Use ?set=<n> to set it." }, { headers: { "Cache-Control": "no-store" } });
+  return Response.json({ ok: true, storedNext: stored, note: "storedNext is the raw saved counter (null = untouched, so numbering starts at 3000). Values ≥ 100000 are ignored by the app (it restarts at 3000). Use ?set=<n> to set it." }, { headers: { "Cache-Control": "no-store" } });
 };

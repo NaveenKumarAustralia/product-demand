@@ -10360,11 +10360,13 @@ function buildCollectionSkuBarcode(row: Record<string, string>, base: string): {
 // number in sequence (starting 654321) at create — SKU "K<n>", barcode "<n>" (per
 // size for sized products), so nobody has to track codes by hand. The counter is a
 // PortalSetting; allocate() atomically returns the next number and advances it.
-const AUTO_SKU_KEY = "collection-auto-sku-next";
-const AUTO_SKU_START = 5000;
-// Ignore a stored counter at/above this — the earlier 6-digit test run left it at
-// ~654322; anything that big is treated as unset so numbering restarts at
-// AUTO_SKU_START. A deliberately-set value BELOW this (e.g. your real ~1500 set via
+// Counter key bumped to -v2 (Sep 24 2026) so numbering starts clean at 3000 (the
+// real starting number the user gave) — the old key still held the 654322 test
+// value; a fresh key reads empty → starts at AUTO_SKU_START → counts up from there.
+const AUTO_SKU_KEY = "collection-auto-sku-next-v2";
+const AUTO_SKU_START = 3000;
+// Ignore a stored counter at/above this — treated as unset so numbering restarts at
+// AUTO_SKU_START. A deliberately-set value BELOW this (e.g. a real number set via
 // /api/collection-sku-counter?set=1500) is respected.
 const AUTO_SKU_RESET_ABOVE = 100000;
 function readAutoSkuNext(value: unknown): number {
