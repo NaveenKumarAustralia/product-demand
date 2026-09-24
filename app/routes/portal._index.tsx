@@ -5715,6 +5715,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           if (String(v ?? "").trim() && rowEmpty) { row[k] = v; rows[idx] = row; }
         }
       }
+      // Auto SKU/barcode when none was entered: the next sequential number (from
+      // 654321) → "K<n>" / "<n>" (per size for sized products). Only when the SKU
+      // cell is blank, so a manually-typed SKU is never touched.
+      if (!(row.sku ?? "").trim()) {
+        const n = await allocateNextAutoSku();
+        const gen = buildCollectionSkuBarcode(row, String(n));
+        row.sku = gen.sku;
+        row.barcode = gen.barcode;
+        rows[idx] = row;
+      }
       const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush, thbPerAud: thbPerAudForPush, currency: isJJNewPush ? "THB" : "INR", productInfo: productInfoForPush ?? undefined });
       if (res.ok && res.productId) {
         // Push the row's model pictures (with per-image alt text) to the new
@@ -10326,6 +10336,24 @@ function buildCollectionSkuBarcode(row: Record<string, string>, base: string): {
     sku: orderedSizes.map((s) => `K${base}${collectionSizeSfx(s)}`).join("\n"),
     barcode: orderedSizes.map((s) => `${base}${collectionSizeSfx(s)}`).join("\n"),
   };
+}
+
+// Auto SKU/barcode numbering. Products where staff DON'T type a SKU get the next
+// number in sequence (starting 654321) at create — SKU "K<n>", barcode "<n>" (per
+// size for sized products), so nobody has to track codes by hand. The counter is a
+// PortalSetting; allocate() atomically returns the next number and advances it.
+const AUTO_SKU_KEY = "collection-auto-sku-next";
+const AUTO_SKU_START = 654321;
+async function allocateNextAutoSku(): Promise<number> {
+  const s = await prisma.portalSetting.findUnique({ where: { key: AUTO_SKU_KEY }, select: { value: true } }).catch(() => null);
+  const cur = (s?.value && typeof s.value === "object" && !Array.isArray(s.value)) ? Number((s.value as { next?: unknown }).next) : NaN;
+  const n = Number.isFinite(cur) && cur >= AUTO_SKU_START ? Math.floor(cur) : AUTO_SKU_START;
+  await prisma.portalSetting.upsert({
+    where: { key: AUTO_SKU_KEY },
+    create: { key: AUTO_SKU_KEY, value: { next: n + 1 } },
+    update: { value: { next: n + 1 } },
+  }).catch(() => {});
+  return n;
 }
 
 // ── Barcode printing ──────────────────────────────────────────────────────
