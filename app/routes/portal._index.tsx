@@ -5491,6 +5491,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, updatedRows, filledFields, linked: gids.length });
   }
 
+  if (intent === "generate_collection_sku") {
+    // "Generate SKU/barcode" button on a Collections row → allocate the next
+    // auto number (shared counter) and fill SKU "K<n>" + barcode "<n>" (per size
+    // for sized rows). Saves + returns them so the sheet updates instantly.
+    const id = Number(form.get("collectionId"));
+    const idx = Number(form.get("rowIndex"));
+    if (!id) return jsonResponse({ ok: false, error: "no_collection" });
+    const collection = await prisma.collection.findUnique({ where: { id }, select: { rows: true } }).catch(() => null);
+    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
+    const rows = normalizeCollectionRows(collection.rows);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= rows.length) return jsonResponse({ ok: false, error: "bad_index" });
+    const n = await allocateNextAutoSku();
+    const gen = buildCollectionSkuBarcode(rows[idx], String(n));
+    rows[idx] = { ...rows[idx], sku: gen.sku, barcode: gen.barcode };
+    await prisma.collection.update({ where: { id }, data: { rows: rows as unknown as object, updatedAt: new Date() } });
+    return jsonResponse({ ok: true, rowIndex: idx, sku: gen.sku, barcode: gen.barcode, next: n });
+  }
+
   if (intent === "duplicate_from_shopify_product") {
     // Collections "Duplicate From": copy EVERYTHING duplicatable from the source
     // product into the row — description, type, tags, vendor, SEO, compare-at, HS
@@ -10343,11 +10361,19 @@ function buildCollectionSkuBarcode(row: Record<string, string>, base: string): {
 // size for sized products), so nobody has to track codes by hand. The counter is a
 // PortalSetting; allocate() atomically returns the next number and advances it.
 const AUTO_SKU_KEY = "collection-auto-sku-next";
-const AUTO_SKU_START = 654321;
+const AUTO_SKU_START = 5000;
+// Ignore a stored counter at/above this — the earlier 6-digit test run left it at
+// ~654322; anything that big is treated as unset so numbering restarts at
+// AUTO_SKU_START. A deliberately-set value BELOW this (e.g. your real ~1500 set via
+// /api/collection-sku-counter?set=1500) is respected.
+const AUTO_SKU_RESET_ABOVE = 100000;
+function readAutoSkuNext(value: unknown): number {
+  const cur = (value && typeof value === "object" && !Array.isArray(value)) ? Number((value as { next?: unknown }).next) : NaN;
+  return (Number.isFinite(cur) && cur >= 1 && cur < AUTO_SKU_RESET_ABOVE) ? Math.floor(cur) : AUTO_SKU_START;
+}
 async function allocateNextAutoSku(): Promise<number> {
   const s = await prisma.portalSetting.findUnique({ where: { key: AUTO_SKU_KEY }, select: { value: true } }).catch(() => null);
-  const cur = (s?.value && typeof s.value === "object" && !Array.isArray(s.value)) ? Number((s.value as { next?: unknown }).next) : NaN;
-  const n = Number.isFinite(cur) && cur >= AUTO_SKU_START ? Math.floor(cur) : AUTO_SKU_START;
+  const n = readAutoSkuNext(s?.value);
   await prisma.portalSetting.upsert({
     where: { key: AUTO_SKU_KEY },
     create: { key: AUTO_SKU_KEY, value: { next: n + 1 } },
@@ -18417,6 +18443,25 @@ function CollectionSpreadsheetPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listItem.id]);
 
+  // "Generate" button: allocate the next AUTO number (shared server counter) and
+  // fill SKU/barcode — so staff don't type a base at all. Server round-trip so the
+  // number is unique; the response fills the cells + persists.
+  const skuGenFetcher = useFetcher<{ ok?: boolean; rowIndex?: number; sku?: string; barcode?: string }>();
+  const autoGenerateSku = useCallback((rowIdx: number) => {
+    skuGenFetcher.submit({ intent: "generate_collection_sku", collectionId: String(listItem.id), rowIndex: String(rowIdx) }, { method: "post" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id]);
+  useEffect(() => {
+    const d = skuGenFetcher.data;
+    if (d?.ok && typeof d.rowIndex === "number") {
+      setRows((prev) => {
+        const next = [...prev];
+        if (next[d.rowIndex!]) next[d.rowIndex!] = { ...next[d.rowIndex!], sku: d.sku ?? "", barcode: d.barcode ?? "" };
+        return next;
+      });
+    }
+  }, [skuGenFetcher.data]);
+
   // Style override: when the row's Name doesn't match a Product Info
   // style by prefix (e.g. print-first "Leaf Tiered Maxi Dress"),
   // staff pick the style explicitly. We save the styleOverrideId on
@@ -19318,6 +19363,7 @@ function CollectionSpreadsheetPage({
                             updateCell={updateCell}
                             productInfo={productInfo}
                             generateSkuAndBarcode={generateSkuAndBarcode}
+                            onAutoGenerateSku={autoGenerateSku}
                             placeholder=""
                             users={users}
                             rowKey={row.__rowKey ?? ""}
@@ -19718,6 +19764,7 @@ function CollectionCellInner({
   updateCell,
   productInfo,
   generateSkuAndBarcode,
+  onAutoGenerateSku,
   placeholder,
   users,
   rowKey,
@@ -19733,6 +19780,7 @@ function CollectionCellInner({
   updateCell: (rowIdx: number, colId: string, value: string) => void;
   productInfo?: ProductInfo;
   generateSkuAndBarcode?: (rowIdx: number, baseNumber: string) => void;
+  onAutoGenerateSku?: (rowIdx: number) => void;
   placeholder?: string;
   users?: PortalUser[];
   rowKey?: string;
@@ -19872,6 +19920,7 @@ function CollectionCellInner({
         onCommit={onCommit}
         rowIndex={rowIndex}
         generateSkuAndBarcode={generateSkuAndBarcode}
+        onAutoGenerateSku={onAutoGenerateSku}
       />
     );
   }
@@ -20499,7 +20548,7 @@ function CollectionCategoryCell({ value, productId, linked, locked, ctx, onSave 
 }
 
 function CollectionSkuCell({
-  value, draft, setDraft, onCommit,
+  value, draft, setDraft, onCommit, rowIndex, onAutoGenerateSku,
 }: {
   value: string;
   draft: string;
@@ -20507,12 +20556,23 @@ function CollectionSkuCell({
   onCommit: (next: string) => void;
   rowIndex: number;
   generateSkuAndBarcode?: (rowIdx: number, baseNumber: string) => void;
+  onAutoGenerateSku?: (rowIdx: number) => void;
 }) {
-  // SKU + barcode are generated automatically in updateCell as soon as a base
-  // number is entered here or a size quantity is added — no manual button.
+  // SKU + barcode auto-generate in updateCell as soon as a base number is typed
+  // here. When the cell is BLANK, a "Generate" button hands out the next auto
+  // number (K<n> / <n>) so staff don't have to type or track codes at all.
+  const blank = !draft.trim();
   return (
-    <div style={{ display: "flex", flexDirection: "column", width: "100%" }}>
+    <div style={{ display: "flex", flexDirection: "column", width: "100%", gap: 3 }}>
       <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
+      {blank && onAutoGenerateSku && (
+        <button
+          type="button"
+          onClick={() => onAutoGenerateSku(rowIndex)}
+          title="Auto-generate the next SKU + barcode for this product"
+          style={{ background: "#eef2ff", border: "1px solid #c7d2fe", color: "#3730a3", borderRadius: 5, padding: "2px 6px", fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}
+        >⚡ Generate</button>
+      )}
     </div>
   );
 }
