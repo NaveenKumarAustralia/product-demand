@@ -10201,6 +10201,9 @@ const COL_ROW_CATEGORY_METAFIELDS = "__categoryMetafields";
 // duplicate field — including the category metafields — is filled from it, so
 // "set a duplicate source → Create" copies everything without a separate click.
 const COL_ROW_DUPLICATE_FROM_ID = "__duplicateFromId";
+// Set to "1" when the user CLEARS the Duplicate From cell — suppresses the auto-
+// suggest so the row stays a fresh, non-duplicated product (create fills nothing).
+const COL_ROW_NO_DUPLICATE = "__noDuplicate";
 type CategoryMetafieldEntry = { key: string; type: string; value: string; names: string[]; refType: string | null; label?: string };
 type CategoryMetafieldBlob = { categoryId: string; categoryName: string; metafields: CategoryMetafieldEntry[] };
 // Build the category blob from a Shopify product node (category { id fullName } +
@@ -11011,7 +11014,13 @@ async function createShopifyProductFromRow(
     return { ok: false, errors: userErrors.map((e: { message?: string }) => e.message || "Unknown error") };
   }
   const product = json?.data?.productSet?.product;
-  if (!product?.id) return { ok: false, errors: ["Shopify returned no product"] };
+  if (!product?.id) {
+    // Surface the ACTUAL Shopify GraphQL error instead of a generic message — a
+    // top-level error (bad field, throttle, etc.) leaves userErrors empty and
+    // product null, which used to show only "Shopify returned no product".
+    const gqlErrs = Array.isArray(json?.errors) ? json.errors.map((e: { message?: string }) => e?.message).filter(Boolean) : [];
+    return { ok: false, errors: gqlErrs.length ? gqlErrs : ["Shopify returned no product (no details returned)"] };
+  }
 
   // Category (taxonomy) metafields go through metafieldsSet AFTER the product +
   // its category exist — the reliable path for the reserved `shopify` namespace
@@ -19084,9 +19093,24 @@ function CollectionSpreadsheetPage({
                                 }}
                                 onSuggest={(sourceId) => {
                                   setRows((prev) => {
+                                    // Never auto-set a source on a row the user cleared.
+                                    if ((prev[rIdx]?.[COL_ROW_NO_DUPLICATE] ?? "") === "1") return prev;
                                     if ((prev[rIdx]?.[COL_ROW_DUPLICATE_FROM_ID] ?? "") === sourceId) return prev;
                                     const next = prev.map((r, i) => (i === rIdx ? { ...r, [COL_ROW_DUPLICATE_FROM_ID]: sourceId } : r));
                                     persistRows(next, prev, `Set duplicate source on row ${rIdx + 1}`);
+                                    return next;
+                                  });
+                                }}
+                                suppressed={(row[COL_ROW_NO_DUPLICATE] ?? "") === "1"}
+                                onClear={() => {
+                                  setRows((prev) => {
+                                    // Clear the source + the copied CATEGORY (a wrong taxonomy from the
+                                    // suggested source is the usual create-breaker). Descriptive fields
+                                    // are left so any manual edits stay; they don't block a create.
+                                    const next = prev.map((r, i) => (i === rIdx
+                                      ? { ...r, duplicateFrom: "", [COL_ROW_DUPLICATE_FROM_ID]: "", [COL_ROW_NO_DUPLICATE]: "1", [COL_ROW_CATEGORY_METAFIELDS]: "", categories: "" }
+                                      : r));
+                                    persistRows(next, prev, `Clear duplicate source on row ${rIdx + 1}`);
                                     return next;
                                   });
                                 }}
@@ -21547,12 +21571,18 @@ function CollectionDuplicateFromCell({
   styleHint,
   onPick,
   onSuggest,
+  onClear,
+  suppressed = false,
 }: {
   value: string;
   currentName: string;
   styleHint: string;
   onPick: (label: string, fields: Record<string, string>) => void;
   onSuggest?: (sourceId: string) => void;
+  // Clear the duplicate source so the row becomes a fresh, non-duplicated product.
+  onClear?: () => void;
+  // True once the user has cleared this row — stops the auto-suggest re-adding one.
+  suppressed?: boolean;
 }) {
   const searchFetcher = useFetcher<{ products?: DuplicateProductSummary[]; error?: string }>();
   const pickFetcher = useFetcher<{ ok?: boolean; fields?: Record<string, string>; error?: string }>();
@@ -21608,13 +21638,13 @@ function CollectionDuplicateFromCell({
   // Pre-select (don't apply) the most recent same-style product on mount, so
   // the row shows a ready-to-use source. Runs once, only for empty rows.
   useEffect(() => {
-    if (value || suggestTriedRef.current) return;
+    if (value || suggestTriedRef.current || suppressed) return; // cleared rows never re-suggest
     const q = (styleHint || currentName.trim().split(/\s+/).slice(0, -1).join(" ")).trim();
     if (!q) return;
     suggestTriedRef.current = true;
     suggestFetcher.load(`/api/collection-duplicate-search?${new URLSearchParams({ q }).toString()}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, styleHint, currentName]);
+  }, [value, styleHint, currentName, suppressed]);
   useEffect(() => {
     if (suggestFetcher.state !== "idle") return;
     const list = suggestFetcher.data?.products ?? [];
@@ -21666,12 +21696,20 @@ function CollectionDuplicateFromCell({
             <span style={{ fontSize: 10, color: isSuggested ? "#059669" : "#9ca3af", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               {value ? "duplicated" : "suggested — click to apply"}
             </span>
-            <button
-              type="button"
-              onClick={() => setOpen(true)}
-              disabled={isFetching}
-              style={{ background: "none", border: "none", color: "#2563eb", cursor: isFetching ? "wait" : "pointer", fontSize: 11, textDecoration: "underline", padding: 0, flexShrink: 0 }}
-            >change</button>
+            <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+              <button
+                type="button"
+                onClick={() => setOpen(true)}
+                disabled={isFetching}
+                style={{ background: "none", border: "none", color: "#2563eb", cursor: isFetching ? "wait" : "pointer", fontSize: 11, textDecoration: "underline", padding: 0 }}
+              >change</button>
+              <button
+                type="button"
+                onClick={() => { setSuggestion(null); onClear?.(); }}
+                title="Clear — create a fresh product without duplicating"
+                style={{ background: "none", border: "none", color: "#dc2626", cursor: "pointer", fontSize: 11, textDecoration: "underline", padding: 0 }}
+              >clear</button>
+            </div>
           </div>
         )}
       </div>
