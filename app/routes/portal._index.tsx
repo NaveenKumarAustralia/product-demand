@@ -10877,8 +10877,14 @@ async function createShopifyProductFromRow(
     if (countryCode.length === 2) ii.countryCodeOfOrigin = countryCode;
     return ii;
   };
+  // A single-variant product (Free Size, or no size columns) still needs ONE
+  // option — Shopify's productSet requires every variant to carry optionValues, or
+  // it rejects with "variants.0.optionValues (Expected value to not be null)". Use
+  // the default Title/"Default Title" option, which Shopify hides on the storefront
+  // for single-variant products (no size selector shown).
   const variants: Variant[] = useFreeSize
     ? [{
+        optionValues: [{ optionName: "Title", name: "Default Title" }],
         price,
         ...(compareAt ? { compareAtPrice: compareAt } : {}),
         ...(baseSku ? { sku: baseSku } : {}),
@@ -10899,6 +10905,7 @@ async function createShopifyProductFromRow(
         };
       })
     : [{
+        optionValues: [{ optionName: "Title", name: "Default Title" }],
         price,
         ...(compareAt ? { compareAtPrice: compareAt } : {}),
         ...(baseSku ? { sku: baseSku } : {}),
@@ -10907,7 +10914,7 @@ async function createShopifyProductFromRow(
       }];
 
   const productOptions = useFreeSize || variantRows.length === 0
-    ? undefined
+    ? [{ name: "Title", values: [{ name: "Default Title" }] }]
     : [{ name: "Size", values: variantRows.map((v) => ({ name: v.size })) }];
 
   // Tags: comma-separated string in the row → array. Pre-order tags are OWNED by
