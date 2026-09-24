@@ -5685,7 +5685,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const results: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string; categoryAttempted?: number; categoryWrote?: number; categoryErrors?: string[]; filled?: Record<string, string> }> = [];
     // Content fields the duplicate-at-create may have filled in — echoed back so the
     // client can show them immediately (no page refresh needed).
-    const CREATE_FILLED_FIELDS = ["description", "tags", "seoTitle", "seoDescription", "productType", "vendor", "hsCode", "countryOfOrigin", "compareAtPrice", "categories", COL_ROW_CATEGORY_METAFIELDS, COL_ROW_DUPLICATE_FROM_ID];
+    const CREATE_FILLED_FIELDS = ["sku", "barcode", "description", "tags", "seoTitle", "seoDescription", "productType", "vendor", "hsCode", "countryOfOrigin", "compareAtPrice", "categories", COL_ROW_CATEGORY_METAFIELDS, COL_ROW_DUPLICATE_FROM_ID];
     const now = new Date().toISOString();
     for (const idx of targetIndexes) {
       const row = rows[idx];
