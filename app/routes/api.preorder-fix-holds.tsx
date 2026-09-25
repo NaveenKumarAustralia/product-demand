@@ -41,18 +41,35 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // Active pre-order reservations (still awaiting stock: reserved, not released,
   // not readied, not fulfilled) — these are the lines that SHOULD be on hold.
+  // IMPORTANT: the user types the order NAME number (e.g. 388695, from "#388695K"),
+  // but reservations are keyed by Shopify's INTERNAL order id. So match either the
+  // internal id OR the order name (which contains the typed number).
+  const orderMatch = explicit.length
+    ? { OR: explicit.flatMap((t) => [{ shopifyOrderId: t }, { shopifyOrderName: { contains: t } }]) }
+    : {};
   const where = {
     shop,
     status: "reserved",
     readyAt: null,
     releasedAt: null,
     fulfilledAt: null,
-    ...(explicit.length ? { shopifyOrderId: { in: explicit } } : {}),
+    ...orderMatch,
   } as const;
   const rows = await prisma.preorderReservation.findMany({
     where,
     select: { shopifyOrderId: true, shopifyOrderName: true, shopifyLineItemId: true, supplierOrderId: true, expectedShipDate: true },
   });
+
+  // Diagnostic: if explicit orders were asked for but nothing active matched, show
+  // ANY reservation rows for those orders (any status) so we can see why.
+  let diagnostic: Array<Record<string, unknown>> | undefined;
+  if (explicit.length && !rows.length) {
+    const anyRows = await prisma.preorderReservation.findMany({
+      where: { shop, OR: explicit.flatMap((t) => [{ shopifyOrderId: t }, { shopifyOrderName: { contains: t } }]) },
+      select: { shopifyOrderId: true, shopifyOrderName: true, shopifyLineItemId: true, variantTitle: true, supplierOrderId: true, status: true, readyAt: true, releasedAt: true, fulfilledAt: true },
+    });
+    diagnostic = anyRows.map((r) => ({ ...r }));
+  }
 
   // Group reservations by order.
   const byOrder = new Map<string, { name: string | null; lineIds: Set<string>; batchIds: Set<number>; earliestMs: number | null }>();
@@ -82,7 +99,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   return Response.json(
-    { ok: true, shop, dryRun, scannedOrders: byOrder.size, results, note: explicit.length ? "Applied to the given orders (add &dryRun=1 to preview)." : (dryRun ? "Dry run of ALL still-reserved orders — add &apply=1 to actually place the holds." : "Applied to ALL still-reserved orders.") },
+    { ok: true, shop, dryRun, scannedOrders: byOrder.size, results, ...(diagnostic ? { diagnostic, diagnosticNote: "No ACTIVE (reserved & awaiting stock) pre-order lines matched. These are all reservation rows found for the order — check status/readyAt/releasedAt/fulfilledAt to see why. Tip: you can also pass the internal order id (from the Shopify admin URL /orders/<id>)." } : {}), note: explicit.length ? "Applied to the given orders (add &dryRun=1 to preview)." : (dryRun ? "Dry run of ALL still-reserved orders — add &apply=1 to actually place the holds." : "Applied to ALL still-reserved orders.") },
     { headers: { "Cache-Control": "no-store" } },
   );
 };
