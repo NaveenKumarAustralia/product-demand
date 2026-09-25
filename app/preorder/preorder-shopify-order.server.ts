@@ -11,8 +11,7 @@ import {
   preorderText,
   type ShopifyOrderPayload,
 } from "./preorder-shopify-order-normalize";
-import { getOfflineToken, addOrderTags, holdOrderOpenFulfillmentOrders } from "./preorder-fulfillment.server";
-import { getPreorderCombineWindowDays } from "./preorder-storefront-settings.server";
+import { getOfflineToken, addOrderTags, applyPreorderHoldPolicy } from "./preorder-fulfillment.server";
 import { captureNoPlanLinesForOrder, type PreorderPlacedItem } from "./preorder-missed-capture.server";
 import { sendPreorderPlacedEvent } from "./preorder-klaviyo.server";
 
@@ -227,27 +226,32 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
       }
     }
 
-    // "Combine window": for a MIXED order whose pre-order is due within N days,
-    // hold the in-stock items too (and set the whole order aside for Pick Pack)
-    // so it all ships together when the batch lands. The existing stock-aware
-    // auto-release releases every hold on the order at once.
-    if (!fullyPreorder && earliestShipMs !== null) {
-      try {
-        const windowDays = await getPreorderCombineWindowDays();
-        const cutoff = Date.now() + windowDays * 86400000;
-        if (windowDays > 0 && earliestShipMs <= cutoff) {
-          const token = await getOfflineToken(shop);
-          if (token) {
-            const held = await holdOrderOpenFulfillmentOrders(shop, token, orderIdNumeric, "Held to ship with the pre-order item in this order (combine window)");
-            if (held > 0) await addOrderTags(shop, token, orderIdNumeric, ["pre-order-hold"]);
-            console.log(`[preorder combine] ${shop} order ${orderIdNumeric}: held ${held} in-stock fulfilment order(s) to ship with the pre-order.`);
-          }
-        }
-      } catch (error) {
-        // Non-fatal: reservation still succeeded; the in-stock part just ships
-        // separately if the hold couldn't be placed (e.g., missing scope).
-        console.warn("[preorder combine] hold failed:", error instanceof Error ? error.message : error);
+    // Put the pre-order line(s) on a Shopify fulfillment hold so they can't ship
+    // before the batch lands. applyPreorderHoldPolicy is the SAME policy the
+    // no-plan capture path uses:
+    //  - dispatch within the combine window → hold the WHOLE order (in-stock
+    //    lines ship together with the pre-order when the batch lands);
+    //  - otherwise → split the fulfillment order and hold ONLY the pre-order
+    //    line(s); any in-stock line ships now.
+    // Previously the plan path only ever held in the combine case, so a mixed
+    // order outside the window (and even a fully-pre-order order) was reserved +
+    // tagged but never actually held — the fulfillment wasn't split. Non-fatal:
+    // the reservation already succeeded; the stock-aware auto-release later
+    // releases every hold on the order at once.
+    try {
+      const token = await getOfflineToken(shop);
+      if (token) {
+        const preorderLineItemIds = normalized.lines
+          .map((line) => line.shopifyLineItemId)
+          .filter((id): id is string => Boolean(id));
+        const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, preorderLineItemIds, earliestShipMs);
+        if (wholeOrderHeld) await addOrderTags(shop, token, orderIdNumeric, ["pre-order-hold"]);
+        console.log(`[preorder] ${shop} order ${orderIdNumeric}: applied hold policy (wholeOrderHeld=${wholeOrderHeld}, lines=${preorderLineItemIds.length}).`);
       }
+    } catch (error) {
+      // Non-fatal: reservation still succeeded; the hold just wasn't placed
+      // (e.g., missing write scope). The next release cycle / re-sync can fix it.
+      console.warn("[preorder] hold policy failed:", error instanceof Error ? error.message : error);
     }
 
     return { preorder: true, reservations, market: normalized.market };
