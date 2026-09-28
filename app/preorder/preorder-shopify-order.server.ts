@@ -11,7 +11,7 @@ import {
   preorderText,
   type ShopifyOrderPayload,
 } from "./preorder-shopify-order-normalize";
-import { getOfflineToken, addOrderTags, applyPreorderHoldPolicy } from "./preorder-fulfillment.server";
+import { getOfflineToken, addOrderTags, holdAllReservedPreorderLines } from "./preorder-fulfillment.server";
 import { captureNoPlanLinesForOrder, type PreorderPlacedItem } from "./preorder-missed-capture.server";
 import { sendPreorderPlacedEvent } from "./preorder-klaviyo.server";
 
@@ -171,7 +171,22 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
   await firePreorderPlacedEvent(shop, orderIdNumeric, normalized.shopifyOrderName, normalized.customerEmail, normalized.customerFirstName, normalized.market, noPlanItems);
 
   // No lines carry our selling plan → nothing more to reserve via the plan path.
-  if (!normalized.lines.length) return { preorder: capturedMissed > 0, reservations: capturedMissed };
+  // Still run the ONE unified hold so the no-plan line(s) get held together.
+  if (!normalized.lines.length) {
+    if (capturedMissed > 0) {
+      try {
+        const token = await getOfflineToken(shop);
+        if (token) {
+          const { wholeOrderHeld, lineCount } = await holdAllReservedPreorderLines(shop, token, orderIdNumeric);
+          if (wholeOrderHeld) await addOrderTags(shop, token, orderIdNumeric, ["pre-order-hold"]);
+          console.log(`[preorder] ${shop} order ${orderIdNumeric}: unified hold (no-plan only) — ${lineCount} line(s), wholeOrderHeld=${wholeOrderHeld}.`);
+        }
+      } catch (error) {
+        console.warn("[preorder] unified hold (no-plan only) failed:", error instanceof Error ? error.message : error);
+      }
+    }
+    return { preorder: capturedMissed > 0, reservations: capturedMissed };
+  }
 
   // Tag the order so Pick Pack handles it: a fully pre-order order gets
   // `pre-order-hold` (Pick Pack sets it aside entirely); a mixed order gets
@@ -226,35 +241,22 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
       }
     }
 
-    // Put the pre-order line(s) on a Shopify fulfillment hold so they can't ship
-    // before the batch lands. applyPreorderHoldPolicy is the SAME policy the
-    // no-plan capture path uses:
-    //  - dispatch within the combine window → hold the WHOLE order (in-stock
-    //    lines ship together with the pre-order when the batch lands);
-    //  - otherwise → split the fulfillment order and hold ONLY the pre-order
-    //    line(s); any in-stock line ships now.
-    // Previously the plan path only ever held in the combine case, so a mixed
-    // order outside the window (and even a fully-pre-order order) was reserved +
-    // tagged but never actually held — the fulfillment wasn't split. Non-fatal:
-    // the reservation already succeeded; the stock-aware auto-release later
-    // releases every hold on the order at once.
+    // ONE unified hold for the WHOLE order — plan/button lines AND any express/
+    // no-plan lines captured earlier — driven by the reservation ledger. Holding
+    // each subset separately would clobber the other (every hold pass releases
+    // all holds then re-holds only its own lines), which left one pre-order line
+    // un-held on mixed orders. Non-fatal: reservations already succeeded; the
+    // stock-aware auto-release later releases every hold on the order at once.
+    void earliestShipMs; // (dispatch is recomputed from the ledger inside the hold)
     try {
       const token = await getOfflineToken(shop);
       if (token) {
-        const preorderLineItemIds = normalized.lines
-          .map((line) => line.shopifyLineItemId)
-          .filter((id): id is string => Boolean(id));
-        const preorderBatchIds = Array.from(new Set(
-          normalized.lines.map((line) => line.preferredSupplierOrderId).filter((n): n is number => Number.isFinite(n as number) && (n as number) > 0),
-        ));
-        const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, preorderLineItemIds, earliestShipMs, preorderBatchIds);
+        const { wholeOrderHeld, lineCount } = await holdAllReservedPreorderLines(shop, token, orderIdNumeric);
         if (wholeOrderHeld) await addOrderTags(shop, token, orderIdNumeric, ["pre-order-hold"]);
-        console.log(`[preorder] ${shop} order ${orderIdNumeric}: applied hold policy (wholeOrderHeld=${wholeOrderHeld}, lines=${preorderLineItemIds.length}).`);
+        console.log(`[preorder] ${shop} order ${orderIdNumeric}: unified hold — ${lineCount} pre-order line(s), wholeOrderHeld=${wholeOrderHeld}.`);
       }
     } catch (error) {
-      // Non-fatal: reservation still succeeded; the hold just wasn't placed
-      // (e.g., missing write scope). The next release cycle / re-sync can fix it.
-      console.warn("[preorder] hold policy failed:", error instanceof Error ? error.message : error);
+      console.warn("[preorder] unified hold failed:", error instanceof Error ? error.message : error);
     }
 
     return { preorder: true, reservations, market: normalized.market };

@@ -1,7 +1,7 @@
 import prisma from "./../db.server";
 import { KARMA_EAST_PREORDER_PLAN_PREFIX } from "./preorder-shopify-order-normalize";
 import { reservePreorderLine, PreorderCapacityError } from "./preorder-allocation.server";
-import { getOfflineToken, getAvailableAtLocation, addOrderTags, applyPreorderHoldPolicy } from "./preorder-fulfillment.server";
+import { getOfflineToken, getAvailableAtLocation, addOrderTags, holdAllReservedPreorderLines } from "./preorder-fulfillment.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
 import { getPreorderLocationSettings, locationForMarket } from "./preorder-locations.server";
 import { marketFromDestination, type PreorderMarket } from "./preorder-rules.server";
@@ -201,12 +201,11 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
     }
     if (capturedLineIds.length) {
       const batchTags = Array.from(capturedBatchIds).map((id) => `pre-order-batch-${id}`);
-      const earliestDispatchMs = Array.from(capturedBatchIds)
-        .map(dispatchMsForBatch)
-        .filter((ms): ms is number => ms != null)
-        .reduce<number | null>((min, ms) => (min == null || ms < min ? ms : min), null);
       try {
-        const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, capturedLineIds, earliestDispatchMs, Array.from(capturedBatchIds));
+        // Unified hold over the WHOLE order (all reserved lines), so a newly
+        // captured line doesn't release holds already placed on this order's
+        // other pre-order lines.
+        const { wholeOrderHeld } = await holdAllReservedPreorderLines(shop, token, orderIdNumeric);
         await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, ...(wholeOrderHeld ? ["pre-order-hold"] : [])]);
       } catch (error) {
         errors.push({ order: cs[0].order, error: `tag/hold: ${error instanceof Error ? error.message : String(error)}` });
@@ -311,21 +310,17 @@ export async function captureNoPlanLinesForOrder(
       continue;
     }
   }
-  // Apply the shared hold policy (line-only, or whole-order if within the combine
-  // window), then tag. `pre-order-hold` (Pick Pack sets the whole order aside) is
-  // added ONLY when the whole order is actually held — a mixed order whose in-stock
-  // items ship now gets `pre-order` but not `pre-order-hold`.
+  // Tag the order (pre-order + batch) immediately so Pick Pack treats it right.
+  // The HOLD is NOT placed here — the caller (processShopifyOrderCreated) runs ONE
+  // unified hold over the whole order after all reservations, so the no-plan line
+  // and any plan/button line are held together and don't clobber each other. (The
+  // order-level `pre-order-hold` tag is added by that unified hold.)
   if (capturedLineIds.length) {
     const batchTags = Array.from(capturedBatchIds).map((id) => `pre-order-batch-${id}`);
-    const earliestDispatchMs = Array.from(capturedBatchIds)
-      .map(dispatchMsForBatch)
-      .filter((ms): ms is number => ms != null)
-      .reduce<number | null>((min, ms) => (min == null || ms < min ? ms : min), null);
     try {
-      const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, capturedLineIds, earliestDispatchMs, Array.from(capturedBatchIds));
-      await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, ...(wholeOrderHeld ? ["pre-order-hold"] : [])]);
+      await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags]);
     } catch (error) {
-      console.warn(`[preorder realtime capture] ${orderName} tag/hold failed:`, error instanceof Error ? error.message : String(error));
+      console.warn(`[preorder realtime capture] ${orderName} tag failed:`, error instanceof Error ? error.message : String(error));
     }
   }
   return { captured, items };

@@ -391,6 +391,35 @@ export async function applyPreorderHoldPolicy(shop: string, token: string, order
   return { wholeOrderHeld: r.fullyHeld };
 }
 
+/**
+ * Hold ALL of an order's still-reserved pre-order lines in ONE pass, driven by
+ * the reservation ledger. This is the safe way to hold, because every hold pass
+ * RELEASES every existing hold on the order and then re-holds only the lines it
+ * was given (see normalizeOrderPreorderHolds step 2). So holding subsets
+ * separately — e.g. the plan/button line, then later the express/no-plan line —
+ * makes each pass clobber the previous one, leaving one pre-order line un-held.
+ * Loading the full set from the ledger and holding it once avoids that.
+ *
+ * Call it AFTER all of an order's reservations are written. Idempotent — safe to
+ * call again (e.g. the 3-hour sweep after a new line is captured). Returns
+ * whether the whole order ended up held, for the order-level `pre-order-hold` tag.
+ */
+export async function holdAllReservedPreorderLines(shop: string, token: string, orderIdNumeric: string): Promise<{ wholeOrderHeld: boolean; lineCount: number }> {
+  const reserved = await prisma.preorderReservation.findMany({
+    where: { shop, shopifyOrderId: orderIdNumeric, status: "reserved", readyAt: null, releasedAt: null, fulfilledAt: null },
+    select: { shopifyLineItemId: true, supplierOrderId: true, expectedShipDate: true },
+  });
+  const lineIds = Array.from(new Set(reserved.map((r) => String(r.shopifyLineItemId ?? "").trim()).filter(Boolean)));
+  if (!lineIds.length) return { wholeOrderHeld: false, lineCount: 0 };
+  const batchIds = Array.from(new Set(reserved.map((r) => r.supplierOrderId).filter((n): n is number => Number.isFinite(n) && n > 0)));
+  const earliestMs = reserved.reduce<number | null>((min, r) => {
+    const t = r.expectedShipDate ? r.expectedShipDate.getTime() : NaN;
+    return Number.isFinite(t) && (min === null || t < min) ? t : min;
+  }, null);
+  const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, lineIds, earliestMs, batchIds);
+  return { wholeOrderHeld, lineCount: lineIds.length };
+}
+
 async function holdFulfillmentOrderGraceful(shop: string, token: string, foId: string, reasonNotes: string): Promise<void> {
   const r = await graphql<{ fulfillmentOrderHold?: { userErrors?: Array<{ message?: string }> } }>(
     shop, token, `#graphql
