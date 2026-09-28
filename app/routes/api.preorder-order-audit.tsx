@@ -380,6 +380,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       lines.push({
         line: li.title, size: li.variant?.title ?? null, qty: li.quantity, unfulfilledQty: unfulfilled,
         soldVia: isPlan ? "pre-order button (selling plan)" : (inLiveBatch.length ? "no-plan (quick-add / Shop Pay / express)" : "n/a"),
+        sellingPlanNameRaw: planName || null,
+        sellingPlanRecognized: planName ? isPlan : null,
         reservedQty, reservationStatuses: res.map((r) => r.status),
         holdStatus, shopifyStock: stock, reservedBatchStillLive,
         batchCapacity: caps, verdict, holdVerdict,
