@@ -172,7 +172,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       const tags: string[] = order?.tags ?? [];
       rows.push({
         order: order?.name ?? orderId, orderId,
+        adminUrl: `https://admin.shopify.com/store/${shop.replace(/\.myshopify\.com$/, "")}/orders/${orderId}`,
         sizes: rs.map((r) => r.variantTitle),
+        qty: rs.reduce((s, r) => s + (r.quantity ?? 0), 0),
         reservedAt: rs[0]?.reservedAt,
         fulfillmentStatus: order?.displayFulfillmentStatus ?? null,
         hasPreorderHoldTag: tags.includes("pre-order-hold"),
