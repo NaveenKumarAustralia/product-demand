@@ -196,7 +196,95 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }, { headers: { "Cache-Control": "no-store" } });
   }
 
-  if (!tokens.length) return Response.json({ ok: false, error: "Pass ?orders=385992,386250,… OR ?batch=1281 OR ?holds=1281&size=3XL (hold status per order)." }, { status: 400 });
+  // VARIANT-ORDERS MODE: ?variantOrders=1280&size=L → list EVERY paid Shopify
+  // order in the last N days that bought this batch's variant for that size, and
+  // label each as a HELD pre-order vs an UN-HELD oversell (committed). The
+  // un-held ones are exactly what pushes Shopify's "available" negative. Read-only.
+  //   ?variantOrders=1280&size=L        (defaults to 120 days)
+  //   ?variantOrders=1280&size=L&days=180
+  const voBatch = Number((url.searchParams.get("variantOrders") ?? "").replace(/[^0-9]/g, ""));
+  if (Number.isFinite(voBatch) && voBatch > 0) {
+    const voSize = (url.searchParams.get("size") ?? "").trim();
+    const days = Math.max(1, Math.min(180, Number((url.searchParams.get("days") ?? "").replace(/[^0-9]/g, "")) || 120));
+    const batch = await prisma.supplierOrder.findUnique({ where: { id: voBatch }, select: { productTitle: true, lines: { select: { variantId: true, variantTitle: true } } } });
+    if (!batch) return Response.json({ ok: false, error: `Batch #${voBatch} not found.` }, { status: 404 });
+    const sizeNorm = voSize.toLowerCase();
+    const variantNums = new Set(
+      batch.lines.filter((l) => !voSize || String(l.variantTitle ?? "").trim().toLowerCase() === sizeNorm).map((l) => numericId(l.variantId)).filter(Boolean),
+    );
+    if (!variantNums.size) return Response.json({ ok: false, error: `Size "${voSize}" not found in batch #${voBatch}.` }, { status: 404 });
+
+    const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
+    const rows: Array<Record<string, unknown>> = [];
+    let cursor: string | null = null;
+    let scanned = 0;
+    for (let page = 0; page < 80; page += 1) {
+      const j: any = await gql(
+        `query VO($q: String!, $cursor: String) {
+          orders(first: 100, after: $cursor, query: $q, sortKey: CREATED_AT, reverse: true) {
+            pageInfo { hasNextPage endCursor }
+            nodes { id name createdAt cancelledAt displayFulfillmentStatus
+              lineItems(first: 50) { nodes { id quantity unfulfilledQuantity variant { id title } sellingPlan { name } } }
+              fulfillmentOrders(first: 25) { nodes { status lineItems(first: 50) { nodes { lineItem { id } } } } } }
+          }
+        }`,
+        { q: `created_at:>=${sinceIso} financial_status:paid`, cursor },
+      ).catch(() => null);
+      const data = j?.data?.orders;
+      if (!data) break;
+      for (const o of data.nodes ?? []) {
+        scanned += 1;
+        const foByLine = new Map<string, string[]>();
+        for (const fo of o.fulfillmentOrders?.nodes ?? []) {
+          for (const n of fo.lineItems?.nodes ?? []) { const lid = numericId(String(n?.lineItem?.id ?? "")); if (lid) { const a = foByLine.get(lid) ?? []; a.push(String(fo.status ?? "")); foByLine.set(lid, a); } }
+        }
+        for (const li of o.lineItems?.nodes ?? []) {
+          const vnum = numericId(String(li.variant?.id ?? ""));
+          if (!variantNums.has(vnum)) continue;
+          const plan: string = li.sellingPlan?.name ?? "";
+          const isPlan = plan.startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX);
+          const st = foByLine.get(numericId(String(li.id))) ?? [];
+          const held = st.includes("ON_HOLD");
+          const open = st.includes("OPEN");
+          const unfulfilled = Number(li.unfulfilledQuantity ?? 0);
+          const bucket = o.cancelledAt ? "cancelled"
+            : unfulfilled <= 0 ? "shipped/fulfilled"
+            : held && !open ? "held pre-order"
+            : "🔴 UN-HELD oversell (this is what pushes available negative)";
+          rows.push({
+            order: o.name, adminUrl: `https://admin.shopify.com/store/${shop.replace(/\.myshopify\.com$/, "")}/orders/${numericId(String(o.id))}`,
+            createdAt: o.createdAt, size: li.variant?.title ?? null, qty: li.quantity, unfulfilledQty: unfulfilled,
+            soldVia: isPlan ? "pre-order button (selling plan)" : (plan ? `other plan: ${plan}` : "no-plan (express / Shop Pay / quick-add)"),
+            holdStatus: held && !open ? "ON_HOLD" : (open && !held ? "OPEN (committed → counts against available)" : (st.join(",") || "no fulfilment order")),
+            bucket,
+          });
+        }
+      }
+      if (!data.pageInfo?.hasNextPage) break;
+      cursor = data.pageInfo.endCursor;
+    }
+    const heldPreorders = rows.filter((r) => r.bucket === "held pre-order");
+    const unheld = rows.filter((r) => String(r.bucket).startsWith("🔴"));
+    const shipped = rows.filter((r) => r.bucket === "shipped/fulfilled");
+    const cancelled = rows.filter((r) => r.bucket === "cancelled");
+    return Response.json({
+      ok: true, mode: "variantOrders", batch: voBatch, product: batch.productTitle, size: voSize || "(all sizes)", days, scannedOrders: scanned,
+      summary: {
+        matchingOrders: rows.length,
+        heldPreorders: heldPreorders.length,
+        unheldOversell: unheld.length,
+        shipped: shipped.length,
+        cancelled: cancelled.length,
+        note: "unheldOversell = orders that bought this variant but are NOT on hold (sold via express/Shop Pay/quick-add without the pre-order button). Their still-unfulfilled qty is what makes Shopify's 'available' negative. heldPreorders don't affect available.",
+      },
+      unheldOversell: unheld,
+      heldPreorders,
+      shipped,
+      cancelled,
+    }, { headers: { "Cache-Control": "no-store" } });
+  }
+
+  if (!tokens.length) return Response.json({ ok: false, error: "Pass ?orders=385992,386250,… OR ?batch=1281 OR ?holds=1281&size=3XL OR ?variantOrders=1281&size=L (held vs un-held per order)." }, { status: 400 });
 
   // Live batch map: variant → the enabled+activated batch(es) it belongs to, plus
   // that batch's incoming/received/buffer for the capacity math.

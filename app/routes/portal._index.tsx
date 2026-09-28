@@ -9835,6 +9835,19 @@ async function getShopifyVariantCodes(shop: string, accessToken: string, product
     .filter((v) => v.id && v.title);
 }
 
+// Current product title + featured image straight from Shopify — used by the
+// restock page's per-row "Refresh from Shopify" button so a renamed/re-shot
+// product can be re-pulled (the stored title is a one-time snapshot otherwise).
+async function getShopifyProductTitleImage(shop: string, accessToken: string, productId: string): Promise<{ title: string | null; imageUrl: string | null }> {
+  const json = await shopifyGraphql<{ data?: { product?: { title?: string | null; featuredImage?: { url?: string | null } | null } } }>(
+    shop, accessToken,
+    `query ProductTitleImage($id: ID!) { product(id: $id) { title featuredImage { url } } }`,
+    { id: productId },
+  );
+  const p = json?.data?.product;
+  return { title: (p?.title ?? "").trim() || null, imageUrl: (p?.featuredImage?.url ?? "").trim() || null };
+}
+
 async function shopifyGraphql<T>(
   shop: string,
   accessToken: string,
