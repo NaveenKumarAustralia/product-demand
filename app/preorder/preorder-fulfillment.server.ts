@@ -352,22 +352,42 @@ export async function holdPreorderLinesOnly(shop: string, token: string, orderId
   return r.held;
 }
 
+// Human hold note shown in the Shopify order's "On hold" card, e.g.
+// "Pre-order · Batch #1466 · Expected 15 Oct 2026". This is what makes the
+// batch + expected ship date visible on the order (plan orders also show the
+// selling-plan name natively under the line; no-plan orders rely on this note).
+const HOLD_NOTE_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export function formatPreorderHoldNote(earliestDispatchMs: number | null, batchIds?: number[]): string {
+  const parts = ["Pre-order"];
+  const uniqueBatches = Array.from(new Set((batchIds ?? []).filter((n) => Number.isFinite(n) && n > 0)));
+  if (uniqueBatches.length === 1) parts.push(`Batch #${uniqueBatches[0]}`);
+  if (earliestDispatchMs != null && Number.isFinite(earliestDispatchMs)) {
+    const d = new Date(earliestDispatchMs);
+    parts.push(`Expected ${d.getUTCDate()} ${HOLD_NOTE_MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`);
+  } else {
+    parts.push("held until the batch lands");
+  }
+  return parts.join(" · ");
+}
+
 /**
  * The ONE pre-order hold policy, shared by both order paths:
  *  - if the earliest pre-order dispatch is within the combine window → hold the
  *    WHOLE order so it ships together;
  *  - otherwise → hold ONLY the pre-order line(s); in-stock lines ship now.
- * Returns whether the whole order ended up held, so the caller can decide the
- * order-level `pre-order-hold` tag (Pick Pack sets the whole order aside).
+ * The hold note carries the batch + expected ship date so it's visible on the
+ * order. Returns whether the whole order ended up held, so the caller can decide
+ * the order-level `pre-order-hold` tag (Pick Pack sets the whole order aside).
  */
-export async function applyPreorderHoldPolicy(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], earliestDispatchMs: number | null): Promise<{ wholeOrderHeld: boolean }> {
+export async function applyPreorderHoldPolicy(shop: string, token: string, orderIdNumeric: string, preorderLineItemIds: string[], earliestDispatchMs: number | null, batchIds?: number[]): Promise<{ wholeOrderHeld: boolean }> {
   const windowDays = await getPreorderCombineWindowDays();
   const combine = windowDays > 0 && earliestDispatchMs != null && earliestDispatchMs <= Date.now() + windowDays * 86400000;
+  const note = formatPreorderHoldNote(earliestDispatchMs, batchIds);
   if (combine) {
-    const held = await holdOrderOpenFulfillmentOrders(shop, token, orderIdNumeric, "Held to ship with the pre-order item in this order (combine window)");
+    const held = await holdOrderOpenFulfillmentOrders(shop, token, orderIdNumeric, note);
     return { wholeOrderHeld: held > 0 };
   }
-  const r = await normalizeOrderPreorderHolds(shop, token, orderIdNumeric, preorderLineItemIds, "Pre-order — held until the batch lands");
+  const r = await normalizeOrderPreorderHolds(shop, token, orderIdNumeric, preorderLineItemIds, note);
   return { wholeOrderHeld: r.fullyHeld };
 }
 

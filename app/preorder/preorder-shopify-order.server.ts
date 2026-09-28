@@ -244,7 +244,10 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
         const preorderLineItemIds = normalized.lines
           .map((line) => line.shopifyLineItemId)
           .filter((id): id is string => Boolean(id));
-        const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, preorderLineItemIds, earliestShipMs);
+        const preorderBatchIds = Array.from(new Set(
+          normalized.lines.map((line) => line.preferredSupplierOrderId).filter((n): n is number => Number.isFinite(n as number) && (n as number) > 0),
+        ));
+        const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, preorderLineItemIds, earliestShipMs, preorderBatchIds);
         if (wholeOrderHeld) await addOrderTags(shop, token, orderIdNumeric, ["pre-order-hold"]);
         console.log(`[preorder] ${shop} order ${orderIdNumeric}: applied hold policy (wholeOrderHeld=${wholeOrderHeld}, lines=${preorderLineItemIds.length}).`);
       }

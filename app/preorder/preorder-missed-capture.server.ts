@@ -206,7 +206,7 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
         .filter((ms): ms is number => ms != null)
         .reduce<number | null>((min, ms) => (min == null || ms < min ? ms : min), null);
       try {
-        const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, capturedLineIds, earliestDispatchMs);
+        const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, capturedLineIds, earliestDispatchMs, Array.from(capturedBatchIds));
         await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, ...(wholeOrderHeld ? ["pre-order-hold"] : [])]);
       } catch (error) {
         errors.push({ order: cs[0].order, error: `tag/hold: ${error instanceof Error ? error.message : String(error)}` });
@@ -322,7 +322,7 @@ export async function captureNoPlanLinesForOrder(
       .filter((ms): ms is number => ms != null)
       .reduce<number | null>((min, ms) => (min == null || ms < min ? ms : min), null);
     try {
-      const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, capturedLineIds, earliestDispatchMs);
+      const { wholeOrderHeld } = await applyPreorderHoldPolicy(shop, token, orderIdNumeric, capturedLineIds, earliestDispatchMs, Array.from(capturedBatchIds));
       await addOrderTags(shop, token, orderIdNumeric, ["pre-order", ...batchTags, ...(wholeOrderHeld ? ["pre-order-hold"] : [])]);
     } catch (error) {
       console.warn(`[preorder realtime capture] ${orderName} tag/hold failed:`, error instanceof Error ? error.message : String(error));
