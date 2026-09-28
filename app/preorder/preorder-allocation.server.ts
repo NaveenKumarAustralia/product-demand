@@ -80,11 +80,17 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
           );
         }
 
+        // Load ALL enabled batches for this shop/market — NOT just the plan's
+        // preferred one. The preferred batch is still tried FIRST (see the sort
+        // below); only the quantity that doesn't fit there rolls onto the next
+        // live batch that has room. Previously we filtered to the preferred batch
+        // alone, so a full pinned batch produced a "ghost" (order placed, never
+        // reserved) instead of rolling forward — the exact case the old error
+        // message named ("not moved to a later batch automatically").
         const enabledSettings = await tx.preorderBatchSetting.findMany({
           where: {
             shop: input.shop,
             enabled: true,
-            ...(input.preferredSupplierOrderId ? { supplierOrderId: input.preferredSupplierOrderId } : {}),
           },
           select: {
             supplierOrderId: true,
@@ -94,10 +100,7 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
           },
         });
         if (!enabledSettings.length) {
-          if (input.preferredSupplierOrderId) {
-            throw new PreorderCapacityError(`Preorder batch #${input.preferredSupplierOrderId} is no longer enabled for new reservations.`);
-          }
-          throw new PreorderCapacityError(`No active ${input.market} preorder production batches are available.`);
+          throw new PreorderCapacityError(`No active ${input.market} preorder production batches are enabled.`);
         }
         const settingByBatch = new Map(enabledSettings.map((setting) => [setting.supplierOrderId, setting]));
 
@@ -136,7 +139,14 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
           .filter((order) => isPreorderEligibleStatus(order.supplierStatus))
           .filter((order) => order.lines.length > 0)
           .sort((a, b) => {
-            if (input.preferredSupplierOrderId) return a.id - b.id;
+            // The plan's preferred batch goes first; the rest follow by soonest
+            // promised ship date, so any overflow rolls onto the batch that will
+            // arrive first.
+            if (input.preferredSupplierOrderId) {
+              const aPref = a.id === input.preferredSupplierOrderId;
+              const bPref = b.id === input.preferredSupplierOrderId;
+              if (aPref !== bPref) return aPref ? -1 : 1;
+            }
             const aSetting = settingByBatch.get(a.id);
             const bSetting = settingByBatch.get(b.id);
             return (
@@ -147,11 +157,6 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
           });
 
         if (!orderedBatches.length) {
-          if (input.preferredSupplierOrderId) {
-            throw new PreorderCapacityError(
-              `Preorder batch #${input.preferredSupplierOrderId} is not eligible for this ${input.market} variant. The order has not been moved to a later batch automatically.`,
-            );
-          }
           throw new PreorderCapacityError(`No eligible ${input.market} production batch contains this variant.`);
         }
 
@@ -204,14 +209,12 @@ export async function reservePreorderLine(input: ReservePreorderLineInput) {
         }
 
         if (remaining > 0) {
+          // Genuinely oversold: even after rolling across EVERY live batch for
+          // this variant there wasn't enough room. (The preferred batch, if any,
+          // was tried first, then all the others by ship date.)
           const available = input.quantity - remaining;
-          if (input.preferredSupplierOrderId) {
-            throw new PreorderCapacityError(
-              `Preorder batch #${input.preferredSupplierOrderId} only has ${available} unit${available === 1 ? "" : "s"} available for this variant; ${input.quantity} requested. The order has not been moved to a later batch automatically.`,
-            );
-          }
           throw new PreorderCapacityError(
-            `Only ${available} unit${available === 1 ? " is" : "s are"} available to preorder for this ${input.market} variant; ${input.quantity} requested.`,
+            `Only ${available} of ${input.quantity} unit${input.quantity === 1 ? "" : "s"} could be reserved for this ${input.market} variant across all live pre-order batches; the rest would be oversold.`,
           );
         }
 
