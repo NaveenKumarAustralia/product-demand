@@ -253,8 +253,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       `query FindOrder($q: String!) {
         orders(first: 3, query: $q) {
           nodes {
-            id name email cancelledAt displayFulfillmentStatus
+            id name email cancelledAt displayFulfillmentStatus tags
             lineItems(first: 50) { nodes { id title quantity unfulfilledQuantity variant { id title } sellingPlan { name } } }
+            fulfillmentOrders(first: 25) { nodes { id status lineItems(first: 50) { nodes { remainingQuantity lineItem { id } } } } }
           }
         }
       }`,
@@ -282,6 +283,54 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       select: { createdAt: true, toValue: true }, orderBy: { createdAt: "desc" }, take: 5,
     }).catch(() => []);
 
+    // Per-line fulfillment-HOLD status: map each line id → the statuses of the
+    // fulfillment order(s) it sits in (ON_HOLD / OPEN / …). This is what tells us
+    // whether the pre-order line is actually being held.
+    const foStatusByLine = new Map<string, string[]>();
+    for (const fo of order.fulfillmentOrders?.nodes ?? []) {
+      for (const n of fo.lineItems?.nodes ?? []) {
+        const lid = numericId(String(n?.lineItem?.id ?? "")); if (!lid) continue;
+        const arr = foStatusByLine.get(lid) ?? []; arr.push(String(fo.status ?? "")); foStatusByLine.set(lid, arr);
+      }
+    }
+    const holdStatusFor = (lineId: string): string => {
+      const st = foStatusByLine.get(lineId) ?? [];
+      if (!st.length) return "no fulfilment order (fulfilled / removed)";
+      const onHold = st.filter((s) => s === "ON_HOLD").length;
+      const open = st.filter((s) => s === "OPEN").length;
+      if (onHold && !open) return "ON_HOLD";
+      if (open && !onHold) return "OPEN (will ship)";
+      if (onHold && open) return "PARTIAL (some on hold, some open)";
+      return st.join(",");
+    };
+
+    // Live Shopify stock (on-hand / committed / available, summed across
+    // locations) for every variant on this order — so we can see the "held even
+    // though we had stock" case at a glance.
+    const orderVariantGids = Array.from(new Set(
+      (order.lineItems?.nodes ?? []).map((li: any) => { const n = numericId(String(li.variant?.id ?? "")); return n ? `gid://shopify/ProductVariant/${n}` : ""; }).filter(Boolean),
+    ));
+    const stockByVariant = new Map<string, { onHand: number; committed: number; available: number }>();
+    for (let i = 0; i < orderVariantGids.length; i += 50) {
+      const chunk = orderVariantGids.slice(i, i + 50);
+      const j = await gql(`query VInv($ids: [ID!]!) {
+        nodes(ids: $ids) { ... on ProductVariant { id inventoryQuantity
+          inventoryItem { inventoryLevels(first: 20) { nodes { quantities(names: ["on_hand","committed","available"]) { name quantity } } } } } }
+      }`, { ids: chunk }).catch(() => null);
+      for (const n of j?.data?.nodes ?? []) {
+        const num = numericId(String(n?.id ?? "")); if (!num) continue;
+        let onHand = 0, committed = 0, available = 0;
+        for (const lvl of n?.inventoryItem?.inventoryLevels?.nodes ?? []) {
+          for (const q of lvl?.quantities ?? []) {
+            if (q?.name === "on_hand") onHand += Number(q.quantity ?? 0);
+            else if (q?.name === "committed") committed += Number(q.quantity ?? 0);
+            else if (q?.name === "available") available += Number(q.quantity ?? 0);
+          }
+        }
+        stockByVariant.set(num, { onHand, committed, available: available || Number(n?.inventoryQuantity ?? 0) });
+      }
+    }
+
     const lines: any[] = [];
     for (const li of order.lineItems?.nodes ?? []) {
       const lineId = numericId(li.id);
@@ -300,6 +349,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       const caps = [];
       for (const bid of batchIds) { const c = await capacityFor(bid, String(li.variant?.id ?? "")); caps.push(c); batchesTouched.add(`${bid}:${vnum}`); }
 
+      const holdStatus = holdStatusFor(lineId);
+      const stock = stockByVariant.get(vnum) ?? null;
+      const onHand = stock?.onHand ?? 0;
+      // Is the batch this line reserved against STILL a live pre-order (open +
+      // enabled + activated)? If not, pre-order was turned off (stock landed /
+      // batch closed) — a hold that lingers after that is stale.
+      const reservedBatchIds = Array.from(new Set(res.map((r) => r.supplierOrderId)));
+      const liveBatchIdSet = new Set(liveBatches.map((b) => b.id));
+      const reservedBatchStillLive = reservedBatchIds.length ? reservedBatchIds.some((id) => liveBatchIdSet.has(id)) : null;
+
       let verdict: string;
       if (!looksPreorder) verdict = "not a pre-order line";
       else if (reservedQty >= li.quantity) verdict = "✅ reserved (counts against the batch)";
@@ -308,17 +367,29 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       else if (unfulfilled <= 0) verdict = "shipped already (was in stock at the time)";
       else verdict = "🚨 GHOST — placed as a pre-order but NO reservation (not counted against the batch)";
 
+      // Separate hold verdict — the "held even though we had stock" signal.
+      let holdVerdict: string;
+      const isHeld = holdStatus === "ON_HOLD" || holdStatus.startsWith("PARTIAL");
+      if (unfulfilled <= 0) holdVerdict = "already shipped/fulfilled";
+      else if (isHeld && onHand >= unfulfilled) holdVerdict = `🔴 HELD BUT IN STOCK — ${onHand} on hand covers the ${unfulfilled} unheld; this should NOT be on hold (pre-order likely still switched on after stock landed)`;
+      else if (isHeld && onHand > 0) holdVerdict = `🟠 held with PARTIAL stock — ${onHand} on hand vs ${unfulfilled} needed`;
+      else if (isHeld) holdVerdict = "🟢 on hold, no stock yet (correct for a pre-order awaiting its batch)";
+      else if (looksPreorder && holdStatus.startsWith("OPEN")) holdVerdict = "🔴 NOT held — pre-order line is OPEN (can be picked/ship early)";
+      else holdVerdict = "not held (in-stock line — fine)";
+
       lines.push({
         line: li.title, size: li.variant?.title ?? null, qty: li.quantity, unfulfilledQty: unfulfilled,
         soldVia: isPlan ? "pre-order button (selling plan)" : (inLiveBatch.length ? "no-plan (quick-add / Shop Pay / express)" : "n/a"),
         reservedQty, reservationStatuses: res.map((r) => r.status),
-        batchCapacity: caps, verdict,
+        holdStatus, shopifyStock: stock, reservedBatchStillLive,
+        batchCapacity: caps, verdict, holdVerdict,
       });
     }
 
     report.push({
       token, name: order.name, orderId: orderIdNum, cancelled: !!order.cancelledAt,
       fulfillmentStatus: order.displayFulfillmentStatus,
+      tags: order.tags ?? [],
       allocationFailuresLogged: failures.map((f) => ({ at: f.createdAt, reason: f.toValue })),
       lines,
     });
@@ -333,6 +404,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const ghosts = report.flatMap((o) => (o.lines ?? []).filter((l: any) => String(l.verdict).startsWith("🚨")).map((l: any) => `${o.name} — ${l.line} ${l.size ?? ""}`.trim()));
+  const heldButInStock = report.flatMap((o) => (o.lines ?? []).filter((l: any) => String(l.holdVerdict).startsWith("🔴 HELD BUT IN STOCK")).map((l: any) => `${o.name} — ${l.line} ${l.size ?? ""}`.trim()));
+  const notHeldPreorders = report.flatMap((o) => (o.lines ?? []).filter((l: any) => String(l.holdVerdict).startsWith("🔴 NOT held")).map((l: any) => `${o.name} — ${l.line} ${l.size ?? ""}`.trim()));
 
   return Response.json({
     ok: true,
@@ -340,8 +413,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ordersChecked: tokens.length,
       ghostsFound: ghosts.length,
       ghosts,
+      heldButInStock,
+      notHeldPreorders,
       oversoldBatches: batchReconcile.filter((c: any) => c.oversoldBy > 0),
-      note: "A pre-order is recorded as a PreorderReservation in the app (NOT as a -1 on the restock sheet or on Shopify inventory). 'GHOST' = the order was placed as a pre-order but no reservation exists, so it is NOT counted against the incoming batch — that is the real overselling risk.",
+      note: "Per line: `verdict` = reservation status (GHOST = placed as pre-order but never reserved). `holdVerdict` = fulfilment-hold health: '🔴 HELD BUT IN STOCK' = wrongly on hold when stock is on hand; '🔴 NOT held' = pre-order line left open (can ship early). `shopifyStock` = live on-hand/committed/available. `reservedBatchStillLive` false = pre-order was turned off for that batch (so a lingering hold is stale).",
     },
     orders: report,
     batchReconcile,
