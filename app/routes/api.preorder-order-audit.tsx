@@ -214,8 +214,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     );
     if (!variantNums.size) return Response.json({ ok: false, error: `Size "${voSize}" not found in batch #${voBatch}.` }, { status: 404 });
 
-    const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
+    // Date-only (YYYY-MM-DD) — a full ISO timestamp's colons break Shopify's
+    // search parser, which silently returns zero orders.
+    const sinceDate = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
     const rows: Array<Record<string, unknown>> = [];
+    const queryErrors: string[] = [];
     let cursor: string | null = null;
     let scanned = 0;
     for (let page = 0; page < 80; page += 1) {
@@ -228,8 +231,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               fulfillmentOrders(first: 25) { nodes { status lineItems(first: 50) { nodes { lineItem { id } } } } } }
           }
         }`,
-        { q: `created_at:>=${sinceIso} financial_status:paid`, cursor },
-      ).catch(() => null);
+        { q: `created_at:>=${sinceDate}`, cursor },
+      ).catch((e: unknown) => { queryErrors.push(String(e)); return null; });
+      if (Array.isArray(j?.errors) && j.errors.length) queryErrors.push(...j.errors.map((e: any) => e?.message).filter(Boolean));
       const data = j?.data?.orders;
       if (!data) break;
       for (const o of data.nodes ?? []) {
@@ -269,6 +273,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const cancelled = rows.filter((r) => r.bucket === "cancelled");
     return Response.json({
       ok: true, mode: "variantOrders", batch: voBatch, product: batch.productTitle, size: voSize || "(all sizes)", days, scannedOrders: scanned,
+      variantIds: Array.from(variantNums),
+      queryErrors,
       summary: {
         matchingOrders: rows.length,
         heldPreorders: heldPreorders.length,
