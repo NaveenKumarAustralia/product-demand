@@ -205,7 +205,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const voBatch = Number((url.searchParams.get("variantOrders") ?? "").replace(/[^0-9]/g, ""));
   if (Number.isFinite(voBatch) && voBatch > 0) {
     const voSize = (url.searchParams.get("size") ?? "").trim();
-    const days = Math.max(1, Math.min(180, Number((url.searchParams.get("days") ?? "").replace(/[^0-9]/g, "")) || 120));
+    const days = Math.max(1, Math.min(180, Number((url.searchParams.get("days") ?? "").replace(/[^0-9]/g, "")) || 21));
     const batch = await prisma.supplierOrder.findUnique({ where: { id: voBatch }, select: { productTitle: true, lines: { select: { variantId: true, variantTitle: true } } } });
     if (!batch) return Response.json({ ok: false, error: `Batch #${voBatch} not found.` }, { status: 404 });
     const sizeNorm = voSize.toLowerCase();
@@ -217,18 +217,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     // Date-only (YYYY-MM-DD) — a full ISO timestamp's colons break Shopify's
     // search parser, which silently returns zero orders.
     const sinceDate = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
-    const rows: Array<Record<string, unknown>> = [];
     const queryErrors: string[] = [];
+    // PASS 1 — cheap scan (no fulfillmentOrders, small page size) to find the
+    // orders that bought this variant. A bigger nested query blows Shopify's
+    // 1000-cost limit, so hold status is fetched per matched order in pass 2.
+    type Matched = { orderId: string; name: string; createdAt: string | null; cancelled: boolean; lineId: string; size: string | null; qty: number; unfulfilled: number; plan: string };
+    const matched: Matched[] = [];
     let cursor: string | null = null;
     let scanned = 0;
     for (let page = 0; page < 80; page += 1) {
       const j: any = await gql(
         `query VO($q: String!, $cursor: String) {
-          orders(first: 100, after: $cursor, query: $q, sortKey: CREATED_AT, reverse: true) {
+          orders(first: 30, after: $cursor, query: $q, sortKey: CREATED_AT, reverse: true) {
             pageInfo { hasNextPage endCursor }
-            nodes { id name createdAt cancelledAt displayFulfillmentStatus
-              lineItems(first: 50) { nodes { id quantity unfulfilledQuantity variant { id title } sellingPlan { name } } }
-              fulfillmentOrders(first: 25) { nodes { status lineItems(first: 50) { nodes { lineItem { id } } } } } }
+            nodes { id name createdAt cancelledAt
+              lineItems(first: 20) { nodes { id quantity unfulfilledQuantity variant { id title } sellingPlan { name } } } }
           }
         }`,
         { q: `created_at:>=${sinceDate}`, cursor },
@@ -238,34 +241,45 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (!data) break;
       for (const o of data.nodes ?? []) {
         scanned += 1;
-        const foByLine = new Map<string, string[]>();
-        for (const fo of o.fulfillmentOrders?.nodes ?? []) {
-          for (const n of fo.lineItems?.nodes ?? []) { const lid = numericId(String(n?.lineItem?.id ?? "")); if (lid) { const a = foByLine.get(lid) ?? []; a.push(String(fo.status ?? "")); foByLine.set(lid, a); } }
-        }
         for (const li of o.lineItems?.nodes ?? []) {
           const vnum = numericId(String(li.variant?.id ?? ""));
           if (!variantNums.has(vnum)) continue;
-          const plan: string = li.sellingPlan?.name ?? "";
-          const isPlan = plan.startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX);
-          const st = foByLine.get(numericId(String(li.id))) ?? [];
-          const held = st.includes("ON_HOLD");
-          const open = st.includes("OPEN");
-          const unfulfilled = Number(li.unfulfilledQuantity ?? 0);
-          const bucket = o.cancelledAt ? "cancelled"
-            : unfulfilled <= 0 ? "shipped/fulfilled"
-            : held && !open ? "held pre-order"
-            : "🔴 UN-HELD oversell (this is what pushes available negative)";
-          rows.push({
-            order: o.name, adminUrl: `https://admin.shopify.com/store/${shop.replace(/\.myshopify\.com$/, "")}/orders/${numericId(String(o.id))}`,
-            createdAt: o.createdAt, size: li.variant?.title ?? null, qty: li.quantity, unfulfilledQty: unfulfilled,
-            soldVia: isPlan ? "pre-order button (selling plan)" : (plan ? `other plan: ${plan}` : "no-plan (express / Shop Pay / quick-add)"),
-            holdStatus: held && !open ? "ON_HOLD" : (open && !held ? "OPEN (committed → counts against available)" : (st.join(",") || "no fulfilment order")),
-            bucket,
+          matched.push({
+            orderId: numericId(String(o.id)), name: o.name, createdAt: o.createdAt ?? null, cancelled: Boolean(o.cancelledAt),
+            lineId: numericId(String(li.id)), size: li.variant?.title ?? null, qty: Number(li.quantity ?? 0),
+            unfulfilled: Number(li.unfulfilledQuantity ?? 0), plan: li.sellingPlan?.name ?? "",
           });
         }
       }
       if (!data.pageInfo?.hasNextPage) break;
       cursor = data.pageInfo.endCursor;
+    }
+
+    // PASS 2 — hold status for the (few) matched orders, one cheap query each.
+    const rows: Array<Record<string, unknown>> = [];
+    for (const m of matched) {
+      const jf: any = await gql(
+        `query FO($id: ID!) { order(id: $id) { fulfillmentOrders(first: 10) { nodes { status lineItems(first: 20) { nodes { lineItem { id } } } } } } }`,
+        { id: `gid://shopify/Order/${m.orderId}` },
+      ).catch(() => null);
+      const st: string[] = [];
+      for (const fo of jf?.data?.order?.fulfillmentOrders?.nodes ?? []) {
+        for (const n of fo.lineItems?.nodes ?? []) { if (numericId(String(n?.lineItem?.id ?? "")) === m.lineId) st.push(String(fo.status ?? "")); }
+      }
+      const held = st.includes("ON_HOLD");
+      const open = st.includes("OPEN");
+      const isPlan = m.plan.startsWith(KARMA_EAST_PREORDER_PLAN_PREFIX);
+      const bucket = m.cancelled ? "cancelled"
+        : m.unfulfilled <= 0 ? "shipped/fulfilled"
+        : held && !open ? "held pre-order"
+        : "🔴 UN-HELD oversell (this is what pushes available negative)";
+      rows.push({
+        order: m.name, adminUrl: `https://admin.shopify.com/store/${shop.replace(/\.myshopify\.com$/, "")}/orders/${m.orderId}`,
+        createdAt: m.createdAt, size: m.size, qty: m.qty, unfulfilledQty: m.unfulfilled,
+        soldVia: isPlan ? "pre-order button (selling plan)" : (m.plan ? `other plan: ${m.plan}` : "no-plan (express / Shop Pay / quick-add)"),
+        holdStatus: held && !open ? "ON_HOLD" : (open && !held ? "OPEN (committed → counts against available)" : (st.join(",") || "no fulfilment order")),
+        bucket,
+      });
     }
     const heldPreorders = rows.filter((r) => r.bucket === "held pre-order");
     const unheld = rows.filter((r) => String(r.bucket).startsWith("🔴"));
