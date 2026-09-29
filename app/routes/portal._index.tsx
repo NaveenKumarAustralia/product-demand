@@ -2634,6 +2634,46 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, newOrderId: created.id });
   }
 
+  // Existing Products Restock — re-pull the product's NAME, image, and per-size
+  // SKU + BARCODE from Shopify and OVERWRITE the stored values, so the barcode
+  // labels printed from this page always match Shopify (which is the source of
+  // truth for the printed name / SKU / barcode). Overwrites even non-empty values.
+  if (intent === "restock_refetch_shopify") {
+    const order = await prisma.supplierOrder.findUnique({ where: { id: orderId }, include: { lines: true } });
+    if (!order) return jsonResponse({ ok: false, error: "not_found" });
+    if (!(order.productId ?? "").trim()) return jsonResponse({ ok: false, error: "not_linked" });
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+    const [ti, codes] = await Promise.all([
+      getShopifyProductTitleImage(session.shop, session.accessToken, order.productId).catch(() => ({ title: null, imageUrl: null })),
+      getShopifyVariantCodes(session.shop, session.accessToken, order.productId).catch(() => [] as ShopifyVariantCode[]),
+    ]);
+    const vnum = (s: string | null | undefined) => String(s ?? "").replace(/\D/g, "");
+    await prisma.supplierOrder.update({
+      where: { id: orderId },
+      data: {
+        ...(ti.title ? { productTitle: ti.title } : {}),
+        ...(ti.imageUrl ? { productImageUrl: ti.imageUrl } : {}),
+      },
+    });
+    let updatedLines = 0;
+    for (const line of order.lines) {
+      const match = codes.find((c) => vnum(c.id) && vnum(c.id) === vnum(line.variantId))
+        ?? codes.find((c) => normalizeVariantSizeLabel(c.title) === normalizeVariantSizeLabel(line.variantTitle ?? ""));
+      if (!match) continue;
+      await prisma.orderLine.update({
+        where: { id: line.id },
+        data: {
+          ...(match.id && vnum(match.id) !== vnum(line.variantId) ? { variantId: match.id } : {}),
+          sku: match.sku ?? null,
+          barcode: match.barcode ?? null,
+        },
+      });
+      updatedLines += 1;
+    }
+    return jsonResponse({ ok: true, refreshed: { title: ti.title ?? order.productTitle, updatedLines, image: Boolean(ti.imageUrl) } });
+  }
+
   if (intent === "duplicate_order") {
     const order = await prisma.supplierOrder.findUnique({
       where: { id: orderId },
@@ -28237,10 +28277,12 @@ function OrderRow({
 }) {
   const fetcher = useFetcher();
   const trRef = useRef<HTMLTableRowElement | null>(null);
-  // On-demand Shopify inventory fetch — populated the first time staff
-  // open the ▼ inventory row for this order. Removed from the page
-  // loader so the restock page renders fast; we only pay the Shopify
-  // round-trip for products the user actually inspects.
+  // Refresh the printed label fields (name + per-size SKU/barcode + image) from
+  // Shopify. Overwrites the stored values so the labels printed here match
+  // Shopify after a name/SKU/barcode change there. A normal action → the page
+  // revalidates and the row shows the new values.
+  const refreshFetcher = useFetcher<{ ok?: boolean; refreshed?: { title?: string; updatedLines?: number } }>();
+  const refreshing = refreshFetcher.state !== "idle";
   const inventoryFetcher = useFetcher<{ variantsBySize?: Record<string, number>; total?: number }>();
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -28388,6 +28430,15 @@ function OrderRow({
             to add position:relative (which would break sticky). */}
         <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={destinationRowBg}>
           <span style={s.productName}>{order.productTitle}</span>
+          {(order.productId ?? "").trim() && (
+            <button
+              type="button"
+              onClick={() => { if (!refreshing) submitPortalCell(refreshFetcher, { intent: "restock_refetch_shopify", orderId: order.id }); }}
+              disabled={refreshing}
+              title="Refresh name, SKU & barcode from Shopify so the printed labels match"
+              style={{ display: "inline-flex", alignItems: "center", gap: 3, marginLeft: 6, verticalAlign: "middle", background: refreshing ? "#e5e7eb" : "#eef2ff", border: "1px solid #c7d2fe", color: "#3730a3", borderRadius: 5, padding: "1px 6px", fontSize: 10, fontWeight: 700, cursor: refreshing ? "wait" : "pointer", whiteSpace: "nowrap" }}
+            >{refreshing ? "…" : "↻ Sync from Shopify"}</button>
+          )}
           {destinationStamp && (
             <div
               aria-hidden
