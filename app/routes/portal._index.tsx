@@ -28436,8 +28436,8 @@ function OrderRow({
               onClick={() => { if (!refreshing) submitPortalCell(refreshFetcher, { intent: "restock_refetch_shopify", orderId: order.id }); }}
               disabled={refreshing}
               title="Refresh name, SKU & barcode from Shopify so the printed labels match"
-              style={{ display: "inline-flex", alignItems: "center", gap: 3, marginLeft: 6, verticalAlign: "middle", background: refreshing ? "#e5e7eb" : "#eef2ff", border: "1px solid #c7d2fe", color: "#3730a3", borderRadius: 5, padding: "1px 6px", fontSize: 10, fontWeight: 700, cursor: refreshing ? "wait" : "pointer", whiteSpace: "nowrap" }}
-            >{refreshing ? "…" : "↻ Sync from Shopify"}</button>
+              style={{ position: "absolute", top: 2, right: 2, zIndex: 2, display: "inline-flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, background: refreshing ? "#e5e7eb" : "#eef2ff", border: "1px solid #c7d2fe", color: "#3730a3", borderRadius: 4, padding: 0, lineHeight: 1, fontSize: 11, fontWeight: 700, cursor: refreshing ? "wait" : "pointer" }}
+            >{refreshing ? "…" : "↻"}</button>
           )}
           {destinationStamp && (
             <div
