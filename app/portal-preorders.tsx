@@ -198,7 +198,7 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
           </div>
         </>
       ) : tab === "orders" ? (
-        <PreorderCustomerOrdersPanel orders={data.customerOrders} />
+        <PreorderCustomerOrdersPanel orders={data.customerOrders} search={headerSearch} />
       ) : tab === "waitlist" ? (
         <>
           <NotifyBlockToggle enabled={data.configuration.notifyBlockEnabled} />

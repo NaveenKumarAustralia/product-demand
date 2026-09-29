@@ -23,7 +23,7 @@ function statusPill(status: string) {
   return <span style={{ display: "inline-block", padding: "2px 9px", borderRadius: 999, fontSize: 11.5, fontWeight: 700, background: tone.bg, color: tone.fg }}>{label}</span>;
 }
 
-export function PreorderCustomerOrdersPanel({ orders }: { orders: PreorderDashboardCustomerOrder[] }) {
+export function PreorderCustomerOrdersPanel({ orders, search = "" }: { orders: PreorderDashboardCustomerOrder[]; search?: string }) {
   const [sortCol, setSortCol] = useState<OrdersSortCol>("dispatch");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
@@ -42,6 +42,13 @@ export function PreorderCustomerOrdersPanel({ orders }: { orders: PreorderDashbo
       status: line.status,
       dispatch: line.expectedShipDate,
     })));
+    // Free-text search across everything on the row — order #, customer email,
+    // product, size, batch #, SKU, status, market and the dispatch date label.
+    const q = search.trim().toLowerCase();
+    const searched = q
+      ? flat.filter((r) => [r.orderName, r.customer, r.product, r.size, `#${r.batch}`, String(r.batch), r.sku, r.status, r.market, formatDate(r.dispatch)]
+          .some((f) => String(f ?? "").toLowerCase().includes(q)))
+      : flat;
     const val = (r: typeof flat[number]): string | number => {
       switch (sortCol) {
         case "order": return r.orderName.toLowerCase();
@@ -54,15 +61,18 @@ export function PreorderCustomerOrdersPanel({ orders }: { orders: PreorderDashbo
         case "dispatch": return r.dispatch ? new Date(r.dispatch).getTime() : Number.POSITIVE_INFINITY;
       }
     };
-    return [...flat].sort((a, b) => {
+    return [...searched].sort((a, b) => {
       const va = val(a), vb = val(b);
       const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
       return sortDir === "asc" ? cmp : -cmp;
     });
-  }, [orders, sortCol, sortDir]);
+  }, [orders, sortCol, sortDir, search]);
 
   if (!orders.length) {
     return <div style={s.empty}>No preorder reservations have been created yet. Customer orders will appear here once Shopify order allocation is connected.</div>;
+  }
+  if (!rows.length) {
+    return <div style={s.empty}>No customer orders match “{search.trim()}”. Search by order number, customer email, product, batch or SKU.</div>;
   }
 
   const clickSort = (col: OrdersSortCol) => {
