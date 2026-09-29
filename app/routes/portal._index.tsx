@@ -939,7 +939,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // shopDomain (the store's myshopify domain) is needed to build "Open in
   // Shopify" admin links. Fetch it on every page that renders one — without it
   // the link is malformed and Shopify shows a "no permission" error.
-  const needsShopDomain = isCollectionsPage || page === "usa-stock" || isRestockPage || page === "search" || (page === "packing" && selectedPackingList);
+  const needsShopDomain = isCollectionsPage || page === "usa-stock" || isRestockPage || page === "search" || page === "preorders" || (page === "packing" && selectedPackingList);
   const shopDomain = needsShopDomain
     ? (await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" }, select: { shop: true } }))?.shop ?? null
     : null;
