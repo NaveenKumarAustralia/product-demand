@@ -5703,7 +5703,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const results: Array<{ index: number; ok: boolean; errors?: string[]; productId?: string; categoryAttempted?: number; categoryWrote?: number; categoryErrors?: string[]; filled?: Record<string, string> }> = [];
     // Content fields the duplicate-at-create may have filled in — echoed back so the
     // client can show them immediately (no page refresh needed).
-    const CREATE_FILLED_FIELDS = ["sku", "barcode", "description", "tags", "seoTitle", "seoDescription", "productType", "vendor", "hsCode", "countryOfOrigin", "compareAtPrice", "categories", COL_ROW_CATEGORY_METAFIELDS, COL_ROW_DUPLICATE_FROM_ID];
+    const CREATE_FILLED_FIELDS = ["sku", "barcode", "price", "description", "tags", "seoTitle", "seoDescription", "productType", "vendor", "hsCode", "countryOfOrigin", "compareAtPrice", "categories", COL_ROW_CATEGORY_METAFIELDS, COL_ROW_DUPLICATE_FROM_ID];
     const now = new Date().toISOString();
     for (const idx of targetIndexes) {
       const row = rows[idx];
@@ -5742,6 +5742,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         row.sku = gen.sku;
         row.barcode = gen.barcode;
         rows[idx] = row;
+      } else {
+        // A single BASE sku typed by hand ("2731" or "K2731") → expand it on the
+        // ROW to the per-size scheme (K-prefixed) and generate matching barcodes,
+        // so the sheet + print labels show what Shopify actually gets. A per-size
+        // list (⚡ Generate) or a custom non-numeric sku is left exactly as typed.
+        const single = (row.sku ?? "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean).length <= 1;
+        const skuBase = single ? deriveCollectionSkuBase(row.sku ?? "") : "";
+        if (skuBase) {
+          const gen = buildCollectionSkuBarcode(row, skuBase);
+          row.sku = gen.sku;
+          if ((row.barcode ?? "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean).length <= 1) row.barcode = gen.barcode;
+          rows[idx] = row;
+        }
       }
       const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, { status: statusOpt as "DRAFT" | "ACTIVE", inrPerAud: inrPerAudForPush, thbPerAud: thbPerAudForPush, currency: isJJNewPush ? "THB" : "INR", productInfo: productInfoForPush ?? undefined });
       if (res.ok && res.productId) {
@@ -10829,7 +10842,7 @@ async function fetchDuplicateFieldsFromProduct(shop: string, accessToken: string
             reference { __typename ... on Metaobject { id displayName type } }
           }
         }
-        variants(first: 1) { nodes { compareAtPrice inventoryItem { harmonizedSystemCode countryCodeOfOrigin } } }
+        variants(first: 1) { nodes { price compareAtPrice inventoryItem { harmonizedSystemCode countryCodeOfOrigin } } }
       }
     }
   `, { id: productGid });
@@ -10851,6 +10864,10 @@ async function fetchDuplicateFieldsFromProduct(shop: string, accessToken: string
     vendor: String(product.vendor ?? ""),
     seoTitle: String(product.seo?.title ?? ""),
     seoDescription: String(product.seo?.description ?? ""),
+    // Copy the RRP (variant price) from the source so a duplicate keeps its price
+    // instead of forcing a manual re-entry. Fills only when the row's price is
+    // empty (create-time) / is applied on "apply", so a typed price still wins.
+    price: v0.price ? String(v0.price) : "",
     compareAtPrice: v0.compareAtPrice ? String(v0.compareAtPrice) : "",
     hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
     countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
@@ -10893,8 +10910,25 @@ async function createShopifyProductFromRow(
   // size, e.g., "K2596XS\nK2596S\n…"). If line count matches the
   // variant count, use them directly. Otherwise fall back to base +
   // size suffix.
-  const skuLines = (row.sku ?? "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-  const barcodeLines = (row.barcode ?? "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  // Normalize a single BASE sku ("2731" or "K2731") into the standard per-size
+  // scheme — "K<base><size>" SKUs + "<base><size>" barcodes — and generate the
+  // barcodes to match. Without this, a bare "2731" produced "2731XS" (no K) and
+  // no barcode. Only a single base value is normalized: an already-generated
+  // per-size list (from the ⚡ Generate button) or a custom sku with no numeric
+  // base (deriveCollectionSkuBase returns "") is left exactly as typed.
+  let normSku = row.sku ?? "";
+  let normBarcode = row.barcode ?? "";
+  if (normSku.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).length <= 1) {
+    const skuBase = deriveCollectionSkuBase(normSku);
+    if (skuBase) {
+      const gen = buildCollectionSkuBarcode(row, skuBase);
+      normSku = gen.sku;
+      // Only fill barcodes when the user didn't type a per-size list of their own.
+      if (normBarcode.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).length <= 1) normBarcode = gen.barcode;
+    }
+  }
+  const skuLines = normSku.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const barcodeLines = normBarcode.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const baseSku = skuLines[0] ?? "";
   const baseBarcode = barcodeLines[0] ?? "";
   const skuForVariant = (idx: number, size: string): string => {
