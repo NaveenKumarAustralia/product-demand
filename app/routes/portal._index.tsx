@@ -19214,7 +19214,11 @@ function CollectionSpreadsheetPage({
                                   setRows((prev) => {
                                     const next = prev.map((r, i) => {
                                       if (i !== rIdx) return r;
-                                      return { ...r, duplicateFrom: label, ...fields };
+                                      const applied = { ...fields };
+                                      // Only copy the source price into an EMPTY price cell —
+                                      // never overwrite a price already typed on this row.
+                                      if ((r.price ?? "").trim() && applied.price !== undefined) delete applied.price;
+                                      return { ...r, duplicateFrom: label, ...applied };
                                     });
                                     persistRows(next);
                                     return next;
@@ -20597,7 +20601,7 @@ function CollectionCategoryCell({ value, productId, linked, locked, ctx, onSave 
 }
 
 function CollectionSkuCell({
-  value, draft, setDraft, onCommit, rowIndex, onAutoGenerateSku,
+  value, draft, setDraft, onCommit, rowIndex, onAutoGenerateSku, generateSkuAndBarcode,
 }: {
   value: string;
   draft: string;
@@ -20607,20 +20611,23 @@ function CollectionSkuCell({
   generateSkuAndBarcode?: (rowIdx: number, baseNumber: string) => void;
   onAutoGenerateSku?: (rowIdx: number) => void;
 }) {
-  // SKU + barcode auto-generate in updateCell as soon as a base number is typed
-  // here. When the cell is BLANK, a "Generate" button hands out the next auto
-  // number (K<n> / <n>) so staff don't have to type or track codes at all.
-  const blank = !draft.trim();
+  // SKU + barcode auto-generate as soon as a base number is committed here (blur
+  // / Enter). When the cell is BLANK, a "Generate" button hands out the next auto
+  // number (K<n> / <n>). When it holds a single un-expanded base number the user
+  // typed ("1234" / "K1234"), a "Fill sizes" button expands it into per-size
+  // K<base><size> SKUs + <base><size> barcodes instantly, without leaving the cell.
+  const trimmed = draft.trim();
+  const blank = !trimmed;
+  const typedBase = (!blank && !trimmed.includes("\n")) ? deriveCollectionSkuBase(trimmed) : "";
+  const btnStyle: React.CSSProperties = { background: "#eef2ff", border: "1px solid #c7d2fe", color: "#3730a3", borderRadius: 5, padding: "2px 6px", fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" };
   return (
     <div style={{ display: "flex", flexDirection: "column", width: "100%", gap: 3 }}>
       <CollectionTextCell value={value} draft={draft} setDraft={setDraft} onCommit={onCommit} />
       {blank && onAutoGenerateSku && (
-        <button
-          type="button"
-          onClick={() => onAutoGenerateSku(rowIndex)}
-          title="Auto-generate the next SKU + barcode for this product"
-          style={{ background: "#eef2ff", border: "1px solid #c7d2fe", color: "#3730a3", borderRadius: 5, padding: "2px 6px", fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}
-        >⚡ Generate</button>
+        <button type="button" onClick={() => onAutoGenerateSku(rowIndex)} title="Auto-generate the next SKU + barcode for this product" style={btnStyle}>⚡ Generate</button>
+      )}
+      {typedBase && generateSkuAndBarcode && (
+        <button type="button" onClick={() => generateSkuAndBarcode(rowIndex, typedBase)} title={`Fill SKU + barcode for every ordered size from ${typedBase}`} style={btnStyle}>⚡ Fill sizes + barcodes</button>
       )}
     </div>
   );
