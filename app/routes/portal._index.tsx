@@ -19277,11 +19277,11 @@ function CollectionSpreadsheetPage({
                                 suppressed={(row[COL_ROW_NO_DUPLICATE] ?? "") === "1"}
                                 onClear={() => {
                                   setRows((prev) => {
-                                    // Clear the source + the copied CATEGORY (a wrong taxonomy from the
-                                    // suggested source is the usual create-breaker). Descriptive fields
-                                    // are left so any manual edits stay; they don't block a create.
+                                    // "Create fresh" — drop the source AND everything it auto-copied
+                                    // (the source is now auto-applied, so these were duplicated, not
+                                    // typed): category, categories, and the descriptive content fields.
                                     const next = prev.map((r, i) => (i === rIdx
-                                      ? { ...r, duplicateFrom: "", [COL_ROW_DUPLICATE_FROM_ID]: "", [COL_ROW_NO_DUPLICATE]: "1", [COL_ROW_CATEGORY_METAFIELDS]: "", categories: "" }
+                                      ? { ...r, duplicateFrom: "", [COL_ROW_DUPLICATE_FROM_ID]: "", [COL_ROW_NO_DUPLICATE]: "1", [COL_ROW_CATEGORY_METAFIELDS]: "", categories: "", description: "", tags: "", seoTitle: "", seoDescription: "", productType: "", vendor: "", hsCode: "", countryOfOrigin: "", compareAtPrice: "" }
                                       : r));
                                     persistRows(next, prev, `Clear duplicate source on row ${rIdx + 1}`);
                                     return next;
@@ -21841,9 +21841,13 @@ function CollectionDuplicateFromCell({
     const list = suggestFetcher.data?.products ?? [];
     if (list.length > 0) {
       setSuggestion(list[0]);
-      // Remember the source on the row so Create can fill everything (incl.
-      // category) from it even if the user never clicks "apply".
+      // Remember the source on the row (safety net so Create can still fill from
+      // it even if the auto-apply below is interrupted)…
       onSuggest?.(list[0].id);
+      // …AND auto-apply it now, so the duplicated data — including the Shopify
+      // CATEGORY + its metafields — lands in the row instantly and visibly,
+      // instead of relying on a lazy (and occasionally-missed) fetch at create.
+      pick(list[0]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [suggestFetcher.state, suggestFetcher.data]);
