@@ -18,7 +18,7 @@ function formatDateTime(value: string | null) {
   return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true }).format(date);
 }
 
-type OrdersColId = "order" | "orderDate" | "customer" | "picture" | "product" | "batch" | "sku" | "qty" | "status" | "dispatch";
+export type OrdersColId = "order" | "orderDate" | "customer" | "picture" | "product" | "batch" | "sku" | "qty" | "status" | "dispatch";
 type OrdersSortCol = Exclude<OrdersColId, "picture">;
 const ORDERS_COLUMNS: Array<{ id: OrdersColId; label: string; sortable: boolean; align?: "center" }> = [
   { id: "order", label: "Order", sortable: true },
@@ -33,27 +33,81 @@ const ORDERS_COLUMNS: Array<{ id: OrdersColId; label: string; sortable: boolean;
   { id: "dispatch", label: "Dispatch", sortable: true },
 ];
 const ORDERS_COL_DEF = new Map(ORDERS_COLUMNS.map((c) => [c.id, c]));
-const ORDERS_COL_ALL: OrdersColId[] = ORDERS_COLUMNS.map((c) => c.id);
-const ORDERS_COLS_KEY = "preorder-customer-orders-cols-v1";
+export const ORDERS_COL_ALL: OrdersColId[] = ORDERS_COLUMNS.map((c) => c.id);
 
-function loadOrdersColPrefs(): { order: OrdersColId[]; hidden: OrdersColId[] } {
-  if (typeof window === "undefined") return { order: ORDERS_COL_ALL, hidden: [] };
-  try {
-    const raw = window.localStorage.getItem(ORDERS_COLS_KEY);
-    if (raw) {
-      const p = JSON.parse(raw) as { order?: unknown; hidden?: unknown };
-      const savedOrder = Array.isArray(p.order) ? (p.order as OrdersColId[]).filter((id) => ORDERS_COL_DEF.has(id)) : [];
-      // Append any columns added since the prefs were saved so nothing is lost.
-      const order = [...savedOrder, ...ORDERS_COL_ALL.filter((id) => !savedOrder.includes(id))];
-      const hidden = Array.isArray(p.hidden) ? (p.hidden as OrdersColId[]).filter((id) => ORDERS_COL_DEF.has(id)) : [];
-      return { order, hidden };
-    }
-  } catch { /* ignore */ }
-  return { order: ORDERS_COL_ALL, hidden: [] };
+export type OrdersColPrefs = { order: OrdersColId[]; hidden: OrdersColId[] };
+// Merge saved prefs (from the server or localStorage) with the full column set,
+// dropping unknown ids and APPENDING any columns added since they were saved so
+// nothing is ever lost.
+export function normalizeOrdersColPrefs(saved: { order?: unknown; hidden?: unknown } | null | undefined): OrdersColPrefs {
+  const savedOrder = Array.isArray(saved?.order) ? (saved!.order as OrdersColId[]).filter((id) => ORDERS_COL_DEF.has(id)) : [];
+  const order = [...savedOrder, ...ORDERS_COL_ALL.filter((id) => !savedOrder.includes(id))];
+  const hidden = Array.isArray(saved?.hidden) ? (saved!.hidden as OrdersColId[]).filter((id) => ORDERS_COL_DEF.has(id)) : [];
+  return { order, hidden };
 }
-function saveOrdersColPrefs(order: OrdersColId[], hidden: Set<OrdersColId>) {
-  if (typeof window === "undefined") return;
-  try { window.localStorage.setItem(ORDERS_COLS_KEY, JSON.stringify({ order, hidden: Array.from(hidden) })); } catch { /* ignore */ }
+
+// A compact columns icon (no text) → opens a popup to show/hide + drag-reorder.
+export function OrdersColumnsButton({ colOrder, hidden, onReorder, onToggle, onReset }: {
+  colOrder: OrdersColId[];
+  hidden: Set<OrdersColId>;
+  onReorder: (drag: OrdersColId, target: OrdersColId) => void;
+  onToggle: (id: OrdersColId) => void;
+  onReset: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [dragId, setDragId] = useState<OrdersColId | null>(null);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title="Show, hide & reorder columns"
+        aria-label="Columns"
+        style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 38, height: 38, background: open ? "#eef2ff" : "#fff", border: "1px solid #cbd5e1", borderRadius: 10, cursor: "pointer", color: "#475569" }}
+      >
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" /><line x1="15" y1="3" x2="15" y2="21" />
+        </svg>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 40, width: 252, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, boxShadow: "0 12px 30px rgba(15,23,42,0.16)", padding: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: ".03em", padding: "4px 6px 8px" }}>Show &amp; reorder columns</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+            {colOrder.map((id) => {
+              const col = ORDERS_COL_DEF.get(id)!;
+              return (
+                <div
+                  key={id}
+                  draggable
+                  onDragStart={() => setDragId(id)}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={() => { if (dragId) onReorder(dragId, id); setDragId(null); }}
+                  onDragEnd={() => setDragId(null)}
+                  style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px", borderRadius: 7, cursor: "grab", background: dragId === id ? "#eef2ff" : "transparent" }}
+                >
+                  <span style={{ color: "#cbd5e1", fontSize: 13, lineHeight: 1 }} title="Drag to reorder">⠿</span>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, cursor: "pointer", fontSize: 13, color: "#1f2937" }}>
+                    <input type="checkbox" checked={!hidden.has(id)} onChange={() => onToggle(id)} style={{ width: 15, height: 15, cursor: "pointer" }} />
+                    {col.label}
+                  </label>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ borderTop: "1px solid #f1f5f9", marginTop: 6, paddingTop: 6, textAlign: "right" }}>
+            <button type="button" onClick={onReset} style={{ background: "none", border: "none", color: "#6366f1", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "2px 4px" }}>Reset to default</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function statusPill(status: string) {
@@ -66,54 +120,27 @@ function statusPill(status: string) {
   return <span style={{ display: "inline-block", padding: "2px 9px", borderRadius: 999, fontSize: 11.5, fontWeight: 700, background: tone.bg, color: tone.fg }}>{label}</span>;
 }
 
-export function PreorderCustomerOrdersPanel({ orders, search = "" }: { orders: PreorderDashboardCustomerOrder[]; search?: string }) {
+export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hidden, onReorder, shopDomain }: {
+  orders: PreorderDashboardCustomerOrder[];
+  search?: string;
+  colOrder: OrdersColId[];
+  hidden: Set<OrdersColId>;
+  onReorder: (drag: OrdersColId, target: OrdersColId) => void;
+  shopDomain?: string | null;
+}) {
   const [sortCol, setSortCol] = useState<OrdersSortCol>("dispatch");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
-  // Column show/hide + order, remembered per browser.
-  const [colOrder, setColOrder] = useState<OrdersColId[]>(ORDERS_COL_ALL);
-  const [hidden, setHidden] = useState<Set<OrdersColId>>(new Set());
-  const [colMenuOpen, setColMenuOpen] = useState(false);
   const [dragId, setDragId] = useState<OrdersColId | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    const p = loadOrdersColPrefs();
-    setColOrder(p.order);
-    setHidden(new Set(p.hidden));
-  }, []);
-  useEffect(() => {
-    if (!colMenuOpen) return;
-    const onDown = (e: MouseEvent) => { if (menuRef.current && !menuRef.current.contains(e.target as Node)) setColMenuOpen(false); };
-    document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
-  }, [colMenuOpen]);
-
-  const reorder = (drag: OrdersColId, target: OrdersColId) => {
-    if (drag === target) return;
-    setColOrder((prev) => {
-      const next = prev.filter((id) => id !== drag);
-      const idx = next.indexOf(target);
-      if (idx < 0) return prev;
-      next.splice(idx, 0, drag);
-      saveOrdersColPrefs(next, hidden);
-      return next;
-    });
-  };
-  const toggleHidden = (id: OrdersColId) => {
-    setHidden((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else { if (colOrder.filter((c) => !next.has(c)).length <= 1) return prev; next.add(id); }
-      saveOrdersColPrefs(colOrder, next);
-      return next;
-    });
-  };
   const visibleCols = colOrder.filter((id) => !hidden.has(id)).map((id) => ORDERS_COL_DEF.get(id)!);
+  // Shopify admin order URL — handle derived from the shop's myshopify domain.
+  const adminHandle = (shopDomain ?? "").replace(/\.myshopify\.com$/i, "").trim();
+  const orderUrl = (internalId: string): string | null => (adminHandle && /^\d+$/.test(internalId)) ? `https://admin.shopify.com/store/${adminHandle}/orders/${internalId}` : null;
 
   const rows = useMemo(() => {
     const flat = orders.flatMap((order) => order.lines.map((line) => ({
       key: line.reservationId,
       orderName: order.shopifyOrderName || order.shopifyOrderId,
+      orderId: String(order.shopifyOrderId ?? "").replace(/\D/g, ""),
       orderDate: order.reservedAt,
       customer: order.customerEmail || "—",
       market: order.market,
@@ -167,7 +194,12 @@ export function PreorderCustomerOrdersPanel({ orders, search = "" }: { orders: P
 
   const renderCell = (id: OrdersColId, r: typeof rows[number]) => {
     switch (id) {
-      case "order": return <td key={id} style={{ ...td, fontWeight: 700 }}>{r.orderName}</td>;
+      case "order": {
+        const url = orderUrl(r.orderId);
+        return <td key={id} style={{ ...td, fontWeight: 700 }}>{url
+          ? <a href={url} target="_blank" rel="noreferrer" title="Open this order in Shopify" style={{ color: "#2563eb", textDecoration: "underline", textUnderlineOffset: 2, display: "inline-flex", alignItems: "center", gap: 4 }}>{r.orderName}<span aria-hidden style={{ fontSize: 11, opacity: 0.85 }}>↗</span></a>
+          : r.orderName}</td>;
+      }
       case "orderDate": return <td key={id} style={{ ...td, color: "#475569" }}>{formatDateTime(r.orderDate)}</td>;
       case "customer": return <td key={id} style={{ ...td, color: "#64748b" }}>{r.customer}</td>;
       case "picture": return <td key={id} style={td}>{r.imageUrl ? <img src={r.imageUrl} alt="" style={{ width: 51, height: 63, objectFit: "cover", borderRadius: 5 }} /> : <div style={{ width: 51, height: 63, background: "#f1f5f9", borderRadius: 5 }} />}</td>;
@@ -182,46 +214,7 @@ export function PreorderCustomerOrdersPanel({ orders, search = "" }: { orders: P
 
   return (
     <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, overflow: "hidden" }}>
-      {/* Toolbar — Columns selector */}
-      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", padding: "8px 10px", borderBottom: "1px solid #eef2f7", position: "relative" }} ref={menuRef}>
-        <button
-          type="button"
-          onClick={() => setColMenuOpen((o) => !o)}
-          style={{ display: "inline-flex", alignItems: "center", gap: 6, background: colMenuOpen ? "#eef2ff" : "#fff", border: "1px solid #cbd5e1", borderRadius: 8, padding: "6px 11px", fontSize: 12.5, fontWeight: 700, color: "#334155", cursor: "pointer" }}
-        >⚙ Columns</button>
-        {colMenuOpen && (
-          <div style={{ position: "absolute", top: "calc(100% + 4px)", right: 10, zIndex: 30, width: 250, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, boxShadow: "0 12px 30px rgba(15,23,42,0.16)", padding: 8 }}>
-            <div style={{ fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: ".03em", padding: "4px 6px 8px" }}>Show &amp; reorder columns</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-              {colOrder.map((id) => {
-                const col = ORDERS_COL_DEF.get(id)!;
-                const isHidden = hidden.has(id);
-                return (
-                  <div
-                    key={id}
-                    draggable
-                    onDragStart={() => setDragId(id)}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={() => { if (dragId) reorder(dragId, id); setDragId(null); }}
-                    onDragEnd={() => setDragId(null)}
-                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 6px", borderRadius: 7, cursor: "grab", background: dragId === id ? "#eef2ff" : "transparent" }}
-                  >
-                    <span style={{ color: "#cbd5e1", fontSize: 13, lineHeight: 1, cursor: "grab" }} title="Drag to reorder">⠿</span>
-                    <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, cursor: "pointer", fontSize: 13, color: "#1f2937" }}>
-                      <input type="checkbox" checked={!isHidden} onChange={() => toggleHidden(id)} style={{ width: 15, height: 15, cursor: "pointer" }} />
-                      {col.label}
-                    </label>
-                  </div>
-                );
-              })}
-            </div>
-            <div style={{ borderTop: "1px solid #f1f5f9", marginTop: 6, paddingTop: 6, textAlign: "right" }}>
-              <button type="button" onClick={() => { setColOrder(ORDERS_COL_ALL); setHidden(new Set()); saveOrdersColPrefs(ORDERS_COL_ALL, new Set()); }} style={{ background: "none", border: "none", color: "#6366f1", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "2px 4px" }}>Reset to default</button>
-            </div>
-          </div>
-        )}
-      </div>
-      <div style={{ overflow: "auto", maxHeight: "calc(100vh - 288px)", borderRadius: 12 }}>
+      <div style={{ overflow: "auto", maxHeight: "calc(100vh - 240px)", borderRadius: 12 }}>
         <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 940 }}>
           <thead>
             <tr>
@@ -231,7 +224,7 @@ export function PreorderCustomerOrdersPanel({ orders, search = "" }: { orders: P
                   draggable
                   onDragStart={() => setDragId(col.id)}
                   onDragOver={(e) => e.preventDefault()}
-                  onDrop={() => { if (dragId) reorder(dragId, col.id); setDragId(null); }}
+                  onDrop={() => { if (dragId) onReorder(dragId, col.id); setDragId(null); }}
                   onDragEnd={() => setDragId(null)}
                   onClick={() => { if (col.sortable) clickSort(col.id as OrdersSortCol); }}
                   title="Click to sort · drag to reorder"

@@ -12986,7 +12986,7 @@ export default function PortalDashboard() {
             <AiChat variant="page" />
           </div>
         ) : page === "preorders" && preorderDashboard ? (
-          <PreordersDashboard data={preorderDashboard} search={preorderSearch} />
+          <PreordersDashboard data={preorderDashboard} search={preorderSearch} shopDomain={shopDomain} />
         ) : page === "reorder" ? (
           <ReorderPlannerPage search={reorderSearch} restockSettings={restockSettings} canManagePreorder={canManagePreorder} />
         ) : page === "search" ? (

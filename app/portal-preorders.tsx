@@ -2,10 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { PreorderDashboardBatch, PreorderDashboardData } from "./preorder/preorder-dashboard.server";
 import {
+  OrdersColumnsButton,
+  ORDERS_COL_ALL,
   PreorderActivationReadinessPanel,
   PreorderCustomerOrdersPanel,
   PreorderReportsPanel,
   PreorderSettingsPanel,
+  normalizeOrdersColPrefs,
+  type OrdersColId,
 } from "./preorder/preorder-operations-panels";
 import { PreorderWebhookStatusPanel } from "./preorder/preorder-webhook-status-panel";
 import { PreorderShopifyReadinessPanel } from "./preorder/preorder-shopify-readiness-panel";
@@ -15,7 +19,10 @@ import { PreorderNotificationsPanel } from "./preorder/preorder-notifications-pa
 type Props = {
   data: PreorderDashboardData;
   search?: string;
+  shopDomain?: string | null;
 };
+
+const ORDERS_COLS_LS = "preorder-customer-orders-cols-v2";
 
 type TabId = "batches" | "orders" | "waitlist" | "notifications" | "reports" | "settings";
 
@@ -50,9 +57,37 @@ function dateInputValue(value: string | null) {
   return date.toISOString().slice(0, 10);
 }
 
-export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
+export function PreordersDashboard({ data, search: headerSearch = "", shopDomain = null }: Props) {
   const [tab, setTab] = useState<TabId>("batches");
   const [market, setMarket] = useState<"ALL" | "AU" | "USA">("ALL");
+  // Customer-orders column layout — localStorage for instant load, then the
+  // account (via /api/preorder-order-columns) so it follows the user everywhere.
+  const [colOrder, setColOrder] = useState<OrdersColId[]>(ORDERS_COL_ALL);
+  const [colHidden, setColHidden] = useState<Set<OrdersColId>>(new Set());
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(ORDERS_COLS_LS);
+      if (raw) { const n = normalizeOrdersColPrefs(JSON.parse(raw)); setColOrder(n.order); setColHidden(new Set(n.hidden)); }
+    } catch { /* ignore */ }
+    fetch("/api/preorder-order-columns", { credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((d: { ok?: boolean; columns?: { order?: string[]; hidden?: string[] } | null }) => {
+        if (d?.ok && d.columns) { const n = normalizeOrdersColPrefs(d.columns); setColOrder(n.order); setColHidden(new Set(n.hidden)); }
+      })
+      .catch(() => { /* ignore */ });
+  }, []);
+  const persistCols = (order: OrdersColId[], hiddenSet: Set<OrdersColId>) => {
+    try { window.localStorage.setItem(ORDERS_COLS_LS, JSON.stringify({ order, hidden: Array.from(hiddenSet) })); } catch { /* ignore */ }
+    fetch("/api/preorder-order-columns", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ order, hidden: Array.from(hiddenSet) }) }).catch(() => { /* ignore */ });
+  };
+  const reorderCols = (drag: OrdersColId, target: OrdersColId) => {
+    if (drag === target) return;
+    setColOrder((prev) => { const next = prev.filter((id) => id !== drag); const idx = next.indexOf(target); if (idx < 0) return prev; next.splice(idx, 0, drag); persistCols(next, colHidden); return next; });
+  };
+  const toggleCol = (id: OrdersColId) => {
+    setColHidden((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else { if (colOrder.filter((c) => !next.has(c)).length <= 1) return prev; next.add(id); } persistCols(colOrder, next); return next; });
+  };
+  const resetCols = () => { setColOrder(ORDERS_COL_ALL); setColHidden(new Set()); persistCols(ORDERS_COL_ALL, new Set()); };
   // Click a summary tile to filter the list below (e.g. "Active batches" → only
   // the active ones). Click the same tile again to clear.
   const [tileFilter, setTileFilter] = useState<"all" | "active" | "incoming" | "reserved" | "available" | "overallocated">("all");
@@ -120,6 +155,8 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
               <button key={item} type="button" onClick={() => setMarket(item)} style={{ ...s.segmentButton, ...(market === item ? s.segmentActive : {}) }}>{item}</button>
             ))}
           </div>
+        ) : tab === "orders" ? (
+          <OrdersColumnsButton colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} onToggle={toggleCol} onReset={resetCols} />
         ) : null}
       </div>
 
@@ -198,7 +235,7 @@ export function PreordersDashboard({ data, search: headerSearch = "" }: Props) {
           </div>
         </>
       ) : tab === "orders" ? (
-        <PreorderCustomerOrdersPanel orders={data.customerOrders} search={headerSearch} />
+        <PreorderCustomerOrdersPanel orders={data.customerOrders} search={headerSearch} colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} shopDomain={shopDomain} />
       ) : tab === "waitlist" ? (
         <>
           <NotifyBlockToggle enabled={data.configuration.notifyBlockEnabled} />
