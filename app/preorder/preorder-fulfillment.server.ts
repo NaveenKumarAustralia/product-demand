@@ -325,8 +325,18 @@ export async function normalizeOrderPreorderHolds(shop: string, token: string, o
   }
   if (correct) return { changed: false, held: 0, fullyHeld };
 
-  // (2) Release every held FO → OPEN + splittable.
-  for (const fo of active) if (fo.status === "ON_HOLD") await releaseFulfillmentOrderGraceful(shop, token, fo.id);
+  // (2) Release ONLY the WRONGLY-held FOs — an ON_HOLD fulfillment order that
+  // still holds a NON-pre-order line, so it must be released to re-split and let
+  // that in-stock line ship. A correctly-held FO (all pre-order lines) is LEFT
+  // ALONE: releasing it flips it to "ready for fulfillment", which makes Shopify
+  // COMMIT the unit and drive inventory NEGATIVE for a deferred pre-order (the
+  // Pippa −1 bug). Leaving it held keeps the pre-order uncommitted — Shopify
+  // stays at 0 and the app's ledger holds the count.
+  for (const fo of active) {
+    if (fo.status !== "ON_HOLD") continue;
+    const lines = fo.lineItems?.nodes ?? [];
+    if (lines.some((l) => !isPre(l))) await releaseFulfillmentOrderGraceful(shop, token, fo.id);
+  }
   // (3) Split each mixed OPEN FO to isolate the pre-order lines.
   fos = await fetchOrderFulfillmentOrders(shop, token, orderIdNumeric);
   for (const fo of fos) {
