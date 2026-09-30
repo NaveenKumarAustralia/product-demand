@@ -18,7 +18,7 @@ function formatDateTime(value: string | null) {
   return new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true }).format(date);
 }
 
-export type OrdersColId = "order" | "orderDate" | "customer" | "picture" | "product" | "batch" | "sku" | "qty" | "status" | "dispatch";
+export type OrdersColId = "order" | "orderDate" | "customer" | "picture" | "product" | "batch" | "sku" | "qty" | "orderValue" | "status" | "dispatch";
 type OrdersSortCol = Exclude<OrdersColId, "picture">;
 const ORDERS_COLUMNS: Array<{ id: OrdersColId; label: string; sortable: boolean; align?: "center" }> = [
   { id: "order", label: "Order", sortable: true },
@@ -29,9 +29,17 @@ const ORDERS_COLUMNS: Array<{ id: OrdersColId; label: string; sortable: boolean;
   { id: "batch", label: "Batch", sortable: true },
   { id: "sku", label: "SKU", sortable: true },
   { id: "qty", label: "Qty", sortable: true, align: "center" },
+  { id: "orderValue", label: "Declared Value", sortable: true },
   { id: "status", label: "Status", sortable: true },
   { id: "dispatch", label: "Dispatch", sortable: true },
 ];
+
+// Order value formatter — e.g. "$168.00 AUD". null → "—".
+function formatMoney(amount: number | null, currency: string | null): string {
+  if (amount == null) return "—";
+  const n = amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return currency ? `$${n} ${currency}` : `$${n}`;
+}
 const ORDERS_COL_DEF = new Map(ORDERS_COLUMNS.map((c) => [c.id, c]));
 export const ORDERS_COL_ALL: OrdersColId[] = ORDERS_COLUMNS.map((c) => c.id);
 
@@ -142,6 +150,8 @@ export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hid
       orderName: order.shopifyOrderName || order.shopifyOrderId,
       orderId: String(order.shopifyOrderId ?? "").replace(/\D/g, ""),
       orderDate: order.reservedAt,
+      orderValue: order.orderValue,
+      orderCurrency: order.orderCurrency,
       customer: order.customerEmail || "—",
       market: order.market,
       imageUrl: line.imageUrl,
@@ -157,7 +167,7 @@ export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hid
     // product, size, batch #, SKU, status, market, order date and dispatch date.
     const q = search.trim().toLowerCase();
     const searched = q
-      ? flat.filter((r) => [r.orderName, r.customer, r.product, r.size, `#${r.batch}`, String(r.batch), r.sku, r.status, r.market, formatDateTime(r.orderDate), formatDate(r.dispatch)]
+      ? flat.filter((r) => [r.orderName, r.customer, r.product, r.size, `#${r.batch}`, String(r.batch), r.sku, r.status, r.market, formatMoney(r.orderValue, r.orderCurrency), formatDateTime(r.orderDate), formatDate(r.dispatch)]
           .some((f) => String(f ?? "").toLowerCase().includes(q)))
       : flat;
     const val = (r: typeof flat[number]): string | number => {
@@ -169,6 +179,7 @@ export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hid
         case "batch": return r.batch;
         case "sku": return r.sku.toLowerCase();
         case "qty": return r.qty;
+        case "orderValue": return r.orderValue ?? Number.NEGATIVE_INFINITY;
         case "status": return r.status.toLowerCase();
         case "dispatch": return r.dispatch ? new Date(r.dispatch).getTime() : Number.POSITIVE_INFINITY;
       }
@@ -207,6 +218,7 @@ export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hid
       case "batch": return <td key={id} style={td}>#{r.batch}</td>;
       case "sku": return <td key={id} style={{ ...td, color: "#64748b" }}>{r.sku || "—"}</td>;
       case "qty": return <td key={id} style={{ ...td, textAlign: "center", fontWeight: 700 }}>{r.qty}</td>;
+      case "orderValue": return <td key={id} style={{ ...td, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{formatMoney(r.orderValue, r.orderCurrency)}</td>;
       case "status": return <td key={id} style={td}>{statusPill(r.status)}</td>;
       case "dispatch": return <td key={id} style={{ ...td, fontWeight: 700 }}>{formatDate(r.dispatch)}</td>;
     }

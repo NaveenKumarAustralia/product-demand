@@ -65,6 +65,10 @@ export type PreorderDashboardCustomerOrder = {
   market: string;
   reservedAt: string;
   totalQuantity: number;
+  // Declared order value = the Shopify order's total price (best-effort, fetched
+  // from Shopify). null when it couldn't be fetched.
+  orderValue: number | null;
+  orderCurrency: string | null;
   lines: PreorderDashboardCustomerOrderLine[];
 };
 
@@ -223,6 +227,8 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
         market: reservation.market,
         reservedAt: reservation.reservedAt.toISOString(),
         totalQuantity: 0,
+        orderValue: null,
+        orderCurrency: null,
         lines: [],
       };
       customerOrderMap.set(reservation.shopifyOrderId, item);
@@ -245,6 +251,37 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
   const customerOrders = Array.from(customerOrderMap.values()).sort(
     (a, b) => new Date(b.reservedAt).getTime() - new Date(a.reservedAt).getTime(),
   );
+
+  // Declared order value = the Shopify order's total price. Batch-fetched from
+  // Shopify (capped to the most recent 300 orders to bound the call). Best-effort:
+  // any failure just leaves orderValue null (the column shows "—").
+  try {
+    const sess = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true, accessToken: true } });
+    if (sess?.shop && sess.accessToken) {
+      const numOf = (id: string) => String(id ?? "").replace(/\D/g, "");
+      const capped = customerOrders.slice(0, 300);
+      const gids = Array.from(new Set(capped.map((o) => numOf(o.shopifyOrderId)).filter(Boolean).map((n) => `gid://shopify/Order/${n}`)));
+      const valueByOrder = new Map<string, { amount: number; currency: string }>();
+      for (let i = 0; i < gids.length; i += 250) {
+        const chunk = gids.slice(i, i + 250);
+        const res = await fetch(`https://${sess.shop}/admin/api/2025-10/graphql.json`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": sess.accessToken },
+          body: JSON.stringify({ query: `query OrderValues($ids: [ID!]!) { nodes(ids: $ids) { ... on Order { id totalPriceSet { shopMoney { amount currencyCode } } } } }`, variables: { ids: chunk } }),
+        }).catch(() => null);
+        const j = res ? await res.json().catch(() => null) as { data?: { nodes?: Array<{ id?: string; totalPriceSet?: { shopMoney?: { amount?: string; currencyCode?: string } } } | null> } } : null;
+        for (const n of j?.data?.nodes ?? []) {
+          const num = numOf(String(n?.id ?? ""));
+          const m = n?.totalPriceSet?.shopMoney;
+          if (num && m?.amount != null) valueByOrder.set(num, { amount: Number(m.amount) || 0, currency: String(m.currencyCode ?? "") });
+        }
+      }
+      for (const o of customerOrders) {
+        const v = valueByOrder.get(numOf(o.shopifyOrderId));
+        if (v) { o.orderValue = v.amount; o.orderCurrency = v.currency; }
+      }
+    }
+  } catch { /* best-effort; leave orderValue null */ }
 
   return {
     batches,
