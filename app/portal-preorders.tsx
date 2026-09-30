@@ -20,6 +20,7 @@ type Props = {
   data: PreorderDashboardData;
   search?: string;
   shopDomain?: string | null;
+  activeTab?: string;
 };
 
 const ORDERS_COLS_LS = "preorder-customer-orders-cols-v2";
@@ -57,8 +58,9 @@ function dateInputValue(value: string | null) {
   return date.toISOString().slice(0, 10);
 }
 
-export function PreordersDashboard({ data, search: headerSearch = "", shopDomain = null }: Props) {
-  const [tab, setTab] = useState<TabId>("batches");
+export function PreordersDashboard({ data, search: headerSearch = "", shopDomain = null, activeTab = "batches" }: Props) {
+  // Tab is driven by the sidebar submenu (via ?preorderTab=), not in-page tabs.
+  const tab: TabId = (TABS.some((t) => t.id === activeTab) ? activeTab : "batches") as TabId;
   const [market, setMarket] = useState<"ALL" | "AU" | "USA">("ALL");
   // Customer-orders column layout — localStorage for instant load, then the
   // account (via /api/preorder-order-columns) so it follows the user everywhere.
@@ -136,19 +138,10 @@ export function PreordersDashboard({ data, search: headerSearch = "", shopDomain
         <div style={{ ...s.notice, ...(notice.kind === "error" ? s.noticeError : s.noticeSuccess) }}>{notice.text}</div>
       ) : null}
 
+      {/* Tabs moved into the sidebar submenu — this row now shows the current
+          section title on the left and its controls on the right. */}
       <div style={s.tabsRow}>
-        <div style={s.tabs}>
-          {TABS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setTab(item.id)}
-              style={{ ...s.tab, ...(tab === item.id ? s.tabActive : {}) }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
+        <div style={{ fontSize: 19, fontWeight: 800, color: "#0f172a" }}>{TABS.find((t) => t.id === tab)?.label ?? ""}</div>
         {tab === "batches" ? (
           <div style={s.segmented}>
             {(["ALL", "AU", "USA"] as const).map((item) => (

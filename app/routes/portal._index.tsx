@@ -6356,7 +6356,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (!formData && currentUrl && nextUrl) {
     const cur = new URL(currentUrl);
     const nxt = new URL(nextUrl);
-    for (const p of ["thread", "row", "collectionId", "shootId", "groupId"]) {
+    for (const p of ["thread", "row", "collectionId", "shootId", "groupId", "preorderTab"]) {
       cur.searchParams.delete(p);
       nxt.searchParams.delete(p);
     }
@@ -7268,6 +7268,17 @@ const ALL_NAV_ITEMS = [
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
 const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "reorder", "preorders", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox", "ai"];
+// Pre-orders sub-tabs — rendered as a dropdown submenu under "Pre-orders" in the
+// sidebar (open while the Pre-orders page is showing). Must match the tab ids in
+// portal-preorders.tsx (PreordersDashboard).
+const PREORDER_SUBTABS: Array<{ id: string; label: string }> = [
+  { id: "batches", label: "Products & Batches" },
+  { id: "orders", label: "Customer Orders" },
+  { id: "waitlist", label: "Back in Stock" },
+  { id: "notifications", label: "Notifications" },
+  { id: "reports", label: "Reports" },
+  { id: "settings", label: "Settings" },
+];
 type FabricSheetData = FabricStockSheet & { originalRows?: string[][]; rowKeys?: number[]; totalCost?: number | null; error?: string };
 const DELETE_CONFIRM_SKIP_KEY = "supplier-portal-delete-confirm-skip-until";
 const PORTAL_LOGIN_REQUIRED_KEY = "supplier-portal-login-required-v1";
@@ -11954,6 +11965,8 @@ export default function PortalDashboard() {
   })();
   const [searchParams, setSearchParams] = useSearchParams();
   const submit = useSubmit();
+  // Active Pre-orders sub-tab (drives both the sidebar submenu and the dashboard).
+  const preorderTab = searchParams.get("preorderTab") ?? "batches";
   const columnWidthsFetcher = useFetcher();
   const undoFetcher = useFetcher();
   const [addRowNonce, setAddRowNonce] = useState(0);
@@ -12527,6 +12540,34 @@ export default function PortalDashboard() {
         <nav style={{ ...s.nav, flex: 1, overflowY: "auto", minHeight: 0 }}>
           {orderedNavItems.map((item) => {
             const isActive = item.id === "restock" ? (page === "restock" && !selectedProductGroup) : page === item.id;
+            // Pre-orders gets a dropdown submenu (its former horizontal tabs),
+            // open while the Pre-orders page is showing. Sub-tabs switch the view
+            // client-side via ?preorderTab= (no full reload).
+            if (item.id === "preorders") {
+              return (
+                <div key={item.id} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <a href={item.href} style={{ ...s.navItem, ...(isActive ? s.navItemActive : {}), display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>{item.label}</span>
+                    {page === "preorders" && <span aria-hidden style={{ fontSize: 10, opacity: 0.8 }}>▾</span>}
+                  </a>
+                  {page === "preorders" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                      {PREORDER_SUBTABS.map((sub) => {
+                        const subActive = preorderTab === sub.id;
+                        return (
+                          <button
+                            key={sub.id}
+                            type="button"
+                            onClick={() => setSearchParams((prev) => { const n = new URLSearchParams(prev); n.set("page", "preorders"); n.set("preorderTab", sub.id); return n; }, { preventScrollReset: true })}
+                            style={{ ...s.navSubItem, textAlign: "left", background: subActive ? "rgba(255,255,255,0.15)" : "transparent", border: "none", cursor: "pointer", color: "inherit", opacity: subActive ? 1 : 0.82, width: "100%", boxSizing: "border-box" }}
+                          >{sub.label}</button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            }
             return (
               <a key={item.id} href={item.href} style={{ ...s.navItem, ...(isActive ? s.navItemActive : {}) }}>{item.label}</a>
             );
@@ -12986,7 +13027,7 @@ export default function PortalDashboard() {
             <AiChat variant="page" />
           </div>
         ) : page === "preorders" && preorderDashboard ? (
-          <PreordersDashboard data={preorderDashboard} search={preorderSearch} shopDomain={shopDomain} />
+          <PreordersDashboard data={preorderDashboard} search={preorderSearch} shopDomain={shopDomain} activeTab={preorderTab} />
         ) : page === "reorder" ? (
           <ReorderPlannerPage search={reorderSearch} restockSettings={restockSettings} canManagePreorder={canManagePreorder} />
         ) : page === "search" ? (
