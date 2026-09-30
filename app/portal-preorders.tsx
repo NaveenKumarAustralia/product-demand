@@ -138,20 +138,21 @@ export function PreordersDashboard({ data, search: headerSearch = "", shopDomain
         <div style={{ ...s.notice, ...(notice.kind === "error" ? s.noticeError : s.noticeSuccess) }}>{notice.text}</div>
       ) : null}
 
-      {/* Tabs moved into the sidebar submenu — this row now shows the current
-          section title on the left and its controls on the right. */}
-      <div style={s.tabsRow}>
-        <div style={{ fontSize: 19, fontWeight: 800, color: "#0f172a" }}>{TABS.find((t) => t.id === tab)?.label ?? ""}</div>
-        {tab === "batches" ? (
-          <div style={s.segmented}>
-            {(["ALL", "AU", "USA"] as const).map((item) => (
-              <button key={item} type="button" onClick={() => setMarket(item)} style={{ ...s.segmentButton, ...(market === item ? s.segmentActive : {}) }}>{item}</button>
-            ))}
-          </div>
-        ) : tab === "orders" ? (
-          <OrdersColumnsButton colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} onToggle={toggleCol} onReset={resetCols} />
-        ) : null}
-      </div>
+      {/* Tabs + title now live in the sidebar / page header. This row is only for
+          the current section's controls (market toggle, columns), right-aligned. */}
+      {(tab === "batches" || tab === "orders") && (
+        <div style={{ ...s.tabsRow, justifyContent: "flex-end" }}>
+          {tab === "batches" ? (
+            <div style={s.segmented}>
+              {(["ALL", "AU", "USA"] as const).map((item) => (
+                <button key={item} type="button" onClick={() => setMarket(item)} style={{ ...s.segmentButton, ...(market === item ? s.segmentActive : {}) }}>{item}</button>
+              ))}
+            </div>
+          ) : (
+            <OrdersColumnsButton colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} onToggle={toggleCol} onReset={resetCols} />
+          )}
+        </div>
+      )}
 
       {tab === "batches" ? (
         <>

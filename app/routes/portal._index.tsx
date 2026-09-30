@@ -12617,6 +12617,11 @@ export default function PortalDashboard() {
                 const grp = gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
                 if (grp) return grp.name;
               }
+              // Pre-orders: the header title IS the current sub-tab (the tabs now
+              // live in the sidebar), so drop the generic "Pre-orders" heading.
+              if (page === "preorders") {
+                return PREORDER_SUBTABS.find((t) => t.id === preorderTab)?.label ?? "Pre-orders";
+              }
               return activePageTitle;
             })()}</h1>
             {page === "jj-new-products" && (() => {
