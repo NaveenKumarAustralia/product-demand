@@ -29,7 +29,7 @@ const ORDERS_COLUMNS: Array<{ id: OrdersColId; label: string; sortable: boolean;
   { id: "batch", label: "Batch", sortable: true },
   { id: "sku", label: "SKU", sortable: true },
   { id: "qty", label: "Qty", sortable: true, align: "center" },
-  { id: "orderValue", label: "Declared Value", sortable: true },
+  { id: "orderValue", label: "Order Value", sortable: true },
   { id: "status", label: "Status", sortable: true },
   { id: "dispatch", label: "Dispatch", sortable: true },
 ];
