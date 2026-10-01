@@ -31073,7 +31073,7 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
   const [manualQty, setManualQty] = useState<Record<string, string>>({});
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   // Click a column header to sort ("" = default server order, most urgent first).
-  const [sortCol, setSortCol] = useState<"" | "product" | "daysStock" | "inStock" | "sold" | "rate">("");
+  const [sortCol, setSortCol] = useState<"" | "product" | "type" | "daysStock" | "inStock" | "sold" | "rate">("");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   // Per-country sold breakdown, fetched lazily when a product row is expanded.
   const [countrySales, setCountrySales] = useState<Record<string, { loading?: boolean; rows?: Array<{ variant: string; country: string; units: number }>; countries?: string[] }>>({});
@@ -31345,6 +31345,7 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
     const val = (p: ReorderOverviewProduct): number | string => {
       switch (sortCol) {
         case "product": return (p.title || "").toLowerCase();
+        case "type": return (p.productType || "").toLowerCase();
         case "inStock": return p.totalStock;
         case "sold": return p.totalSold;
         case "rate": return rateOfP(p);
@@ -31361,7 +31362,7 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
   }, [products, sortCol, sortDir, growthFactor, lookbackDays]);
   const clickSort = (col: typeof sortCol) => {
     if (sortCol === col) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else { setSortCol(col); setSortDir(col === "product" ? "asc" : "desc"); }
+    else { setSortCol(col); setSortDir(col === "product" || col === "type" ? "asc" : "desc"); }
   };
   const sortArrow = (col: typeof sortCol) => (sortCol === col ? (sortDir === "asc" ? " ▲" : " ▼") : "");
   // Load fabric stock/on-order for a product (which fabric is it made from, how
@@ -31470,6 +31471,7 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
             <thead>
               <tr>
                 <th style={{ ...th, textAlign: "left", minWidth: 260, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("product")} title="Sort by name">Product{sortArrow("product")}</th>
+                <th style={{ ...th, textAlign: "left", cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("type")} title="Sort by product type">Type{sortArrow("type")}</th>
                 <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("daysStock")} title="Sort by days of stock left">Days stock{sortArrow("daysStock")}</th>
                 <th style={{ ...th, cursor: "pointer", userSelect: "none" }} onClick={() => clickSort("inStock")} title="Sort by in stock">In stock{sortArrow("inStock")}</th>
                 <th style={{ ...th, minWidth: 180 }} title="Stock per size">Variants</th>
@@ -31483,8 +31485,8 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
               </tr>
             </thead>
             <tbody>
-              {firstLoad && <tr><td colSpan={11} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>Loading products…</td></tr>}
-              {!firstLoad && products.length === 0 && <tr><td colSpan={11} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>No products match.</td></tr>}
+              {firstLoad && <tr><td colSpan={12} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>Loading products…</td></tr>}
+              {!firstLoad && products.length === 0 && <tr><td colSpan={12} style={{ ...cell, color: "#94a3b8", padding: "28px 10px" }}>No products match.</td></tr>}
               {sortedProducts.map((p) => {
                 const isOpen = expanded.has(p.id);
                 // Per-size sold is only fetched (and only needed) once a row is
@@ -31514,6 +31516,7 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
                           {productRunsOut && <span title="Sells out before your sell-until date at the current rate. Expand to see which sizes." style={{ fontSize: 15, lineHeight: 1, cursor: "help" }}>⚠️</span>}
                         </div>
                       </td>
+                      <td style={{ ...cell, textAlign: "left", color: "#64748b", whiteSpace: "nowrap" }}>{p.productType || "—"}</td>
                       <td style={cell}>{daysBadge(productDaysStock)}</td>
                       <td style={{ ...cell, fontWeight: 700 }}>{p.totalStock}</td>
                       <td style={{ ...cell, textAlign: "left", maxWidth: 260 }}>
@@ -31560,7 +31563,7 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
                     </tr>
                     {isOpen && (
                       <tr>
-                        <td colSpan={11} style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0", padding: "10px 16px 14px 38px" }}>
+                        <td colSpan={12} style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0", padding: "10px 16px 14px 38px" }}>
                           {!calc.haveSizes ? (
                             <div style={{ padding: "8px 2px 4px", fontSize: 12.5, color: "#94a3b8" }}>Loading size breakdown…</div>
                           ) : (
