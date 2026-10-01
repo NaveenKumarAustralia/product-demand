@@ -90,6 +90,38 @@ export function PreordersDashboard({ data, search: headerSearch = "", shopDomain
     setColHidden((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else { if (colOrder.filter((c) => !next.has(c)).length <= 1) return prev; next.add(id); } persistCols(colOrder, next); return next; });
   };
   const resetCols = () => { setColOrder(ORDERS_COL_ALL); setColHidden(new Set()); persistCols(ORDERS_COL_ALL, new Set()); };
+  // Customer Orders toolbar: order-date window + product + pending/fulfilled.
+  const [orderWindow, setOrderWindow] = useState<string>("all");
+  const [orderFrom, setOrderFrom] = useState<string>("");
+  const [orderUntil, setOrderUntil] = useState<string>("");
+  const [orderProduct, setOrderProduct] = useState<string>("");
+  const [orderStatus, setOrderStatus] = useState<"all" | "pending" | "fulfilled">("all");
+  // Every product that appears in the current order list → the Product filter.
+  const orderProductOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const o of data.customerOrders) for (const l of o.lines) { const t = (l.productTitle || "").trim(); if (t) set.add(t); }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [data.customerOrders]);
+  // Window preset → [from, to] in ms (same presets as the Reorder Planner;
+  // "last N days" includes today). null bound = unbounded.
+  const { orderDateFrom, orderDateTo } = useMemo(() => {
+    if (orderWindow === "all") return { orderDateFrom: null as number | null, orderDateTo: null as number | null };
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    const endOfToday = new Date(); endOfToday.setHours(23, 59, 59, 999);
+    const dayStart = (d: Date) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x.getTime(); };
+    const dayEnd = (d: Date) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x.getTime(); };
+    if (orderWindow === "custom") {
+      return {
+        orderDateFrom: orderFrom ? dayStart(new Date(`${orderFrom}T00:00:00`)) : null,
+        orderDateTo: orderUntil ? dayEnd(new Date(`${orderUntil}T00:00:00`)) : null,
+      };
+    }
+    if (orderWindow === "today") return { orderDateFrom: startOfToday.getTime(), orderDateTo: endOfToday.getTime() };
+    if (orderWindow === "yesterday") { const y = new Date(startOfToday); y.setDate(y.getDate() - 1); return { orderDateFrom: dayStart(y), orderDateTo: dayEnd(y) }; }
+    const n = Number(orderWindow) || 30;
+    const from = new Date(startOfToday); from.setDate(from.getDate() - n);
+    return { orderDateFrom: dayStart(from), orderDateTo: endOfToday.getTime() };
+  }, [orderWindow, orderFrom, orderUntil]);
   // Click a summary tile to filter the list below (e.g. "Active batches" → only
   // the active ones). Click the same tile again to clear.
   const [tileFilter, setTileFilter] = useState<"all" | "active" | "incoming" | "reserved" | "available" | "overallocated">("all");
@@ -138,19 +170,58 @@ export function PreordersDashboard({ data, search: headerSearch = "", shopDomain
         <div style={{ ...s.notice, ...(notice.kind === "error" ? s.noticeError : s.noticeSuccess) }}>{notice.text}</div>
       ) : null}
 
-      {/* Tabs + title now live in the sidebar / page header. This row is only for
-          the current section's controls (market toggle, columns), right-aligned. */}
-      {(tab === "batches" || tab === "orders") && (
+      {/* Tabs + title live in the sidebar / page header. */}
+      {tab === "batches" && (
         <div style={{ ...s.tabsRow, justifyContent: "flex-end" }}>
-          {tab === "batches" ? (
-            <div style={s.segmented}>
-              {(["ALL", "AU", "USA"] as const).map((item) => (
-                <button key={item} type="button" onClick={() => setMarket(item)} style={{ ...s.segmentButton, ...(market === item ? s.segmentActive : {}) }}>{item}</button>
-              ))}
-            </div>
-          ) : (
-            <OrdersColumnsButton colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} onToggle={toggleCol} onReset={resetCols} />
+          <div style={s.segmented}>
+            {(["ALL", "AU", "USA"] as const).map((item) => (
+              <button key={item} type="button" onClick={() => setMarket(item)} style={{ ...s.segmentButton, ...(market === item ? s.segmentActive : {}) }}>{item}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Customer Orders toolbar — date window + filters on the left, columns on
+          the right (styled like the Reorder Planner toolbar). */}
+      {tab === "orders" && (
+        <div style={s.ordersBar}>
+          <label style={s.ordersBarField}>
+            <span style={s.ordersBarLabel}>Window</span>
+            <select value={orderWindow} onChange={(e) => setOrderWindow(e.target.value)} style={{ ...s.ordersBarCtrl, width: 150 }}>
+              <option value="all">All dates</option>
+              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
+              <option value="3">Last 3 days</option>
+              <option value="7">Last 7 days</option>
+              <option value="14">Last 14 days</option>
+              <option value="30">Last 30 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="custom">Custom range…</option>
+            </select>
+          </label>
+          {orderWindow === "custom" && (
+            <>
+              <input type="date" value={orderFrom} onChange={(e) => setOrderFrom(e.target.value)} style={{ ...s.ordersBarCtrl, width: 140 }} title="From" />
+              <input type="date" value={orderUntil} onChange={(e) => setOrderUntil(e.target.value)} style={{ ...s.ordersBarCtrl, width: 140 }} title="To" />
+            </>
           )}
+          <label style={s.ordersBarField}>
+            <span style={s.ordersBarLabel}>Product</span>
+            <select value={orderProduct} onChange={(e) => setOrderProduct(e.target.value)} style={{ ...s.ordersBarCtrl, maxWidth: 240 }} title="Filter by product">
+              <option value="">All products</option>
+              {orderProductOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </label>
+          <label style={s.ordersBarField}>
+            <span style={s.ordersBarLabel}>Status</span>
+            <select value={orderStatus} onChange={(e) => setOrderStatus(e.target.value as "all" | "pending" | "fulfilled")} style={{ ...s.ordersBarCtrl, width: 130 }}>
+              <option value="all">All</option>
+              <option value="pending">Pending</option>
+              <option value="fulfilled">Fulfilled</option>
+            </select>
+          </label>
+          <div style={{ flex: 1 }} />
+          <OrdersColumnsButton colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} onToggle={toggleCol} onReset={resetCols} />
         </div>
       )}
 
@@ -229,7 +300,7 @@ export function PreordersDashboard({ data, search: headerSearch = "", shopDomain
           </div>
         </>
       ) : tab === "orders" ? (
-        <PreorderCustomerOrdersPanel orders={data.customerOrders} search={headerSearch} colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} shopDomain={shopDomain} />
+        <PreorderCustomerOrdersPanel orders={data.customerOrders} search={headerSearch} colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} shopDomain={shopDomain} dateFrom={orderDateFrom} dateTo={orderDateTo} productFilter={orderProduct} statusFilter={orderStatus} />
       ) : tab === "waitlist" ? (
         <>
           <NotifyBlockToggle enabled={data.configuration.notifyBlockEnabled} />
@@ -478,6 +549,10 @@ const s: Record<string, React.CSSProperties> = {
   noticeError: { background: "#fef2f2", border: "1px solid #fecaca", color: "#991b1b" },
   noticeSuccess: { background: "#f0fdf4", border: "1px solid #bbf7d0", color: "#166534" },
   tabsRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 20 },
+  ordersBar: { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, boxShadow: "0 1px 3px rgba(15,23,42,0.06)", padding: "9px 12px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" },
+  ordersBarField: { display: "inline-flex", alignItems: "center", gap: 6 },
+  ordersBarLabel: { fontSize: 11, fontWeight: 700, color: "#94a3b8", whiteSpace: "nowrap" },
+  ordersBarCtrl: { height: 32, boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 8, padding: "0 8px", fontSize: 13, fontWeight: 600, background: "#fff", color: "#0f172a", cursor: "pointer" },
   tabs: { display: "flex", gap: 8, flexWrap: "wrap" },
   tab: { border: "1px solid #e2e8f0", background: "#fff", borderRadius: 9, padding: "9px 15px", fontSize: 13, fontWeight: 700, color: "#475569", cursor: "pointer", boxShadow: "0 1px 2px rgba(15,23,42,0.05)" },
   tabActive: { background: "#C16452", color: "#fff", borderColor: "#C16452" },

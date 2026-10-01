@@ -128,13 +128,18 @@ function statusPill(status: string) {
   return <span style={{ display: "inline-block", padding: "2px 9px", borderRadius: 999, fontSize: 11.5, fontWeight: 700, background: tone.bg, color: tone.fg }}>{label}</span>;
 }
 
-export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hidden, onReorder, shopDomain }: {
+export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hidden, onReorder, shopDomain, dateFrom = null, dateTo = null, productFilter = "", statusFilter = "all" }: {
   orders: PreorderDashboardCustomerOrder[];
   search?: string;
   colOrder: OrdersColId[];
   hidden: Set<OrdersColId>;
   onReorder: (drag: OrdersColId, target: OrdersColId) => void;
   shopDomain?: string | null;
+  // Toolbar filters (applied before free-text search).
+  dateFrom?: number | null;   // order-date window start (ms), null = no lower bound
+  dateTo?: number | null;     // order-date window end (ms), null = no upper bound
+  productFilter?: string;     // exact product title, "" = all
+  statusFilter?: "all" | "pending" | "fulfilled";
 }) {
   const [sortCol, setSortCol] = useState<OrdersSortCol>("dispatch");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
@@ -163,13 +168,29 @@ export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hid
       status: line.status,
       dispatch: line.expectedShipDate,
     })));
+    // Toolbar filters: order-date window, product, and pending/fulfilled status.
+    const inDate = (iso: string | null) => {
+      if (dateFrom == null && dateTo == null) return true;
+      if (!iso) return false;
+      const t = new Date(iso).getTime();
+      if (dateFrom != null && t < dateFrom) return false;
+      if (dateTo != null && t > dateTo) return false;
+      return true;
+    };
+    const matchesStatus = (st: string) => {
+      if (statusFilter === "all") return true;
+      const s2 = st.toLowerCase();
+      // Pending = still reserved/awaiting; Fulfilled = shipped/fulfilled.
+      return statusFilter === "fulfilled" ? (s2 === "fulfilled" || s2 === "dispatched") : (s2 !== "fulfilled" && s2 !== "dispatched");
+    };
+    const base = flat.filter((r) => inDate(r.orderDate) && (!productFilter || r.product === productFilter) && matchesStatus(r.status));
     // Free-text search across everything on the row — order #, customer email,
     // product, size, batch #, SKU, status, market, order date and dispatch date.
     const q = search.trim().toLowerCase();
     const searched = q
-      ? flat.filter((r) => [r.orderName, r.customer, r.product, r.size, `#${r.batch}`, String(r.batch), r.sku, r.status, r.market, formatMoney(r.orderValue, r.orderCurrency), formatDateTime(r.orderDate), formatDate(r.dispatch)]
+      ? base.filter((r) => [r.orderName, r.customer, r.product, r.size, `#${r.batch}`, String(r.batch), r.sku, r.status, r.market, formatMoney(r.orderValue, r.orderCurrency), formatDateTime(r.orderDate), formatDate(r.dispatch)]
           .some((f) => String(f ?? "").toLowerCase().includes(q)))
-      : flat;
+      : base;
     const val = (r: typeof flat[number]): string | number => {
       switch (sortCol) {
         case "order": return r.orderName.toLowerCase();
@@ -189,7 +210,7 @@ export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hid
       const cmp = typeof va === "string" ? va.localeCompare(vb as string) : (va as number) - (vb as number);
       return sortDir === "asc" ? cmp : -cmp;
     });
-  }, [orders, sortCol, sortDir, search]);
+  }, [orders, sortCol, sortDir, search, dateFrom, dateTo, productFilter, statusFilter]);
 
   if (!orders.length) {
     return <div style={s.empty}>No preorder reservations have been created yet. Customer orders will appear here once Shopify order allocation is connected.</div>;
@@ -247,7 +268,7 @@ export function PreorderCustomerOrdersPanel({ orders, search = "", colOrder, hid
           </thead>
           <tbody>
             {rows.length === 0 ? (
-              <tr><td colSpan={visibleCols.length} style={{ ...td, textAlign: "center", color: "#94a3b8", padding: "28px 10px" }}>No customer orders match “{search.trim()}”. Search by order number, customer email, product, batch or SKU.</td></tr>
+              <tr><td colSpan={visibleCols.length} style={{ ...td, textAlign: "center", color: "#94a3b8", padding: "28px 10px" }}>{search.trim() ? <>No customer orders match “{search.trim()}”. Search by order number, customer email, product, batch or SKU.</> : "No customer orders match the current filters."}</td></tr>
             ) : rows.map((r) => (
               <tr key={r.key}>{visibleCols.map((col) => renderCell(col.id, r))}</tr>
             ))}
