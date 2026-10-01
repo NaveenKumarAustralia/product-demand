@@ -4949,7 +4949,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             }
             if (portalCol === "status") val = mapToChipValue(val, chipStatusOptions);
             if (portalCol === "sample") val = mapToChipValue(val, chipSampleOptions);
-            if (portalCol === "complProducts" || portalCol === "schedules" || portalCol === "reviews" || portalCol === "swatches") {
+            if (portalCol === "complProducts" || portalCol === "schedules" || portalCol === "reviews" || portalCol === "swatches" || portalCol === "combineListing" || portalCol === "imageAltText") {
               val = /^true$/i.test(val) ? "1" : "";
               if (!val) continue;
             }
@@ -5190,7 +5190,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             }
             if (portalCol === "status") val = mapToChipValue(val, chipStatusOptions);
             if (portalCol === "sample") val = mapToChipValue(val, chipSampleOptions);
-            if (portalCol === "complProducts" || portalCol === "schedules" || portalCol === "reviews" || portalCol === "swatches") {
+            if (portalCol === "complProducts" || portalCol === "schedules" || portalCol === "reviews" || portalCol === "swatches" || portalCol === "combineListing" || portalCol === "imageAltText") {
               val = /^true$/i.test(val) ? "1" : "";
               if (!val) continue;
             }
@@ -16164,6 +16164,8 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "schedules", label: "Schedules", type: "tickbox", width: 90 },
   { id: "reviews", label: "Reviews", type: "tickbox", width: 80 },
   { id: "swatches", label: "Swatches", type: "tickbox", width: 90 },
+  { id: "combineListing", label: "Combine listing", type: "tickbox", width: 110 },
+  { id: "imageAltText", label: "Image alt text", type: "tickbox", width: 110 },
 ];
 
 // Columns whose value is now set automatically at Shopify-create, so they no
@@ -16211,6 +16213,8 @@ const COLLECTION_COLUMN_HELP: Record<string, string> = {
   schedules: "Tick when scheduled activation is set.",
   reviews: "Tick when reviews are done.",
   swatches: "Tick when swatches are done.",
+  combineListing: "Tick when the combine listing is done.",
+  imageAltText: "Tick when the image alt text has been added.",
 };
 
 // Searchable picker for a Shopify product type (or tag) that already exists in
@@ -16336,6 +16340,9 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   insertAfter("price", { id: "priceRupees", label: "Price ₹", type: "number", width: 90 });
   insertAfter("priceRupees", { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 });
   insertAfter("duplicateFrom", { id: "categoryMetafields", label: "Category metafields", width: 180 });
+  // Two tickbox columns added later — surface them on existing collections too.
+  insertAfter("swatches", { id: "combineListing", label: "Combine listing", type: "tickbox", width: 110 });
+  insertAfter("combineListing", { id: "imageAltText", label: "Image alt text", type: "tickbox", width: 110 });
   // Factory Notes was added later as the leftmost column. Drop it in
   // at index 0 for existing collections so staff don't have to drag
   // it to the front manually.
