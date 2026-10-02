@@ -2671,7 +2671,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
       updatedLines += 1;
     }
-    return jsonResponse({ ok: true, refreshed: { title: ti.title ?? order.productTitle, updatedLines, image: Boolean(ti.imageUrl) } });
+    return jsonResponse({ ok: true, refreshed: { title: ti.title ?? order.productTitle, updatedLines, image: Boolean(ti.imageUrl), imageUrl: ti.imageUrl ?? null } });
   }
 
   if (intent === "duplicate_order") {
@@ -28338,8 +28338,19 @@ function OrderRow({
   // Shopify. Overwrites the stored values so the labels printed here match
   // Shopify after a name/SKU/barcode change there. A normal action → the page
   // revalidates and the row shows the new values.
-  const refreshFetcher = useFetcher<{ ok?: boolean; refreshed?: { title?: string; updatedLines?: number } }>();
+  const refreshFetcher = useFetcher<{ ok?: boolean; refreshed?: { title?: string; updatedLines?: number; image?: boolean; imageUrl?: string | null } }>();
   const refreshing = refreshFetcher.state !== "idle";
+  // Row image is tracked locally so a sync can swap it in instantly (and so a
+  // loader-refreshed image from props still flows through). Keyed by order.id,
+  // so a different order taking this slot re-initialises cleanly.
+  const [imageLocal, setImageLocal] = useState<string | null>(order.productImageUrl);
+  useEffect(() => { setImageLocal(order.productImageUrl); }, [order.productImageUrl]);
+  useEffect(() => {
+    const d = refreshFetcher.data;
+    if (refreshFetcher.state === "idle" && d?.ok && d.refreshed && "imageUrl" in d.refreshed && d.refreshed.imageUrl) {
+      setImageLocal(d.refreshed.imageUrl);
+    }
+  }, [refreshFetcher.state, refreshFetcher.data]);
   const inventoryFetcher = useFetcher<{ variantsBySize?: Record<string, number>; total?: number }>();
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -28469,13 +28480,13 @@ function OrderRow({
         {/* Picture */}
         <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[2]} style={destinationRowBg}>
           <div style={s.imageCell}>
-            {order.productImageUrl
+            {imageLocal
               ? <img
-                  src={order.productImageUrl}
+                  src={imageLocal}
                   alt={order.productTitle ?? ""}
                   style={{ ...s.thumb, cursor: "zoom-in" }}
                   title="Click to enlarge"
-                  onClick={(e) => { e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-image-lightbox", { detail: { url: order.productImageUrl, alt: order.productTitle ?? "" } })); }}
+                  onClick={(e) => { e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-image-lightbox", { detail: { url: imageLocal, alt: order.productTitle ?? "" } })); }}
                 />
               : <div style={s.noImg}>—</div>}
           </div>
@@ -28492,7 +28503,7 @@ function OrderRow({
               type="button"
               onClick={() => { if (!refreshing) submitPortalCell(refreshFetcher, { intent: "restock_refetch_shopify", orderId: order.id }); }}
               disabled={refreshing}
-              title="Refresh name, SKU & barcode from Shopify so the printed labels match"
+              title="Refresh name, image, SKU & barcode from Shopify so the row matches"
               style={{ position: "absolute", bottom: 2, left: 2, zIndex: 2, display: "inline-flex", alignItems: "center", justifyContent: "center", width: 18, height: 18, background: refreshing ? "#e5e7eb" : "#eef2ff", border: "1px solid #c7d2fe", color: "#3730a3", borderRadius: 4, padding: 0, lineHeight: 1, fontSize: 11, fontWeight: 700, cursor: refreshing ? "wait" : "pointer" }}
             >{refreshing ? "…" : "↻"}</button>
           )}
