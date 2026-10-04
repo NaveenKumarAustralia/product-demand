@@ -10543,8 +10543,8 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
   const across = Math.min(4, Math.max(1, Math.floor(setup.across) || 1));
   const wMm = setup.wMm, hMm = setup.hMm, gapMm = setup.gapMm;
   const pageW = across * wMm + (across - 1) * gapMm;
-  const bcW = Math.max(10, wMm - 4);
-  const bcH = Math.max(5, Math.min(hMm * 0.5, 13) * 0.7);
+  const bcW = Math.max(10, wMm - 6);                 // leave a quiet zone each side (no edge clipping)
+  const bcH = Math.max(5, Math.min(hMm * 0.28, 7));  // shorter bars → more room for a bigger name
   const labels: string[] = [];
   for (const it of items) {
     const n = Math.max(0, Math.floor(it.count) || 0);
@@ -10573,26 +10573,42 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
     .row{display:flex;width:${pageW}mm;height:${hMm}mm;page-break-after:always;}
     .row:last-child{page-break-after:auto;}
     .gap{width:${gapMm}mm;flex:0 0 ${gapMm}mm;}
-    .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:1.2mm 2mm 1.2mm 0mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;}
-    .pname{font-size:11pt;font-weight:700;text-align:center;max-width:100%;overflow:hidden;line-height:1.2;padding-top:0.3mm;max-height:2.4em;word-break:break-word;}
-    .sku{font-size:10pt;font-weight:700;text-align:center;line-height:1.15;}
-    .bc{line-height:0;margin-top:0.4mm;} .bc svg{display:block;shape-rendering:crispEdges;}
+    .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:0.8mm 1.6mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;}
+    .pname{width:100%;font-size:11pt;font-weight:700;text-align:center;line-height:1.1;overflow:hidden;word-break:break-word;overflow-wrap:break-word;}
+    .sku{font-size:10pt;font-weight:700;text-align:center;line-height:1.1;margin-top:0.3mm;}
+    .bc{line-height:0;margin-top:0.5mm;} .bc svg{display:block;shape-rendering:crispEdges;}
     .bc svg rect{fill:#000;}
-    .code{font-size:11pt;font-weight:700;letter-spacing:0.5px;font-family:'Courier New',monospace;line-height:1.2;color:#000;}
+    .code{font-size:10.5pt;font-weight:700;letter-spacing:0.5px;font-family:'Courier New',monospace;line-height:1.15;color:#000;margin-top:0.2mm;}
   </style></head><body>${rows.join("")}<script>
     (function(){
-      // Shrink each product name until it fits its 2-line box, so long names are
-      // never clipped. Only shrinks (never grows past the CSS size). Min ~7px.
-      var els = document.getElementsByClassName('pname');
-      for (var i = 0; i < els.length; i++) {
-        var el = els[i];
-        var size = parseFloat(getComputedStyle(el).fontSize) || 15;
-        var guard = 0;
-        while (el.scrollHeight > el.clientHeight + 0.5 && size > 7 && guard < 80) {
-          size -= 0.5;
-          el.style.fontSize = size + 'px';
-          guard++;
+      // Size each product name to be as LARGE as possible while fitting on at
+      // most two lines within the space left after the SKU, barcode and code.
+      // A name only shrinks when it genuinely can't fit at the max size.
+      var MAXPX = 30, MINPX = 6, LH = 1.1;
+      var lbls = document.getElementsByClassName('lbl');
+      for (var i = 0; i < lbls.length; i++) {
+        var lbl = lbls[i];
+        var name = lbl.querySelector('.pname');
+        if (!name) continue;
+        var sku = lbl.querySelector('.sku');
+        var bc = lbl.querySelector('.bc');
+        var code = lbl.querySelector('.code');
+        var cs = getComputedStyle(lbl);
+        var padV = parseFloat(cs.paddingTop || '0') + parseFloat(cs.paddingBottom || '0');
+        var used = (sku ? sku.offsetHeight : 0) + (bc ? bc.offsetHeight : 0) + (code ? code.offsetHeight : 0);
+        var avail = lbl.clientHeight - padV - used - 6; // small buffer for inter-element margins
+        if (avail < 10) avail = 10;
+        // Binary-search the largest font that stays within the available height,
+        // the label width, and two lines.
+        var lo = MINPX, hi = MAXPX;
+        for (var k = 0; k < 26; k++) {
+          var mid = (lo + hi) / 2;
+          name.style.fontSize = mid + 'px';
+          var lines = Math.round(name.scrollHeight / (mid * LH));
+          var fits = (name.scrollHeight <= avail) && (name.scrollWidth <= name.clientWidth + 0.5) && (lines <= 2);
+          if (fits) lo = mid; else hi = mid;
         }
+        name.style.fontSize = lo + 'px';
       }
     })();
   </script></body></html>`;
