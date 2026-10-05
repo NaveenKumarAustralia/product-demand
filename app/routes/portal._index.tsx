@@ -10543,7 +10543,7 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
   const across = Math.min(4, Math.max(1, Math.floor(setup.across) || 1));
   const wMm = setup.wMm, hMm = setup.hMm, gapMm = setup.gapMm;
   const pageW = across * wMm + (across - 1) * gapMm;
-  const bcW = Math.max(10, wMm - 6);                 // leave a quiet zone each side (no edge clipping)
+  const bcW = Math.max(10, wMm - 10);                // narrower → clearly centered with an even margin each side
   const bcH = Math.max(5, Math.min(hMm * 0.24, 6));  // shorter bars → more room so the name never clips
   const labels: string[] = [];
   for (const it of items) {
@@ -10576,7 +10576,7 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
     .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:0.8mm 1.6mm;display:flex;flex-direction:column;align-items:stretch;justify-content:center;overflow:hidden;}
     .pname{width:100%;font-size:10pt;font-weight:700;text-align:center;line-height:1.08;word-break:break-word;overflow-wrap:break-word;}
     .sku{font-size:9.5pt;font-weight:700;text-align:center;line-height:1.1;margin-top:0.4mm;}
-    .bc{line-height:0;margin-top:0.5mm;text-align:center;} .bc svg{display:inline-block;shape-rendering:crispEdges;}
+    .bc{line-height:0;margin:0.5mm auto 0;width:${bcW}mm;} .bc svg{display:block;width:100%;shape-rendering:crispEdges;}
     .bc svg rect{fill:#000;}
     .code{font-size:10pt;font-weight:700;letter-spacing:0.5px;font-family:'Courier New',monospace;line-height:1.1;color:#000;margin-top:0.2mm;}
   </style></head><body>${rows.join("")}<script>
