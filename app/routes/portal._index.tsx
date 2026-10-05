@@ -10576,7 +10576,7 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
     .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:0.8mm 1.6mm;display:flex;flex-direction:column;align-items:stretch;justify-content:center;overflow:hidden;}
     .pname{width:100%;font-size:10pt;font-weight:700;text-align:center;line-height:1.08;word-break:break-word;overflow-wrap:break-word;}
     .sku{font-size:9.5pt;font-weight:700;text-align:center;line-height:1.1;margin-top:0.4mm;}
-    .bc{line-height:0;margin-top:0.5mm;display:flex;justify-content:center;} .bc svg{display:block;shape-rendering:crispEdges;}
+    .bc{line-height:0;margin-top:0.5mm;text-align:center;} .bc svg{display:inline-block;shape-rendering:crispEdges;}
     .bc svg rect{fill:#000;}
     .code{font-size:10pt;font-weight:700;letter-spacing:0.5px;font-family:'Courier New',monospace;line-height:1.1;color:#000;margin-top:0.2mm;}
   </style></head><body>${rows.join("")}<script>
@@ -10584,7 +10584,7 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
       // Size each product name to be as LARGE as possible while fitting on at
       // most two lines in the space left after the SKU, barcode and code — and
       // then a hard clamp guarantees it is NEVER clipped (shrinks until it fits).
-      var MAXPX = 22, MINPX = 5, LH = 1.08;
+      var MAXPX = 13 * 96 / 72, MINPX = 5, LH = 1.08;  // cap the name at 13pt
       function H(el){ return el ? el.getBoundingClientRect().height : 0; }
       function MT(el){ return el ? (parseFloat(getComputedStyle(el).marginTop) || 0) : 0; }
       var lbls = document.getElementsByClassName('lbl');
