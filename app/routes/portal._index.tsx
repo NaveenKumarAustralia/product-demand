@@ -10573,12 +10573,12 @@ function printBarcodeLabels(productName: string, items: Array<BarcodeItem & { co
     .row{display:flex;width:${pageW}mm;height:${hMm}mm;page-break-after:always;}
     .row:last-child{page-break-after:auto;}
     .gap{width:${gapMm}mm;flex:0 0 ${gapMm}mm;}
-    .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:0.8mm 1.6mm;display:flex;flex-direction:column;align-items:stretch;justify-content:center;overflow:hidden;}
+    .lbl{width:${wMm}mm;height:${hMm}mm;flex:0 0 ${wMm}mm;padding:0.8mm 1.6mm;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;}
     .pname{width:100%;font-size:10pt;font-weight:700;text-align:center;line-height:1.08;word-break:break-word;overflow-wrap:break-word;}
-    .sku{font-size:9.5pt;font-weight:700;text-align:center;line-height:1.1;margin-top:0.4mm;}
-    .bc{line-height:0;margin:0.5mm auto 0;width:${bcW}mm;} .bc svg{display:block;width:100%;shape-rendering:crispEdges;}
+    .sku{width:100%;font-size:9.5pt;font-weight:700;text-align:center;line-height:1.1;margin-top:0.4mm;}
+    .bc{line-height:0;margin-top:0.5mm;width:${bcW}mm;} .bc svg{display:block;width:100%;shape-rendering:crispEdges;}
     .bc svg rect{fill:#000;}
-    .code{font-size:10pt;font-weight:700;letter-spacing:0.5px;font-family:'Courier New',monospace;line-height:1.1;color:#000;margin-top:0.2mm;}
+    .code{width:100%;font-size:10pt;font-weight:700;letter-spacing:0.5px;font-family:'Courier New',monospace;line-height:1.1;color:#000;margin-top:0.2mm;text-align:center;}
   </style></head><body>${rows.join("")}<script>
     (function(){
       // Size each product name to be as LARGE as possible while fitting on at
