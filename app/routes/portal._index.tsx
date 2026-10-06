@@ -5538,16 +5538,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 bySize.set(normalizeVariantSizeLabel(String(v?.title ?? "")), { sku: String(v?.sku ?? ""), barcode: String(v?.barcode ?? "") });
               }
               const freeSizeQty = Number(row.freeSize) || 0;
+              const ordered = COLLECTION_SIZE_COLUMN_LABELS.filter(([id]) => (Number(row[id]) || 0) > 0);
               let skuLines: string[] = [], barcodeLines: string[] = [];
               if (freeSizeQty > 0) {
                 const m = bySize.get(normalizeVariantSizeLabel("Free Size")) ?? [...bySize.values()][0];
                 if (m) { skuLines = [m.sku]; barcodeLines = [m.barcode]; }
-              } else {
-                const ordered = COLLECTION_SIZE_COLUMN_LABELS.filter(([id]) => (Number(row[id]) || 0) > 0);
+              } else if (ordered.length) {
+                // Row has ordered sizes → align codes to exactly those sizes.
                 for (const [, label] of ordered) {
                   const m = bySize.get(normalizeVariantSizeLabel(label));
                   skuLines.push(m?.sku ?? "");
                   barcodeLines.push(m?.barcode ?? "");
+                }
+              } else {
+                // Existing product with no order quantities on the row → recover
+                // EVERY variant's code, in Shopify's variant order.
+                for (const v of node.variants?.nodes ?? []) {
+                  skuLines.push(String(v?.sku ?? ""));
+                  barcodeLines.push(String(v?.barcode ?? ""));
                 }
               }
               if (skuEmpty && skuLines.some(Boolean)) { row.sku = skuLines.join("\n"); filledFields++; rowChanged = true; }
@@ -18233,62 +18241,60 @@ function CollectionSpreadsheetPage({
   // Lock/unlock a linked row (freeze Shopify pushes / resume + pull from Shopify).
   const lockFetcher = useFetcher<{ ok?: boolean; index?: number; locked?: boolean; unlocked?: boolean; deleted?: boolean; fields?: Record<string, string>; error?: string }>();
   const [lockBusyIdx, setLockBusyIdx] = useState<number | null>(null);
-  // Non-blocking job queue: press Shopify buttons freely — each job runs in the
-  // background (up to a few at once) and the button it came from shows a spinner.
-  // activeJobsRef is the source of truth (dedup + concurrency); busyJobs mirrors
-  // it so the right buttons spin.
+  // Press Shopify buttons freely — jobs QUEUE and run one at a time in the
+  // background through a single React Router fetcher (a proper data request, so
+  // the action result comes back as JSON, not a re-rendered HTML page). The
+  // button you pressed disables + spins; others stay clickable. busyJobs = the
+  // keys that are queued or running, so the right buttons show the wheel.
+  const jobFetcher = useFetcher<any>();
   const [busyJobs, setBusyJobs] = useState<Set<string>>(new Set());
-  const activeJobsRef = useRef<Set<string>>(new Set());
-  const jobQueueRef = useRef<Array<{ key: string; run: () => Promise<void> }>>([]);
-  const jobRunningRef = useRef(0);
-  const JOB_CONCURRENCY = 3;
-  const syncBusyJobs = () => setBusyJobs(new Set(activeJobsRef.current));
-  const pumpJobs = () => {
-    while (jobRunningRef.current < JOB_CONCURRENCY && jobQueueRef.current.length) {
-      const job = jobQueueRef.current.shift()!;
-      jobRunningRef.current += 1;
-      job.run().catch(() => undefined).finally(() => {
-        jobRunningRef.current -= 1;
-        activeJobsRef.current.delete(job.key);
-        syncBusyJobs();
-        pumpJobs();
-      });
+  const busyKeysRef = useRef<Set<string>>(new Set());
+  const jobQueueRef = useRef<Array<{ key: string; fd: FormData; apply: (data: any) => void }>>([]);
+  const currentJobRef = useRef<{ key: string; apply: (data: any) => void } | null>(null);
+  const refreshBusy = () => setBusyJobs(new Set(busyKeysRef.current));
+  const pumpQueue = () => {
+    if (currentJobRef.current || jobFetcher.state !== "idle") return;
+    const job = jobQueueRef.current.shift();
+    if (!job) return;
+    currentJobRef.current = { key: job.key, apply: job.apply };
+    jobFetcher.submit(job.fd, { method: "post" });
+  };
+  const enqueueJob = (key: string, fd: FormData, apply: (data: any) => void) => {
+    if (busyKeysRef.current.has(key)) return; // already queued / running
+    busyKeysRef.current.add(key);
+    refreshBusy();
+    jobQueueRef.current.push({ key, fd, apply });
+    pumpQueue();
+  };
+  useEffect(() => {
+    if (jobFetcher.state !== "idle") return;
+    const cur = currentJobRef.current;
+    if (cur) {
+      if (jobFetcher.data) { try { cur.apply(jobFetcher.data); } catch { /* ignore */ } }
+      currentJobRef.current = null;
+      busyKeysRef.current.delete(cur.key);
+      refreshBusy();
     }
-  };
-  const enqueueJob = (key: string, run: () => Promise<void>) => {
-    if (activeJobsRef.current.has(key)) return; // already queued / running
-    activeJobsRef.current.add(key);
-    syncBusyJobs();
-    jobQueueRef.current.push({ key, run });
-    pumpJobs();
-  };
-  // POST a FormData to this route's action and get JSON back (used by queued jobs).
-  const postAction = async (fd: FormData): Promise<any> => {
-    const res = await fetch(window.location.pathname + window.location.search, { method: "POST", body: fd, headers: { Accept: "application/json" }, credentials: "same-origin" });
-    return res.json();
-  };
+    pumpQueue();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobFetcher.state, jobFetcher.data]);
   // "Match Shopify & lock" — pull Shopify's current values into the row and lock
   // it (Shopify wins). Per-row patches in place; the bulk run reloads.
   const matchFetcher = useFetcher<{ ok?: boolean; matched?: number; failed?: number; index?: number | null; row?: Record<string, string> | null; error?: string }>();
   const [matchBusyIdx, setMatchBusyIdx] = useState<number | null>(null);
   const [matchAllBusy, setMatchAllBusy] = useState(false);
   const matchRowFromShopify = (idx: number) => {
-    enqueueJob(`match:${idx}`, async () => {
-      const fd = new FormData();
-      fd.set("intent", "match_shopify_and_lock");
-      fd.set("collectionId", String(listItem.id));
-      fd.set("rowIndex", String(idx));
-      try {
-        const data = await postAction(fd);
-        if (data?.ok && data.row && typeof data.index === "number") {
-          const i = data.index, patch = data.row;
-          setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...patch }; return next; });
-          setPushStatus({ msg: `Row ${idx + 1}: matched to Shopify and locked.`, tone: "ok" });
-        } else {
-          setPushStatus({ msg: `Row ${idx + 1} match failed — ${data?.error ?? "unknown error"}`, tone: "err" });
-        }
-      } catch (e) {
-        setPushStatus({ msg: `Row ${idx + 1} match failed — ${e instanceof Error ? e.message : "network error"}`, tone: "err" });
+    const fd = new FormData();
+    fd.set("intent", "match_shopify_and_lock");
+    fd.set("collectionId", String(listItem.id));
+    fd.set("rowIndex", String(idx));
+    enqueueJob(`match:${idx}`, fd, (data) => {
+      if (data?.ok && data.row && typeof data.index === "number") {
+        const i = data.index, patch = data.row;
+        setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...patch }; return next; });
+        setPushStatus({ msg: `Row ${idx + 1}: matched to Shopify and locked.`, tone: "ok" });
+      } else {
+        setPushStatus({ msg: `Row ${idx + 1} match failed — ${data?.error ?? "unknown error"}`, tone: "err" });
       }
     });
   };
@@ -19078,23 +19084,18 @@ function CollectionSpreadsheetPage({
   const updateRowInShopify = (idx: number) => {
     const row = rows[idx];
     if (!(row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
-    enqueueJob(`update:${idx}`, async () => {
-      const fd = new FormData();
-      fd.set("intent", "update_collection_row_in_shopify");
-      fd.set("collectionId", String(listItem.id));
-      fd.set("rowIndex", String(idx));
-      try {
-        const data = await postAction(fd);
-        if (data?.ok && Array.isArray(data.results)) {
-          setRows((prev) => { const next = [...prev]; for (const r of data.results) { if (r?.ok && next[r.index]) next[r.index] = { ...next[r.index], [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1" }; } return next; });
-          const r0 = data.results[0];
-          if ((r0?.categoryErrors ?? []).length) setPushStatus({ msg: `Row ${idx + 1}: pushed, but category metafields failed: ${r0.categoryErrors.join("; ")}`, tone: "err" });
-          else setPushStatus({ msg: `Row ${idx + 1}: pushed to Shopify and locked.`, tone: "ok" });
-        } else {
-          setPushStatus({ msg: `Row ${idx + 1} update failed — ${data?.error ?? "unknown error"}`, tone: "err" });
-        }
-      } catch (e) {
-        setPushStatus({ msg: `Row ${idx + 1} update failed — ${e instanceof Error ? e.message : "network error"}`, tone: "err" });
+    const fd = new FormData();
+    fd.set("intent", "update_collection_row_in_shopify");
+    fd.set("collectionId", String(listItem.id));
+    fd.set("rowIndex", String(idx));
+    enqueueJob(`update:${idx}`, fd, (data) => {
+      if (data?.ok && Array.isArray(data.results)) {
+        setRows((prev) => { const next = [...prev]; for (const r of data.results) { if (r?.ok && next[r.index]) next[r.index] = { ...next[r.index], [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1" }; } return next; });
+        const r0 = data.results[0];
+        if ((r0?.categoryErrors ?? []).length) setPushStatus({ msg: `Row ${idx + 1}: pushed, but category metafields failed: ${r0.categoryErrors.join("; ")}`, tone: "err" });
+        else setPushStatus({ msg: `Row ${idx + 1}: pushed to Shopify and locked.`, tone: "ok" });
+      } else {
+        setPushStatus({ msg: `Row ${idx + 1} update failed — ${data?.error ?? "unknown error"}`, tone: "err" });
       }
     });
   };
@@ -19103,25 +19104,20 @@ function CollectionSpreadsheetPage({
   const unlockRow = (idx: number, skipConfirm = false) => {
     if (!(rows[idx]?.[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
     if (!skipConfirm && !window.confirm("Unlock and pull the latest from Shopify?\n\nFields you've already edited here are KEPT. For everything you haven't touched (description, tags, product type, vendor, SEO, etc.), Shopify's current values are pulled in. Then you can push changes from the portal again.")) return;
-    enqueueJob(`unlock:${idx}`, async () => {
-      const fd = new FormData();
-      fd.set("intent", "unlock_collection_row_shopify");
-      fd.set("collectionId", String(listItem.id));
-      fd.set("rowIndex", String(idx));
-      try {
-        const data = await postAction(fd);
-        if (!data?.ok) { setPushStatus({ msg: data?.error === "verify_failed" ? `Row ${idx + 1}: couldn't reach Shopify — try again.` : `Row ${idx + 1} unlock failed — ${data?.error ?? "unknown error"}`, tone: "err" }); return; }
-        const i = typeof data.index === "number" ? data.index : idx;
-        if (data.unlocked) {
-          const preserved = Array.isArray(data.preserved) ? data.preserved : [];
-          setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...(data.fields ?? {}), [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: preserved.length ? "1" : "", [COL_ROW_SHOPIFY_EDITED]: "" }; return next; });
-          setPushStatus({ msg: preserved.length ? `Row ${i + 1}: unlocked — kept your edits, pulled the rest from Shopify.` : `Row ${i + 1}: unlocked — pulled the latest from Shopify.`, tone: "ok" });
-        } else if (data.deleted) {
-          setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_EDITED]: "" }; return next; });
-          setPushStatus({ msg: `Row ${i + 1}: product no longer exists in Shopify — unlinked.`, tone: "ok" });
-        }
-      } catch (e) {
-        setPushStatus({ msg: `Row ${idx + 1} unlock failed — ${e instanceof Error ? e.message : "network error"}`, tone: "err" });
+    const fd = new FormData();
+    fd.set("intent", "unlock_collection_row_shopify");
+    fd.set("collectionId", String(listItem.id));
+    fd.set("rowIndex", String(idx));
+    enqueueJob(`unlock:${idx}`, fd, (data) => {
+      if (!data?.ok) { setPushStatus({ msg: data?.error === "verify_failed" ? `Row ${idx + 1}: couldn't reach Shopify — try again.` : `Row ${idx + 1} unlock failed — ${data?.error ?? "unknown error"}`, tone: "err" }); return; }
+      const i = typeof data.index === "number" ? data.index : idx;
+      if (data.unlocked) {
+        const preserved = Array.isArray(data.preserved) ? data.preserved : [];
+        setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...(data.fields ?? {}), [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: preserved.length ? "1" : "", [COL_ROW_SHOPIFY_EDITED]: "" }; return next; });
+        setPushStatus({ msg: preserved.length ? `Row ${i + 1}: unlocked — kept your edits, pulled the rest from Shopify.` : `Row ${i + 1}: unlocked — pulled the latest from Shopify.`, tone: "ok" });
+      } else if (data.deleted) {
+        setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_EDITED]: "" }; return next; });
+        setPushStatus({ msg: `Row ${i + 1}: product no longer exists in Shopify — unlinked.`, tone: "ok" });
       }
     });
   };
