@@ -11310,7 +11310,14 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
     }
     if (!bytes) continue;
     const ext = mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : mime.includes("gif") ? "gif" : "jpg";
-    const resourceUrl = await stageUploadShopifyImage(shop, accessToken, `image-${i + 1}.${ext}`, mime, bytes);
+    // Preserve the original file name (base) so Shopify keeps it, with the
+    // extension matching the actual bytes; fall back to image-N when unknown.
+    const rawName = (entry.filename ?? "").trim();
+    const base = rawName
+      ? rawName.replace(/\.[a-z0-9]+$/i, "").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 120)
+      : "";
+    const uploadName = `${base || `image-${i + 1}`}.${ext}`;
+    const resourceUrl = await stageUploadShopifyImage(shop, accessToken, uploadName, mime, bytes);
     if (!resourceUrl) { errors.push(`image ${i + 1}: upload failed`); continue; }
     media.push({ originalSource: resourceUrl, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
   }
@@ -18152,6 +18159,8 @@ function CollectionSpreadsheetPage({
   const [editingName, setEditingName] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pushStatus, setPushStatus] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
+  // Row index whose locked-edit attempt should raise the "unlock first" popup.
+  const [lockPromptIdx, setLockPromptIdx] = useState<number | null>(null);
   // Row drag-reorder state. dragRowIdx = the row currently being
   // dragged, dragOverRowIdx = the row position the user is currently
   // hovering over. Visual indicator: dragged row dims, drop target
@@ -18629,7 +18638,7 @@ function CollectionSpreadsheetPage({
       // fields (status, sample, notes, loading, etc.) edit freely even when locked.
       const cur = prev[rowIdx];
       if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && SHOPIFY_SYNCED_COLUMN_IDS.has(colId)) {
-        setTimeout(() => setPushStatus({ msg: "🔒 This product is locked. Click “Unlock to edit” in the Name column first — your changes then push when you press “Update in Shopify.”", tone: "err" }), 0);
+        setTimeout(() => setLockPromptIdx(rowIdx), 0);
         return prev;
       }
       const next = prev.map((r, i) => {
@@ -18691,7 +18700,7 @@ function CollectionSpreadsheetPage({
     setRows((prev) => {
       const cur = prev[rowIdx];
       if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && Object.keys(fields).some((k) => SHOPIFY_SYNCED_COLUMN_IDS.has(k))) {
-        setTimeout(() => setPushStatus({ msg: "🔒 This product is locked. Click “Unlock to edit” in the Name column first — your changes then push when you press “Update in Shopify.”", tone: "err" }), 0);
+        setTimeout(() => setLockPromptIdx(rowIdx), 0);
         return prev;
       }
       const next = prev.map((r, i) => {
@@ -18891,9 +18900,9 @@ function CollectionSpreadsheetPage({
   };
   // Unlock a linked row → pull Shopify's current values ONLY for fields you
   // haven't edited (your in-progress edits are kept), then resume portal control.
-  const unlockRow = (idx: number) => {
+  const unlockRow = (idx: number, skipConfirm = false) => {
     if (!(rows[idx]?.[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
-    if (!window.confirm("Unlock and pull the latest from Shopify?\n\nFields you've already edited here are KEPT. For everything you haven't touched (description, tags, product type, vendor, SEO, etc.), Shopify's current values are pulled in. Then you can push changes from the portal again.")) return;
+    if (!skipConfirm && !window.confirm("Unlock and pull the latest from Shopify?\n\nFields you've already edited here are KEPT. For everything you haven't touched (description, tags, product type, vendor, SEO, etc.), Shopify's current values are pulled in. Then you can push changes from the portal again.")) return;
     setPushStatus(null);
     setLockBusyIdx(idx);
     const fd = new FormData();
@@ -19183,6 +19192,25 @@ function CollectionSpreadsheetPage({
           color: pushStatus.tone === "ok" ? "#065f46" : "#991b1b",
           border: `1px solid ${pushStatus.tone === "ok" ? "#a7f3d0" : "#fecaca"}`,
         }}>{pushStatus.msg}</div>
+      )}
+
+      {lockPromptIdx !== null && typeof document !== "undefined" && createPortal(
+        <div onClick={() => setLockPromptIdx(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 12, padding: "22px 24px", width: "min(470px, 94vw)", boxShadow: "0 24px 60px rgba(0,0,0,0.3)" }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: "#0f172a" }}>🔒 This product is locked</div>
+            <p style={{ margin: "10px 0 0", fontSize: 14, color: "#475569", lineHeight: 1.55 }}>
+              It’s linked to Shopify, so Shopify is the source of truth and portal edits are blocked. <b>Unlock to edit</b> — your changes then push when you press <b>“Update in Shopify.”</b>
+            </p>
+            <p style={{ margin: "8px 0 0", fontSize: 12.5, color: "#94a3b8", lineHeight: 1.5 }}>
+              Unlocking pulls Shopify’s current values for anything you haven’t already changed; fields you’ve edited here are kept.
+            </p>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18 }}>
+              <button type="button" onClick={() => setLockPromptIdx(null)} style={{ background: "#f1f5f9", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#334155" }}>Cancel</button>
+              <button type="button" onClick={() => { const i = lockPromptIdx; setLockPromptIdx(null); if (i !== null) unlockRow(i, true); }} style={{ background: "#C16452", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>🔓 Unlock to edit</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
 
       <div className="portal-table-scroll" style={{ ...s.tableWrap, flex: 1, minHeight: 0, maxHeight: "calc(100vh - 230px - var(--portal-bottom-gap) - var(--portal-footer-actions))" }}>
@@ -21396,7 +21424,7 @@ function CollectionReleaseCell({ value, onCommit }: { value: string; onCommit: (
 //     the full bytes stored in CollectionImage and fetched lazily.
 // parseMultiImageValue normalises everything to { thumb, key? } so
 // downstream code can render uniformly.
-type CollectionImageEntry = { thumb: string; key?: string; alt?: string };
+type CollectionImageEntry = { thumb: string; key?: string; alt?: string; filename?: string };
 function parseMultiImageValue(value: string): CollectionImageEntry[] {
   const v = value?.trim() ?? "";
   if (!v) return [];
@@ -21412,7 +21440,7 @@ function parseMultiImageValue(value: string): CollectionImageEntry[] {
             const key = typeof x.key === "string" ? x.key : undefined;
             // Keep entries that have EITHER an inline thumb OR a key (key-only
             // entries are served on demand from /portal/collection-image/<key>).
-            if (thumb || key) return { thumb, key, alt: typeof x.alt === "string" ? x.alt : undefined };
+            if (thumb || key) return { thumb, key, alt: typeof x.alt === "string" ? x.alt : undefined, filename: typeof x.filename === "string" ? x.filename : undefined };
           }
           return null;
         })
@@ -21427,11 +21455,12 @@ function serializeMultiImageValue(images: CollectionImageEntry[]): string {
   // Always object form when there's a key or alt to preserve; else keep the
   // compact string form for plain thumbs.
   return JSON.stringify(images.map((i) => {
-    if (i.key || i.alt) {
-      const o: { thumb?: string; key?: string; alt?: string } = {};
+    if (i.key || i.alt || i.filename) {
+      const o: { thumb?: string; key?: string; alt?: string; filename?: string } = {};
       if (i.thumb) o.thumb = i.thumb;   // omit empty thumb (key-only entries)
       if (i.key) o.key = i.key;
       if (i.alt) o.alt = i.alt;
+      if (i.filename) o.filename = i.filename;  // keep the original file name for Shopify
       return o;
     }
     return i.thumb;
@@ -21550,7 +21579,8 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
     setBusy(true);
     try {
       const dataUrls = await Promise.all(arr.map((f) => compressImageToDataUrl(f)));
-      const added = dataUrls.map((d): CollectionImageEntry => ({ thumb: d }));
+      // Keep the original file name so Shopify shows it (not image-1.jpg).
+      const added = dataUrls.map((d, i): CollectionImageEntry => ({ thumb: d, filename: arr[i]?.name || undefined }));
       // Single-image cells (fabric) replace; multi cells append.
       commit(singleImage ? added.slice(-1) : [...images, ...added]);
     } finally { setBusy(false); }
@@ -21722,8 +21752,8 @@ function CollectionImageAltEditor({ entry, productName, onChange }: { entry: Col
         onChange={(e) => setAlt(e.target.value)}
         onBlur={() => { if (alt !== (entry.alt ?? "")) onChange(alt); }}
         placeholder="Describe this image…"
-        rows={2}
-        style={{ width: "100%", boxSizing: "border-box", border: "1px solid #e5e7eb", borderRadius: 5, padding: "4px 6px", fontSize: 11, resize: "vertical", fontFamily: "inherit", color: "#374151" }}
+        rows={5}
+        style={{ width: "100%", boxSizing: "border-box", border: "1px solid #e5e7eb", borderRadius: 6, padding: "8px 10px", fontSize: 13, minHeight: 92, resize: "vertical", fontFamily: "inherit", color: "#374151", lineHeight: 1.4 }}
       />
       {err && <span style={{ fontSize: 10, color: "#b45309" }}>{err}</span>}
     </div>
@@ -21763,6 +21793,13 @@ function CollectionImageManagerModal({
   const piMatches = styleFetcher.data?.styles ?? [];
   const piLoading = styleFetcher.state !== "idle";
   void productInfo;
+  // Close only via the Done button or Escape — NOT by clicking outside (so a
+  // stray click can't lose your work mid-edit).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
   void fileRef;
@@ -21800,8 +21837,7 @@ function CollectionImageManagerModal({
 
   return (
     <div
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center" }}
-      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1500, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
       onPaste={(e) => {
         const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
         if (files.length) void onAddFiles(files);
@@ -21810,8 +21846,8 @@ function CollectionImageManagerModal({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: "#fff", borderRadius: 12, width: 720, maxWidth: "92vw",
-          maxHeight: "86vh", display: "flex", flexDirection: "column",
+          background: "#fff", borderRadius: 12, width: 1180, maxWidth: "97vw",
+          maxHeight: "94vh", display: "flex", flexDirection: "column",
           boxShadow: "0 24px 60px rgba(0,0,0,0.3)",
         }}
       >
@@ -21825,7 +21861,7 @@ function CollectionImageManagerModal({
           <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", fontWeight: 600 }}>Done</button>
         </div>
         <div style={{ padding: 18, overflowY: "auto", flex: 1 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
             {images.map((entry, idx) => {
               // Lazy-load the FULL-quality image from CollectionImage
               // via its key. While loading we keep the small thumb
