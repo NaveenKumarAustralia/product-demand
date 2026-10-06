@@ -17235,14 +17235,15 @@ function useProgressiveReveal(total: number, resetKey: string, step = TILE_RENDE
   }, [limit, total, step]);
   return Math.min(limit, total);
 }
-// Self-contained button loading wheel (SVG/SMIL — no global CSS needed). Default
-// style; swap the markup to change the chosen design from the 50-spinner gallery.
+// Button loading wheel — design #35 from the 50-spinner gallery (two-tone ring:
+// a faint full track with a solid half that spins). Self-contained SVG/SMIL, so
+// no global CSS, and it inherits the button's colour via currentColor.
 function ButtonSpinner({ size = 14, color = "currentColor" }: { size?: number; color?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden style={{ display: "inline-block", verticalAlign: "-2px", flex: "0 0 auto" }}>
-      <circle cx="12" cy="12" r="9" fill="none" stroke={color} strokeOpacity="0.28" strokeWidth="3" />
-      <path d="M21 12a9 9 0 0 0-9-9" fill="none" stroke={color} strokeWidth="3" strokeLinecap="round">
-        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.75s" repeatCount="indefinite" />
+      <circle cx="12" cy="12" r="9" fill="none" stroke={color} strokeOpacity="0.25" strokeWidth="3" />
+      <path d="M21 12 A 9 9 0 0 1 3 12" fill="none" stroke={color} strokeWidth="3" strokeLinecap="round">
+        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.85s" repeatCount="indefinite" />
       </path>
     </svg>
   );
