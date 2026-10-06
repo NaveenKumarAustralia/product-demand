@@ -14,6 +14,7 @@ const numeric = (s: unknown) => String(s ?? "").replace(/\D/g, "");
 const K_PRODUCT_ID = "__shopifyProductId";
 const K_LOCKED = "__shopifyLocked";
 const K_CATEGORY = "__categoryMetafields";
+const K_EDITED = "__shopifyEditedFields";
 
 async function gql(shop: string, token: string, query: string, variables: Record<string, unknown>) {
   const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
@@ -137,6 +138,14 @@ export async function syncLockedCollectionRowsForProduct(shop: string, productId
     const next = rows.map((row) => {
       if (numeric(row?.[K_PRODUCT_ID]) !== num || String(row?.[K_LOCKED] ?? "") !== "1") return row;
       changed = true; updated += 1;
+      // Don't overwrite the row's pictures if the user has a pending picture edit
+      // here (images are portal-curated and editable even when locked).
+      const edited = new Set(String(row?.[K_EDITED] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+      if (edited.has("modelPicture")) {
+        const { modelPicture: _skip, ...rest } = pulled;
+        void _skip;
+        return { ...row, ...rest };
+      }
       return { ...row, ...pulled };
     });
     if (changed) await prisma.collection.update({ where: { id: c.id }, data: { rows: next as unknown as object, updatedAt: new Date() } }).catch(() => {});

@@ -18731,7 +18731,9 @@ function CollectionSpreadsheetPage({
       // unlocked first (then it pushes on "Update in Shopify"). Portal-only
       // fields (status, sample, notes, loading, etc.) edit freely even when locked.
       const cur = prev[rowIdx];
-      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && SHOPIFY_SYNCED_COLUMN_IDS.has(colId)) {
+      // Pictures are portal-curated — add/remove/reorder them freely even on a
+      // locked row (no unlock popup). Every OTHER Shopify-bound field is blocked.
+      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && SHOPIFY_SYNCED_COLUMN_IDS.has(colId) && colId !== "modelPicture") {
         setTimeout(() => setLockPromptIdx(rowIdx), 0);
         return prev;
       }
@@ -18794,7 +18796,7 @@ function CollectionSpreadsheetPage({
   const updateRowFields = useCallback((rowIdx: number, fields: Record<string, string>) => {
     setRows((prev) => {
       const cur = prev[rowIdx];
-      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && Object.keys(fields).some((k) => SHOPIFY_SYNCED_COLUMN_IDS.has(k))) {
+      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && Object.keys(fields).some((k) => SHOPIFY_SYNCED_COLUMN_IDS.has(k) && k !== "modelPicture")) {
         setTimeout(() => setLockPromptIdx(rowIdx), 0);
         return prev;
       }
