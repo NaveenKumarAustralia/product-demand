@@ -5475,7 +5475,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const data = await shopifyGraphql<{ data?: { nodes?: Array<{
         id?: string; descriptionHtml?: string; productType?: string; tags?: string[]; vendor?: string;
         seo?: { title?: string; description?: string };
-        variants?: { nodes?: Array<{ compareAtPrice?: string | null; inventoryItem?: { harmonizedSystemCode?: string | null; countryCodeOfOrigin?: string | null } }> };
+        variants?: { nodes?: Array<{ title?: string | null; sku?: string | null; barcode?: string | null; compareAtPrice?: string | null; inventoryItem?: { harmonizedSystemCode?: string | null; countryCodeOfOrigin?: string | null } }> };
       } | null> } }>(session.shop, session.accessToken, `
         query BackfillProducts($ids: [ID!]!) {
           nodes(ids: $ids) {
@@ -5486,7 +5486,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               tags
               vendor
               seo { title description }
-              variants(first: 1) { nodes { compareAtPrice inventoryItem { harmonizedSystemCode countryCodeOfOrigin } } }
+              variants(first: 100) { nodes { title sku barcode compareAtPrice inventoryItem { harmonizedSystemCode countryCodeOfOrigin } } }
             }
           }
         }
@@ -5525,6 +5525,34 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             row[field] = val;
             filledFields++;
             rowChanged = true;
+          }
+          // SKU + barcode: recover Shopify's EXISTING per-size codes when the row
+          // has none — never overwrites, never generates new ones. Aligned to the
+          // row's ordered sizes (Free Size = single), matched by size label.
+          {
+            const skuEmpty = !String(row.sku ?? "").trim();
+            const barcodeEmpty = !String(row.barcode ?? "").trim();
+            if (skuEmpty || barcodeEmpty) {
+              const bySize = new Map<string, { sku: string; barcode: string }>();
+              for (const v of node.variants?.nodes ?? []) {
+                bySize.set(normalizeVariantSizeLabel(String(v?.title ?? "")), { sku: String(v?.sku ?? ""), barcode: String(v?.barcode ?? "") });
+              }
+              const freeSizeQty = Number(row.freeSize) || 0;
+              let skuLines: string[] = [], barcodeLines: string[] = [];
+              if (freeSizeQty > 0) {
+                const m = bySize.get(normalizeVariantSizeLabel("Free Size")) ?? [...bySize.values()][0];
+                if (m) { skuLines = [m.sku]; barcodeLines = [m.barcode]; }
+              } else {
+                const ordered = COLLECTION_SIZE_COLUMN_LABELS.filter(([id]) => (Number(row[id]) || 0) > 0);
+                for (const [, label] of ordered) {
+                  const m = bySize.get(normalizeVariantSizeLabel(label));
+                  skuLines.push(m?.sku ?? "");
+                  barcodeLines.push(m?.barcode ?? "");
+                }
+              }
+              if (skuEmpty && skuLines.some(Boolean)) { row.sku = skuLines.join("\n"); filledFields++; rowChanged = true; }
+              if (barcodeEmpty && barcodeLines.some(Boolean)) { row.barcode = barcodeLines.join("\n"); filledFields++; rowChanged = true; }
+            }
           }
           if (rowChanged) updatedRows++;
         }
@@ -18968,7 +18996,7 @@ function CollectionSpreadsheetPage({
   const backfillFromShopify = () => {
     const linked = rows.filter((r) => (r[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()).length;
     if (linked === 0) { setPushStatus({ msg: "No rows are linked to Shopify yet — nothing to backfill.", tone: "err" }); return; }
-    if (!window.confirm(`Pull product details from Shopify into ${linked} linked row(s)?\n\nThis only fills EMPTY fields (tags are merged in), never overwrites what you've entered, and does NOT push anything to Shopify.`)) return;
+    if (!window.confirm(`Pull product details from Shopify into ${linked} linked row(s)?\n\nThis only fills EMPTY fields — including missing SKU/barcode (recovered from Shopify's variants, never regenerated) — merges tags, never overwrites what you've entered, and does NOT push anything to Shopify.`)) return;
     setPushStatus(null);
     backfillFetcher.submit({ intent: "backfill_collection_from_shopify", collectionId: String(listItem.id) }, { method: "post" });
   };
@@ -19287,6 +19315,18 @@ function CollectionSpreadsheetPage({
             title="Pull Shopify's current values into every linked row (Shopify wins) and lock them — brings the portal up to date with Shopify and keeps it in sync"
           >
             {matchAllBusy ? "Matching…" : "⤓ Match all from Shopify & lock"}
+          </button>
+          <button
+            type="button"
+            onClick={backfillFromShopify}
+            disabled={isBackfilling || !loaded}
+            style={{
+              background: "#fff", color: "#6d28d9", border: "1px solid #c4b5fd", borderRadius: 6,
+              padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: isBackfilling ? "wait" : "pointer",
+            }}
+            title="Fill only EMPTY fields from Shopify — including missing SKU/barcode (recovered, never regenerated). Never overwrites, never pushes."
+          >
+            {isBackfilling ? "Backfilling…" : "Fill missing info + SKU/barcode"}
           </button>
         </div>
       </div>
