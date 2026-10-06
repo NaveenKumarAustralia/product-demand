@@ -6838,7 +6838,9 @@ const COLLECTION_FABRIC_LINK_KEY = "collections-fabric-link-v1";
 // under one tile. { groups: [{ id, name, collectionIds:[] }] }. Collections not
 // in any group show as normal tiles; a collection lives in at most one group.
 const COLLECTION_GROUPS_KEY = "collections-groups-v1";
-type CollectionGroup = { id: string; name: string; collectionIds: number[] };
+// coverCollectionId: which member collection's thumbnail is the group's cover
+// tile. Optional — falls back to the first member that has a thumbnail.
+type CollectionGroup = { id: string; name: string; collectionIds: number[]; coverCollectionId?: number };
 function normalizeCollectionGroups(value: unknown): CollectionGroup[] {
   const arr = value && typeof value === "object" && Array.isArray((value as { groups?: unknown }).groups)
     ? (value as { groups: unknown[] }).groups : Array.isArray(value) ? value : [];
@@ -6851,7 +6853,10 @@ function normalizeCollectionGroups(value: unknown): CollectionGroup[] {
       const ids = Array.isArray((g as CollectionGroup).collectionIds) ? (g as CollectionGroup).collectionIds : [];
       // Each collection can only belong to one group — dedupe across groups.
       const collectionIds = ids.map((n) => Number(n)).filter((n) => Number.isInteger(n) && !seen.has(n) && (seen.add(n), true));
-      return id && name ? { id, name, collectionIds } : null;
+      const rawCover = Number((g as CollectionGroup).coverCollectionId);
+      // Keep the cover only if it's still a member of the group.
+      const coverCollectionId = Number.isInteger(rawCover) && collectionIds.includes(rawCover) ? rawCover : undefined;
+      return id && name ? { id, name, collectionIds, ...(coverCollectionId != null ? { coverCollectionId } : {}) } : null;
     })
     .filter((g): g is CollectionGroup => Boolean(g));
 }
@@ -17202,6 +17207,13 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const removeFromGroup = (collectionId: number) => saveGroups(groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => id !== collectionId) })));
   const ungroup = (groupId: string) => { saveGroups(groups.filter((g) => g.id !== groupId)); openGroupNav(null); };
   const renameGroup = (groupId: string) => { const g = groups.find((x) => x.id === groupId); if (!g) return; const name = window.prompt("Rename group:", g.name)?.trim(); if (!name) return; saveGroups(groups.map((x) => x.id === groupId ? { ...x, name } : x)); };
+  // Group cover image: pick which member collection's thumbnail represents the
+  // group tile (null = back to auto / first member with an image).
+  const [coverPickerGroupId, setCoverPickerGroupId] = useState<string | null>(null);
+  const setGroupCover = (groupId: string, collectionId: number | null) => {
+    saveGroups(groups.map((g) => g.id === groupId ? { ...g, coverCollectionId: collectionId ?? undefined } : g));
+    setCoverPickerGroupId(null);
+  };
   // The group folder currently open (if any) — drives the toolbar (its nav +
   // title + rename/ungroup + count all live in the bar instead of a separate row).
   const openGroup = groupIdParam ? (groups.find((g) => g.id === groupIdParam) ?? null) : null;
@@ -17512,7 +17524,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                   searching, folders are hidden and matches show directly (below). */}
               {!showHidden && !searchQ && groups.map((g) => {
                 const memberCount = g.collectionIds.length;
-                const cover = collections.find((c) => g.collectionIds.includes(c.id) && c.hasThumbnail);
+                const picked = g.coverCollectionId != null ? collections.find((c) => c.id === g.coverCollectionId && c.hasThumbnail) : null;
+                const cover = picked ?? collections.find((c) => g.collectionIds.includes(c.id) && c.hasThumbnail);
                 return (
                   <div key={g.id} onClick={() => openGroupNav(g.id)} style={{ ...s.productStyleCard, cursor: "pointer", position: "relative" }} title={`Open ${g.name}`}>
                     <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative", background: "#0f766e" }}>
@@ -17523,6 +17536,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                       )}
                       {/* Folder badge (stacked-card look). */}
                       <div style={{ position: "absolute", top: 8, left: 8, background: "rgba(15,118,110,0.92)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>📦 {memberCount}</div>
+                      {/* Change cover image */}
+                      <button type="button" title="Change cover image" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 8, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 6, padding: "3px 7px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>🖼</button>
                       <div style={{ position: "absolute", inset: 0, boxShadow: "inset 0 0 0 3px rgba(255,255,255,0.5)", borderRadius: 6, pointerEvents: "none" }} />
                     </div>
                     <div style={{ padding: "8px 4px 2px" }}>
@@ -17559,6 +17574,44 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               {showHidden ? "← Back to active collections" : `Show hidden collections (${hiddenCount})`}
             </button>
           </div>
+        );
+      })()}
+
+      {coverPickerGroupId && typeof document !== "undefined" && (() => {
+        const g = groups.find((x) => x.id === coverPickerGroupId);
+        if (!g) return null;
+        const members = collections.filter((c) => g.collectionIds.includes(c.id));
+        const coverPickCard: React.CSSProperties = { background: "#fff", borderRadius: 8, padding: 6, cursor: "pointer" };
+        return createPortal(
+          <div onClick={() => setCoverPickerGroupId(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 12, padding: 20, width: "min(680px, 94vw)", maxHeight: "86vh", overflow: "auto", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <h3 style={{ margin: 0, fontSize: 16 }}>Cover image — {g.name}</h3>
+                <button type="button" onClick={() => setCoverPickerGroupId(null)} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 10px", fontSize: 13, cursor: "pointer" }}>Close</button>
+              </div>
+              <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>Pick which collection’s image shows on the group tile.</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(118px, 1fr))", gap: 10 }}>
+                <button type="button" onClick={() => setGroupCover(g.id, null)} style={{ ...coverPickCard, border: g.coverCollectionId == null ? "2px solid #0f766e" : "1px solid #e5e7eb" }}>
+                  <div style={{ aspectRatio: "1.3/1.8", background: "#f3f4f6", borderRadius: 6, display: "grid", placeItems: "center", color: "#6b7280", fontSize: 12, fontWeight: 800 }}>Auto</div>
+                  <div style={{ fontSize: 11, marginTop: 4, textAlign: "center", color: "#374151" }}>First image</div>
+                </button>
+                {members.map((c) => {
+                  const selected = g.coverCollectionId === c.id;
+                  return (
+                    <button key={c.id} type="button" disabled={!c.hasThumbnail} onClick={() => setGroupCover(g.id, c.id)} title={c.hasThumbnail ? c.name : `${c.name} (no image)`} style={{ ...coverPickCard, opacity: c.hasThumbnail ? 1 : 0.5, cursor: c.hasThumbnail ? "pointer" : "not-allowed", border: selected ? "2px solid #0f766e" : "1px solid #e5e7eb" }}>
+                      <div style={{ aspectRatio: "1.3/1.8", background: "#f3f4f6", borderRadius: 6, overflow: "hidden" }}>
+                        {c.hasThumbnail
+                          ? <img src={`/portal/thumbnail/collection/${c.id}?v=${new Date(c.updatedAt).getTime()}`} alt={c.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} loading="lazy" decoding="async" />
+                          : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center", color: "#9ca3af", fontSize: 11 }}>No image</div>}
+                      </div>
+                      <div style={{ fontSize: 11, marginTop: 4, textAlign: "center", color: "#374151", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>,
+          document.body,
         );
       })()}
 
