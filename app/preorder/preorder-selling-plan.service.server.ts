@@ -4,6 +4,7 @@ import { getPreorderEligibility } from "./preorder-rules.server";
 import { getPreorderLocationSettings, locationForMarket } from "./preorder-locations.server";
 import { buildPreorderSellingPlanGroup, buildPreorderSellingPlanUpdateInput, preorderExpectedLabel } from "./preorder-selling-plan";
 import { setVariantsPreorderMetafields, setProductPreorderTag } from "./preorder-fulfillment.server";
+import { reconcilePreorderInventoryPolicyForVariants } from "./preorder-inventory-policy.server";
 import {
   getPreorderSellingPlanRegistryEntry,
   getPreorderSellingPlanRegistryEntries,
@@ -280,6 +281,9 @@ export async function activatePreorderSellingPlan(input: {
     } catch (error) {
       console.warn("[preorder] selling-plan date refresh failed:", error instanceof Error ? error.message : error);
     }
+    // Re-activation just set CONTINUE on every variant above; immediately flip any
+    // that are already full back to DENY so they don't reopen for overselling.
+    await reconcilePreorderInventoryPolicyForVariants(order.shop, variantIds).catch(() => undefined);
     return { created: false, registry: existing };
   }
 
@@ -342,6 +346,10 @@ export async function activatePreorderSellingPlan(input: {
       toValue: sellingPlanGroupId,
     },
   }).catch(() => undefined);
+
+  // Now that the batch is live, align each variant's inventory policy to its
+  // remaining capacity (keeps CONTINUE while there's room; DENY if already full).
+  await reconcilePreorderInventoryPolicyForVariants(order.shop, variantIds).catch(() => undefined);
 
   return { created: true, registry };
 }

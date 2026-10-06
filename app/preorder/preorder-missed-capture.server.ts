@@ -2,6 +2,7 @@ import prisma from "./../db.server";
 import { KARMA_EAST_PREORDER_PLAN_PREFIX } from "./preorder-shopify-order-normalize";
 import { reservePreorderLine, PreorderCapacityError } from "./preorder-allocation.server";
 import { getOfflineToken, getAvailableAtLocation, addOrderTags, holdAllReservedPreorderLines } from "./preorder-fulfillment.server";
+import { reconcilePreorderInventoryPolicyForVariants, reconcileAllLivePreorderInventoryPolicies } from "./preorder-inventory-policy.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
 import { getPreorderLocationSettings, locationForMarket } from "./preorder-locations.server";
 import { marketFromDestination, type PreorderMarket } from "./preorder-rules.server";
@@ -211,6 +212,10 @@ export async function captureMissedPreorders(opts: { days?: number; apply?: bool
         errors.push({ order: cs[0].order, error: `tag/hold: ${error instanceof Error ? error.message : String(error)}` });
       }
     }
+  }
+  // Flip any now-full variant to DENY so it stops overselling on every path.
+  if (converted > 0) {
+    await reconcilePreorderInventoryPolicyForVariants(shop, candidates.map((c) => c.variantId)).catch(() => undefined);
   }
   return { scannedOrders, candidates, converted, errors, applied: true, skippedNoScope: false };
 }
@@ -458,7 +463,10 @@ export function startMissedPreorderCaptureScheduler() {
   const run = () => {
     captureMissedPreorders({ days: 4, apply: true })
       .then((r) => { if (r.converted || r.errors.length) console.log("[preorder missed capture] cycle:", { converted: r.converted, candidates: r.candidates.length, errors: r.errors.length }); })
-      .catch((e) => console.warn("[preorder missed capture] cycle failed:", e instanceof Error ? e.message : e));
+      .catch((e) => console.warn("[preorder missed capture] cycle failed:", e instanceof Error ? e.message : e))
+      // Self-healing: align every live variant's inventory policy to capacity so a
+      // full batch can't be oversold via Shop Pay / PayPal / express checkout.
+      .finally(() => { reconcileAllLivePreorderInventoryPolicies().catch((e) => console.warn("[preorder policy] sweep failed:", e instanceof Error ? e.message : e)); });
   };
   setTimeout(run, 120_000);
   setInterval(run, 3 * 60 * 60 * 1000);

@@ -13,6 +13,7 @@ import {
 } from "./preorder-shopify-order-normalize";
 import { getOfflineToken, addOrderTags, holdAllReservedPreorderLines } from "./preorder-fulfillment.server";
 import { captureNoPlanLinesForOrder, type PreorderPlacedItem } from "./preorder-missed-capture.server";
+import { reconcilePreorderInventoryPolicyForVariants } from "./preorder-inventory-policy.server";
 import { sendPreorderPlacedEvent } from "./preorder-klaviyo.server";
 
 const API_VERSION = "2025-10";
@@ -185,6 +186,9 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
         console.warn("[preorder] unified hold (no-plan only) failed:", error instanceof Error ? error.message : error);
       }
     }
+    // Flip any now-full variant to DENY so further express/Shop Pay checkouts
+    // can't oversell past the batch (matches the pre-order button's capacity gate).
+    await reconcilePreorderInventoryPolicyForVariants(shop, normalized.noPlanLines.map((line) => line.variantId)).catch(() => undefined);
     return { preorder: capturedMissed > 0, reservations: capturedMissed };
   }
 
@@ -259,6 +263,14 @@ export async function processShopifyOrderCreated(shop: string, payload: unknown)
       console.warn("[preorder] unified hold failed:", error instanceof Error ? error.message : error);
     }
 
+    // Keep each variant's inventory policy in step with remaining capacity, so a
+    // batch that just filled up blocks express/Shop Pay/PayPal checkouts too —
+    // they can no longer oversell past the batch and create un-holdable ghosts.
+    await reconcilePreorderInventoryPolicyForVariants(shop, [
+      ...normalized.lines.map((line) => line.variantId),
+      ...normalized.noPlanLines.map((line) => line.variantId),
+    ]).catch(() => undefined);
+
     return { preorder: true, reservations, market: normalized.market };
   } catch (error) {
     await releasePreorderOrder(shop, normalized.shopifyOrderId).catch(() => undefined);
@@ -281,7 +293,11 @@ export async function processShopifyOrderCancelled(shop: string, payload: unknow
   const order = (payload && typeof payload === "object" ? payload : {}) as ShopifyOrderPayload;
   const orderId = preorderText(order.id);
   if (!orderId) return { released: 0 };
+  // Grab the affected variants before releasing so we can re-open capacity.
+  const variantIds = (await prisma.preorderReservation.findMany({ where: { shop, shopifyOrderId: orderId }, select: { variantId: true } })).map((r) => r.variantId);
   const result = await releasePreorderOrder(shop, orderId);
+  // Cancelling frees capacity → a previously-full variant can sell again (CONTINUE).
+  await reconcilePreorderInventoryPolicyForVariants(shop, variantIds).catch(() => undefined);
   return { released: result.count };
 }
 
@@ -289,6 +305,9 @@ export async function processShopifyOrderFulfilled(shop: string, payload: unknow
   const order = (payload && typeof payload === "object" ? payload : {}) as ShopifyOrderPayload;
   const orderId = preorderText(order.id);
   if (!orderId) return { fulfilled: 0 };
+  const variantIds = (await prisma.preorderReservation.findMany({ where: { shop, shopifyOrderId: orderId }, select: { variantId: true } })).map((r) => r.variantId);
   const result = await fulfillPreorderOrder(shop, orderId);
+  // Keep the policy in step with capacity after fulfilment.
+  await reconcilePreorderInventoryPolicyForVariants(shop, variantIds).catch(() => undefined);
   return { fulfilled: result.count };
 }
