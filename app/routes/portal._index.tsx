@@ -21674,6 +21674,26 @@ function CollectionReleaseCell({ value, onCommit }: { value: string; onCommit: (
 // parseMultiImageValue normalises everything to { thumb, key? } so
 // downstream code can render uniformly.
 type CollectionImageEntry = { thumb: string; key?: string; alt?: string; filename?: string };
+// Identity used to detect duplicate images: same stored bytes (key) OR the exact
+// same image data/URL (thumb). compressImageToDataUrl is deterministic, so
+// re-adding the same file produces the same thumb → it's caught here.
+function imageIdentity(e: CollectionImageEntry): string {
+  return e.key ? `k:${e.key}` : `t:${e.thumb ?? ""}`;
+}
+// Drop entries that are already present (by identity) or repeated in the incoming
+// batch. Returns { kept, skipped } so callers can tell the user when dupes were ignored.
+function dropDuplicateImages(existing: CollectionImageEntry[], incoming: CollectionImageEntry[]): { kept: CollectionImageEntry[]; skipped: number } {
+  const seen = new Set(existing.map(imageIdentity));
+  const kept: CollectionImageEntry[] = [];
+  let skipped = 0;
+  for (const e of incoming) {
+    const id = imageIdentity(e);
+    if (!id || id === "t:" || seen.has(id)) { skipped += 1; continue; }
+    seen.add(id);
+    kept.push(e);
+  }
+  return { kept, skipped };
+}
 function parseMultiImageValue(value: string): CollectionImageEntry[] {
   const v = value?.trim() ?? "";
   if (!v) return [];
@@ -21819,6 +21839,12 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
   const [busy, setBusy] = useState(false);
   const [hover, setHover] = useState(false);
   const [copyFlash, setCopyFlash] = useState(false);
+  const [dupNotice, setDupNotice] = useState<string | null>(null);
+  const flashDup = (n: number) => {
+    if (n <= 0) return;
+    setDupNotice(`${n} duplicate image${n > 1 ? "s" : ""} skipped — already added.`);
+    window.setTimeout(() => setDupNotice(null), 3500);
+  };
   const commit = (next: CollectionImageEntry[]) => onCommit(serializeMultiImageValue(next));
 
   const addFiles = async (files: FileList | File[] | null | undefined) => {
@@ -21829,9 +21855,12 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
     try {
       const dataUrls = await Promise.all(arr.map((f) => compressImageToDataUrl(f)));
       // Keep the original file name so Shopify shows it (not image-1.jpg).
-      const added = dataUrls.map((d, i): CollectionImageEntry => ({ thumb: d, filename: arr[i]?.name || undefined }));
-      // Single-image cells (fabric) replace; multi cells append.
-      commit(singleImage ? added.slice(-1) : [...images, ...added]);
+      const incoming = dataUrls.map((d, i): CollectionImageEntry => ({ thumb: d, filename: arr[i]?.name || undefined }));
+      // Single-image cells (fabric) replace; multi cells append — minus duplicates.
+      if (singleImage) { commit(incoming.slice(-1)); return; }
+      const { kept, skipped } = dropDuplicateImages(images, incoming);
+      flashDup(skipped);
+      if (kept.length) commit([...images, ...kept]);
     } finally { setBusy(false); }
   };
 
@@ -21844,7 +21873,18 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
     window.setTimeout(() => setCopyFlash(false), 900);
   };
   const pasteEntry = (entry: CollectionImageEntry) => {
-    commit(singleImage ? [entry] : [...images, entry]);
+    if (singleImage) { commit([entry]); return; }
+    const { kept, skipped } = dropDuplicateImages(images, [entry]);
+    flashDup(skipped);
+    if (kept.length) commit([...images, ...kept]);
+  };
+  // Append entries (e.g. from the Dropbox picker) minus any duplicates.
+  const addEntries = (incoming: CollectionImageEntry[]) => {
+    if (!incoming.length) return;
+    if (singleImage) { commit(incoming.slice(-1)); return; }
+    const { kept, skipped } = dropDuplicateImages(images, incoming);
+    flashDup(skipped);
+    if (kept.length) commit([...images, ...kept]);
   };
   const pasteFromMemory = () => { if (copiedCollectionImage) { pasteEntry(copiedCollectionImage); return true; } return false; };
 
@@ -21926,6 +21966,8 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
           onClose={() => setOpen(false)}
           onAddFiles={addFiles}
           onCommit={commit}
+          onAddEntries={addEntries}
+          dupNotice={dupNotice}
           onPickFile={() => fileRef.current?.click()}
           onPickStyleName={onPickStyleName}
           fileRef={fileRef}
@@ -22013,7 +22055,7 @@ function CollectionImageAltEditor({ entry, productName, onChange }: { entry: Col
 // add more. Saves immediately via onCommit on every change so the user
 // can close at any time without losing edits.
 function CollectionImageManagerModal({
-  images, busy, productInfo, collectionId, rowName, onClose, onAddFiles, onCommit, onPickFile, onPickStyleName, fileRef,
+  images, busy, productInfo, collectionId, rowName, onClose, onAddFiles, onCommit, onAddEntries, dupNotice, onPickFile, onPickStyleName, fileRef,
 }: {
   images: CollectionImageEntry[];
   busy: boolean;
@@ -22023,6 +22065,8 @@ function CollectionImageManagerModal({
   onClose: () => void;
   onAddFiles: (files: FileList | File[] | null | undefined) => Promise<void>;
   onCommit: (next: CollectionImageEntry[]) => void;
+  onAddEntries: (entries: CollectionImageEntry[]) => void;
+  dupNotice: string | null;
   onPickFile: () => void;
   onPickStyleName?: (styleName: string) => void;
   fileRef: React.RefObject<HTMLInputElement | null>;
@@ -22104,8 +22148,9 @@ function CollectionImageManagerModal({
           <div>
             <div style={{ fontWeight: 700, fontSize: 15 }}>Model pictures</div>
             <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
-              {images.length} image{images.length === 1 ? "" : "s"} — drag to reorder. Position number = image order in Shopify.
+              {images.length} image{images.length === 1 ? "" : "s"} — drag to reorder. Position number = image order in Shopify. Duplicates are skipped automatically.
             </div>
+            {dupNotice && <div style={{ fontSize: 12, color: "#b45309", fontWeight: 700, marginTop: 4 }}>⚠ {dupNotice}</div>}
           </div>
           <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", fontWeight: 600 }}>Done</button>
         </div>
@@ -22208,7 +22253,7 @@ function CollectionImageManagerModal({
                 <DropboxImagePicker
                   collectionId={collectionId}
                   initialQuery={rowName ?? ""}
-                  onAdd={(entries) => onCommit([...images, ...entries])}
+                  onAdd={(entries) => onAddEntries(entries)}
                   onClose={() => setDropboxOpen(false)}
                 />
               )}
@@ -22240,7 +22285,7 @@ function CollectionImageManagerModal({
                         key={s.id}
                         type="button"
                         onClick={() => {
-                          onCommit([...images, { thumb: s.imageUrl }]);
+                          onAddEntries([{ thumb: s.imageUrl }]);
                           // Also drop the style's name into the row's Name so
                           // it's pre-filled; the user can type over it later.
                           onPickStyleName?.(s.name);
