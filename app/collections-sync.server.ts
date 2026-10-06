@@ -74,6 +74,7 @@ export async function syncLockedCollectionRowsForProduct(shop: string, productId
         id descriptionHtml productType vendor tags
         seo { title description }
         category { id fullName }
+        media(first: 25) { nodes { ... on MediaImage { image { url } } } }
         metafields(first: 250) {
           nodes {
             namespace key type value
@@ -107,6 +108,14 @@ export async function syncLockedCollectionRowsForProduct(shop: string, productId
     const kept = shopTags.filter((t: string) => { const s = t.toLowerCase(); return s !== "pre-order" && !s.startsWith("pre-order: ") && !s.startsWith("pre-order ships "); });
     if (product.tags !== undefined) pulled.tags = kept.join(", ");
   }
+  // Product images: mirror the Shopify media into the row's Model Picture so an
+  // image added/reordered in Shopify shows up in the portal on save. Stored as a
+  // JSON array of CDN URLs (same shape used by the import/link flows). Only set
+  // when Shopify has images, so an empty/partial fetch never wipes the row.
+  const imageUrls: string[] = (product.media?.nodes ?? [])
+    .map((n: { image?: { url?: string } }) => String(n?.image?.url ?? ""))
+    .filter((u: string) => !!u);
+  if (imageUrls.length) pulled.modelPicture = JSON.stringify(imageUrls);
   const catBlob = buildCategoryBlob(product);
   const catStr = catBlob ? JSON.stringify(catBlob) : "";
 
