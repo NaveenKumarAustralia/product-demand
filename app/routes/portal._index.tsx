@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { PreordersDashboard } from "../portal-preorders";
 import { ProductionCutsPanel } from "../portal-production-cuts";
+import { pullShopifyProductFields } from "../collections-sync.server";
 import AiChat from "../ai/AiChat";
 import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server";
 import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
@@ -5920,6 +5921,44 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId, categoryAttempted: res.categoryAttempted, categoryWrote: res.categoryWrote, categoryErrors: res.categoryErrors }] });
   }
 
+  if (intent === "match_shopify_and_lock") {
+    // Reconciliation: pull Shopify's CURRENT values into the row(s) (Shopify
+    // wins — brings a stale portal row up to date) and LOCK them, so the
+    // products/update webhook keeps them in sync afterwards and a later push
+    // can't clobber Shopify. Per-row (collectionId+rowIndex) or bulk (all=1,
+    // optionally scoped to one collectionId).
+    const session = await prisma.session.findFirst({ where: { accessToken: { not: "" } }, orderBy: { isOnline: "asc" } }).catch(() => null);
+    if (!session?.shop || !session.accessToken) return jsonResponse({ ok: false, error: "no_session" });
+    const all = form.get("all") === "1";
+    const id = Number(form.get("collectionId"));
+    const idx = Number(form.get("rowIndex"));
+    const targets = all
+      ? await prisma.collection.findMany({ ...(id ? { where: { id } } : {}), select: { id: true, rows: true } })
+      : (id ? [await prisma.collection.findUnique({ where: { id }, select: { id: true, rows: true } })] : []);
+    const cache = new Map<string, Record<string, string> | null>();
+    let matched = 0, failed = 0;
+    let patchedRow: Record<string, string> | null = null;
+    for (const c of targets) {
+      if (!c) continue;
+      const rows = normalizeCollectionRows(c.rows);
+      let changed = false;
+      for (let i = 0; i < rows.length; i++) {
+        if (!all && i !== idx) continue;
+        const row = rows[i];
+        const numId = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").replace(/\D/g, "");
+        if (!numId) continue;
+        let fields = cache.get(numId);
+        if (fields === undefined) { fields = await pullShopifyProductFields(session.shop, session.accessToken, numId).catch(() => null); cache.set(numId, fields); }
+        if (!fields) { failed += 1; continue; }
+        rows[i] = { ...row, ...fields, [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_EDITED]: "" };
+        changed = true; matched += 1;
+        if (!all) patchedRow = rows[i];
+      }
+      if (changed) await prisma.collection.update({ where: { id: c.id }, data: { rows, updatedAt: new Date() } }).catch(() => {});
+    }
+    return jsonResponse({ ok: true, matched, failed, index: Number.isFinite(idx) ? idx : null, row: patchedRow });
+  }
+
   if (intent === "unlock_collection_row_shopify") {
     // Unlock a linked row and RESUME portal control. Because Shopify was the
     // source of truth while locked, first pull Shopify's current values into the
@@ -6447,6 +6486,8 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "set_collection_fabric_status" || intent === "set_collection_order_status" || intent === "set_collection_fabric_link") return false;
   if (intent === "set_collection_groups") return false;
+  // Match-and-lock patches the row locally (per-row) or reloads (bulk); no heavy loader re-run.
+  if (intent === "match_shopify_and_lock") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths" || intent === "update_photoshoot_column_widths" || intent === "update_jj_column_widths") return false;
   // Photo shoot row edits keep their own local state; the slim shoot list
   // (loader) only needs refreshing on add/rename/delete, not row edits.
@@ -18129,6 +18170,38 @@ function CollectionSpreadsheetPage({
   // Lock/unlock a linked row (freeze Shopify pushes / resume + pull from Shopify).
   const lockFetcher = useFetcher<{ ok?: boolean; index?: number; locked?: boolean; unlocked?: boolean; deleted?: boolean; fields?: Record<string, string>; error?: string }>();
   const [lockBusyIdx, setLockBusyIdx] = useState<number | null>(null);
+  // "Match Shopify & lock" — pull Shopify's current values into the row and lock
+  // it (Shopify wins). Per-row patches in place; the bulk run reloads.
+  const matchFetcher = useFetcher<{ ok?: boolean; matched?: number; failed?: number; index?: number | null; row?: Record<string, string> | null; error?: string }>();
+  const [matchBusyIdx, setMatchBusyIdx] = useState<number | null>(null);
+  const [matchAllBusy, setMatchAllBusy] = useState(false);
+  const matchRowFromShopify = (idx: number) => {
+    setPushStatus(null);
+    setMatchBusyIdx(idx);
+    matchFetcher.submit({ intent: "match_shopify_and_lock", collectionId: String(listItem.id), rowIndex: String(idx) }, { method: "post" });
+  };
+  const matchAllFromShopify = () => {
+    if (!window.confirm("Match every linked row in this collection to Shopify and lock them?\n\nShopify's current values (description, tags, type, vendor, SEO, images, category) are pulled into the portal — Shopify WINS — and each row is locked so it stays in sync. Any portal-only changes you never pushed will be replaced.")) return;
+    setPushStatus(null);
+    setMatchAllBusy(true);
+    matchFetcher.submit({ intent: "match_shopify_and_lock", collectionId: String(listItem.id), all: "1" }, { method: "post" });
+  };
+  useEffect(() => {
+    const data = matchFetcher.data;
+    if (!data || matchFetcher.state !== "idle") return;
+    setMatchBusyIdx(null);
+    setMatchAllBusy(false);
+    if (!data.ok) { setPushStatus({ msg: `Match failed — ${data.error ?? "unknown error"}`, tone: "err" }); return; }
+    if (data.row && typeof data.index === "number") {
+      const i = data.index, patch = data.row;
+      setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...patch }; return next; });
+      setPushStatus({ msg: "Matched to Shopify and locked. The portal now shows Shopify's current values.", tone: "ok" });
+    } else {
+      setPushStatus({ msg: `Matched ${data.matched ?? 0} row${(data.matched ?? 0) === 1 ? "" : "s"} to Shopify and locked${data.failed ? ` (${data.failed} couldn't be read)` : ""}. Reloading…`, tone: "ok" });
+      setTimeout(() => window.location.reload(), 700);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matchFetcher.data, matchFetcher.state]);
   // Move/combine: selected row indices + a fetcher for the move action.
   const moveFetcher = useFetcher<{ ok?: boolean; moved?: number; targetId?: number; deletedSource?: boolean; error?: string }>();
   const sendShootFetcher = useFetcher<{ ok?: boolean; shootId?: number; added?: number; error?: string }>();
@@ -19180,6 +19253,18 @@ function CollectionSpreadsheetPage({
           >
             {isPushing ? "Pushing…" : "Create all in Shopify (DRAFT)"}
           </button>
+          <button
+            type="button"
+            onClick={matchAllFromShopify}
+            disabled={matchAllBusy || !loaded}
+            style={{
+              background: "#fff", color: "#0d9488", border: "1px solid #0d9488", borderRadius: 6,
+              padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: matchAllBusy ? "wait" : "pointer",
+            }}
+            title="Pull Shopify's current values into every linked row (Shopify wins) and lock them — brings the portal up to date with Shopify and keeps it in sync"
+          >
+            {matchAllBusy ? "Matching…" : "⤓ Match all from Shopify & lock"}
+          </button>
         </div>
       </div>
       {pushStatus && (
@@ -19397,13 +19482,22 @@ function CollectionSpreadsheetPage({
                               title="Pull Shopify's latest into this row and unlock, so you can edit and push from the portal"
                             >{lockBusy ? "Unlocking…" : "🔓 Unlock to edit"}</button>
                           ) : (
-                            <button
-                              type="button"
-                              onClick={() => updateRowInShopify(rIdx)}
-                              disabled={isUpdatingShopify}
-                              style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer", width: "100%" }}
-                              title="Push this row's changes to Shopify, then lock it again automatically"
-                            >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => updateRowInShopify(rIdx)}
+                                disabled={isUpdatingShopify}
+                                style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer", width: "100%" }}
+                                title="Push this row's changes to Shopify (portal wins every field), then lock it again automatically"
+                              >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
+                              <button
+                                type="button"
+                                onClick={() => matchRowFromShopify(rIdx)}
+                                disabled={matchBusyIdx === rIdx}
+                                style={{ background: "#fff", color: "#0d9488", border: "1px solid #0d9488", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: matchBusyIdx === rIdx ? "wait" : "pointer", width: "100%" }}
+                                title="Pull Shopify's CURRENT values into this row (Shopify wins) and lock it — use when Shopify has the correct data, so a push can't overwrite it"
+                              >{matchBusyIdx === rIdx ? "Matching…" : "⤓ Match Shopify & lock"}</button>
+                            </>
                           )}
                         </div>
                       ) : (
