@@ -21013,7 +21013,7 @@ function CollectionPriceRupeesCell({
     return "";
   }, [productInfo.categories, styleOverrideId]);
   return (
-    <div style={{ display: "flex", flexDirection: "column", width: "100%", gap: 2, position: "relative" }} onContextMenu={openBreakdown}>
+    <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%", minHeight: 36, gap: 2, position: "relative" }} onContextMenu={openBreakdown}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
         {/* ₹ prefix so the amount reads as rupees (this cell is only rendered for
             INR collections; JJ uses ฿ on its own path). */}
@@ -21069,7 +21069,7 @@ function CollectionPriceRupeesCell({
           type="button"
           onClick={() => setReselect(true)}
           title="Change style / fabric"
-          style={{ position: "absolute", bottom: 0, right: 2, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}
+          style={{ position: "absolute", bottom: 2, right: 3, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}
         >
           ✎
         </button>
@@ -27891,17 +27891,18 @@ function PackingPriceCell({
         padding: "4px 6px",
         cursor: "context-menu",
         minHeight: 28,
+        position: "relative",
       }}
     >
       {effective > 0 && !reselect ? (
-        <div style={{ position: "relative", width: "100%", display: "flex", justifyContent: "center" }}>
+        <>
           <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
             {Math.round(effective).toLocaleString()}
           </span>
           {productTitle && (
-            <button type="button" onClick={(e) => { e.stopPropagation(); setReselect(true); }} title="Change style / fabric" style={{ position: "absolute", bottom: -3, right: 0, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}>✎</button>
+            <button type="button" onClick={(e) => { e.stopPropagation(); setReselect(true); }} title="Change style / fabric" style={{ position: "absolute", bottom: 2, right: 3, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}>✎</button>
           )}
-        </div>
+        </>
       ) : productTitle ? (
         // No manual override + no auto-resolve (or re-picking) → offer the same
         // pick-style / pick-fabric / type-price affordances as the restock page
@@ -28922,32 +28923,34 @@ function OrderRow({
         {/* Cost in rupees — derived from the matching Product Info style.
             Top line is per-piece cost, second line is total for the row's
             qty. Shows "—" if no matching style is found. */}
-        <Td rowIndex={rowIndex} colIndex={costRupeesCol} center>
+        <Td rowIndex={rowIndex} colIndex={costRupeesCol} center style={{ position: "relative" }}>
           {costPerPiece > 0 && !costReselect ? (
-            <div
-              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "context-menu", position: "relative", width: "100%" }}
-              title="Right-click to see cost breakdown"
-              onContextMenu={(e) => {
-                if (!costBreakdown) return;
-                e.preventDefault();
-                e.stopPropagation();
-                document.dispatchEvent(new CustomEvent("show-cost-breakdown", {
-                  detail: { x: e.clientX, y: e.clientY, breakdown: costBreakdown, productTitle: order.productTitle, totalQty: order.totalQty },
-                }));
-              }}
-            >
-              <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
-                ₹{costPerPiece.toLocaleString(undefined, { maximumFractionDigits: 2 })}
-              </span>
-              {order.totalQty > 0 && (
-                <span style={{ fontSize: 11, color: "#6b7280" }}>
-                  Total ₹{(costPerPiece * order.totalQty).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+            <>
+              <div
+                style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "context-menu", width: "100%" }}
+                title="Right-click to see cost breakdown"
+                onContextMenu={(e) => {
+                  if (!costBreakdown) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  document.dispatchEvent(new CustomEvent("show-cost-breakdown", {
+                    detail: { x: e.clientX, y: e.clientY, breakdown: costBreakdown, productTitle: order.productTitle, totalQty: order.totalQty },
+                  }));
+                }}
+              >
+                <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
+                  ₹{costPerPiece.toLocaleString(undefined, { maximumFractionDigits: 2 })}
                 </span>
-              )}
+                {order.totalQty > 0 && (
+                  <span style={{ fontSize: 11, color: "#6b7280" }}>
+                    Total ₹{(costPerPiece * order.totalQty).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </span>
+                )}
+              </div>
               {order.productTitle && (
-                <button type="button" onClick={(e) => { e.stopPropagation(); setCostReselect(true); }} title="Change style / fabric" style={{ position: "absolute", bottom: -1, right: 0, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}>✎</button>
+                <button type="button" onClick={(e) => { e.stopPropagation(); setCostReselect(true); }} title="Change style / fabric" style={{ position: "absolute", bottom: 3, right: 4, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}>✎</button>
               )}
-            </div>
+            </>
           ) : order.productTitle ? (
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, width: "100%" }}>
               <CostFallbacks
