@@ -18409,7 +18409,7 @@ function CollectionSpreadsheetPage({
     const fabricRupees = styleCostLookup.fabricCostForTitle(title, styleOverrideId || undefined);
     const next = fabricRupees ? String(Math.round(fabricRupees)) : "";
     setRows((prev) => {
-      const updated = prev.map((r, i) => i === rowIdx ? { ...r, priceRupees: next } : r);
+      const updated = prev.map((r, i) => i === rowIdx ? { ...r, priceRupees: next, ...((r[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() ? { [COL_ROW_SHOPIFY_DIRTY]: "1" } : {}) } : r);
       persistRows(updated, prev, `Undo reset price on row ${rowIdx + 1}`);
       return updated;
     });
@@ -18751,13 +18751,17 @@ function CollectionSpreadsheetPage({
   // staff pick the style explicitly. We save the styleOverrideId on
   // the row AND immediately fill priceRupees from costForOverride so
   // the user sees the price land in one click.
+  // On a CREATED (linked) row a cost re-pick changes a Shopify-bound field, so
+  // mark it dirty → the "Update in Shopify" button shows (push still needs an
+  // unlock, so nothing is sent to Shopify silently).
+  const dirtyIfLinked = (r: Record<string, string>): Record<string, string> => ((r[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() ? { [COL_ROW_SHOPIFY_DIRTY]: "1" } : {});
   const pickStyleOverrideForRow = useCallback((rowIdx: number, styleId: string) => {
     setRows((prev) => {
       const next = prev.map((r, i) => {
         if (i !== rowIdx) return r;
         const rowName = (r.name ?? r.title ?? "").trim();
         const rupees = autoPriceRupees(rowName, styleId);
-        return { ...r, styleOverrideId: styleId, priceRupees: rupees };
+        return { ...r, styleOverrideId: styleId, priceRupees: rupees, ...dirtyIfLinked(r) };
       });
       persistRows(next, prev, `Undo style pick on row ${rowIdx + 1}`);
       return next;
@@ -18770,9 +18774,19 @@ function CollectionSpreadsheetPage({
         if (i !== rowIdx) return r;
         const { styleOverrideId, ...rest } = r;
         void styleOverrideId;
-        return { ...rest, priceRupees: "" };
+        return { ...rest, priceRupees: "", ...dirtyIfLinked(rest) };
       });
       persistRows(next, prev, `Undo clear style on row ${rowIdx + 1}`);
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listItem.id]);
+  // Empty a row's Price ₹ so the next render shows the freshly-computed cost
+  // (used after re-picking the fabric, whose override is applied at render time).
+  const clearPriceForRow = useCallback((rowIdx: number) => {
+    setRows((prev) => {
+      const next = prev.map((r, i) => i === rowIdx ? { ...r, priceRupees: "", ...dirtyIfLinked(r) } : r);
+      persistRows(next, prev, `Undo clear price on row ${rowIdx + 1}`);
       return next;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -19570,7 +19584,7 @@ function CollectionSpreadsheetPage({
                         // JJ New Products (Baht): skip the rupee auto-cost / fabric
                         // picker cell — cost is a plain manual ฿ value, so fall
                         // through to the default number input below.
-                        if (col.id === "priceRupees" && !linked && !isThb) {
+                        if (col.id === "priceRupees" && !isThb) {
                           const rowName = (row.name ?? row.title ?? "").trim();
                           const overrideId = (row.styleOverrideId ?? "").trim();
                           const autoValue = autoPriceRupees(rowName, overrideId || undefined);
@@ -19600,6 +19614,7 @@ function CollectionSpreadsheetPage({
                                 onResetToAutomatic={() => resetPriceToAutomatic(rIdx, rowName, overrideId)}
                                 onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
                                 onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
+                                onClearPrice={() => clearPriceForRow(rIdx)}
                               />
                             </Td>
                           );
@@ -20924,6 +20939,7 @@ function CollectionPriceRupeesCell({
   onResetToAutomatic,
   onPickStyleOverride,
   onClearStyleOverride,
+  onClearPrice,
 }: {
   value: string;
   rowIndex: number;
@@ -20943,6 +20959,8 @@ function CollectionPriceRupeesCell({
   onResetToAutomatic: () => void;
   onPickStyleOverride: (styleId: string) => void;
   onClearStyleOverride: () => void;
+  // Empties the stored price so a freshly re-picked fabric's cost shows.
+  onClearPrice: () => void;
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
@@ -21031,7 +21049,7 @@ function CollectionPriceRupeesCell({
           // override, so a wrong style/fabric can always be corrected.
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, width: "100%" }}>
             <CollectionStylePicker productInfo={productInfo} currentName={rowName} onPick={(styleId) => { onPickStyleOverride(styleId); setReselect(false); }} pickedStyleName={overrideStyleName || (costBreakdown?.styleName ?? null)} />
-            <TitleFabricPicker fabrics={allFabrics} currentTitle={rowName} onPick={(fabricKey) => { onPickFabric(fabricKey); setReselect(false); }} />
+            <TitleFabricPicker fabrics={allFabrics} currentTitle={rowName} onPick={(fabricKey) => { onPickFabric(fabricKey); onClearPrice(); setReselect(false); }} />
             <button type="button" onClick={() => setReselect(false)} style={{ background: "transparent", border: "none", color: "#9ca3af", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.4 }}>cancel</button>
           </div>
         ) : (
