@@ -20951,6 +20951,9 @@ function CollectionPriceRupeesCell({
   // lands again (so it doesn't flash pickers on every auto-resolved row).
   const [justCleared, setJustCleared] = useState(false);
   useEffect(() => { if (value.trim()) setJustCleared(false); }, [value]);
+  // "Change style / fabric" — lets the user re-open the pickers even when a cost
+  // is already resolved (fixes being stuck with a wrong fabric/style pick).
+  const [reselect, setReselect] = useState(false);
   // Emptying the cell means "make this automatic" — clear the manual/sheet
   // price (and its override) and fall back to the computed fabric cost.
   // A non-empty value is a manual override the user typed.
@@ -20977,7 +20980,11 @@ function CollectionPriceRupeesCell({
   // to pick for — either nothing auto-resolves, OR the user just cleared the
   // price (so they can re-select style + fabric to bring in a new cost even if
   // a stale value would otherwise resolve). A committed value hides them.
-  const showPicker = !draft.trim() && rowName.length > 0 && !styleOverrideId && (!autoValue || justCleared);
+  // Show the pickers when the cell is empty with nothing resolved / just cleared,
+  // OR whenever the user clicked "Change" (even with a cost + override in place).
+  const showPicker = rowName.length > 0 && (reselect || (!draft.trim() && !styleOverrideId && (!autoValue || justCleared)));
+  // A resolved cost → offer a persistent way back into the pickers.
+  const costResolved = Boolean(draft.trim() || autoValue);
   // Resolve the override style's name from productInfo so the
   // subtext can say "Style: Tiered Maxi Dress" instead of an id.
   const overrideStyleName = useMemo(() => {
@@ -21018,13 +21025,36 @@ function CollectionPriceRupeesCell({
         />
       </div>
       {showPicker && (
-        <CostFallbacks
-          productInfo={productInfo}
-          productTitle={rowName}
-          fabrics={allFabrics}
-          warning={costWarning}
-          blocker={costBlocker}
-        />
+        reselect ? (
+          // Re-pick after a cost already resolved: use the row's own style
+          // override (always wins over any auto/global match) + the fabric
+          // override, so a wrong style/fabric can always be corrected.
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, width: "100%" }}>
+            <CollectionStylePicker productInfo={productInfo} currentName={rowName} onPick={(styleId) => { onPickStyleOverride(styleId); setReselect(false); }} pickedStyleName={overrideStyleName || (costBreakdown?.styleName ?? null)} />
+            <TitleFabricPicker fabrics={allFabrics} currentTitle={rowName} onPick={(fabricKey) => { onPickFabric(fabricKey); setReselect(false); }} />
+            <button type="button" onClick={() => setReselect(false)} style={{ background: "transparent", border: "none", color: "#9ca3af", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.4 }}>cancel</button>
+          </div>
+        ) : (
+          <CostFallbacks
+            productInfo={productInfo}
+            productTitle={rowName}
+            fabrics={allFabrics}
+            warning={costWarning}
+            blocker={costBlocker}
+            onPicked={() => { setReselect(false); setJustCleared(false); }}
+          />
+        )
+      )}
+      {/* Persistent re-pick: change the fabric or style even when a cost already shows. */}
+      {!showPicker && costResolved && rowName.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setReselect(true)}
+          title="Re-select the style or fabric used for this cost"
+          style={{ alignSelf: "center", background: "transparent", border: "none", color: "#2563eb", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.3, textDecoration: "underline", textUnderlineOffset: 2 }}
+        >
+          change style / fabric
+        </button>
       )}
       {/* When a cost is already resolved the cell just shows the number —
           right-click opens the full cost breakdown (with "Pick a different
@@ -30371,6 +30401,7 @@ function CostFallbacks({
   warning,
   blocker,
   layout = "stacked",
+  onPicked,
 }: {
   productInfo: ProductInfo;
   productTitle: string;
@@ -30378,10 +30409,12 @@ function CostFallbacks({
   warning: string | null;
   blocker?: CostBlocker;
   layout?: "stacked" | "inline";
+  onPicked?: () => void;
 }) {
   const fetcher = useFetcher();
   const submit = (fields: Record<string, string>) => {
     fetcher.submit(fields, { method: "post" });
+    onPicked?.();
   };
   const onPickStyle = (styleId: string) => submit({ intent: "set_title_style_override", title: productTitle, styleId });
   const onPickFabric = (fabricKey: string) => submit({ intent: "set_title_fabric_override", title: productTitle, fabricKey });
