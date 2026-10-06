@@ -5526,15 +5526,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             filledFields++;
             rowChanged = true;
           }
-          // SKU + barcode: recover Shopify's EXISTING per-size codes when the row
-          // has none — never overwrites, never generates new ones. Aligned to the
-          // row's ordered sizes (Free Size = single), matched by size label.
+          // SKU + barcode: recover Shopify's EXISTING codes when the row has none
+          // — never overwrites, never generates new ones. Try to align to the
+          // row's ordered sizes; if that finds nothing (variant titles differ, or
+          // the row has no order quantities) fall back to EVERY variant in order,
+          // so the codes are always recovered when Shopify has them.
           {
             const skuEmpty = !String(row.sku ?? "").trim();
             const barcodeEmpty = !String(row.barcode ?? "").trim();
-            if (skuEmpty || barcodeEmpty) {
+            const variants = node.variants?.nodes ?? [];
+            if ((skuEmpty || barcodeEmpty) && variants.length) {
               const bySize = new Map<string, { sku: string; barcode: string }>();
-              for (const v of node.variants?.nodes ?? []) {
+              for (const v of variants) {
                 bySize.set(normalizeVariantSizeLabel(String(v?.title ?? "")), { sku: String(v?.sku ?? ""), barcode: String(v?.barcode ?? "") });
               }
               const freeSizeQty = Number(row.freeSize) || 0;
@@ -5544,19 +5547,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
                 const m = bySize.get(normalizeVariantSizeLabel("Free Size")) ?? [...bySize.values()][0];
                 if (m) { skuLines = [m.sku]; barcodeLines = [m.barcode]; }
               } else if (ordered.length) {
-                // Row has ordered sizes → align codes to exactly those sizes.
                 for (const [, label] of ordered) {
                   const m = bySize.get(normalizeVariantSizeLabel(label));
                   skuLines.push(m?.sku ?? "");
                   barcodeLines.push(m?.barcode ?? "");
                 }
-              } else {
-                // Existing product with no order quantities on the row → recover
-                // EVERY variant's code, in Shopify's variant order.
-                for (const v of node.variants?.nodes ?? []) {
-                  skuLines.push(String(v?.sku ?? ""));
-                  barcodeLines.push(String(v?.barcode ?? ""));
-                }
+              }
+              // Fallback: alignment recovered nothing → take every variant's code.
+              if (!skuLines.some(Boolean) && !barcodeLines.some(Boolean)) {
+                skuLines = variants.map((v) => String(v?.sku ?? ""));
+                barcodeLines = variants.map((v) => String(v?.barcode ?? ""));
               }
               if (skuEmpty && skuLines.some(Boolean)) { row.sku = skuLines.join("\n"); filledFields++; rowChanged = true; }
               if (barcodeEmpty && barcodeLines.some(Boolean)) { row.barcode = barcodeLines.join("\n"); filledFields++; rowChanged = true; }
