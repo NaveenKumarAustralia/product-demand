@@ -27840,6 +27840,8 @@ function PackingPriceCell({
 }) {
   const fetcher = useFetcher();
   const [editing, setEditing] = useState(false);
+  // Re-pick the style/fabric behind the cost even when a cost already resolved.
+  const [reselect, setReselect] = useState(false);
   const effective = manualPrice > 0 ? manualPrice : autoPrice;
 
   if (editing) {
@@ -27891,23 +27893,31 @@ function PackingPriceCell({
         minHeight: 28,
       }}
     >
-      {effective > 0 ? (
-        <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
-          {Math.round(effective).toLocaleString()}
-        </span>
+      {effective > 0 && !reselect ? (
+        <>
+          <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
+            {Math.round(effective).toLocaleString()}
+          </span>
+          {productTitle && (
+            <button type="button" onClick={(e) => { e.stopPropagation(); setReselect(true); }} title="Re-select the style or fabric used for this cost" style={{ background: "transparent", border: "none", color: "#2563eb", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.3, textDecoration: "underline", textUnderlineOffset: 2 }}>change style / fabric</button>
+          )}
+        </>
       ) : productTitle ? (
-        // No manual override + no auto-resolve → offer the same
-        // pick-style / pick-fabric / type-price affordances as the
-        // restock page so staff can fix the row without leaving the
-        // packing list.
-        <div onClick={(e) => e.stopPropagation()} style={{ width: "100%" }}>
+        // No manual override + no auto-resolve (or re-picking) → offer the same
+        // pick-style / pick-fabric / type-price affordances as the restock page
+        // so staff can fix the row without leaving the packing list.
+        <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
           <CostFallbacks
             productInfo={productInfo}
             productTitle={productTitle}
             fabrics={allFabrics}
             warning={costWarning}
             blocker={costBlocker}
+            onPicked={() => setReselect(false)}
           />
+          {reselect && (
+            <button type="button" onClick={() => setReselect(false)} style={{ background: "transparent", border: "none", color: "#9ca3af", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.4 }}>cancel</button>
+          )}
         </div>
       ) : (
         <span style={{ color: "#9ca3af" }}>—</span>
@@ -28634,6 +28644,8 @@ function OrderRow({
   }, [refreshFetcher.state, refreshFetcher.data]);
   const inventoryFetcher = useFetcher<{ variantsBySize?: Record<string, number>; total?: number }>();
   const [inventoryOpen, setInventoryOpen] = useState(false);
+  // Re-pick the style/fabric behind the ₹ cost even when a cost already resolved.
+  const [costReselect, setCostReselect] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [splitOpen, setSplitOpen] = useState(false);
   const [printOpen, setPrintOpen] = useState(false);
@@ -28911,7 +28923,7 @@ function OrderRow({
             Top line is per-piece cost, second line is total for the row's
             qty. Shows "—" if no matching style is found. */}
         <Td rowIndex={rowIndex} colIndex={costRupeesCol} center>
-          {costPerPiece > 0 ? (
+          {costPerPiece > 0 && !costReselect ? (
             <div
               style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "context-menu" }}
               title="Right-click to see cost breakdown"
@@ -28932,15 +28944,24 @@ function OrderRow({
                   Total ₹{(costPerPiece * order.totalQty).toLocaleString(undefined, { maximumFractionDigits: 0 })}
                 </span>
               )}
+              {order.productTitle && (
+                <button type="button" onClick={(e) => { e.stopPropagation(); setCostReselect(true); }} title="Re-select the style or fabric used for this cost" style={{ background: "transparent", border: "none", color: "#2563eb", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.3, textDecoration: "underline", textUnderlineOffset: 2 }}>change style / fabric</button>
+              )}
             </div>
           ) : order.productTitle ? (
-            <CostFallbacks
-              productInfo={productInfo}
-              productTitle={order.productTitle}
-              fabrics={allFabrics}
-              warning={costWarning}
-              blocker={costBlocker}
-            />
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, width: "100%" }}>
+              <CostFallbacks
+                productInfo={productInfo}
+                productTitle={order.productTitle}
+                fabrics={allFabrics}
+                warning={costWarning}
+                blocker={costBlocker}
+                onPicked={() => setCostReselect(false)}
+              />
+              {costReselect && (
+                <button type="button" onClick={() => setCostReselect(false)} style={{ background: "transparent", border: "none", color: "#9ca3af", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.4 }}>cancel</button>
+              )}
+            </div>
           ) : (
             <span style={{ color: "#9ca3af" }}>—</span>
           )}
