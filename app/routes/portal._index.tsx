@@ -5891,7 +5891,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const storedStatus = (row[COL_ROW_SHOPIFY_STATUS] ?? "").toUpperCase();
     const status = storedStatus === "ACTIVE" || storedStatus === "DRAFT" ? (storedStatus as "ACTIVE" | "DRAFT") : undefined;
 
-    const res = await createShopifyProductFromRow(session.shop, session.accessToken, row, {
+    // MERGE push (so a push can't wipe a Shopify change you didn't touch): pull
+    // Shopify's CURRENT values and apply them to the row for every syncable field
+    // the user has NOT edited since unlock (tracked in __shopifyEditedFields).
+    // The full push then only changes the fields you actually edited.
+    const editedSet = new Set((row[COL_ROW_SHOPIFY_EDITED] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+    const imagesEdited = editedSet.has("modelPicture");
+    let pushRow = row;
+    const shopifyNow = await pullShopifyProductFields(session.shop, session.accessToken, linkedId.replace(/\D/g, "")).catch(() => null);
+    if (shopifyNow) {
+      const patch: Record<string, string> = {};
+      for (const [k, v] of Object.entries(shopifyNow)) {
+        // Images handled separately; category is portal-managed on the row.
+        if (k === "modelPicture" || k === COL_ROW_CATEGORY_METAFIELDS) continue;
+        if (!editedSet.has(k)) patch[k] = v;
+      }
+      pushRow = { ...row, ...patch };
+    }
+
+    const res = await createShopifyProductFromRow(session.shop, session.accessToken, pushRow, {
       productId: linkedId,
       status,
       inrPerAud,
@@ -5901,22 +5919,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
     if (!res.ok) return jsonResponse({ ok: false, error: (res.errors ?? []).join("; ") || "update_failed" });
 
-    // Sync images: replace the product's media with the row's pictures so they
-    // don't pile up. Only when the row actually has images (never wipe blindly).
-    try {
-      const imgs = parseMultiImageValue(row.modelPicture ?? "");
-      if (imgs.length) {
-        await deleteAllProductMedia(session.shop, session.accessToken, linkedId);
-        const imgErrors = await pushRowImagesToShopify(session.shop, session.accessToken, linkedId, imgs);
-        if (imgErrors.length) console.warn(`[collection update] row ${idx} image errors:`, imgErrors);
+    // Sync images ONLY when the user edited the pictures here — otherwise leave
+    // Shopify's current media untouched (so a push never clobbers Shopify images).
+    if (imagesEdited) {
+      try {
+        const imgs = parseMultiImageValue(pushRow.modelPicture ?? "");
+        if (imgs.length) {
+          await deleteAllProductMedia(session.shop, session.accessToken, linkedId);
+          const imgErrors = await pushRowImagesToShopify(session.shop, session.accessToken, linkedId, imgs);
+          if (imgErrors.length) console.warn(`[collection update] row ${idx} image errors:`, imgErrors);
+        }
+      } catch (e) {
+        console.warn(`[collection update] row ${idx} images failed:`, e);
       }
-    } catch (e) {
-      console.warn(`[collection update] row ${idx} images failed:`, e);
     }
 
     // Re-lock after a successful push so the product rests protected again —
     // the portal shouldn't be able to overwrite it until explicitly unlocked.
-    rows[idx] = { ...row, [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_EDITED]: "" };
+    // Persist the merged values so the portal row matches what's now in Shopify.
+    rows[idx] = { ...pushRow, [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_EDITED]: "" };
     await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
     return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId, categoryAttempted: res.categoryAttempted, categoryWrote: res.categoryWrote, categoryErrors: res.categoryErrors }] });
   }
@@ -18753,9 +18774,10 @@ function CollectionSpreadsheetPage({
         // update push (an info column changed after creation). The per-product
         // workflow status is portal-only, so it never triggers a Shopify push.
         if (colId !== "__productStatus" && (patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
-        // While the row is LOCKED, remember which Shopify-synced fields the user
-        // edits, so a later Unlock keeps them instead of pulling Shopify over them.
-        if ((patched[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && SHOPIFY_UNLOCK_PULL_FIELDS.includes(colId)) {
+        // Remember which Shopify-synced fields the user has edited on a linked
+        // row, so "Update in Shopify" is a MERGE: it pushes only these fields and
+        // keeps Shopify's current values for everything untouched (no clobber).
+        if ((patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && SHOPIFY_SYNCED_COLUMN_IDS.has(colId)) {
           const edited = new Set((patched[COL_ROW_SHOPIFY_EDITED] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
           edited.add(colId);
           patched[COL_ROW_SHOPIFY_EDITED] = Array.from(edited).join(",");
@@ -18780,11 +18802,10 @@ function CollectionSpreadsheetPage({
         if (i !== rowIdx) return r;
         const patched = { ...r, ...fields };
         if ((patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) patched[COL_ROW_SHOPIFY_DIRTY] = "1";
-        // While locked, remember which Shopify-synced fields were edited so Unlock
-        // preserves them (same as updateCell, but for multi-field saves like SEO).
-        if ((patched[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1") {
+        // Track edited Shopify-synced fields for the merge push (same as updateCell).
+        if ((patched[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) {
           const edited = new Set((patched[COL_ROW_SHOPIFY_EDITED] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
-          for (const key of Object.keys(fields)) if (SHOPIFY_UNLOCK_PULL_FIELDS.includes(key)) edited.add(key);
+          for (const key of Object.keys(fields)) if (SHOPIFY_SYNCED_COLUMN_IDS.has(key)) edited.add(key);
           if (edited.size) patched[COL_ROW_SHOPIFY_EDITED] = Array.from(edited).join(",");
         }
         return patched;
