@@ -9,6 +9,7 @@ import { syncOrderNoteMessages, syncEntityNoteMessages, syncSampleIterationMessa
 import { randomUUID } from "node:crypto";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { PreordersDashboard } from "../portal-preorders";
+import { ProductionCutsPanel } from "../portal-production-cuts";
 import AiChat from "../ai/AiChat";
 import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server";
 import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
@@ -1198,9 +1199,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
   }
 
+  const productionCuts = page === "production-cuts" ? await buildProductionCutsData(url.searchParams) : null;
+
   return {
     perf,
     orders,
+    productionCuts,
     preorderByOrderId,
     sizes: allSizes,
     productGroups,
@@ -6296,8 +6300,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         field: `Qty (${size})`,
         toValue: String(qtyOrdered),
       });
+      // Keep the cut log's piece count in sync if this order is already on production.
+      await reconcileProductionCutRecord(orderId, currentUser?.name ?? null);
     }
 
+    return null;
+  }
+
+  if (intent === "update_production_date") {
+    // Manual correction of the on-production (cut) date — updates the order and
+    // its permanent cut-log record together.
+    const raw = String(form.get("value") ?? "");
+    const parsed = raw ? parsePortalDate(raw) : null;
+    if (raw && !parsed) return null;
+    await prisma.supplierOrder.update({ where: { id: orderId }, data: { productionDate: parsed } });
+    if (parsed) await prisma.productionCutRecord.updateMany({ where: { supplierOrderId: orderId }, data: { productionDate: parsed } });
     return null;
   }
 
@@ -6307,6 +6324,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // fabric from physical stock; leaving it restores. Reversible + idempotent.
     if (intent === "update_status") {
       await reconcileOrderFabricConsumption(orderId);
+      // Record (or remove) the production "cut" + stamp/clear the production date.
+      await reconcileProductionCutRecord(orderId, currentUser?.name ?? null);
     }
     if (intent === "update_factory_notes" || intent === "update_notes") {
       await syncOrderNoteMessages({
@@ -6389,6 +6408,8 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // Status is now a controlled chip (statusLocal) and ETA is an uncontrolled
   // text input — both keep their displayed value without a loader refresh.
   if (intent === "update_status" || intent === "update_eta") return false;
+  // Production (cut) date edits are one cell; OrderRow tracks it locally.
+  if (intent === "update_production_date") return false;
   // Per-size SKU/barcode edits are one-cell writes; the input keeps its own
   // value, so no need to re-run the heavy JJ loader.
   if (intent === "jj_set_line_code") return false;
@@ -7256,6 +7277,7 @@ const ALL_NAV_ITEMS = [
   { id: "jj-restock", label: "JJ Order", href: "/portal?page=jj-restock" },
   { id: "jj-new-products", label: "JJ New Products", href: "/portal?page=jj-new-products" },
   { id: "reorder", label: "Reorder Planner", href: "/portal?page=reorder" },
+  { id: "production-cuts", label: "Production Cuts", href: "/portal?page=production-cuts" },
   { id: "preorders", label: "Pre-orders", href: "/portal?page=preorders" },
   { id: "fabric", label: "Fabric in stock", href: "/portal?page=fabric" },
   { id: "packing", label: "Packing Lists", href: "/portal?page=packing" },
@@ -7267,7 +7289,7 @@ const ALL_NAV_ITEMS = [
   { id: "ai", label: "AI Assistant", href: "/portal?page=ai" },
 ] as const;
 type NavItemId = typeof ALL_NAV_ITEMS[number]["id"];
-const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "reorder", "preorders", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox", "ai"];
+const DEFAULT_NAV_ORDER: NavItemId[] = ["restock", "jj-restock", "jj-new-products", "reorder", "production-cuts", "preorders", "fabric", "packing", "productinfo", "samples", "visionboard", "collections", "dropbox", "ai"];
 // Pre-orders sub-tabs — rendered as a dropdown submenu under "Pre-orders" in the
 // sidebar (open while the Pre-orders page is showing). Must match the tab ids in
 // portal-preorders.tsx (PreordersDashboard).
@@ -11950,6 +11972,7 @@ export default function PortalDashboard() {
     users,
     currentUser,
     preorderByOrderId,
+    productionCuts,
     activeUsers,
     messages,
     allNotes,
@@ -12379,6 +12402,7 @@ export default function PortalDashboard() {
     : page === "reorder" ? "Reorder Planner"
     : page === "preorders" ? "Pre-orders"
     : page === "usa-stock" ? "USA Stock"
+    : page === "production-cuts" ? "Production Cuts"
     : page === "notes" ? "All Notes"
     : page === "search" ? "Search"
     : page === "dropbox" ? "Dropbox"
@@ -13095,6 +13119,8 @@ export default function PortalDashboard() {
           <GlobalSearchPage query={globalSearchQuery} results={globalSearch} isAdmin={Boolean(currentUser?.admin)} shopDomain={shopDomain} />
         ) : page === "usa-stock" ? (
           <UsaStockPanel orders={orders} shopDomain={shopDomain} search={usaSearch} />
+        ) : page === "production-cuts" ? (
+          <ProductionCutsPanel data={productionCuts ?? { rows: [], from: "", to: "", totals: { today: { pieces: 0, orders: 0 }, week: { pieces: 0, orders: 0 }, month: { pieces: 0, orders: 0 }, range: { pieces: 0, orders: 0 } }, byDay: [] }} />
         ) : page === "notes" ? (
           <AllNotesPage notes={allNotes} currentUserName={currentUser?.name ?? ""} />
         ) : page === "jj-restock" ? (
@@ -24805,6 +24831,97 @@ async function reconcileOrderFabricConsumption(orderId: number): Promise<void> {
   }
 }
 
+// Keep the permanent cut log (ProductionCutRecord) and the order's editable
+// productionDate in step with the order's status:
+//   • entering production (on_production/ready/in_shipment) for the first time →
+//     stamp productionDate = today and create/refresh the cut record (qty = live
+//     total, so an edited quantity stays in sync while the row exists);
+//   • leaving production (reversed by mistake) → clear productionDate and REMOVE
+//     the cut record (user choice: an un-cut row shouldn't count).
+// The cut record has no cascade to SupplierOrder, so a deleted row keeps its log
+// entry (qty frozen at its last synced value). Best-effort; never throws.
+async function reconcileProductionCutRecord(orderId: number, actorName: string | null): Promise<void> {
+  try {
+    const order = await prisma.supplierOrder.findUnique({
+      where: { id: orderId },
+      select: { id: true, shop: true, productId: true, productTitle: true, supplier: true, productType: true, totalQty: true, supplierStatus: true, productionDate: true, lines: { select: { qtyOrdered: true } } },
+    });
+    if (!order) return;
+    const inProduction = FABRIC_CONSUMED_STATUSES.has(order.supplierStatus);
+    const qty = (order.totalQty ?? 0) > 0 ? order.totalQty : (order.lines ?? []).reduce((s, l) => s + (l.qtyOrdered || 0), 0);
+    if (inProduction) {
+      const productionDate = order.productionDate ?? new Date();
+      if (!order.productionDate) {
+        await prisma.supplierOrder.update({ where: { id: orderId }, data: { productionDate } });
+      }
+      await prisma.productionCutRecord.upsert({
+        where: { supplierOrderId: orderId },
+        create: {
+          shop: order.shop, supplierOrderId: orderId, productId: order.productId ?? null,
+          productTitle: order.productTitle ?? "(untitled)", supplier: order.supplier ?? null,
+          productType: order.productType ?? null, qty, productionDate, createdByName: actorName,
+        },
+        // Keep the piece count + descriptive fields synced while the row exists;
+        // leave productionDate alone (that's the recorded cut date, edited separately).
+        update: { qty, productTitle: order.productTitle ?? "(untitled)", supplier: order.supplier ?? null, productType: order.productType ?? null, productId: order.productId ?? null },
+      });
+    } else {
+      if (order.productionDate) await prisma.supplierOrder.update({ where: { id: orderId }, data: { productionDate: null } });
+      await prisma.productionCutRecord.deleteMany({ where: { supplierOrderId: orderId } });
+    }
+  } catch (e) {
+    console.warn("[production cut reconcile]", e);
+  }
+}
+
+export type ProductionCutRow = { id: number; productTitle: string; supplier: string | null; productType: string | null; qty: number; productionDate: string; supplierOrderId: number | null; live: boolean };
+export type ProductionCutTotal = { pieces: number; orders: number };
+export type ProductionCutsData = {
+  rows: ProductionCutRow[];
+  from: string; to: string;
+  totals: { today: ProductionCutTotal; week: ProductionCutTotal; month: ProductionCutTotal; range: ProductionCutTotal };
+  byDay: Array<{ date: string; pieces: number; orders: number }>;
+};
+
+// Builds the Production Cuts (cut log) page data: the records in the chosen date
+// range + today / this-week (Mon) / this-month piece totals. Records are kept
+// even after their restock row is deleted (no cascade), so this is the durable
+// throughput history.
+async function buildProductionCutsData(searchParams: URLSearchParams): Promise<ProductionCutsData> {
+  const now = new Date();
+  const startToday = new Date(now); startToday.setHours(0, 0, 0, 0);
+  const startWeek = new Date(startToday); startWeek.setDate(startWeek.getDate() - ((startWeek.getDay() + 6) % 7)); // Monday
+  const startMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const parseD = (s: string | null) => { const d = s ? new Date(`${s}T00:00:00`) : null; return d && !Number.isNaN(d.getTime()) ? d : null; };
+  const defFrom = new Date(startToday); defFrom.setDate(defFrom.getDate() - 89); // last 90 days
+  const fromD = parseD(searchParams.get("from")) ?? defFrom;
+  const toRaw = parseD(searchParams.get("to"));
+  const toD = toRaw
+    ? new Date(toRaw.getFullYear(), toRaw.getMonth(), toRaw.getDate(), 23, 59, 59, 999)
+    : new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+  const [records, forTotals, liveIds] = await Promise.all([
+    prisma.productionCutRecord.findMany({ where: { productionDate: { gte: fromD, lte: toD } }, orderBy: { productionDate: "desc" }, take: 3000 }),
+    prisma.productionCutRecord.findMany({ where: { productionDate: { gte: startMonth < startWeek ? startMonth : startWeek } }, select: { qty: true, productionDate: true } }),
+    prisma.supplierOrder.findMany({ select: { id: true } }), // all existing rows → "row deleted" = truly gone
+  ]);
+  const liveSet = new Set(liveIds.map((o) => o.id));
+  const sumSince = (start: Date): ProductionCutTotal => forTotals.filter((r) => r.productionDate >= start).reduce((a, r) => ({ pieces: a.pieces + r.qty, orders: a.orders + 1 }), { pieces: 0, orders: 0 });
+  const byDayMap = new Map<string, { pieces: number; orders: number }>();
+  for (const r of records) {
+    const key = r.productionDate.toISOString().slice(0, 10);
+    const e = byDayMap.get(key) ?? { pieces: 0, orders: 0 };
+    e.pieces += r.qty; e.orders += 1; byDayMap.set(key, e);
+  }
+  return {
+    rows: records.map((r) => ({ id: r.id, productTitle: r.productTitle, supplier: r.supplier, productType: r.productType, qty: r.qty, productionDate: r.productionDate.toISOString(), supplierOrderId: r.supplierOrderId, live: r.supplierOrderId != null && liveSet.has(r.supplierOrderId) })),
+    from: fromD.toISOString().slice(0, 10),
+    to: toD.toISOString().slice(0, 10),
+    totals: { today: sumSince(startToday), week: sumSince(startWeek), month: sumSince(startMonth), range: records.reduce((a, r) => ({ pieces: a.pieces + r.qty, orders: a.orders + 1 }), { pieces: 0, orders: 0 }) },
+    byDay: Array.from(byDayMap.entries()).map(([date, v]) => ({ date, ...v })).sort((a, b) => (a.date < b.date ? 1 : -1)),
+  };
+}
+
 // Rewrites every stock sheet row's Products cell: keep hand-added (auto!==true)
 // entries untouched, and (re)generate the auto entries from the current fabric
 // picks. Returns the number of cells changed. Mutates the sheets in place.
@@ -28444,6 +28561,15 @@ function OrderRow({
   const allBarcodes = order.lines.map((l: { sku: string | null; barcode: string | null }) => l.barcode).filter(Boolean).join("\n");
   const etaValue = formatPortalDate(order.eta);
   const orderDate = formatPortalDate(order.createdAt);
+  // The on-production ("cut") date lives in the Order Date cell under the order
+  // date. Tracked locally so it appears instantly when the status flips to a
+  // production status (update_status skips revalidation) and is editable.
+  const [cutDate, setCutDate] = useState<string>(formatPortalDate(order.productionDate));
+  useEffect(() => { setCutDate(formatPortalDate(order.productionDate)); }, [order.productionDate]);
+  const onStatusCommit = (next: string) => {
+    if (FABRIC_CONSUMED_STATUSES.has(next)) setCutDate((cur) => cur || formatPortalDate(new Date()));
+    else setCutDate("");
+  };
   const inventoryTotal = fetchedInventory ? (inventoryFetcher.data?.total ?? 0) : 0;
   const totalCol = 5 + sizes.length;
   const statusCol = totalCol + 1;
@@ -28538,7 +28664,12 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={{ ...destinationRowBg, height: 1, padding: 0, verticalAlign: "top" }}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
         {/* Order date */}
-        <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={destinationRowBg}><span style={s.dateText}>{orderDate}</span></Td>
+        <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={destinationRowBg}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
+            <span style={s.dateText} title="Order date">{orderDate}</span>
+            {cutDate !== "" && <ProductionDateCell orderId={order.id} value={cutDate} onCommit={setCutDate} />}
+          </div>
+        </Td>
 
         {/* Picture */}
         <Td rowIndex={rowIndex} colIndex={2} center historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product image" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[2]} style={destinationRowBg}>
@@ -28659,7 +28790,7 @@ function OrderRow({
         </Td>
 
         {/* Status */}
-        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} linkedPackingListId={order.packingListId ?? null} openPackingLists={openPackingLists} canManagePreorder={canManagePreorder} preorderMarket={preorderMarket} preorderActivated={preorder?.activated ?? false} preorderShipDate={preorder?.shipDate ?? null} preorderEnabled={preorderEnabledLocal} onPreorderEnabledChange={setPreorderEnabledLocal} productTitle={order.productTitle} orderEta={order.eta ?? null} /></Td>
+        <Td rowIndex={rowIndex} colIndex={statusCol} historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Status" historyEntityName={order.productTitle}><StatusCell orderId={order.id} value={order.supplierStatus} restockSettings={restockSettings} packingListBadges={packingListBadges} linkedPackingListId={order.packingListId ?? null} openPackingLists={openPackingLists} canManagePreorder={canManagePreorder} preorderMarket={preorderMarket} preorderActivated={preorder?.activated ?? false} preorderShipDate={preorder?.shipDate ?? null} preorderEnabled={preorderEnabledLocal} onPreorderEnabledChange={setPreorderEnabledLocal} productTitle={order.productTitle} orderEta={order.eta ?? null} onStatusCommit={onStatusCommit} /></Td>
 
         {/* Notes (from order) */}
         <Td rowIndex={rowIndex} colIndex={notesCol} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Notes" historyEntityName={order.productTitle} style={{ height: 1, padding: 0, position: "relative", verticalAlign: "top" }}><NotesCell orderId={order.id} field="notes" value={order.notes ?? ""} users={users} /></Td>
@@ -29513,6 +29644,7 @@ function StatusCell({
   onPreorderEnabledChange,
   productTitle = "",
   orderEta = null,
+  onStatusCommit,
 }: {
   orderId: number;
   value: string;
@@ -29528,6 +29660,7 @@ function StatusCell({
   onPreorderEnabledChange?: (enabled: boolean) => void;
   productTitle?: string;
   orderEta?: string | null;
+  onStatusCommit?: (newStatus: string) => void;
 }) {
   const linkFetcher = useFetcher();
   // Track the chip's selected status locally so the packing list picker
@@ -29578,7 +29711,7 @@ function StatusCell({
         restockSettings={restockSettings}
         updateIntent="update_status"
         undoLabel="Undo status"
-        onChange={setStatusLocal}
+        onChange={(v) => { setStatusLocal(v); onStatusCommit?.(v); }}
         controlled
         blockedValues={preorderEnabled ? ["cancelled"] : undefined}
       />
@@ -30124,6 +30257,36 @@ function EtaCell({ orderId, value }: { orderId: number; value: string }) {
       style={s.dateInput}
       placeholder="dd/mm/yy"
     />
+  );
+}
+
+// The editable on-production ("cut") date shown under the order date. Controlled
+// so a status flip updates it instantly; commits on blur to both the order and
+// its permanent cut-log record.
+function ProductionDateCell({ orderId, value, onCommit }: { orderId: number; value: string; onCommit: (v: string) => void }) {
+  const fetcher = useFetcher();
+  const [text, setText] = useState(value);
+  useEffect(() => { setText(value); }, [value]);
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }} title="On-production (cut) date — editable">
+      <span aria-hidden style={{ fontSize: 11, color: "#2563eb" }}>✂</span>
+      <input
+        type="text"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={(e) => {
+          const v = e.currentTarget.value;
+          onCommit(v);
+          submitPortalCell(
+            fetcher,
+            { intent: "update_production_date", orderId, value: v },
+            { label: "Undo cut date", fields: { intent: "update_production_date", orderId, value } },
+          );
+        }}
+        style={{ ...s.dateInput, width: 62, color: "#1d4ed8", fontWeight: 700 }}
+        placeholder="dd/mm/yy"
+      />
+    </span>
   );
 }
 

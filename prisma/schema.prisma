@@ -64,9 +64,32 @@ model SupplierOrder {
   metersPerPiece       Float?
   fabricConsumed       Boolean  @default(false)
   fabricConsumedMeters Float?
+  // Date the order first went "on production" (cut). Editable. Null until cut.
+  productionDate DateTime?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   lines        OrderLine[]
+}
+
+// Permanent log of production "cuts" — one row per order that reached production
+// (on_order → on_production). Deliberately NOT a cascade relation to
+// SupplierOrder: the record survives even after the restock row is deleted, so
+// cut throughput (pieces/day/week/month) stays intact for reporting.
+model ProductionCutRecord {
+  id              Int       @id @default(autoincrement())
+  shop            String
+  supplierOrderId Int?      @unique
+  productId       String?
+  productTitle    String
+  supplier        String?
+  productType     String?
+  qty             Int       @default(0)
+  productionDate  DateTime
+  createdByName   String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([shop, productionDate])
 }
 
 model OrderLine {
