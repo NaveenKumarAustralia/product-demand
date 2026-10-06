@@ -146,3 +146,88 @@ export async function reconcileAllLivePreorderInventoryPolicies(): Promise<void>
   const variantIds = batches.flatMap((b) => b.lines.map((l) => l.variantId)).filter(Boolean);
   if (variantIds.length) await reconcilePreorderInventoryPolicyForVariants(session.shop, variantIds);
 }
+
+export type PreorderPolicyReportRow = {
+  variantId: string; productTitle: string; size: string | null; batchIds: number[];
+  incoming: number; reserved: number; availableToPreorder: number;
+  targetPolicy: "CONTINUE" | "DENY"; currentPolicy: string | null; needsChange: boolean;
+};
+
+// Read-only audit of every live pre-order variant: remaining capacity, the
+// inventory policy Shopify currently has, and what it SHOULD be. `needsChange`
+// flags a full batch still set to CONTINUE (i.e. still oversellable). Powers the
+// dry-run of /api/preorder-reconcile-policies.
+export async function reportLivePreorderInventoryPolicies(): Promise<{
+  ok: boolean; shop?: string; rows: PreorderPolicyReportRow[];
+  summary: { liveVariants: number; full: number; needChange: number; stillOversellable: number };
+  error?: string;
+}> {
+  const empty = { liveVariants: 0, full: 0, needChange: 0, stillOversellable: 0 };
+  const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true } });
+  if (!session?.shop) return { ok: false, rows: [], summary: empty, error: "No offline Shopify session." };
+  const token = await getOfflineToken(session.shop);
+  if (!token) return { ok: false, shop: session.shop, rows: [], summary: empty, error: "No offline Shopify token." };
+
+  const [enabledSettings, registry] = await Promise.all([
+    prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true, safetyBufferPercent: true, safetyBufferQty: true } }),
+    getPreorderSellingPlanRegistryEntries(session.shop),
+  ]);
+  const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
+  const liveSettings = enabledSettings.filter((s) => activatedIds.has(s.supplierOrderId));
+  const liveIds = liveSettings.map((s) => s.supplierOrderId);
+  if (!liveIds.length) return { ok: true, shop: session.shop, rows: [], summary: empty };
+  const bufferById = new Map(liveSettings.map((s) => [s.supplierOrderId, { pct: s.safetyBufferPercent ?? 0, qty: s.safetyBufferQty ?? null }]));
+
+  const [batches, reservations] = await Promise.all([
+    prisma.supplierOrder.findMany({
+      where: { id: { in: liveIds }, status: "open", destination: { in: ["send_to_au", "send_to_usa"] } },
+      select: { id: true, productTitle: true, lines: { select: { variantId: true, variantTitle: true, qtyOrdered: true, qtyReceived: true } } },
+    }),
+    prisma.preorderReservation.findMany({ where: { supplierOrderId: { in: liveIds }, status: "reserved" }, select: { supplierOrderId: true, variantId: true, quantity: true } }),
+  ]);
+  const reservedByKey = new Map<string, number>();
+  for (const r of reservations) reservedByKey.set(`${r.supplierOrderId}:${numericId(r.variantId)}`, (reservedByKey.get(`${r.supplierOrderId}:${numericId(r.variantId)}`) ?? 0) + r.quantity);
+
+  const agg = new Map<string, { productTitle: string; size: string | null; batchIds: number[]; incoming: number; reserved: number; avail: number }>();
+  for (const b of batches) {
+    const buf = bufferById.get(b.id) ?? { pct: 0, qty: null };
+    for (const line of b.lines) {
+      const vnum = numericId(line.variantId);
+      if (!vnum) continue;
+      const reserved = reservedByKey.get(`${b.id}:${vnum}`) ?? 0;
+      const incomingRemaining = Math.max(0, (line.qtyOrdered ?? 0) - (line.qtyReceived ?? 0));
+      const cap = calculatePreorderCapacity({ confirmedIncomingQty: incomingRemaining, reservedQty: reserved, safetyBufferPercent: buf.pct, safetyBufferQty: buf.qty });
+      const cur = agg.get(vnum) ?? { productTitle: b.productTitle, size: line.variantTitle ?? null, batchIds: [], incoming: 0, reserved: 0, avail: 0 };
+      cur.batchIds.push(b.id); cur.incoming += incomingRemaining; cur.reserved += reserved; cur.avail += cap.availableToPreorder;
+      agg.set(vnum, cur);
+    }
+  }
+
+  // Current Shopify inventory policy per variant (nodes in chunks of 100).
+  const vnums = Array.from(agg.keys());
+  const policyByVariant = new Map<string, string>();
+  for (let i = 0; i < vnums.length; i += 100) {
+    const ids = vnums.slice(i, i + 100).map((v) => `gid://shopify/ProductVariant/${v}`);
+    try {
+      const res = await fetch(`https://${session.shop}/admin/api/${API_VERSION}/graphql.json`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": token },
+        body: JSON.stringify({ query: `#graphql
+          query KEPolicyReport($ids: [ID!]!) { nodes(ids: $ids) { ... on ProductVariant { id inventoryPolicy } } }`, variables: { ids } }),
+      });
+      const json = await res.json() as { data?: { nodes?: Array<{ id?: string; inventoryPolicy?: string } | null> } };
+      for (const n of json.data?.nodes ?? []) { if (n?.id) policyByVariant.set(numericId(n.id), String(n.inventoryPolicy ?? "")); }
+    } catch { /* leave current unknown for this chunk */ }
+  }
+
+  const rows: PreorderPolicyReportRow[] = vnums.map((vnum) => {
+    const a = agg.get(vnum)!;
+    const targetPolicy: "CONTINUE" | "DENY" = a.avail <= 0 ? "DENY" : "CONTINUE";
+    const currentPolicy = policyByVariant.get(vnum) ?? null;
+    return { variantId: vnum, productTitle: a.productTitle, size: a.size, batchIds: a.batchIds, incoming: a.incoming, reserved: a.reserved, availableToPreorder: a.avail, targetPolicy, currentPolicy, needsChange: currentPolicy != null && currentPolicy.toUpperCase() !== targetPolicy };
+  }).sort((x, y) => x.productTitle.localeCompare(y.productTitle));
+
+  const full = rows.filter((r) => r.availableToPreorder <= 0).length;
+  const needChange = rows.filter((r) => r.needsChange).length;
+  const stillOversellable = rows.filter((r) => r.availableToPreorder <= 0 && (r.currentPolicy ?? "").toUpperCase() === "CONTINUE").length;
+  return { ok: true, shop: session.shop, rows, summary: { liveVariants: rows.length, full, needChange, stillOversellable } };
+}
