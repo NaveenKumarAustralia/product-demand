@@ -17235,6 +17235,19 @@ function useProgressiveReveal(total: number, resetKey: string, step = TILE_RENDE
   }, [limit, total, step]);
   return Math.min(limit, total);
 }
+// Self-contained button loading wheel (SVG/SMIL — no global CSS needed). Default
+// style; swap the markup to change the chosen design from the 50-spinner gallery.
+function ButtonSpinner({ size = 14, color = "currentColor" }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden style={{ display: "inline-block", verticalAlign: "-2px", flex: "0 0 auto" }}>
+      <circle cx="12" cy="12" r="9" fill="none" stroke={color} strokeOpacity="0.28" strokeWidth="3" />
+      <path d="M21 12a9 9 0 0 0-9-9" fill="none" stroke={color} strokeWidth="3" strokeLinecap="round">
+        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.75s" repeatCount="indefinite" />
+      </path>
+    </svg>
+  );
+}
+
 function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], canSeeProductStatus = false, search = "", onTotalsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
@@ -18219,15 +18232,64 @@ function CollectionSpreadsheetPage({
   // Lock/unlock a linked row (freeze Shopify pushes / resume + pull from Shopify).
   const lockFetcher = useFetcher<{ ok?: boolean; index?: number; locked?: boolean; unlocked?: boolean; deleted?: boolean; fields?: Record<string, string>; error?: string }>();
   const [lockBusyIdx, setLockBusyIdx] = useState<number | null>(null);
+  // Non-blocking job queue: press Shopify buttons freely — each job runs in the
+  // background (up to a few at once) and the button it came from shows a spinner.
+  // activeJobsRef is the source of truth (dedup + concurrency); busyJobs mirrors
+  // it so the right buttons spin.
+  const [busyJobs, setBusyJobs] = useState<Set<string>>(new Set());
+  const activeJobsRef = useRef<Set<string>>(new Set());
+  const jobQueueRef = useRef<Array<{ key: string; run: () => Promise<void> }>>([]);
+  const jobRunningRef = useRef(0);
+  const JOB_CONCURRENCY = 3;
+  const syncBusyJobs = () => setBusyJobs(new Set(activeJobsRef.current));
+  const pumpJobs = () => {
+    while (jobRunningRef.current < JOB_CONCURRENCY && jobQueueRef.current.length) {
+      const job = jobQueueRef.current.shift()!;
+      jobRunningRef.current += 1;
+      job.run().catch(() => undefined).finally(() => {
+        jobRunningRef.current -= 1;
+        activeJobsRef.current.delete(job.key);
+        syncBusyJobs();
+        pumpJobs();
+      });
+    }
+  };
+  const enqueueJob = (key: string, run: () => Promise<void>) => {
+    if (activeJobsRef.current.has(key)) return; // already queued / running
+    activeJobsRef.current.add(key);
+    syncBusyJobs();
+    jobQueueRef.current.push({ key, run });
+    pumpJobs();
+  };
+  // POST a FormData to this route's action and get JSON back (used by queued jobs).
+  const postAction = async (fd: FormData): Promise<any> => {
+    const res = await fetch(window.location.pathname + window.location.search, { method: "POST", body: fd, headers: { Accept: "application/json" }, credentials: "same-origin" });
+    return res.json();
+  };
   // "Match Shopify & lock" — pull Shopify's current values into the row and lock
   // it (Shopify wins). Per-row patches in place; the bulk run reloads.
   const matchFetcher = useFetcher<{ ok?: boolean; matched?: number; failed?: number; index?: number | null; row?: Record<string, string> | null; error?: string }>();
   const [matchBusyIdx, setMatchBusyIdx] = useState<number | null>(null);
   const [matchAllBusy, setMatchAllBusy] = useState(false);
   const matchRowFromShopify = (idx: number) => {
-    setPushStatus(null);
-    setMatchBusyIdx(idx);
-    matchFetcher.submit({ intent: "match_shopify_and_lock", collectionId: String(listItem.id), rowIndex: String(idx) }, { method: "post" });
+    enqueueJob(`match:${idx}`, async () => {
+      const fd = new FormData();
+      fd.set("intent", "match_shopify_and_lock");
+      fd.set("collectionId", String(listItem.id));
+      fd.set("rowIndex", String(idx));
+      try {
+        const data = await postAction(fd);
+        if (data?.ok && data.row && typeof data.index === "number") {
+          const i = data.index, patch = data.row;
+          setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...patch }; return next; });
+          setPushStatus({ msg: `Row ${idx + 1}: matched to Shopify and locked.`, tone: "ok" });
+        } else {
+          setPushStatus({ msg: `Row ${idx + 1} match failed — ${data?.error ?? "unknown error"}`, tone: "err" });
+        }
+      } catch (e) {
+        setPushStatus({ msg: `Row ${idx + 1} match failed — ${e instanceof Error ? e.message : "network error"}`, tone: "err" });
+      }
+    });
   };
   const matchAllFromShopify = () => {
     if (!window.confirm("Match every linked row in this collection to Shopify and lock them?\n\nShopify's current values (description, tags, type, vendor, SEO, images, category) are pulled into the portal — Shopify WINS — and each row is locked so it stays in sync. Any portal-only changes you never pushed will be replaced.")) return;
@@ -19015,25 +19077,52 @@ function CollectionSpreadsheetPage({
   const updateRowInShopify = (idx: number) => {
     const row = rows[idx];
     if (!(row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
-    setPushStatus(null);
-    const fd = new FormData();
-    fd.set("intent", "update_collection_row_in_shopify");
-    fd.set("collectionId", String(listItem.id));
-    fd.set("rowIndex", String(idx));
-    updateShopifyFetcher.submit(fd, { method: "post" });
+    enqueueJob(`update:${idx}`, async () => {
+      const fd = new FormData();
+      fd.set("intent", "update_collection_row_in_shopify");
+      fd.set("collectionId", String(listItem.id));
+      fd.set("rowIndex", String(idx));
+      try {
+        const data = await postAction(fd);
+        if (data?.ok && Array.isArray(data.results)) {
+          setRows((prev) => { const next = [...prev]; for (const r of data.results) { if (r?.ok && next[r.index]) next[r.index] = { ...next[r.index], [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1" }; } return next; });
+          const r0 = data.results[0];
+          if ((r0?.categoryErrors ?? []).length) setPushStatus({ msg: `Row ${idx + 1}: pushed, but category metafields failed: ${r0.categoryErrors.join("; ")}`, tone: "err" });
+          else setPushStatus({ msg: `Row ${idx + 1}: pushed to Shopify and locked.`, tone: "ok" });
+        } else {
+          setPushStatus({ msg: `Row ${idx + 1} update failed — ${data?.error ?? "unknown error"}`, tone: "err" });
+        }
+      } catch (e) {
+        setPushStatus({ msg: `Row ${idx + 1} update failed — ${e instanceof Error ? e.message : "network error"}`, tone: "err" });
+      }
+    });
   };
   // Unlock a linked row → pull Shopify's current values ONLY for fields you
   // haven't edited (your in-progress edits are kept), then resume portal control.
   const unlockRow = (idx: number, skipConfirm = false) => {
     if (!(rows[idx]?.[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
     if (!skipConfirm && !window.confirm("Unlock and pull the latest from Shopify?\n\nFields you've already edited here are KEPT. For everything you haven't touched (description, tags, product type, vendor, SEO, etc.), Shopify's current values are pulled in. Then you can push changes from the portal again.")) return;
-    setPushStatus(null);
-    setLockBusyIdx(idx);
-    const fd = new FormData();
-    fd.set("intent", "unlock_collection_row_shopify");
-    fd.set("collectionId", String(listItem.id));
-    fd.set("rowIndex", String(idx));
-    lockFetcher.submit(fd, { method: "post" });
+    enqueueJob(`unlock:${idx}`, async () => {
+      const fd = new FormData();
+      fd.set("intent", "unlock_collection_row_shopify");
+      fd.set("collectionId", String(listItem.id));
+      fd.set("rowIndex", String(idx));
+      try {
+        const data = await postAction(fd);
+        if (!data?.ok) { setPushStatus({ msg: data?.error === "verify_failed" ? `Row ${idx + 1}: couldn't reach Shopify — try again.` : `Row ${idx + 1} unlock failed — ${data?.error ?? "unknown error"}`, tone: "err" }); return; }
+        const i = typeof data.index === "number" ? data.index : idx;
+        if (data.unlocked) {
+          const preserved = Array.isArray(data.preserved) ? data.preserved : [];
+          setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], ...(data.fields ?? {}), [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_DIRTY]: preserved.length ? "1" : "", [COL_ROW_SHOPIFY_EDITED]: "" }; return next; });
+          setPushStatus({ msg: preserved.length ? `Row ${i + 1}: unlocked — kept your edits, pulled the rest from Shopify.` : `Row ${i + 1}: unlocked — pulled the latest from Shopify.`, tone: "ok" });
+        } else if (data.deleted) {
+          setRows((prev) => { const next = [...prev]; if (next[i]) next[i] = { ...next[i], [COL_ROW_SHOPIFY_PRODUCT_ID]: "", [COL_ROW_SHOPIFY_HANDLE]: "", [COL_ROW_SHOPIFY_CREATED_AT]: "", [COL_ROW_SHOPIFY_STATUS]: "", [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "", [COL_ROW_SHOPIFY_EDITED]: "" }; return next; });
+          setPushStatus({ msg: `Row ${i + 1}: product no longer exists in Shopify — unlinked.`, tone: "ok" });
+        }
+      } catch (e) {
+        setPushStatus({ msg: `Row ${idx + 1} unlock failed — ${e instanceof Error ? e.message : "network error"}`, tone: "err" });
+      }
+    });
   };
   useEffect(() => {
     const data = lockFetcher.data;
@@ -19530,7 +19619,13 @@ function CollectionSpreadsheetPage({
                     />
                     {(() => {
                       const shopifyLocked = (row[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1";
-                      const lockBusy = lockBusyIdx === rIdx;
+                      // Per-row busy flags from the background job queue — only the
+                      // pressed button is disabled + spins; other rows stay clickable.
+                      const unlockBusy = busyJobs.has(`unlock:${rIdx}`);
+                      const updateBusy = busyJobs.has(`update:${rIdx}`);
+                      const matchBusy = busyJobs.has(`match:${rIdx}`);
+                      const btnLabel = (busy: boolean, spinning: string, idle: React.ReactNode) =>
+                        busy ? <span style={{ display: "inline-flex", alignItems: "center", gap: 6, justifyContent: "center" }}><ButtonSpinner size={13} />{spinning}</span> : idle;
                       // The Shopify action (Create / Linked status + Update) used to
                       // be its own column; it now sits at the TOP of the Name cell.
                       const shopifyContent = linked ? (
@@ -19540,26 +19635,26 @@ function CollectionSpreadsheetPage({
                             <button
                               type="button"
                               onClick={() => unlockRow(rIdx)}
-                              disabled={lockBusy}
-                              style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: lockBusy ? "wait" : "pointer", width: "100%" }}
+                              disabled={unlockBusy}
+                              style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: unlockBusy ? "wait" : "pointer", width: "100%", opacity: unlockBusy ? 0.85 : 1 }}
                               title="Pull Shopify's latest into this row and unlock, so you can edit and push from the portal"
-                            >{lockBusy ? "Unlocking…" : "🔓 Unlock to edit"}</button>
+                            >{btnLabel(unlockBusy, "Unlocking…", "🔓 Unlock to edit")}</button>
                           ) : (
                             <>
                               <button
                                 type="button"
                                 onClick={() => updateRowInShopify(rIdx)}
-                                disabled={isUpdatingShopify}
-                                style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: isUpdatingShopify ? "wait" : "pointer", width: "100%" }}
-                                title="Push this row's changes to Shopify (portal wins every field), then lock it again automatically"
-                              >{isUpdatingShopify ? "Updating…" : "↑ Update in Shopify"}</button>
+                                disabled={updateBusy}
+                                style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: updateBusy ? "wait" : "pointer", width: "100%", opacity: updateBusy ? 0.85 : 1 }}
+                                title="Push this row's changes to Shopify, then lock it again. You can keep pressing other rows — jobs queue in the background."
+                              >{btnLabel(updateBusy, "Updating…", "↑ Update in Shopify")}</button>
                               <button
                                 type="button"
                                 onClick={() => matchRowFromShopify(rIdx)}
-                                disabled={matchBusyIdx === rIdx}
-                                style={{ background: "#fff", color: "#0d9488", border: "1px solid #0d9488", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: matchBusyIdx === rIdx ? "wait" : "pointer", width: "100%" }}
+                                disabled={matchBusy}
+                                style={{ background: "#fff", color: "#0d9488", border: "1px solid #0d9488", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: matchBusy ? "wait" : "pointer", width: "100%", opacity: matchBusy ? 0.85 : 1 }}
                                 title="Pull Shopify's CURRENT values into this row (Shopify wins) and lock it — use when Shopify has the correct data, so a push can't overwrite it"
-                              >{matchBusyIdx === rIdx ? "Matching…" : "⤓ Match Shopify & lock"}</button>
+                              >{btnLabel(matchBusy, "Matching…", "⤓ Match Shopify & lock")}</button>
                             </>
                           )}
                         </div>
