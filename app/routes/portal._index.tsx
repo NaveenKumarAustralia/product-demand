@@ -21013,7 +21013,7 @@ function CollectionPriceRupeesCell({
     return "";
   }, [productInfo.categories, styleOverrideId]);
   return (
-    <div style={{ display: "flex", flexDirection: "column", width: "100%", gap: 2 }} onContextMenu={openBreakdown}>
+    <div style={{ display: "flex", flexDirection: "column", width: "100%", gap: 2, position: "relative" }} onContextMenu={openBreakdown}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
         {/* ₹ prefix so the amount reads as rupees (this cell is only rendered for
             INR collections; JJ uses ฿ on its own path). */}
@@ -21068,10 +21068,10 @@ function CollectionPriceRupeesCell({
         <button
           type="button"
           onClick={() => setReselect(true)}
-          title="Re-select the style or fabric used for this cost"
-          style={{ alignSelf: "center", background: "transparent", border: "none", color: "#2563eb", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.3, textDecoration: "underline", textUnderlineOffset: 2 }}
+          title="Change style / fabric"
+          style={{ position: "absolute", bottom: 0, right: 2, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}
         >
-          change style / fabric
+          ✎
         </button>
       )}
       {/* When a cost is already resolved the cell just shows the number —
@@ -27894,14 +27894,14 @@ function PackingPriceCell({
       }}
     >
       {effective > 0 && !reselect ? (
-        <>
+        <div style={{ position: "relative", width: "100%", display: "flex", justifyContent: "center" }}>
           <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>
             {Math.round(effective).toLocaleString()}
           </span>
           {productTitle && (
-            <button type="button" onClick={(e) => { e.stopPropagation(); setReselect(true); }} title="Re-select the style or fabric used for this cost" style={{ background: "transparent", border: "none", color: "#2563eb", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.3, textDecoration: "underline", textUnderlineOffset: 2 }}>change style / fabric</button>
+            <button type="button" onClick={(e) => { e.stopPropagation(); setReselect(true); }} title="Change style / fabric" style={{ position: "absolute", bottom: -3, right: 0, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}>✎</button>
           )}
-        </>
+        </div>
       ) : productTitle ? (
         // No manual override + no auto-resolve (or re-picking) → offer the same
         // pick-style / pick-fabric / type-price affordances as the restock page
@@ -28925,7 +28925,7 @@ function OrderRow({
         <Td rowIndex={rowIndex} colIndex={costRupeesCol} center>
           {costPerPiece > 0 && !costReselect ? (
             <div
-              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "context-menu" }}
+              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "context-menu", position: "relative", width: "100%" }}
               title="Right-click to see cost breakdown"
               onContextMenu={(e) => {
                 if (!costBreakdown) return;
@@ -28945,7 +28945,7 @@ function OrderRow({
                 </span>
               )}
               {order.productTitle && (
-                <button type="button" onClick={(e) => { e.stopPropagation(); setCostReselect(true); }} title="Re-select the style or fabric used for this cost" style={{ background: "transparent", border: "none", color: "#2563eb", fontSize: 10, cursor: "pointer", padding: 0, lineHeight: 1.3, textDecoration: "underline", textUnderlineOffset: 2 }}>change style / fabric</button>
+                <button type="button" onClick={(e) => { e.stopPropagation(); setCostReselect(true); }} title="Change style / fabric" style={{ position: "absolute", bottom: -1, right: 0, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}>✎</button>
               )}
             </div>
           ) : order.productTitle ? (
