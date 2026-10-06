@@ -12322,6 +12322,38 @@ export default function PortalDashboard() {
   const visibleOrders = page === "restock" && restockSearch
     ? localRestockOrders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
     : localRestockOrders;
+  // Restock rows render in a growing window (50 at a time, more on scroll) so a
+  // long list paints fast instead of mounting every heavy row up front.
+  const RESTOCK_PAGE_SIZE = 50;
+  const [restockVisibleCount, setRestockVisibleCount] = useState(RESTOCK_PAGE_SIZE);
+  // New search → start again from the first page.
+  useEffect(() => { setRestockVisibleCount(RESTOCK_PAGE_SIZE); }, [restockSearch]);
+  const shownOrders = page === "restock" ? visibleOrders.slice(0, restockVisibleCount) : visibleOrders;
+  const restockHasMore = page === "restock" && visibleOrders.length > shownOrders.length;
+  // Load the next page when the sentinel row scrolls near the bottom.
+  const restockSentinelRef = useRef<HTMLTableRowElement | null>(null);
+  useEffect(() => {
+    if (!restockHasMore) return;
+    const node = restockSentinelRef.current;
+    if (!node) return;
+    const io = new IntersectionObserver(
+      (entries) => { if (entries.some((e) => e.isIntersecting)) setRestockVisibleCount((c) => c + RESTOCK_PAGE_SIZE); },
+      { root: restockTableScrollRef.current ?? null, rootMargin: "800px 0px" },
+    );
+    io.observe(node);
+    return () => io.disconnect();
+  }, [restockHasMore, restockVisibleCount]);
+  // A notification link (?thread=supplier_order:<id>) may point to a row past the
+  // current window — expand so that row renders and the existing scroll/flash works.
+  useEffect(() => {
+    if (page !== "restock") return;
+    const thread = searchParams.get("thread");
+    if (!thread) return;
+    const [entityType, orderId] = thread.split(":");
+    if (entityType !== "supplier_order" || !orderId) return;
+    const idx = visibleOrders.findIndex((o) => String(o.id) === String(orderId));
+    if (idx >= 0 && idx + 1 > restockVisibleCount) setRestockVisibleCount(idx + 1);
+  }, [page, searchParams, visibleOrders, restockVisibleCount]);
   // Lookup: product title (e.g. "Vivien Dress Queen Protea") → per-piece
   // rupee cost. Style data drives stitching/factory/profit/etc. Fabric
   // cost is computed live from the fabric-in-stock sheet:
@@ -13128,7 +13160,7 @@ export default function PortalDashboard() {
                   setHistoryMenu({ x: e.clientX, y: e.clientY, entity, entityId, field, entityName });
                 }}
               >
-                {visibleOrders.map((order, rowIndex) => {
+                {shownOrders.map((order, rowIndex) => {
                   const restockFrozenOffsets = [
                     48,
                     48 + widthFor("factoryNotes"),
@@ -13167,7 +13199,14 @@ export default function PortalDashboard() {
                   />
                   );
                 })}
-                {Array.from({ length: 10 }, (_, index) => (
+                {restockHasMore && (
+                  <tr ref={restockSentinelRef} style={s.row}>
+                    <td colSpan={columns.length + 1} style={{ ...s.td, textAlign: "center", color: "#94a3b8", fontWeight: 700, padding: "14px 10px" }}>
+                      Loading more… ({shownOrders.length} of {visibleOrders.length})
+                    </td>
+                  </tr>
+                )}
+                {!restockHasMore && Array.from({ length: 10 }, (_, index) => (
                   <AddRestockOrderRow
                     key={`${addRowNonce}:${index}`}
                     rowIndex={visibleOrders.length + index + 1}
