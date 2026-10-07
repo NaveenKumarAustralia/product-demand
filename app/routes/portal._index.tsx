@@ -20015,7 +20015,7 @@ function CollectionSpreadsheetPage({
                           {shopifyLocked ? (
                             <button
                               type="button"
-                              onClick={() => unlockRow(rIdx)}
+                              onClick={() => unlockRow(rIdx, true)}
                               disabled={unlockBusy}
                               style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: unlockBusy ? "wait" : "pointer", width: "100%", opacity: unlockBusy ? 0.85 : 1 }}
                               title="Pull Shopify's latest into this row and unlock, so you can edit and push from the portal"
