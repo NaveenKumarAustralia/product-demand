@@ -19848,6 +19848,10 @@ function CollectionSpreadsheetPage({
                           const preview = (col.id === "description" || col.id === "seoTitle" || col.id === "seoDescription")
                             ? String(value).replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim()
                             : String(value);
+                          // Multi-line codes (per-size SKU/barcode) must keep their
+                          // line breaks, not collapse to one space-separated line —
+                          // so a locked row reads exactly like an editable one.
+                          const isMultiline = preview.includes("\n");
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
                               <div
@@ -19857,14 +19861,18 @@ function CollectionSpreadsheetPage({
                                   cursor: "pointer",
                                   display: "flex",
                                   alignItems: "center",
-                                  justifyContent: isNum ? "center" : "flex-start",
+                                  justifyContent: isNum || isMultiline ? "center" : "flex-start",
                                   minHeight: 28,
                                   padding: "4px 6px",
                                   fontSize: "var(--portal-table-font-size, 14px)",
                                   color: preview ? "#64748b" : "#cbd5e1",
                                 }}
                               >
-                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 240 }}>{preview || "—"}</span>
+                                {isMultiline ? (
+                                  <span style={{ whiteSpace: "pre-line", textAlign: "center", lineHeight: 1.45 }}>{preview}</span>
+                                ) : (
+                                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 240 }}>{preview || "—"}</span>
+                                )}
                               </div>
                             </Td>
                           );
