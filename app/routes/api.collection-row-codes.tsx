@@ -27,12 +27,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (!name.toLowerCase().includes(q)) return;
       const sizes: Record<string, string> = {};
       for (const id of SIZE_IDS) if ((Number(row[id]) || 0) > 0) sizes[id] = row[id];
+      // Parse modelPicture entries so we can see whether each image is a stored
+      // key (CollectionImage), a CDN/remote URL, an inline data URL, or empty.
+      let modelPicture: unknown = row.modelPicture ?? "";
+      try {
+        const raw = String(row.modelPicture ?? "").trim();
+        if (raw.startsWith("[")) {
+          const arr = JSON.parse(raw) as unknown[];
+          modelPicture = arr.map((x, idx) => {
+            if (typeof x === "string") return { i: idx, type: x.startsWith("data:") ? "dataURL" : /^https?:/i.test(x) ? "url" : x ? "string" : "empty", src: x.slice(0, 90) };
+            const o = (x && typeof x === "object") ? x as Record<string, unknown> : {};
+            const thumb = String(o.thumb ?? ""); const key = String(o.key ?? "");
+            return { i: idx, hasKey: !!key, key: key || undefined, thumbType: thumb.startsWith("data:") ? "dataURL" : /^https?:/i.test(thumb) ? "url" : thumb ? "string" : "empty", thumb: thumb.slice(0, 90) || undefined, alt: String(o.alt ?? "").slice(0, 40) || undefined, kind: o.kind };
+          });
+        }
+      } catch { /* leave raw */ }
       matches.push({
         collection: c.name,
         collectionId: c.id,
         rowIndex: i,
         name,
         sizesOrdered: sizes,
+        modelPicture,
         sku_raw: row.sku ?? "",
         barcode_raw: row.barcode ?? "",
         sku_visible: show(row.sku),         // newlines shown as ⏎
