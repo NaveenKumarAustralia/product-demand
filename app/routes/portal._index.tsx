@@ -19392,6 +19392,9 @@ function CollectionSpreadsheetPage({
   // state with the returned product IDs so the row visibly flips to
   // "linked" without waiting for a full reload.
   const isPushing = pushFetcher.state !== "idle";
+  // Which single row's "Create in Shopify" is in flight, so only that button spins.
+  const [pushingRowIdx, setPushingRowIdx] = useState<number | null>(null);
+  useEffect(() => { if (pushFetcher.state === "idle") setPushingRowIdx(null); }, [pushFetcher.state]);
   const pushRow = (idx: number) => {
     const row = rows[idx];
     if ((row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim()) return;
@@ -19407,6 +19410,7 @@ function CollectionSpreadsheetPage({
       if (!window.confirm(`No "Duplicate from" style is selected for "${title}".\n\nProducts should be created by duplicating an existing Shopify product, then editing only what differs. Only create from scratch if this is a brand-new style that doesn't exist in Shopify yet.\n\nCreate from scratch anyway?`)) return;
     }
     setPushStatus(null);
+    setPushingRowIdx(idx);
     const fd = new FormData();
     fd.set("intent", "push_collection_row_to_shopify");
     fd.set("collectionId", String(listItem.id));
@@ -20044,9 +20048,9 @@ function CollectionSpreadsheetPage({
                           type="button"
                           onClick={() => pushRow(rIdx)}
                           disabled={isPushing}
-                          style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: isPushing ? "wait" : "pointer", width: "100%" }}
+                          style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 600, cursor: isPushing ? "wait" : "pointer", width: "100%", opacity: isPushing && pushingRowIdx !== rIdx ? 0.7 : 1 }}
                           title="Create a Shopify draft product from this row"
-                        >Create in Shopify</button>
+                        >{btnLabel(isPushing && pushingRowIdx === rIdx, "Creating…", "Create in Shopify")}</button>
                       );
                       // Cell-renderer that wraps all the special-case
                       // branches. Called once per column; sticky props
