@@ -4439,8 +4439,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // client re-requests to advance the next batch, then gets the slim rows.
     try {
       const rows = normalizeCollectionRows(collection.rows);
+      // Fold removed "Loading Notes" column into Notes (one-time, idempotent).
+      const notesChanged = mergeLoadingNotesIntoNotes(rows);
       const { changed, remaining } = await offloadInlineCollectionImages(id, rows, 40);
-      if (changed) await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+      if (changed || notesChanged) await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
       if (remaining > 0) return jsonResponse({ collection: null, migrating: true, remaining });
       // Auto-detect products deleted in Shopify: unlink those rows so they show
       // "Create in Shopify" again without anyone re-checking. Best-effort — a
@@ -4458,7 +4460,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } catch (e) {
         console.warn("[get_collection_full] link prune failed:", e);
       }
-      if (changed || linkChanged) return jsonResponse({ collection: { ...collection, rows } });
+      if (changed || linkChanged || notesChanged) return jsonResponse({ collection: { ...collection, rows } });
     } catch (e) {
       console.warn("[get_collection_full] image offload failed:", e);
     }
@@ -4475,9 +4477,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!collection) return jsonResponse({ ok: false, remaining: 0 });
     try {
       const rows = normalizeCollectionRows(collection.rows);
+      const notesChanged = mergeLoadingNotesIntoNotes(rows);
       const { changed, remaining } = await offloadInlineCollectionImages(id, rows, 40);
-      if (changed) await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
-      return jsonResponse({ ok: true, changed, remaining });
+      if (changed || notesChanged) await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
+      return jsonResponse({ ok: true, changed: changed || notesChanged, remaining });
     } catch (e) {
       console.warn("[migrate_collection_images] failed:", e);
       return jsonResponse({ ok: false, remaining: 0 });
@@ -11784,6 +11787,23 @@ async function offloadInlineCollectionImages(
   return { changed: touchedCells.size > 0, remaining: Math.max(0, pending.length - slice.length) };
 }
 
+// One-time migration: the "Loading Notes" column was removed, so fold any row's
+// loadingNotes text into its Notes cell and clear loadingNotes. Idempotent —
+// once moved, loadingNotes is empty so it never runs again. Mutates rows in
+// place; returns true if anything changed.
+function mergeLoadingNotesIntoNotes(rows: Array<Record<string, string>>): boolean {
+  let changed = false;
+  for (const row of rows) {
+    const ln = (row.loadingNotes ?? "").trim();
+    if (!ln) { if (row.loadingNotes) { row.loadingNotes = ""; changed = true; } continue; }
+    const existing = (row.notes ?? "").trim();
+    row.notes = existing ? `${existing}\nLoading: ${ln}` : `Loading: ${ln}`;
+    row.loadingNotes = "";
+    changed = true;
+  }
+  return changed;
+}
+
 async function persistFullCollectionImage(
   collectionId: number,
   buf: Buffer,
@@ -16438,7 +16458,6 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "priceRupees", label: "Price ₹", type: "number", width: 90 },
   { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 },
   { id: "eta", label: "ETA", type: "date", width: 90 },
-  { id: "loadingNotes", label: "Loading Notes", width: 140 },
   { id: "duplicateFrom", label: "DUPLICATE FROM", width: 140 },
   { id: "categoryMetafields", label: "Category metafields", width: 180 },
   { id: "modelHeightSize", label: "Model height and size", width: 130 },
@@ -16625,7 +16644,10 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   // "mani Pics Taken" and "Open in Shopify" columns removed (Sep 16 2026, user
   // asked — not needed). Drop them from any collection that saved them; row data
   // stays in JSON (unshown) and the storefront link is still reachable elsewhere.
-  for (const dropId of ["maniPicsTaken", "link"]) {
+  // "Loading Notes" column removed (Oct 2026, user asked) — its content is
+  // migrated into the Notes column server-side (see mergeLoadingNotesIntoNotes
+  // in get_collection_full). Drop the now-empty column from existing collections.
+  for (const dropId of ["maniPicsTaken", "link", "loadingNotes"]) {
     const idx = cols.findIndex((c) => c.id === dropId);
     if (idx !== -1) cols.splice(idx, 1);
   }
