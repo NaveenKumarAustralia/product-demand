@@ -20149,7 +20149,9 @@ function CollectionSpreadsheetPage({
                         //    shipment) built ONLY from Packing Lists; click it for
                         //    the per-size shipment breakdown popup.
                         if (col.type === "chip" && col.id === "status") {
-                          const rsOpt = rowRestockStatus ? restockSettings.statusOptions.find((o) => o.value === rowRestockStatus) : null;
+                          // Product is "in the restock page" when it has a restock order.
+                          const inRestock = Boolean(rowRestockStatus);
+                          const rsOpt = inRestock ? restockSettings.statusOptions.find((o) => o.value === rowRestockStatus) : null;
                           let shipLabel = "—", shipBg = "#f3f4f6", shipColor = "#9ca3af";
                           if (totalOrdered > 0 || rowShippedTotal > 0) {
                             if (rowShippedTotal <= 0) { shipLabel = "Not shipped"; shipBg = "#f3f4f6"; shipColor = "#6b7280"; }
@@ -20160,10 +20162,22 @@ function CollectionSpreadsheetPage({
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                                <span
-                                  title={rsOpt ? `Status from the restock page: ${rsOpt.label}` : "No restock order for this product yet"}
-                                  style={{ display: "inline-block", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 999, whiteSpace: "nowrap", background: rsOpt?.bg ?? "#f3f4f6", color: rsOpt?.color ?? "#9ca3af" }}
-                                >{rsOpt?.label ?? "—"}</span>
+                                {inRestock ? (
+                                  // In the restock page → status comes from there (read-only).
+                                  <span
+                                    title={rsOpt ? `Status from the restock page: ${rsOpt.label}` : `Status from the restock page: ${rowRestockStatus}`}
+                                    style={{ display: "inline-block", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 999, whiteSpace: "nowrap", background: rsOpt?.bg ?? "#e5e7eb", color: rsOpt?.color ?? "#374151" }}
+                                  >{rsOpt?.label ?? rowRestockStatus}</span>
+                                ) : (
+                                  // Not in the restock page → editable here, same chips as before.
+                                  <CollectionChipDropdown
+                                    value={value}
+                                    options={localStatusOptions}
+                                    emptyLabel="Set status"
+                                    onChange={(v) => updateCell(rIdx, "status", v)}
+                                    onOptionsChange={(next) => saveChipOptions("statusOptions", next)}
+                                  />
+                                )}
                                 <button
                                   type="button"
                                   disabled={!canOpen}
