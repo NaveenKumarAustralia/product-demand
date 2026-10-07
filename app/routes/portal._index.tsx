@@ -22405,30 +22405,38 @@ function DropboxPickerTile({ r, added, selected, onToggle }: {
   const border = added ? "2px solid #0d9488" : selected ? "3px solid #0061FF" : "1px solid #d1d5db";
   return (
     <div style={{ breakInside: "avoid", marginBottom: 10, position: "relative", borderRadius: 8, overflow: "hidden", border, background: "#f1f5f9", opacity: added ? 0.6 : 1 }}>
-      <div onClick={() => { if (!added) onToggle(); }} style={{ cursor: added ? "default" : "pointer", display: "block" }} title={added ? `${r.name} — already added` : r.name}>
+      {/* Clicking anywhere on the tile selects it (the ▶ button is separate). */}
+      <div onClick={() => { if (!added) onToggle(); }} style={{ cursor: added ? "default" : "pointer", display: "block" }} title={added ? `${r.name} — already added` : `${r.name}${isVideo ? " — tap ▶ to preview" : ""}`}>
         {isVideo ? (
-          playing && videoUrl ? (
-            <video src={videoUrl} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} style={{ width: "100%", height: "auto", display: "block", background: "#000" }} />
-          ) : videoUrl ? (
-            <video src={`${videoUrl}#t=0.1`} muted playsInline preload="metadata" style={{ width: "100%", height: "auto", display: "block", background: "#000", minHeight: 120 }} />
+          videoUrl ? (
+            <video src={`${videoUrl}#t=0.1`} muted playsInline preload="metadata" style={{ width: "100%", height: "auto", display: "block", background: "#000", minHeight: 120, pointerEvents: "none" }} />
           ) : (
             <div style={{ width: "100%", aspectRatio: "3 / 4", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", background: "#0b0b0b", fontSize: 30 }}>🎬</div>
           )
         ) : (
-          <DropboxThumb path={r.path} rev={r.rev} size="w640h480" mode="bestfit" style={{ width: "100%", height: "auto", display: "block" }} />
+          <DropboxThumb path={r.path} rev={r.rev} size="w640h480" mode="bestfit" style={{ width: "100%", height: "auto", display: "block", pointerEvents: "none" }} />
         )}
       </div>
-      {isVideo && !playing && videoUrl && (
+      {/* Small ▶ in the bottom-left corner — plays the clip in a lightbox so the
+          rest of the tile stays tappable for selecting. */}
+      {isVideo && videoUrl && (
         <button type="button" onClick={(e) => { e.stopPropagation(); setPlaying(true); }} title="Play video"
-          style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 52, height: 52, borderRadius: "50%", background: "rgba(0,0,0,0.55)", color: "#fff", border: "none", cursor: "pointer", fontSize: 22, display: "flex", alignItems: "center", justifyContent: "center", paddingLeft: 4 }}
+          style={{ position: "absolute", bottom: 6, left: 6, width: 32, height: 32, borderRadius: "50%", background: "rgba(0,0,0,0.65)", color: "#fff", border: "2px solid rgba(255,255,255,0.85)", cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", paddingLeft: 3, boxShadow: "0 1px 4px rgba(0,0,0,0.4)" }}
         >▶</button>
       )}
-      {isVideo && <span style={{ position: "absolute", bottom: 4, right: 4, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 800, pointerEvents: "none" }}>video</span>}
+      {isVideo && <span style={{ position: "absolute", bottom: 6, right: 6, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 800, pointerEvents: "none" }}>video</span>}
       {added ? (
         <span style={{ position: "absolute", top: 4, left: 4, background: "#0d9488", color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 800 }}>✓ Added</span>
       ) : selected ? (
         <span style={{ position: "absolute", top: 4, left: 4, background: "#0061FF", color: "#fff", borderRadius: "50%", width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800 }}>✓</span>
       ) : null}
+      {playing && videoUrl && typeof document !== "undefined" && createPortal(
+        <div onClick={() => setPlaying(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.82)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <video src={videoUrl} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} style={{ maxWidth: "92vw", maxHeight: "90vh", borderRadius: 8, background: "#000", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }} />
+          <button type="button" onClick={() => setPlaying(false)} title="Close" style={{ position: "fixed", top: 18, right: 22, width: 36, height: 36, borderRadius: "50%", background: "rgba(255,255,255,0.15)", color: "#fff", border: "none", fontSize: 18, cursor: "pointer" }}>×</button>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
