@@ -20332,43 +20332,6 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
-                        // Size qty cells: keep the editable ordered-qty input, but
-                        // when this product has shipment data for this size, show a
-                        // small read-only line under it (how many went in which
-                        // shipment, e.g. "15 in #15") — sourced from Packing Lists.
-                        {
-                          const sizeCanon = COLLECTION_SIZE_ID_TO_CANON[col.id];
-                          const sizeShip = sizeCanon && rowShipDetail ? rowShipDetail[sizeCanon] : null;
-                          if (sizeCanon && sizeShip && sizeShip.total > 0) {
-                            return (
-                              <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky} style={{ verticalAlign: "top" }}>
-                                <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch" }}>
-                                  <CollectionCell
-                                    value={value}
-                                    type="number"
-                                    columnId={col.id}
-                                    rowIndex={rIdx}
-                                    updateCell={updateCell}
-                                    productInfo={productInfo}
-                                    generateSkuAndBarcode={generateSkuAndBarcode}
-                                    onAutoGenerateSku={autoGenerateSku}
-                                    placeholder=""
-                                    users={users}
-                                    rowKey={row.__rowKey ?? ""}
-                                    collectionId={listItem.id}
-                                    rowName={row.name ?? row.title ?? ""}
-                                    threadCounts={threadCounts}
-                                    costCurrency={costCurrency}
-                                  />
-                                  <div
-                                    title={`${sizeShip.total} shipped in: ${sizeShip.parts.map((p) => `${p.qty} in #${p.ship}`).join(", ")}`}
-                                    style={{ fontSize: 9.5, color: "#0e7490", fontWeight: 700, lineHeight: 1.25, textAlign: "center", marginTop: 1, whiteSpace: "normal", wordBreak: "break-word" }}
-                                  >{sizeShip.parts.map((p) => `${p.qty} in #${p.ship}`).join(" · ")}</div>
-                                </div>
-                              </Td>
-                            );
-                          }
-                        }
                         // Model Pictures gallery: on a locked, linked row it's
                         // VIEW-ONLY — the manager opens so you can see the images,
                         // but add / remove / reorder are blocked and raise the
