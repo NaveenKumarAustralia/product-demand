@@ -17566,6 +17566,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   };
   const [dragToken, setDragToken] = useState<string | null>(null);
   const [dragOverToken, setDragOverToken] = useState<string | null>(null);
+  // True right after a tile drag, so the click the browser fires on drop doesn't
+  // also open the group folder.
+  const justDraggedRef = useRef(false);
   const groupIdParam = searchParams.get("groupId");
   const openGroupNav = (id: string | null) => {
     const next = new URLSearchParams(searchParams);
@@ -17750,11 +17753,11 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   // Shared drag handlers for a tile (group or collection). CollectionCard already
   // sets `draggable` on its handle; the group tile div adds `draggable` itself.
   const tileDragProps = (token: string, orderedTokens: string[]) => ({
-    onDragStart: (e: React.DragEvent) => { setDragToken(token); e.dataTransfer.effectAllowed = "move"; },
+    onDragStart: (e: React.DragEvent) => { justDraggedRef.current = true; setDragToken(token); e.dataTransfer.effectAllowed = "move"; },
     onDragOver: (e: React.DragEvent) => { if (!dragToken) return; e.preventDefault(); setDragOverToken(token); },
     onDragLeave: () => setDragOverToken((cur) => cur === token ? null : cur),
     onDrop: (e: React.DragEvent) => { e.preventDefault(); reorderTiles(orderedTokens, token); setDragToken(null); setDragOverToken(null); },
-    onDragEnd: () => { setDragToken(null); setDragOverToken(null); },
+    onDragEnd: () => { setDragToken(null); setDragOverToken(null); window.setTimeout(() => { justDraggedRef.current = false; }, 120); },
   });
 
   // When a collection is selected via the URL, render the spreadsheet page
@@ -17975,14 +17978,14 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             <div
               key={g.id}
               draggable
-              onClick={() => { if (!dragToken) openGroupNav(g.id); }}
+              onClick={() => { if (!dragToken && !justDraggedRef.current) openGroupNav(g.id); }}
               {...tileDragProps(token, orderedTokens)}
               style={{ ...s.productStyleCard, cursor: "grab", position: "relative", opacity: dragToken === token ? 0.4 : 1, outline: over ? "3px solid #0d9488" : "none", outlineOffset: 2 }}
               title={`Open ${g.name} — drag to reorder`}
             >
               <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative", background: "#0f766e" }}>
                 {cover ? (
-                  <img src={`/portal/thumbnail/collection/${cover.id}?v=${new Date(cover.updatedAt).getTime()}`} alt={g.name} style={{ ...s.productStyleImage, filter: "brightness(0.9)" }} loading="lazy" decoding="async" />
+                  <img src={`/portal/thumbnail/collection/${cover.id}?v=${new Date(cover.updatedAt).getTime()}`} alt={g.name} draggable={false} style={{ ...s.productStyleImage, filter: "brightness(0.9)", pointerEvents: "none" }} loading="lazy" decoding="async" />
                 ) : (
                   <div style={s.productStyleImageEmpty}>Group</div>
                 )}
