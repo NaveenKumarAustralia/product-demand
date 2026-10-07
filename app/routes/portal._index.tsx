@@ -21917,7 +21917,7 @@ function CollectionPriceRupeesCell({
     return "";
   }, [productInfo.categories, styleOverrideId]);
   return (
-    <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%", minHeight: 36, gap: 2, position: "relative" }} onContextMenu={openBreakdown}>
+    <div style={{ display: "flex", flexDirection: "column", justifyContent: "center", width: "100%", height: "100%", minHeight: 36, gap: 2, position: "relative" }} onContextMenu={openBreakdown}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: "100%" }}>
         {/* ₹ prefix so the amount reads as rupees (this cell is only rendered for
             INR collections; JJ uses ฿ on its own path). */}
