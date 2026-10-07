@@ -6316,12 +6316,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   }
 
+  // Previous supplier status, captured on update_status, so the cut log can tell
+  // a real On Order → On Production transition from any other status change.
+  let prevSupplierStatusForCut: string | null = null;
   if (intent === "update_status") {
     // Alert the account owner if the status of a LIVE-preorder product changes.
     const newStatus = String(form.get("value") ?? "") || null;
+    // Previous status drives the cut log: a cut is recorded ONLY on the genuine
+    // On Order → On Production transition (see the reconcile call below).
+    const existingOrder = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { supplierStatus: true, productTitle: true } });
+    prevSupplierStatusForCut = existingOrder?.supplierStatus ?? null;
     const preorderSetting = await prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: orderId }, select: { enabled: true } });
     if (preorderSetting?.enabled === true) {
-      const existingOrder = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { supplierStatus: true, productTitle: true } });
       if ((existingOrder?.supplierStatus ?? null) !== newStatus) {
         await notifyPreorderChange({ orderId, field: "status", oldValue: existingOrder?.supplierStatus ?? null, newValue: newStatus, actor: currentUser, users, productTitle: existingOrder?.productTitle });
       }
@@ -6435,8 +6441,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         field: `Qty (${size})`,
         toValue: String(qtyOrdered),
       });
-      // Keep the cut log's piece count in sync if this order is already on production.
-      await reconcileProductionCutRecord(orderId, currentUser?.name ?? null);
+      // Keep the cut log's piece count in sync if this order is already on
+      // production — a qty edit never CREATES a cut (allowCreate: false).
+      await reconcileProductionCutRecord(orderId, currentUser?.name ?? null, { allowCreate: false });
     }
 
     return null;
@@ -6460,7 +6467,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (intent === "update_status") {
       await reconcileOrderFabricConsumption(orderId);
       // Record (or remove) the production "cut" + stamp/clear the production date.
-      await reconcileProductionCutRecord(orderId, currentUser?.name ?? null);
+      // A cut is CREATED only on a genuine On Order → On Production transition;
+      // any other status change just syncs/removes, never logs a new cut.
+      const newStatusForCut = String(form.get("value") ?? "");
+      const isOnOrderToOnProduction = newStatusForCut === "on_production" && (prevSupplierStatusForCut === "on_order" || !prevSupplierStatusForCut);
+      await reconcileProductionCutRecord(orderId, currentUser?.name ?? null, { allowCreate: isOnOrderToOnProduction });
     }
     if (intent === "update_factory_notes" || intent === "update_notes") {
       await syncOrderNoteMessages({
@@ -25723,15 +25734,19 @@ async function reconcileOrderFabricConsumption(orderId: number): Promise<void> {
 }
 
 // Keep the permanent cut log (ProductionCutRecord) and the order's editable
-// productionDate in step with the order's status:
-//   • entering production (on_production/ready/in_shipment) for the first time →
-//     stamp productionDate = today and create/refresh the cut record (qty = live
-//     total, so an edited quantity stays in sync while the row exists);
-//   • leaving production (reversed by mistake) → clear productionDate and REMOVE
-//     the cut record (user choice: an un-cut row shouldn't count).
+// productionDate in step with the order's status. A cut is recorded ONLY on the
+// "On Order → On Production" transition (opts.allowCreate), NOT for any other
+// status change — so jumping straight to Ready / In Shipment, or re-saving a
+// status, never logs a new cut.
+//   • On Order → On Production (allowCreate) with no record yet → stamp
+//     productionDate = today and CREATE the cut record.
+//   • Already recorded + still in a production status (on_production/ready/
+//     in_shipment) → keep qty + descriptive fields synced (leave the cut date).
+//   • Leaving production (back to on_order/cancelled) → clear productionDate and
+//     REMOVE the cut record (an un-cut row shouldn't count).
 // The cut record has no cascade to SupplierOrder, so a deleted row keeps its log
 // entry (qty frozen at its last synced value). Best-effort; never throws.
-async function reconcileProductionCutRecord(orderId: number, actorName: string | null): Promise<void> {
+async function reconcileProductionCutRecord(orderId: number, actorName: string | null, opts: { allowCreate?: boolean } = {}): Promise<void> {
   try {
     const order = await prisma.supplierOrder.findUnique({
       where: { id: orderId },
@@ -25741,21 +25756,29 @@ async function reconcileProductionCutRecord(orderId: number, actorName: string |
     const inProduction = FABRIC_CONSUMED_STATUSES.has(order.supplierStatus);
     const qty = (order.totalQty ?? 0) > 0 ? order.totalQty : (order.lines ?? []).reduce((s, l) => s + (l.qtyOrdered || 0), 0);
     if (inProduction) {
-      const productionDate = order.productionDate ?? new Date();
-      if (!order.productionDate) {
-        await prisma.supplierOrder.update({ where: { id: orderId }, data: { productionDate } });
-      }
-      await prisma.productionCutRecord.upsert({
-        where: { supplierOrderId: orderId },
-        create: {
-          shop: order.shop, supplierOrderId: orderId, productId: order.productId ?? null,
-          productTitle: order.productTitle ?? "(untitled)", supplier: order.supplier ?? null,
-          productType: order.productType ?? null, qty, productionDate, createdByName: actorName,
-        },
+      const existing = await prisma.productionCutRecord.findUnique({ where: { supplierOrderId: orderId }, select: { id: true } });
+      if (existing) {
         // Keep the piece count + descriptive fields synced while the row exists;
         // leave productionDate alone (that's the recorded cut date, edited separately).
-        update: { qty, productTitle: order.productTitle ?? "(untitled)", supplier: order.supplier ?? null, productType: order.productType ?? null, productId: order.productId ?? null },
-      });
+        await prisma.productionCutRecord.update({
+          where: { supplierOrderId: orderId },
+          data: { qty, productTitle: order.productTitle ?? "(untitled)", supplier: order.supplier ?? null, productType: order.productType ?? null, productId: order.productId ?? null },
+        });
+      } else if (opts.allowCreate) {
+        // First-time cut (On Order → On Production). Stamp the cut date + log it.
+        const productionDate = order.productionDate ?? new Date();
+        if (!order.productionDate) await prisma.supplierOrder.update({ where: { id: orderId }, data: { productionDate } });
+        await prisma.productionCutRecord.create({
+          data: {
+            shop: order.shop, supplierOrderId: orderId, productId: order.productId ?? null,
+            productTitle: order.productTitle ?? "(untitled)", supplier: order.supplier ?? null,
+            productType: order.productType ?? null, qty, productionDate, createdByName: actorName,
+          },
+        });
+      }
+      // In a production status but no record and not an On Order → On Production
+      // transition (e.g. jumped straight to Ready/In Shipment, or a qty sync) →
+      // deliberately do nothing, so only real cuts are logged.
     } else {
       if (order.productionDate) await prisma.supplierOrder.update({ where: { id: orderId }, data: { productionDate: null } });
       await prisma.productionCutRecord.deleteMany({ where: { supplierOrderId: orderId } });
