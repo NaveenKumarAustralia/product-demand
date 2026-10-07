@@ -22301,7 +22301,6 @@ function CollectionImageManagerModal({
   };
   const onDragEnd = () => { setDragIdx(null); setDragOverIdx(null); };
   const removeAt = (idx: number) => {
-    if (!window.confirm(`Remove image ${idx + 1}?`)) return;
     onCommit(images.filter((_, i) => i !== idx));
   };
   const moveBy = (idx: number, delta: number) => {
