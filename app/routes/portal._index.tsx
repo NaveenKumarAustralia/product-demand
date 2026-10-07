@@ -5957,16 +5957,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
     // Sync images ONLY when the user edited the pictures here — otherwise leave
     // Shopify's current media untouched (so a push never clobbers Shopify images).
+    let imgErrorsOut: string[] = [];
     if (imagesEdited) {
       try {
         const imgs = parseMultiImageValue(pushRow.modelPicture ?? "");
         if (imgs.length) {
           await deleteAllProductMedia(session.shop, session.accessToken, linkedId);
-          const imgErrors = await pushRowImagesToShopify(session.shop, session.accessToken, linkedId, imgs);
-          if (imgErrors.length) console.warn(`[collection update] row ${idx} image errors:`, imgErrors);
+          imgErrorsOut = await pushRowImagesToShopify(session.shop, session.accessToken, linkedId, imgs);
+          if (imgErrorsOut.length) console.warn(`[collection update] row ${idx} image errors:`, imgErrorsOut);
         }
       } catch (e) {
         console.warn(`[collection update] row ${idx} images failed:`, e);
+        imgErrorsOut = [`images failed: ${e instanceof Error ? e.message : String(e)}`];
       }
     }
 
@@ -5975,7 +5977,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // Persist the merged values so the portal row matches what's now in Shopify.
     rows[idx] = { ...pushRow, [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1", [COL_ROW_SHOPIFY_EDITED]: "" };
     await prisma.collection.update({ where: { id }, data: { rows, updatedAt: new Date() } });
-    return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId, categoryAttempted: res.categoryAttempted, categoryWrote: res.categoryWrote, categoryErrors: res.categoryErrors }] });
+    return jsonResponse({ ok: true, results: [{ index: idx, ok: true, productId: res.productId, categoryAttempted: res.categoryAttempted, categoryWrote: res.categoryWrote, categoryErrors: res.categoryErrors, imageErrors: imgErrorsOut }] });
   }
 
   if (intent === "match_shopify_and_lock") {
@@ -11470,13 +11472,46 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
   const json = await shopifyGraphql<any>(shop, accessToken, `
     mutation AddProductMedia($productId: ID!, $media: [CreateMediaInput!]!) {
       productCreateMedia(productId: $productId, media: $media) {
-        media { id }
+        media { id mediaContentType status ... on MediaImage { image { url } } }
         mediaUserErrors { field message }
       }
     }
   `, { productId, media });
   const errs = json?.data?.productCreateMedia?.mediaUserErrors ?? [];
   for (const e of errs) errors.push(e.message || "media error");
+  const createdIds: string[] = (json?.data?.productCreateMedia?.media ?? []).map((m: any) => String(m?.id ?? "")).filter(Boolean);
+
+  // productCreateMedia returns immediately with status PROCESSING; Shopify then
+  // processes the file asynchronously and may fail AFTER we've "succeeded" — the
+  // "Media processing failed" the admin shows. mediaUserErrors never carries
+  // that. Poll the created media for its real status + error CODE so we actually
+  // know why (INVALID/UNSUPPORTED/DOWNLOAD/etc.) instead of guessing.
+  if (createdIds.length) {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const poll = await shopifyGraphql<any>(shop, accessToken, `
+        query MediaStatus($ids: [ID!]!) {
+          nodes(ids: $ids) {
+            ... on MediaImage { id status mediaErrors { code details message } image { url } }
+          }
+        }
+      `, { ids: createdIds }).catch(() => null);
+      const nodes = (poll?.data?.nodes ?? []).filter(Boolean) as any[];
+      const stillProcessing = nodes.some((n) => String(n?.status ?? "") === "PROCESSING");
+      const failed = nodes.filter((n) => String(n?.status ?? "") === "FAILED");
+      if (failed.length) {
+        for (const n of failed) {
+          const me = (n?.mediaErrors ?? [])[0] ?? {};
+          const detail = [me.code, me.details, me.message].filter(Boolean).join(" — ") || "FAILED (no code)";
+          errors.push(`media processing failed: ${detail}`);
+        }
+      }
+      if (!stillProcessing) break;
+    }
+    if (errors.some((e) => e.startsWith("media processing failed"))) {
+      console.error(`[shopify media] product ${productId} processing failures:`, errors.filter((e) => e.startsWith("media processing failed")));
+    }
+  }
   return errors;
 }
 
@@ -19139,7 +19174,8 @@ function CollectionSpreadsheetPage({
       if (data?.ok && Array.isArray(data.results)) {
         setRows((prev) => { const next = [...prev]; for (const r of data.results) { if (r?.ok && next[r.index]) next[r.index] = { ...next[r.index], [COL_ROW_SHOPIFY_DIRTY]: "", [COL_ROW_SHOPIFY_LOCKED]: "1" }; } return next; });
         const r0 = data.results[0];
-        if ((r0?.categoryErrors ?? []).length) setPushStatus({ msg: `Row ${idx + 1}: pushed, but category metafields failed: ${r0.categoryErrors.join("; ")}`, tone: "err" });
+        if ((r0?.imageErrors ?? []).length) setPushStatus({ msg: `Row ${idx + 1}: pushed, but some images failed: ${r0.imageErrors.join(" | ")}`, tone: "err" });
+        else if ((r0?.categoryErrors ?? []).length) setPushStatus({ msg: `Row ${idx + 1}: pushed, but category metafields failed: ${r0.categoryErrors.join("; ")}`, tone: "err" });
         else setPushStatus({ msg: `Row ${idx + 1}: pushed to Shopify and locked.`, tone: "ok" });
       } else {
         setPushStatus({ msg: `Row ${idx + 1} update failed — ${data?.error ?? "unknown error"}`, tone: "err" });
