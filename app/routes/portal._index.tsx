@@ -5962,8 +5962,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       try {
         const imgs = parseMultiImageValue(pushRow.modelPicture ?? "");
         if (imgs.length) {
-          await deleteAllProductMedia(session.shop, session.accessToken, linkedId);
-          imgErrorsOut = await pushRowImagesToShopify(session.shop, session.accessToken, linkedId, imgs);
+          // replaceExisting: pushRowImagesToShopify stages every new image FIRST
+          // (downloading any cdn.shopify.com bytes while they still exist), then
+          // deletes the old media, then creates — so re-referenced CDN files
+          // can't 404 mid-push.
+          imgErrorsOut = await pushRowImagesToShopify(session.shop, session.accessToken, linkedId, imgs, { replaceExisting: true });
           if (imgErrorsOut.length) console.warn(`[collection update] row ${idx} image errors:`, imgErrorsOut);
         }
       } catch (e) {
@@ -11415,7 +11418,7 @@ async function normalizeImageForShopify(bytes: Buffer, mime: string): Promise<{ 
 // text. Local images (stored in CollectionImage by key, or inline data URLs)
 // go through a staged upload; public http(s) URLs are attached directly.
 // Best-effort: returns a list of error strings (the product already exists).
-async function pushRowImagesToShopify(shop: string, accessToken: string, productId: string, images: CollectionImageEntry[]): Promise<string[]> {
+async function pushRowImagesToShopify(shop: string, accessToken: string, productId: string, images: CollectionImageEntry[], opts: { replaceExisting?: boolean } = {}): Promise<string[]> {
   const errors: string[] = [];
   if (!images.length) return errors;
   const media: Array<{ originalSource: string; mediaContentType: string; alt?: string }> = [];
@@ -11435,17 +11438,14 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
     }
     if (!bytes && /^https?:\/\//i.test(entry.thumb || "")) {
       const url = entry.thumb as string;
-      // Shopify's own CDN images are already processed — attach directly.
-      if (/cdn\.shopify\.com/i.test(url)) {
-        media.push({ originalSource: url, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
-        continue;
-      }
-      // Other public URLs (Dropbox / product-info): fetch the bytes so we can
-      // re-encode them below — a huge/HEIC source fetched directly by Shopify
-      // is exactly what fails "Media processing". Fall back to direct attach
-      // if the fetch fails.
+      // Download the bytes for EVERY http(s) source — INCLUDING this store's own
+      // cdn.shopify.com — so we own them and re-stage a fresh upload. Attaching a
+      // cdn.shopify.com URL directly is fatal when this push replaces the
+      // product's media: deleteAllProductMedia removes that very file, so
+      // Shopify's fetch of the originalSource 404s ("Media processing failed").
+      // This download runs BEFORE the delete below, while the file still exists.
       try {
-        const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+        const r = await fetch(url, { signal: AbortSignal.timeout(20_000) });
         if (r.ok) { bytes = Buffer.from(await r.arrayBuffer()); mime = (r.headers.get("content-type") || mime).split(";")[0].trim() || mime; }
       } catch { /* fall back below */ }
       if (!bytes) {
@@ -11469,6 +11469,13 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
     media.push({ originalSource: resourceUrl, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
   }
   if (!media.length) return errors;
+  // Every new image's bytes are now staged (or are external URLs we couldn't
+  // download). ONLY NOW is it safe to clear the product's old media — doing it
+  // earlier would delete the cdn.shopify.com files the row still pointed at.
+  if (opts.replaceExisting) {
+    try { await deleteAllProductMedia(shop, accessToken, productId); }
+    catch (e) { console.warn(`[shopify media] delete existing failed for ${productId}:`, e); }
+  }
   const json = await shopifyGraphql<any>(shop, accessToken, `
     mutation AddProductMedia($productId: ID!, $media: [CreateMediaInput!]!) {
       productCreateMedia(productId: $productId, media: $media) {
