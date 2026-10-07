@@ -23165,7 +23165,9 @@ function CollectionDuplicateFromCell({
             border: isSuggested ? "1px solid #6ee7b7" : "1px dashed #d1d5db",
             borderRadius: 5, padding: "5px 8px", fontSize: 12,
             color: value ? "#111827" : isSuggested ? "#065f46" : "#6b7280",
-            cursor: isFetching ? "wait" : "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            cursor: isFetching ? "wait" : "pointer",
+            // Wrap the full name so it's all visible without widening the column.
+            whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word", lineHeight: 1.3,
           }}
           title={value
             ? "Duplicated from this product — click to change"
