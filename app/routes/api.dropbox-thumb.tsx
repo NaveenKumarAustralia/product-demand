@@ -11,9 +11,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const path = url.searchParams.get("path") ?? "";
   const rev = url.searchParams.get("rev") ?? "";
   const size = url.searchParams.get("size") ?? "w256h256";
+  // "bestfit" preserves the image's natural aspect ratio (fits within the box);
+  // "strict" (default) returns an exact box, cropping as needed.
+  const mode = url.searchParams.get("mode") === "bestfit" ? "bestfit" : "strict";
   if (!path) return new Response("Missing path", { status: 400 });
   try {
-    const buf = await thumbnail(path, size, rev);
+    const buf = await thumbnail(path, size, rev, mode);
     return new Response(new Uint8Array(buf), {
       status: 200,
       headers: {

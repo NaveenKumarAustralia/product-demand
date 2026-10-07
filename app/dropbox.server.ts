@@ -166,15 +166,15 @@ export async function temporaryLink(path: string): Promise<string> {
   return j.link;
 }
 
-export async function thumbnail(path: string, size = "w256h256", rev = ""): Promise<Buffer> {
+export async function thumbnail(path: string, size = "w256h256", rev = "", mode = "strict"): Promise<Buffer> {
   assertAllowed(path);
-  const key = createHash("sha1").update(`${size}:${rev}:${norm(path)}`).digest("hex") + ".jpg";
+  const key = createHash("sha1").update(`${size}:${mode}:${rev}:${norm(path)}`).digest("hex") + ".jpg";
   const cacheFile = join(THUMB_CACHE, key);
   if (existsSync(cacheFile)) {
     try { return readFileSync(cacheFile); } catch { /* refetch */ }
   }
   const token = await accessToken();
-  const arg = { resource: { ".tag": "path", path: norm(path) }, format: "jpeg", size, mode: "strict" };
+  const arg = { resource: { ".tag": "path", path: norm(path) }, format: "jpeg", size, mode };
   const res = await fetch(`${CONTENT_BASE}/files/get_thumbnail_v2`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Dropbox-API-Arg": JSON.stringify(arg), ...(await teamHeaders()) },

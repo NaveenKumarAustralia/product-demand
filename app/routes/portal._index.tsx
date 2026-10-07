@@ -16857,7 +16857,7 @@ function dbxRelease() {
 
 // Throttled Dropbox image thumbnail: only assigns the <img> src once a slot is
 // free, and releases the slot on load/error so the next tile can start.
-function DropboxThumb({ path, rev, size = "w256h256", style }: { path: string; rev?: string; size?: string; style?: React.CSSProperties }) {
+function DropboxThumb({ path, rev, size = "w256h256", style, mode }: { path: string; rev?: string; size?: string; style?: React.CSSProperties; mode?: "strict" | "bestfit" }) {
   const [src, setSrc] = useState<string | null>(null);
   const releasedRef = useRef(false);
   useEffect(() => {
@@ -16867,12 +16867,12 @@ function DropboxThumb({ path, rev, size = "w256h256", style }: { path: string; r
     let acquired = false;
     dbxAcquire().then(() => {
       acquired = true;
-      if (active) setSrc(`/api/dropbox-thumb?path=${encodeURIComponent(path)}&rev=${encodeURIComponent(rev ?? "")}&size=${size}`);
+      if (active) setSrc(`/api/dropbox-thumb?path=${encodeURIComponent(path)}&rev=${encodeURIComponent(rev ?? "")}&size=${size}${mode ? `&mode=${mode}` : ""}`);
       else release();
     });
     return () => { active = false; if (acquired) release(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, rev, size]);
+  }, [path, rev, size, mode]);
   const done = () => { if (!releasedRef.current) { releasedRef.current = true; dbxRelease(); } };
   if (!src) return <div style={{ ...style, display: "flex", alignItems: "center", justifyContent: "center", background: "#f1f5f9" }}><span style={{ fontSize: 11, color: "#94a3b8" }}>…</span></div>;
   return <img src={src} onLoad={done} onError={done} style={style} loading="lazy" decoding="async" alt="" />;
@@ -20381,7 +20381,9 @@ function CollectionSpreadsheetPage({
                           // cost even on rows that once had a Google-sheet price.
                           const priceBreakdown = styleCostLookup.fabricBreakdownForTitle(rowName, overrideId || undefined);
                           return (
-                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                            // height:1 lets the inner cell fill the FULL row height so
+                            // the "Edit" button can pin to the real bottom-right corner.
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky} style={{ height: 1, verticalAlign: "top" }}>
                               <CollectionPriceRupeesCell
                                 value={value}
                                 rowIndex={rIdx}
@@ -22377,6 +22379,59 @@ function serializeMultiImageValue(images: CollectionImageEntry[]): string {
 // product name (auto-find); the user ticks images and adds them. Selected
 // files are imported server-side into CollectionImage and returned as
 // { thumb, key } entries so they push to Shopify like any other image.
+// One result tile in the collections Dropbox picker. Images show at their
+// NATURAL aspect (bestfit thumbnail), videos show a preview frame with a ▶ Play
+// button that plays the clip inline (temp link) so you can check it before adding.
+function DropboxPickerTile({ r, added, selected, onToggle }: {
+  r: { type: string; name: string; path: string; kind?: string; rev?: string };
+  added: boolean; selected: boolean; onToggle: () => void;
+}) {
+  const isVideo = r.kind === "video";
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
+  useEffect(() => {
+    if (!isVideo) return;
+    let active = true; let released = false;
+    const release = () => { if (!released) { released = true; dbxRelease(); } };
+    let acquired = false;
+    dbxAcquire().then(async () => {
+      acquired = true;
+      if (!active) { release(); return; }
+      try { const resp = await fetch(`/api/dropbox?op=link&path=${encodeURIComponent(r.path)}`); const j = await resp.json() as { link?: string }; if (active) setVideoUrl(j.link ?? null); } catch { /* keep placeholder */ } finally { release(); }
+    });
+    return () => { active = false; if (acquired) release(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [r.path]);
+  const border = added ? "2px solid #0d9488" : selected ? "3px solid #0061FF" : "1px solid #d1d5db";
+  return (
+    <div style={{ breakInside: "avoid", marginBottom: 10, position: "relative", borderRadius: 8, overflow: "hidden", border, background: "#f1f5f9", opacity: added ? 0.6 : 1 }}>
+      <div onClick={() => { if (!added) onToggle(); }} style={{ cursor: added ? "default" : "pointer", display: "block" }} title={added ? `${r.name} — already added` : r.name}>
+        {isVideo ? (
+          playing && videoUrl ? (
+            <video src={videoUrl} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} style={{ width: "100%", height: "auto", display: "block", background: "#000" }} />
+          ) : videoUrl ? (
+            <video src={`${videoUrl}#t=0.1`} muted playsInline preload="metadata" style={{ width: "100%", height: "auto", display: "block", background: "#000", minHeight: 120 }} />
+          ) : (
+            <div style={{ width: "100%", aspectRatio: "3 / 4", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", background: "#0b0b0b", fontSize: 30 }}>🎬</div>
+          )
+        ) : (
+          <DropboxThumb path={r.path} rev={r.rev} size="w640h480" mode="bestfit" style={{ width: "100%", height: "auto", display: "block" }} />
+        )}
+      </div>
+      {isVideo && !playing && videoUrl && (
+        <button type="button" onClick={(e) => { e.stopPropagation(); setPlaying(true); }} title="Play video"
+          style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 52, height: 52, borderRadius: "50%", background: "rgba(0,0,0,0.55)", color: "#fff", border: "none", cursor: "pointer", fontSize: 22, display: "flex", alignItems: "center", justifyContent: "center", paddingLeft: 4 }}
+        >▶</button>
+      )}
+      {isVideo && <span style={{ position: "absolute", bottom: 4, right: 4, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 800, pointerEvents: "none" }}>video</span>}
+      {added ? (
+        <span style={{ position: "absolute", top: 4, left: 4, background: "#0d9488", color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 800 }}>✓ Added</span>
+      ) : selected ? (
+        <span style={{ position: "absolute", top: 4, left: 4, background: "#0061FF", color: "#fff", borderRadius: "50%", width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800 }}>✓</span>
+      ) : null}
+    </div>
+  );
+}
 function DropboxImagePicker({
   collectionId, initialQuery, onAdd, onClose, addedPaths,
 }: {
@@ -22442,38 +22497,18 @@ function DropboxImagePicker({
           ) : results.length === 0 ? (
             <div style={{ padding: 24, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>No images found. Try a different search.</div>
           ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10 }}>
-              {results.map((r) => {
-                const added = isAdded(r.path);
-                const isSel = selected.has(r.path);
-                return (
-                  <button
-                    key={r.path}
-                    type="button"
-                    onClick={() => toggle(r.path)}
-                    disabled={added}
-                    style={{ position: "relative", border: added ? "2px solid #0d9488" : isSel ? "3px solid #0061FF" : "1px solid #d1d5db", borderRadius: 8, padding: 0, background: "#f1f5f9", cursor: added ? "default" : "pointer", overflow: "hidden", aspectRatio: "3 / 4", opacity: added ? 0.55 : 1 }}
-                    title={added ? `${r.name} — already added` : r.name}
-                  >
-                    {r.kind === "video" ? (
-                      <div style={{ width: "100%", height: "100%", background: "#0b0b0b", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, padding: 6 }}>
-                        <span style={{ fontSize: 22 }}>▶</span>
-                        <span style={{ fontSize: 10, textAlign: "center", wordBreak: "break-word", lineHeight: 1.2, maxHeight: 40, overflow: "hidden" }}>{r.name}</span>
-                      </div>
-                    ) : (
-                      <DropboxThumb path={r.path} rev={r.rev} size="w256h256" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    )}
-                    {r.kind === "video" && (
-                      <span style={{ position: "absolute", bottom: 4, right: 4, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 800 }}>video</span>
-                    )}
-                    {added ? (
-                      <span style={{ position: "absolute", top: 4, left: 4, background: "#0d9488", color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 800 }}>✓ Added</span>
-                    ) : isSel ? (
-                      <span style={{ position: "absolute", top: 4, left: 4, background: "#0061FF", color: "#fff", borderRadius: "50%", width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800 }}>✓</span>
-                    ) : null}
-                  </button>
-                );
-              })}
+            // Masonry columns so each tile keeps its NATURAL shape (landscape /
+            // square / portrait) instead of being cropped to a fixed box.
+            <div style={{ columnWidth: 170, columnGap: 10 }}>
+              {results.map((r) => (
+                <DropboxPickerTile
+                  key={r.path}
+                  r={r}
+                  added={isAdded(r.path)}
+                  selected={selected.has(r.path)}
+                  onToggle={() => toggle(r.path)}
+                />
+              ))}
             </div>
           )}
         </div>
