@@ -21967,9 +21967,9 @@ function CollectionPriceRupeesCell({
           type="button"
           onClick={() => setReselect(true)}
           title="Change style / fabric"
-          style={{ position: "absolute", bottom: 2, right: 3, background: "transparent", border: "none", color: "#94a3b8", fontSize: 11, cursor: "pointer", padding: 0, lineHeight: 1 }}
+          style={{ position: "absolute", bottom: 4, right: 4, background: "#fff", border: "1px solid #0d9488", color: "#0d9488", fontSize: 13, fontWeight: 700, cursor: "pointer", lineHeight: 1, padding: "3px 6px", borderRadius: 6, boxShadow: "0 1px 3px rgba(0,0,0,0.18)" }}
         >
-          ✎
+          ✎ Edit
         </button>
       )}
       {/* When a cost is already resolved the cell just shows the number —
