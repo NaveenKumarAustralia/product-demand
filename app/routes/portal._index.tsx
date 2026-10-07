@@ -19952,6 +19952,7 @@ function CollectionSpreadsheetPage({
                                 onPickStyleName={(name) => updateCell(rIdx, "name", name)}
                                 locked={shopifyLocked && linked}
                                 onLocked={() => setLockPromptIdx(rIdx)}
+                                onUnlock={() => unlockRow(rIdx, true)}
                               />
                             </Td>
                           );
@@ -21891,7 +21892,7 @@ function DropboxImagePicker({
   );
 }
 
-function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName, onPickStyleName, singleImage = false, locked = false, onLocked }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string; onPickStyleName?: (styleName: string) => void; singleImage?: boolean; locked?: boolean; onLocked?: () => void }) {
+function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName, onPickStyleName, singleImage = false, locked = false, onLocked, onUnlock }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string; onPickStyleName?: (styleName: string) => void; singleImage?: boolean; locked?: boolean; onLocked?: () => void; onUnlock?: () => void }) {
   const images = useMemo(() => parseMultiImageValue(value), [value]);
   const [open, setOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -22028,6 +22029,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
           images={images}
           busy={busy}
           locked={locked}
+          onUnlock={onUnlock}
           productInfo={productInfo}
           collectionId={collectionId}
           rowName={rowName}
@@ -22126,11 +22128,12 @@ function CollectionImageAltEditor({ entry, productName, onChange, readOnly = fal
 // add more. Saves immediately via onCommit on every change so the user
 // can close at any time without losing edits.
 function CollectionImageManagerModal({
-  images, busy, locked = false, productInfo, collectionId, rowName, onClose, onAddFiles, onCommit, onAddEntries, dupNotice, onPickFile, onPickStyleName, fileRef,
+  images, busy, locked = false, onUnlock, productInfo, collectionId, rowName, onClose, onAddFiles, onCommit, onAddEntries, dupNotice, onPickFile, onPickStyleName, fileRef,
 }: {
   images: CollectionImageEntry[];
   busy: boolean;
   locked?: boolean;
+  onUnlock?: () => void;
   productInfo?: ProductInfo;
   collectionId?: number;
   rowName?: string;
@@ -22229,7 +22232,17 @@ function CollectionImageManagerModal({
             )}
             {!locked && dupNotice && <div style={{ fontSize: 12, color: "#b45309", fontWeight: 700, marginTop: 4 }}>⚠ {dupNotice}</div>}
           </div>
-          <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", fontWeight: 600 }}>Done</button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {locked && onUnlock && (
+              <button
+                type="button"
+                onClick={() => onUnlock()}
+                style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 13, cursor: "pointer", fontWeight: 700 }}
+                title="Unlock this product so you can add, remove and reorder its images"
+              >🔓 Unlock to edit</button>
+            )}
+            <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", fontWeight: 600 }}>Done</button>
+          </div>
         </div>
         <div style={{ padding: 18, overflowY: "auto", flex: 1 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
