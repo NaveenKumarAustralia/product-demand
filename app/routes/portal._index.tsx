@@ -18830,7 +18830,7 @@ function CollectionSpreadsheetPage({
       const cur = prev[rowIdx];
       // Pictures are portal-curated — add/remove/reorder them freely even on a
       // locked row (no unlock popup). Every OTHER Shopify-bound field is blocked.
-      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && SHOPIFY_SYNCED_COLUMN_IDS.has(colId) && colId !== "modelPicture") {
+      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && SHOPIFY_SYNCED_COLUMN_IDS.has(colId)) {
         setTimeout(() => setLockPromptIdx(rowIdx), 0);
         return prev;
       }
@@ -18893,7 +18893,7 @@ function CollectionSpreadsheetPage({
   const updateRowFields = useCallback((rowIdx: number, fields: Record<string, string>) => {
     setRows((prev) => {
       const cur = prev[rowIdx];
-      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && Object.keys(fields).some((k) => SHOPIFY_SYNCED_COLUMN_IDS.has(k) && k !== "modelPicture")) {
+      if (cur && (cur[COL_ROW_SHOPIFY_LOCKED] ?? "") === "1" && (cur[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim() && Object.keys(fields).some((k) => SHOPIFY_SYNCED_COLUMN_IDS.has(k))) {
         setTimeout(() => setLockPromptIdx(rowIdx), 0);
         return prev;
       }
@@ -19742,14 +19742,12 @@ function CollectionSpreadsheetPage({
                                   display: "flex",
                                   alignItems: "center",
                                   justifyContent: isNum ? "center" : "flex-start",
-                                  gap: 5,
                                   minHeight: 28,
                                   padding: "4px 6px",
                                   fontSize: "var(--portal-table-font-size, 14px)",
                                   color: preview ? "#64748b" : "#cbd5e1",
                                 }}
                               >
-                                <span aria-hidden style={{ fontSize: 11, opacity: 0.65, flexShrink: 0 }}>🔒</span>
                                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 240 }}>{preview || "—"}</span>
                               </div>
                             </Td>
@@ -19933,6 +19931,27 @@ function CollectionSpreadsheetPage({
                                 onPickStyleOverride={(styleId) => pickStyleOverrideForRow(rIdx, styleId)}
                                 onClearStyleOverride={() => clearStyleOverrideForRow(rIdx)}
                                 onClearPrice={() => clearPriceForRow(rIdx)}
+                              />
+                            </Td>
+                          );
+                        }
+                        // Model Pictures gallery: on a locked, linked row it's
+                        // VIEW-ONLY — the manager opens so you can see the images,
+                        // but add / remove / reorder are blocked and raise the
+                        // unlock popup. Rendered directly (not via CollectionCell)
+                        // so the lock flags thread through.
+                        if (col.id === "modelPicture") {
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <CollectionMultiImageCell
+                                value={row.modelPicture ?? ""}
+                                onCommit={(v) => updateCell(rIdx, "modelPicture", v)}
+                                productInfo={productInfo}
+                                collectionId={listItem.id}
+                                rowName={row.name ?? row.title ?? ""}
+                                onPickStyleName={(name) => updateCell(rIdx, "name", name)}
+                                locked={shopifyLocked && linked}
+                                onLocked={() => setLockPromptIdx(rIdx)}
                               />
                             </Td>
                           );
@@ -21872,7 +21891,7 @@ function DropboxImagePicker({
   );
 }
 
-function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName, onPickStyleName, singleImage = false }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string; onPickStyleName?: (styleName: string) => void; singleImage?: boolean }) {
+function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName, onPickStyleName, singleImage = false, locked = false, onLocked }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string; onPickStyleName?: (styleName: string) => void; singleImage?: boolean; locked?: boolean; onLocked?: () => void }) {
   const images = useMemo(() => parseMultiImageValue(value), [value]);
   const [open, setOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -21885,9 +21904,17 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
     setDupNotice(`${n} duplicate image${n > 1 ? "s" : ""} skipped — already added.`);
     window.setTimeout(() => setDupNotice(null), 3500);
   };
-  const commit = (next: CollectionImageEntry[]) => onCommit(serializeMultiImageValue(next));
+  // On a locked, linked row the gallery is VIEW-ONLY: every mutation funnels
+  // through commit(), so blocking it here stops add / remove / reorder / alt
+  // edits from any source (buttons, drag, keyboard paste) and raises the
+  // unlock popup instead.
+  const commit = (next: CollectionImageEntry[]) => {
+    if (locked) { onLocked?.(); return; }
+    onCommit(serializeMultiImageValue(next));
+  };
 
   const addFiles = async (files: FileList | File[] | null | undefined) => {
+    if (locked) { onLocked?.(); return; }
     if (!files) return;
     const arr = Array.from(files).filter((f) => f.type.startsWith("image/"));
     if (!arr.length) return;
@@ -22000,6 +22027,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
         <CollectionImageManagerModal
           images={images}
           busy={busy}
+          locked={locked}
           productInfo={productInfo}
           collectionId={collectionId}
           rowName={rowName}
@@ -22045,13 +22073,13 @@ async function collectionImageToDataUrl(entry: CollectionImageEntry): Promise<st
 // Per-image ALT TEXT editor: an AI (vision) generate/regenerate button + an
 // editable field. Alt text is stored on the image entry and pushed to Shopify
 // as the image's alt on create.
-function CollectionImageAltEditor({ entry, productName, onChange }: { entry: CollectionImageEntry; productName?: string; onChange: (alt: string) => void }) {
+function CollectionImageAltEditor({ entry, productName, onChange, readOnly = false }: { entry: CollectionImageEntry; productName?: string; onChange: (alt: string) => void; readOnly?: boolean }) {
   const [alt, setAlt] = useState(entry.alt ?? "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   useEffect(() => { setAlt(entry.alt ?? ""); }, [entry.alt]);
   const generate = async () => {
-    if (busy) return;
+    if (readOnly || busy) return;
     setBusy(true); setErr(null);
     try {
       const dataUrl = await collectionImageToDataUrl(entry);
@@ -22070,21 +22098,24 @@ function CollectionImageAltEditor({ entry, productName, onChange }: { entry: Col
     <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <span style={{ fontSize: 10, fontWeight: 700, color: "#9ca3af", textTransform: "uppercase", letterSpacing: 0.3 }}>Alt text</span>
-        <button
-          type="button"
-          onClick={generate}
-          disabled={busy}
-          title="Generate alt text from this image with AI"
-          style={{ border: "none", borderRadius: 5, cursor: busy ? "wait" : "pointer", fontSize: 10, fontWeight: 700, color: "#fff", background: busy ? "#9ca3af" : "#111827", padding: "2px 7px" }}
-        >{busy ? "…" : (alt ? "✨ Redo" : "✨ AI")}</button>
+        {!readOnly && (
+          <button
+            type="button"
+            onClick={generate}
+            disabled={busy}
+            title="Generate alt text from this image with AI"
+            style={{ border: "none", borderRadius: 5, cursor: busy ? "wait" : "pointer", fontSize: 10, fontWeight: 700, color: "#fff", background: busy ? "#9ca3af" : "#111827", padding: "2px 7px" }}
+          >{busy ? "…" : (alt ? "✨ Redo" : "✨ AI")}</button>
+        )}
       </div>
       <textarea
         value={alt}
-        onChange={(e) => setAlt(e.target.value)}
-        onBlur={() => { if (alt !== (entry.alt ?? "")) onChange(alt); }}
-        placeholder="Describe this image…"
+        readOnly={readOnly}
+        onChange={(e) => { if (!readOnly) setAlt(e.target.value); }}
+        onBlur={() => { if (!readOnly && alt !== (entry.alt ?? "")) onChange(alt); }}
+        placeholder={readOnly ? "" : "Describe this image…"}
         rows={5}
-        style={{ width: "100%", boxSizing: "border-box", border: "1px solid #e5e7eb", borderRadius: 6, padding: "8px 10px", fontSize: 13, minHeight: 92, resize: "vertical", fontFamily: "inherit", color: "#374151", lineHeight: 1.4 }}
+        style={{ width: "100%", boxSizing: "border-box", border: "1px solid #e5e7eb", borderRadius: 6, padding: "8px 10px", fontSize: 13, minHeight: 92, resize: "vertical", fontFamily: "inherit", color: "#374151", lineHeight: 1.4, background: readOnly ? "#f9fafb" : "#fff", cursor: readOnly ? "default" : "text" }}
       />
       {err && <span style={{ fontSize: 10, color: "#b45309" }}>{err}</span>}
     </div>
@@ -22095,10 +22126,11 @@ function CollectionImageAltEditor({ entry, productName, onChange }: { entry: Col
 // add more. Saves immediately via onCommit on every change so the user
 // can close at any time without losing edits.
 function CollectionImageManagerModal({
-  images, busy, productInfo, collectionId, rowName, onClose, onAddFiles, onCommit, onAddEntries, dupNotice, onPickFile, onPickStyleName, fileRef,
+  images, busy, locked = false, productInfo, collectionId, rowName, onClose, onAddFiles, onCommit, onAddEntries, dupNotice, onPickFile, onPickStyleName, fileRef,
 }: {
   images: CollectionImageEntry[];
   busy: boolean;
+  locked?: boolean;
   productInfo?: ProductInfo;
   collectionId?: number;
   rowName?: string;
@@ -22188,9 +22220,14 @@ function CollectionImageManagerModal({
           <div>
             <div style={{ fontWeight: 700, fontSize: 15 }}>Model pictures</div>
             <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
-              {images.length} image{images.length === 1 ? "" : "s"} — drag to reorder. Position number = image order in Shopify. Duplicates are skipped automatically.
+              {locked
+                ? `${images.length} image${images.length === 1 ? "" : "s"} — view only while this product is locked.`
+                : `${images.length} image${images.length === 1 ? "" : "s"} — drag to reorder. Position number = image order in Shopify. Duplicates are skipped automatically.`}
             </div>
-            {dupNotice && <div style={{ fontSize: 12, color: "#b45309", fontWeight: 700, marginTop: 4 }}>⚠ {dupNotice}</div>}
+            {locked && (
+              <div style={{ fontSize: 12, color: "#b45309", fontWeight: 700, marginTop: 4 }}>🔒 Locked — unlock the row to add or remove images.</div>
+            )}
+            {!locked && dupNotice && <div style={{ fontSize: 12, color: "#b45309", fontWeight: 700, marginTop: 4 }}>⚠ {dupNotice}</div>}
           </div>
           <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", fontWeight: 600 }}>Done</button>
         </div>
@@ -22206,21 +22243,21 @@ function CollectionImageManagerModal({
               return (
               <div key={`${idx}-${entry.thumb.slice(0, 24)}`} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <div
-                draggable
-                onDragStart={onDragStart(idx)}
-                onDragOver={onDragOver(idx)}
-                onDrop={onDrop(idx)}
-                onDragEnd={onDragEnd}
+                draggable={!locked}
+                onDragStart={locked ? undefined : onDragStart(idx)}
+                onDragOver={locked ? undefined : onDragOver(idx)}
+                onDrop={locked ? undefined : onDrop(idx)}
+                onDragEnd={locked ? undefined : onDragEnd}
                 style={{
                   position: "relative",
                   borderRadius: 8,
                   border: dragOverIdx === idx && dragIdx !== idx ? "2px solid #0d9488"
                         : dragIdx === idx ? "2px solid #94a3b8"
                         : "1px solid #d1d5db",
-                  overflow: "hidden", cursor: "grab", background: "#f9fafb",
+                  overflow: "hidden", cursor: locked ? "default" : "grab", background: "#f9fafb",
                   aspectRatio: "3 / 4", opacity: dragIdx === idx ? 0.6 : 1,
                 }}
-                title={`Position ${idx + 1} — drag to reorder`}
+                title={locked ? `Position ${idx + 1}` : `Position ${idx + 1} — drag to reorder`}
               >
                 <img src={fullSrc} alt={`pos ${idx + 1}`} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />
                 <span style={{
@@ -22228,55 +22265,63 @@ function CollectionImageManagerModal({
                   background: "rgba(17,24,39,0.9)", color: "#fff",
                   fontSize: 12, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
                 }}>{idx + 1}</span>
-                <button type="button" onClick={(e) => { e.stopPropagation(); removeAt(idx); }}
-                  style={{
-                    position: "absolute", top: 6, right: 6,
-                    background: "rgba(220,38,38,0.92)", color: "#fff", border: "none",
-                    borderRadius: 4, width: 22, height: 22, lineHeight: "20px",
-                    fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0,
-                  }}
-                  title="Remove image"
-                >×</button>
-                <div style={{ position: "absolute", bottom: 6, right: 6, display: "flex", gap: 4 }}>
-                  <button type="button" onClick={(e) => { e.stopPropagation(); moveBy(idx, -1); }} disabled={idx === 0}
-                    style={{ background: "rgba(255,255,255,0.92)", border: "1px solid #d1d5db", borderRadius: 4, width: 22, height: 22, fontSize: 11, cursor: idx === 0 ? "default" : "pointer", padding: 0, color: idx === 0 ? "#cbd5e1" : "#111827" }}
-                    title="Move earlier"
-                  >◀</button>
-                  <button type="button" onClick={(e) => { e.stopPropagation(); moveBy(idx, 1); }} disabled={idx === images.length - 1}
-                    style={{ background: "rgba(255,255,255,0.92)", border: "1px solid #d1d5db", borderRadius: 4, width: 22, height: 22, fontSize: 11, cursor: idx === images.length - 1 ? "default" : "pointer", padding: 0, color: idx === images.length - 1 ? "#cbd5e1" : "#111827" }}
-                    title="Move later"
-                  >▶</button>
-                </div>
+                {/* Remove / reorder controls are hidden on a locked row. */}
+                {!locked && (
+                  <>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); removeAt(idx); }}
+                      style={{
+                        position: "absolute", top: 6, right: 6,
+                        background: "rgba(220,38,38,0.92)", color: "#fff", border: "none",
+                        borderRadius: 4, width: 22, height: 22, lineHeight: "20px",
+                        fontSize: 12, fontWeight: 700, cursor: "pointer", padding: 0,
+                      }}
+                      title="Remove image"
+                    >×</button>
+                    <div style={{ position: "absolute", bottom: 6, right: 6, display: "flex", gap: 4 }}>
+                      <button type="button" onClick={(e) => { e.stopPropagation(); moveBy(idx, -1); }} disabled={idx === 0}
+                        style={{ background: "rgba(255,255,255,0.92)", border: "1px solid #d1d5db", borderRadius: 4, width: 22, height: 22, fontSize: 11, cursor: idx === 0 ? "default" : "pointer", padding: 0, color: idx === 0 ? "#cbd5e1" : "#111827" }}
+                        title="Move earlier"
+                      >◀</button>
+                      <button type="button" onClick={(e) => { e.stopPropagation(); moveBy(idx, 1); }} disabled={idx === images.length - 1}
+                        style={{ background: "rgba(255,255,255,0.92)", border: "1px solid #d1d5db", borderRadius: 4, width: 22, height: 22, fontSize: 11, cursor: idx === images.length - 1 ? "default" : "pointer", padding: 0, color: idx === images.length - 1 ? "#cbd5e1" : "#111827" }}
+                        title="Move later"
+                      >▶</button>
+                    </div>
+                  </>
+                )}
               </div>
               {/* Per-image ALT TEXT — AI-generated (from the image), editable, regenerate. */}
               <CollectionImageAltEditor
                 entry={entry}
                 productName={rowName}
+                readOnly={locked}
                 onChange={(alt) => onCommit(images.map((im, i) => i === idx ? { ...im, alt } : im))}
               />
               </div>
               );
             })}
-            <button
-              type="button"
-              onClick={onPickFile}
-              disabled={busy}
-              style={{
-                borderRadius: 8, border: "2px dashed #d1d5db", background: busy ? "#f3f4f6" : "transparent",
-                color: "#6b7280", fontSize: 28, cursor: busy ? "wait" : "pointer",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                aspectRatio: "3 / 4",
-              }}
-              title="Add image(s)"
-            >{busy ? "…" : "+"}</button>
+            {!locked && (
+              <button
+                type="button"
+                onClick={onPickFile}
+                disabled={busy}
+                style={{
+                  borderRadius: 8, border: "2px dashed #d1d5db", background: busy ? "#f3f4f6" : "transparent",
+                  color: "#6b7280", fontSize: 28, cursor: busy ? "wait" : "pointer",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  aspectRatio: "3 / 4",
+                }}
+                title="Add image(s)"
+              >{busy ? "…" : "+"}</button>
+            )}
           </div>
           {images.length === 0 && (
             <div style={{ marginTop: 14, padding: 14, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 13, color: "#6b7280", textAlign: "center" }}>
-              No images yet. Click + to add, paste, or pick from Product Information below.
+              {locked ? "No images." : "No images yet. Click + to add, paste, or pick from Product Information below."}
             </div>
           )}
 
-          {collectionId != null && (
+          {!locked && collectionId != null && (
             <div style={{ marginTop: 22, paddingTop: 18, borderTop: "1px solid #e5e7eb" }}>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>Dropbox</div>
@@ -22300,7 +22345,7 @@ function CollectionImageManagerModal({
             </div>
           )}
 
-          {productInfo && (
+          {!locked && productInfo && (
             <div style={{ marginTop: 22, paddingTop: 18, borderTop: "1px solid #e5e7eb" }}>
               <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 10 }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>Pick from Product Information</div>
