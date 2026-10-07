@@ -1107,6 +1107,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   // Collection groups (reversible folders) for the Collections pages.
   const collectionGroups = isCollectionsPage ? normalizeCollectionGroups(wrap(COLLECTION_GROUPS_KEY)?.value) : [];
+  // Unified drag order for the Collections tile grid (groups + collections).
+  const collectionTileOrder = isCollectionsPage ? normalizeTileOrder(wrap(COLLECTION_TILE_ORDER_KEY)?.value) : [];
 
   // Whole-site search (admin only) — searches every data source, including
   // pages hidden from the nav.
@@ -1270,6 +1272,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     globalSearchQuery,
     globalSearch,
     collectionGroups,
+    collectionTileOrder,
     jjInboxCollectionId,
     jjTabs: normalizeJJTabs(wrap(JJ_TABS_KEY)?.value),
     fabricStockIndex,
@@ -4362,6 +4365,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
     return jsonResponse({ ok: true });
   }
+  if (intent === "set_collection_tile_order") {
+    // Save the unified Collections tile order (group folders + collection tiles).
+    let order: string[] = [];
+    try { order = normalizeTileOrder(JSON.parse(String(form.get("order") ?? "[]"))); } catch { order = []; }
+    await prisma.portalSetting.upsert({
+      where: { key: COLLECTION_TILE_ORDER_KEY },
+      create: { key: COLLECTION_TILE_ORDER_KEY, value: { order } },
+      update: { value: { order } },
+    });
+    return jsonResponse({ ok: true });
+  }
   if (intent === "set_collection_fabric_link") {
     // Pin a fabric NAME to a specific fabric-in-stock entry (fabricKey) for this
     // collection, so the in-stock meters read that exact entry. Stored as
@@ -6555,6 +6569,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "set_collection_fabric_status" || intent === "set_collection_order_status" || intent === "set_collection_fabric_link") return false;
   if (intent === "set_collection_groups") return false;
+  if (intent === "set_collection_tile_order") return false;
   // Match-and-lock patches the row locally (per-row) or reloads (bulk); no heavy loader re-run.
   if (intent === "match_shopify_and_lock") return false;
   if (intent === "update_column_widths" || intent === "update_packing_column_widths" || intent === "update_photoshoot_column_widths" || intent === "update_jj_column_widths") return false;
@@ -6969,6 +6984,22 @@ function normalizeCollectionGroups(value: unknown): CollectionGroup[] {
       return id && name ? { id, name, collectionIds, ...(coverCollectionId != null ? { coverCollectionId } : {}) } : null;
     })
     .filter((g): g is CollectionGroup => Boolean(g));
+}
+// Unified display order for the Collections tile grid: a flat list of tokens,
+// "g:<groupId>" or "c:<collectionId>", letting group folders and collection
+// tiles be dragged into any position relative to each other. Tiles not listed
+// fall back to the default order (groups first, then collections by sortOrder).
+const COLLECTION_TILE_ORDER_KEY = "collections-tile-order-v1";
+function normalizeTileOrder(value: unknown): string[] {
+  const arr = value && typeof value === "object" && !Array.isArray(value) && Array.isArray((value as { order?: unknown }).order)
+    ? (value as { order: unknown[] }).order : Array.isArray(value) ? value : [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of arr) {
+    const s = String(t ?? "").trim();
+    if ((s.startsWith("g:") || s.startsWith("c:")) && !seen.has(s)) { seen.add(s); out.push(s); }
+  }
+  return out;
 }
 // Chip catalogs for the Collections Status + Sample columns. Reuses
 // the same shape as RestockOption so the dropdown UI can be reused.
@@ -12217,6 +12248,7 @@ export default function PortalDashboard() {
     globalSearchQuery,
     globalSearch,
     collectionGroups,
+    collectionTileOrder,
     jjInboxCollectionId,
     jjTabs,
     fabricStockIndex,
@@ -13314,6 +13346,7 @@ export default function PortalDashboard() {
                 etaByProductId={collectionEtaByProductId}
                 shipmentByProductId={collectionShipmentByProductId}
                 collectionGroups={collectionGroups}
+                collectionTileOrder={collectionTileOrder}
                 canSeeProductStatus={Boolean(currentUser?.admin || currentUser?.canSeeProductStatus)}
                 search={collectionSearch}
                 onTotalsChange={setCollectionTotals}
@@ -17372,7 +17405,7 @@ function ButtonSpinner({ size = 14, color = "currentColor" }: { size?: number; c
   );
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], canSeeProductStatus = false, search = "", onTotalsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], collectionTileOrder = [], canSeeProductStatus = false, search = "", onTotalsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; collectionTileOrder?: string[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -17402,6 +17435,16 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     setGroups(cleaned); // optimistic
     groupFetcher.submit({ intent: "set_collection_groups", groups: JSON.stringify(cleaned) }, { method: "post" });
   };
+  // ── Unified tile order (group folders + collection tiles, drag anywhere) ──
+  const [tileOrder, setTileOrder] = useState<string[]>(collectionTileOrder);
+  useEffect(() => { setTileOrder(collectionTileOrder); }, [collectionTileOrder]);
+  const tileOrderFetcher = useFetcher();
+  const saveTileOrder = (next: string[]) => {
+    setTileOrder(next); // optimistic
+    tileOrderFetcher.submit({ intent: "set_collection_tile_order", order: JSON.stringify(next) }, { method: "post" });
+  };
+  const [dragToken, setDragToken] = useState<string | null>(null);
+  const [dragOverToken, setDragOverToken] = useState<string | null>(null);
   const groupIdParam = searchParams.get("groupId");
   const openGroupNav = (id: string | null) => {
     const next = new URLSearchParams(searchParams);
@@ -17571,6 +17614,27 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     setCollections(next);
     fetcher.submit({ intent: "reorder_collections", collectionIds: JSON.stringify(next.map((c) => c.id)) }, { method: "post" });
   };
+  // Unified reorder for the default tile grid: move the dragged tile (group or
+  // collection) to the dropped-on tile's position within the full ordered list.
+  const reorderTiles = (orderedTokens: string[], targetToken: string) => {
+    if (!dragToken || dragToken === targetToken) return;
+    const from = orderedTokens.indexOf(dragToken);
+    const to = orderedTokens.indexOf(targetToken);
+    if (from < 0 || to < 0) return;
+    const next = [...orderedTokens];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    saveTileOrder(next);
+  };
+  // Shared drag handlers for a tile (group or collection). CollectionCard already
+  // sets `draggable` on its handle; the group tile div adds `draggable` itself.
+  const tileDragProps = (token: string, orderedTokens: string[]) => ({
+    onDragStart: (e: React.DragEvent) => { setDragToken(token); e.dataTransfer.effectAllowed = "move"; },
+    onDragOver: (e: React.DragEvent) => { if (!dragToken) return; e.preventDefault(); setDragOverToken(token); },
+    onDragLeave: () => setDragOverToken((cur) => cur === token ? null : cur),
+    onDrop: (e: React.DragEvent) => { e.preventDefault(); reorderTiles(orderedTokens, token); setDragToken(null); setDragOverToken(null); },
+    onDragEnd: () => { setDragToken(null); setDragOverToken(null); },
+  });
 
   // When a collection is selected via the URL, render the spreadsheet page
   // instead of the tile grid — full inline view, not an overlay.
@@ -17750,43 +17814,108 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           );
         }
 
+        // While SEARCHING or viewing HIDDEN: no groups — show the flat (old)
+        // collection list with the per-collection drag (reorder()).
+        if (searchQ || showHidden) {
+          const flat = visibleCollections.filter((c) => searchQ || showHidden || !groupedIds.has(c.id));
+          return (
+            <div>
+              {selectionBar}
+              <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
+                {flat.slice(0, tileLimit).map(card)}
+                {flat.length === 0 && (
+                  <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
+                    {searchQ ? `No collections match "${search.trim()}".` : "No hidden collections."}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        }
+
+        // DEFAULT view: one unified, freely-draggable grid of group folders +
+        // ungrouped collection tiles. Saved tile order wins; brand-new tiles
+        // append (groups first). Drag any tile — group or collection — anywhere.
+        const ungroupedCols = visibleCollections.filter((c) => !groupedIds.has(c.id));
+        const defaultOrder = [...groups.map((g) => `g:${g.id}`), ...ungroupedCols.map((c) => `c:${c.id}`)];
+        const savedValid = tileOrder.filter((t) => defaultOrder.includes(t));
+        const orderedTokens = [...savedValid, ...defaultOrder.filter((t) => !savedValid.includes(t))];
+        const groupById = new Map(groups.map((g) => [g.id, g] as const));
+        const colById = new Map(ungroupedCols.map((c) => [c.id, c] as const));
+        const groupTile = (g: CollectionGroup) => {
+          const memberCount = g.collectionIds.length;
+          const picked = g.coverCollectionId != null ? collections.find((c) => c.id === g.coverCollectionId && c.hasThumbnail) : null;
+          const cover = picked ?? collections.find((c) => g.collectionIds.includes(c.id) && c.hasThumbnail);
+          const token = `g:${g.id}`;
+          const over = dragOverToken === token && dragToken !== token;
+          return (
+            <div
+              key={g.id}
+              draggable
+              onClick={() => { if (!dragToken) openGroupNav(g.id); }}
+              {...tileDragProps(token, orderedTokens)}
+              style={{ ...s.productStyleCard, cursor: "grab", position: "relative", opacity: dragToken === token ? 0.4 : 1, outline: over ? "3px solid #0d9488" : "none", outlineOffset: 2 }}
+              title={`Open ${g.name} — drag to reorder`}
+            >
+              <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative", background: "#0f766e" }}>
+                {cover ? (
+                  <img src={`/portal/thumbnail/collection/${cover.id}?v=${new Date(cover.updatedAt).getTime()}`} alt={g.name} style={{ ...s.productStyleImage, filter: "brightness(0.9)" }} loading="lazy" decoding="async" />
+                ) : (
+                  <div style={s.productStyleImageEmpty}>Group</div>
+                )}
+                <div style={{ position: "absolute", top: 8, left: 8, background: "rgba(15,118,110,0.92)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>📦 {memberCount}</div>
+                <button type="button" title="Change cover image" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 8, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 6, padding: "3px 7px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>🖼</button>
+                <div style={{ position: "absolute", inset: 0, boxShadow: "inset 0 0 0 3px rgba(255,255,255,0.5)", borderRadius: 6, pointerEvents: "none" }} />
+              </div>
+              <div style={{ padding: "8px 4px 2px" }}>
+                <div style={{ fontWeight: 800, fontSize: 14, color: "#111827", textAlign: "center" }}>{g.name}</div>
+                <div style={{ fontSize: 11, color: "#6b7280", textAlign: "center" }}>{memberCount} collections</div>
+              </div>
+            </div>
+          );
+        };
+        const unifiedCard = (c: CollectionListItem) => {
+          const token = `c:${c.id}`;
+          return (
+            <CollectionCard
+              key={c.id}
+              collection={c}
+              isDragging={dragToken === token}
+              isDragOver={dragOverToken === token && dragToken !== token}
+              onOpen={() => openCollection(c.id)}
+              onRename={(name) => handleRename(c.id, name)}
+              onDelete={() => handleHide(c.id)}
+              onUnhide={c.hidden ? () => handleUnhide(c.id) : undefined}
+              hidden={Boolean(c.hidden)}
+              actionVerb="Hide"
+              fabricStatus={c.fabricStatus ?? ""}
+              onSetFabricStatus={(st) => handleSetFabricStatus(c.id, st)}
+              orderStatus={c.orderStatus ?? ""}
+              onSetOrderStatus={(st) => handleSetOrderStatus(c.id, st)}
+              onSetCover={(file) => handleSetCover(c.id, file)}
+              selectable={!c.hidden}
+              selected={selectedIds.has(c.id)}
+              onToggleSelected={() => toggleSelect(c.id)}
+              {...tileDragProps(token, orderedTokens)}
+            />
+          );
+        };
+        let shownCols = 0;
         return (
           <div>
             {selectionBar}
             <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
-              {/* Group tiles (folders) first, then ungrouped collections. While
-                  searching, folders are hidden and matches show directly (below). */}
-              {!showHidden && !searchQ && groups.map((g) => {
-                const memberCount = g.collectionIds.length;
-                const picked = g.coverCollectionId != null ? collections.find((c) => c.id === g.coverCollectionId && c.hasThumbnail) : null;
-                const cover = picked ?? collections.find((c) => g.collectionIds.includes(c.id) && c.hasThumbnail);
-                return (
-                  <div key={g.id} onClick={() => openGroupNav(g.id)} style={{ ...s.productStyleCard, cursor: "pointer", position: "relative" }} title={`Open ${g.name}`}>
-                    <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative", background: "#0f766e" }}>
-                      {cover ? (
-                        <img src={`/portal/thumbnail/collection/${cover.id}?v=${new Date(cover.updatedAt).getTime()}`} alt={g.name} style={{ ...s.productStyleImage, filter: "brightness(0.9)" }} loading="lazy" decoding="async" />
-                      ) : (
-                        <div style={s.productStyleImageEmpty}>Group</div>
-                      )}
-                      {/* Folder badge (stacked-card look). */}
-                      <div style={{ position: "absolute", top: 8, left: 8, background: "rgba(15,118,110,0.92)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>📦 {memberCount}</div>
-                      {/* Change cover image */}
-                      <button type="button" title="Change cover image" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 8, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 6, padding: "3px 7px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>🖼</button>
-                      <div style={{ position: "absolute", inset: 0, boxShadow: "inset 0 0 0 3px rgba(255,255,255,0.5)", borderRadius: 6, pointerEvents: "none" }} />
-                    </div>
-                    <div style={{ padding: "8px 4px 2px" }}>
-                      <div style={{ fontWeight: 800, fontSize: 14, color: "#111827", textAlign: "center" }}>{g.name}</div>
-                      <div style={{ fontSize: 11, color: "#6b7280", textAlign: "center" }}>{memberCount} collections</div>
-                    </div>
-                  </div>
-                );
+              {orderedTokens.map((token) => {
+                if (token.startsWith("g:")) { const g = groupById.get(token.slice(2)); return g ? groupTile(g) : null; }
+                const c = colById.get(Number(token.slice(2)));
+                if (!c) return null;
+                if (shownCols >= tileLimit) return null;
+                shownCols += 1;
+                return unifiedCard(c);
               })}
-              {/* When searching, show every matching collection (even ones inside a
-                  group); otherwise hide grouped ones (they live in their folder). */}
-              {visibleCollections.filter((c) => searchQ || showHidden || !groupedIds.has(c.id)).slice(0, tileLimit).map(card)}
-              {visibleCollections.filter((c) => searchQ || showHidden || !groupedIds.has(c.id)).length === 0 && (searchQ || groups.length === 0) && (
+              {orderedTokens.length === 0 && (
                 <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-                  {searchQ ? `No collections match "${search.trim()}".` : fabricStatusFilter ? "No collections with this fabric status." : showHidden ? "No hidden collections." : "No collections yet. Click Add Collection to create your first one."}
+                  {fabricStatusFilter ? "No collections with this fabric status." : "No collections yet. Click Add Collection to create your first one."}
                 </div>
               )}
             </div>
