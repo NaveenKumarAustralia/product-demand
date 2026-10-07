@@ -6393,6 +6393,25 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     updates.packingListId = parsed;
   }
 
+  // Actually REMOVE this product from a shipment: the "in #N" badge on the
+  // restock Status column comes from the product being a LINE in that packing
+  // list, so clearing the soft packingListId link alone did nothing (the badge
+  // fell back to the real line). This deletes the product's line(s) in that
+  // packing list so it's truly out of the shipment, then the picker reappears to
+  // assign a different one. Clears the soft link too when it pointed there.
+  if (intent === "remove_order_from_packing_list") {
+    const listId = Number(form.get("packingListId"));
+    if (!listId) return jsonResponse({ ok: false, error: "no_list" });
+    const order = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { productId: true, packingListId: true } });
+    if (order?.productId) {
+      await prisma.packingListLine.deleteMany({ where: { packingListId: listId, productId: order.productId, isCustom: false } }).catch(() => {});
+    }
+    if (order?.packingListId === listId) {
+      await prisma.supplierOrder.update({ where: { id: orderId }, data: { packingListId: null } }).catch(() => {});
+    }
+    return jsonResponse({ ok: true });
+  }
+
   if (intent === "update_qty") {
     const size = String(form.get("size") ?? "");
     const qtyOrdered = Math.max(0, Number(form.get("value") ?? 0) || 0);
@@ -6595,6 +6614,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // Linking a restock row to a packing list updates one column on one
   // row — local optimistic state handles the badge.
   if (intent === "update_packing_list_link") return false;
+  if (intent === "remove_order_from_packing_list") return false;
   // Packing line field edits (productTitle, sku, price, weight, notes,
   // box number, image) are entirely local to one cell and never affect
   // the rest of the page. PackingProductNameCell mirrors the typed
@@ -30722,20 +30742,25 @@ function StatusCell({
   // shouldRevalidate skips update_packing_list_link so the prop won't
   // refresh until next page load.
   const [linkLocal, setLinkLocal] = useState<number | null>(linkedPackingListId);
+  // Shipments the user just removed this product from (optimistic) — so the
+  // badge disappears instantly even though the loader prop won't refresh (the
+  // remove action is in the shouldRevalidate skip list).
+  const [removedListIds, setRemovedListIds] = useState<Set<number>>(new Set());
+  const effectiveBadges = packingListBadges.filter((b) => !removedListIds.has(b.packingListId));
   // Picker option pool: prefer packing lists that actually contain this
   // product (so the user's first guess is right), then any other open
   // packing list as a backup.
-  const productListIds = new Set(packingListBadges.map((b) => b.packingListId));
+  const productListIds = new Set(effectiveBadges.map((b) => b.packingListId));
   const pickerOptions: PackingListBadge[] = [
-    ...packingListBadges,
-    ...openPackingLists.filter((list) => !productListIds.has(list.packingListId)),
+    ...effectiveBadges,
+    ...openPackingLists.filter((list) => !productListIds.has(list.packingListId) && !removedListIds.has(list.packingListId)),
   ];
   // Resolve the linked packing list to a badge for display. Falls back to
   // the productId-based lookup so legacy rows without an explicit link
   // still show their badge.
-  const linkedBadge = linkLocal
+  const linkedBadge = linkLocal && !removedListIds.has(linkLocal)
     ? pickerOptions.find((opt) => opt.packingListId === linkLocal) ?? null
-    : (packingListBadges[0] ?? null);
+    : (effectiveBadges[0] ?? null);
   const showLinkUI = statusLocal === "in_shipment";
   const submitLink = (next: number | null) => {
     setLinkLocal(next);
@@ -30744,6 +30769,14 @@ function StatusCell({
       { intent: "update_packing_list_link", orderId, value: next === null ? "" : String(next) },
       { label: "Undo packing list link", fields: { intent: "update_packing_list_link", orderId, value: linkLocal === null ? "" : String(linkLocal) } },
     );
+  };
+  // Remove the product from a specific shipment (deletes its line in that
+  // packing list) so the badge actually goes away and a new one can be picked.
+  const removeFromPackingList = (listId: number) => {
+    if (!window.confirm("Remove this product from that shipment? Its packed quantities in that packing list will be cleared, and you can then assign a different one.")) return;
+    setRemovedListIds((prev) => { const n = new Set(prev); n.add(listId); return n; });
+    if (linkLocal === listId) setLinkLocal(null);
+    submitPortalCell(linkFetcher, { intent: "remove_order_from_packing_list", orderId, packingListId: String(listId) });
   };
   // The button appears once a destination (market) is set AND the status can
   // take preorders — anything except a blank status or Cancelled. On Order is
@@ -30787,10 +30820,10 @@ function StatusCell({
             </a>
             <button
               type="button"
-              onClick={() => submitLink(null)}
-              style={{ border: "none", background: "none", cursor: "pointer", color: "#6b7280", fontSize: 11, padding: "0 4px" }}
-              title="Unlink from packing list"
-              aria-label="Unlink from packing list"
+              onClick={() => removeFromPackingList(linkedBadge.packingListId)}
+              style={{ border: "none", background: "none", cursor: "pointer", color: "#dc2626", fontSize: 13, fontWeight: 800, padding: "0 4px" }}
+              title="Remove this product from this shipment (then pick a different one)"
+              aria-label="Remove from packing list"
             >
               ×
             </button>
