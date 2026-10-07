@@ -20182,16 +20182,19 @@ function CollectionSpreadsheetPage({
                                     onOptionsChange={(next) => saveChipOptions("statusOptions", next)}
                                   />
                                 )}
-                                <button
-                                  type="button"
-                                  disabled={!canOpen}
-                                  onClick={() => { if (canOpen) setShipGridRowIdx(rIdx); }}
-                                  title={canOpen ? `${rowShippedTotal} of ${totalOrdered} shipped — click for the per-size shipment breakdown` : "No order quantities yet"}
-                                  style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 999, background: shipBg, color: shipColor, whiteSpace: "nowrap", border: "none", cursor: canOpen ? "pointer" : "default", fontFamily: "inherit" }}
-                                >
-                                  {shipLabel}
-                                  {canOpen && <span aria-hidden style={{ fontSize: 8, opacity: 0.7 }}>▼</span>}
-                                </button>
+                                {/* Only show the shipment chip once something has
+                                    actually shipped; otherwise show nothing. */}
+                                {rowShippedTotal > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setShipGridRowIdx(rIdx)}
+                                    title={`${rowShippedTotal} of ${totalOrdered} shipped — click for the per-size shipment breakdown`}
+                                    style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 999, background: shipBg, color: shipColor, whiteSpace: "nowrap", border: "none", cursor: "pointer", fontFamily: "inherit" }}
+                                  >
+                                    {shipLabel}
+                                    <span aria-hidden style={{ fontSize: 8, opacity: 0.7 }}>▼</span>
+                                  </button>
+                                )}
                               </div>
                             </Td>
                           );
