@@ -4658,16 +4658,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     paths = paths.filter((p) => typeof p === "string" && p.trim()).slice(0, 30);
     if (!paths.length) return jsonResponse({ ok: false, error: "no_paths" });
     const entries: CollectionImageEntry[] = [];
-    const VIDEO_MAX = 100 * 1024 * 1024;
+    const failed: string[] = [];
+    const VIDEO_MAX = 200 * 1024 * 1024; // Dropbox downloads server-side, so allow larger clips than a browser upload.
+    const fmtMB = (n: number) => `${(n / (1024 * 1024)).toFixed(0)} MB`;
     for (const path of paths) {
+      const fname = (path.split("/").pop() || path).trim();
       try {
         const fileKind = dbxFileKind(path);
-        if (fileKind !== "image" && fileKind !== "video") continue;
+        if (fileKind !== "image" && fileKind !== "video") { failed.push(`${fname}: not an image or video`); continue; }
         const { bytes } = await dbxDownload(path);
         const ext = (path.split(".").pop() || "").toLowerCase();
         const filename = (path.split("/").pop() || "").trim() || undefined;
         if (fileKind === "video") {
-          if (bytes.length > VIDEO_MAX) { console.warn("[dropbox_import_images] video too large, skipped:", path); continue; }
+          if (bytes.length > VIDEO_MAX) { failed.push(`${fname}: too large (${fmtMB(bytes.length)} — max ${fmtMB(VIDEO_MAX)}). Trim or compress it.`); console.warn("[dropbox_import_images] video too large, skipped:", path, bytes.length); continue; }
           const vMime = ext === "mov" ? "video/quicktime" : ext === "webm" ? "video/webm" : ext === "m4v" ? "video/x-m4v" : "video/mp4";
           const key = await persistFullCollectionImage(collectionId, bytes, vMime);
           // Poster frame for the grid (Dropbox can thumbnail a video).
@@ -4689,11 +4692,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // filename = the Dropbox file name so Shopify keeps a real name.
         entries.push({ thumb, key, src: path, ...(filename ? { filename } : {}) });
       } catch (e) {
+        failed.push(`${fname}: ${e instanceof Error ? e.message : "couldn't download from Dropbox"}`);
         console.warn("[dropbox_import_images] failed for", path, e);
       }
     }
-    if (!entries.length) return jsonResponse({ ok: false, error: "import_failed" });
-    return jsonResponse({ ok: true, entries });
+    if (!entries.length) return jsonResponse({ ok: false, error: failed.join(" · ") || "import_failed", failed });
+    return jsonResponse({ ok: true, entries, failed });
   }
 
 
@@ -22385,7 +22389,7 @@ function DropboxImagePicker({
   const isAdded = (p: string) => !!addedPaths && addedPaths.has(p.toLowerCase());
   const [query, setQuery] = useState(initialQuery);
   const searchFetcher = useFetcher<{ entries?: Array<{ type: string; name: string; path: string; kind?: string; rev?: string }>; error?: string; configured?: boolean }>();
-  const importFetcher = useFetcher<{ ok?: boolean; entries?: CollectionImageEntry[]; error?: string }>();
+  const importFetcher = useFetcher<{ ok?: boolean; entries?: CollectionImageEntry[]; error?: string; failed?: string[] }>();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const runSearch = (q: string) => { if (q.trim().length >= 2) searchFetcher.load(`/api/dropbox?op=search&q=${encodeURIComponent(q.trim())}`); };
   // Auto-find on open using the product name.
@@ -22393,6 +22397,10 @@ function DropboxImagePicker({
   // Close after a successful import (entries handed back to the cell).
   useEffect(() => {
     if (importFetcher.state === "idle" && importFetcher.data?.ok && importFetcher.data.entries?.length) {
+      // Some selected files still failed (e.g. a too-large video) — tell the user
+      // which, but keep the ones that imported fine.
+      const failed = importFetcher.data.failed ?? [];
+      if (failed.length) window.alert(`Added ${importFetcher.data.entries.length} file(s). These were skipped:\n\n${failed.join("\n")}`);
       onAdd(importFetcher.data.entries);
       onClose();
     }
