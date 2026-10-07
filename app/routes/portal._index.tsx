@@ -4625,11 +4625,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     paths = paths.filter((p) => typeof p === "string" && p.trim()).slice(0, 30);
     if (!paths.length) return jsonResponse({ ok: false, error: "no_paths" });
     const entries: CollectionImageEntry[] = [];
+    const VIDEO_MAX = 100 * 1024 * 1024;
     for (const path of paths) {
       try {
-        if (dbxFileKind(path) !== "image") continue;
+        const fileKind = dbxFileKind(path);
+        if (fileKind !== "image" && fileKind !== "video") continue;
         const { bytes } = await dbxDownload(path);
-        const ext = (path.split(".").pop() || "jpg").toLowerCase();
+        const ext = (path.split(".").pop() || "").toLowerCase();
+        const filename = (path.split("/").pop() || "").trim() || undefined;
+        if (fileKind === "video") {
+          if (bytes.length > VIDEO_MAX) { console.warn("[dropbox_import_images] video too large, skipped:", path); continue; }
+          const vMime = ext === "mov" ? "video/quicktime" : ext === "webm" ? "video/webm" : ext === "m4v" ? "video/x-m4v" : "video/mp4";
+          const key = await persistFullCollectionImage(collectionId, bytes, vMime);
+          // Poster frame for the grid (Dropbox can thumbnail a video).
+          let thumb = "";
+          try { const t = await dbxThumbnail(path, "w640h480"); thumb = `data:image/jpeg;base64,${t.toString("base64")}`; } catch { /* no poster */ }
+          entries.push({ thumb, key, src: path, kind: "video", ...(filename ? { filename } : {}) });
+          continue;
+        }
         const mime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : ext === "gif" ? "image/gif" : "image/jpeg";
         const key = await persistFullCollectionImage(collectionId, bytes, mime);
         // Small inline thumb for the grid (Dropbox jpeg thumbnail).
@@ -4641,7 +4654,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // src = the Dropbox path (stable across re-imports) so the SAME file
         // can't be added twice even though each import gets a fresh key.
         // filename = the Dropbox file name so Shopify keeps a real name.
-        const filename = (path.split("/").pop() || "").trim() || undefined;
         entries.push({ thumb, key, src: path, ...(filename ? { filename } : {}) });
       } catch (e) {
         console.warn("[dropbox_import_images] failed for", path, e);
@@ -4650,6 +4662,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!entries.length) return jsonResponse({ ok: false, error: "import_failed" });
     return jsonResponse({ ok: true, entries });
   }
+
 
   // ─── Dropbox → attach selected files as media to an existing Shopify product.
   // Uses a Dropbox shared (public raw) link as the media source so Shopify
@@ -11401,7 +11414,7 @@ async function createShopifyProductFromRow(
 
 // Upload local image bytes to Shopify via a staged upload; returns the
 // resourceUrl to use as productCreateMedia originalSource (or null on failure).
-async function stageUploadShopifyImage(shop: string, accessToken: string, filename: string, mime: string, bytes: Buffer): Promise<string | null> {
+async function stageUploadShopifyImage(shop: string, accessToken: string, filename: string, mime: string, bytes: Buffer, resource: "IMAGE" | "VIDEO" = "IMAGE"): Promise<string | null> {
   const staged = await shopifyGraphql<any>(shop, accessToken, `
     mutation StageUpload($input: [StagedUploadInput!]!) {
       stagedUploadsCreate(input: $input) {
@@ -11409,7 +11422,7 @@ async function stageUploadShopifyImage(shop: string, accessToken: string, filena
         userErrors { field message }
       }
     }
-  `, { input: [{ filename, mimeType: mime, httpMethod: "POST", resource: "IMAGE", fileSize: String(bytes.length) }] });
+  `, { input: [{ filename, mimeType: mime, httpMethod: "POST", resource, fileSize: String(bytes.length) }] });
   const target = staged?.data?.stagedUploadsCreate?.stagedTargets?.[0];
   if (!target?.url || !target?.resourceUrl) return null;
   try {
@@ -11452,9 +11465,18 @@ async function normalizeImageForShopify(bytes: Buffer, mime: string): Promise<{ 
   return { bytes, mime, ext };
 }
 
-// Push a collection row's images to its Shopify product, with per-image alt
-// text. Local images (stored in CollectionImage by key, or inline data URLs)
-// go through a staged upload; public http(s) URLs are attached directly.
+// Is this media entry a VIDEO? Marked kind, a video mime, or a video extension.
+function isVideoEntry(entry: CollectionImageEntry, mime?: string): boolean {
+  if (entry.kind === "video") return true;
+  if (mime && mime.startsWith("video/")) return true;
+  const name = `${entry.filename ?? ""} ${entry.src ?? ""} ${entry.thumb ?? ""}`;
+  return /\.(mp4|mov|m4v|webm)(\?|$)/i.test(name);
+}
+
+// Push a collection row's media (images + videos) to its Shopify product, with
+// per-item alt text. Local files (stored in CollectionImage by key, or inline
+// data URLs) go through a staged upload; public http(s) URLs are downloaded and
+// re-staged. Images are re-encoded; videos are staged as-is as VIDEO media.
 // Best-effort: returns a list of error strings (the product already exists).
 async function pushRowImagesToShopify(shop: string, accessToken: string, productId: string, images: CollectionImageEntry[], opts: { replaceExisting?: boolean } = {}): Promise<string[]> {
   const errors: string[] = [];
@@ -11487,21 +11509,31 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
         if (r.ok) { bytes = Buffer.from(await r.arrayBuffer()); mime = (r.headers.get("content-type") || mime).split(";")[0].trim() || mime; }
       } catch { /* fall back below */ }
       if (!bytes) {
-        media.push({ originalSource: url, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
+        media.push({ originalSource: url, mediaContentType: isVideoEntry(entry, mime) ? "VIDEO" : "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
         continue;
       }
     }
     if (!bytes) continue;
-    // Re-encode so Shopify can always process it (caps megapixels, fixes
+    const rawName = (entry.filename ?? "").trim();
+    const safeBase = rawName
+      ? rawName.replace(/\.[a-z0-9]+$/i, "").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 120)
+      : "";
+    // VIDEO: staged as-is (no re-encode) and attached as a VIDEO media.
+    if (isVideoEntry(entry, mime)) {
+      const vExt = mime.includes("quicktime") || /\.mov$/i.test(rawName) ? "mov" : "mp4";
+      const vName = `${safeBase || `video-${i + 1}`}.${vExt}`;
+      const vMime = mime.startsWith("video/") ? mime : (vExt === "mov" ? "video/quicktime" : "video/mp4");
+      const resourceUrl = await stageUploadShopifyImage(shop, accessToken, vName, vMime, bytes, "VIDEO");
+      if (!resourceUrl) { errors.push(`video ${i + 1}: upload failed`); continue; }
+      media.push({ originalSource: resourceUrl, mediaContentType: "VIDEO", ...(entry.alt ? { alt: entry.alt } : {}) });
+      continue;
+    }
+    // IMAGE: re-encode so Shopify can always process it (caps megapixels, fixes
     // HEIC / CMYK / corrupt sources that trigger "Media processing failed").
     const norm = await normalizeImageForShopify(bytes, mime);
     // Preserve the original file name (base) so Shopify keeps it, with the
     // extension matching the RE-ENCODED bytes; fall back to image-N when unknown.
-    const rawName = (entry.filename ?? "").trim();
-    const base = rawName
-      ? rawName.replace(/\.[a-z0-9]+$/i, "").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 120)
-      : "";
-    const uploadName = `${base || `image-${i + 1}`}.${norm.ext}`;
+    const uploadName = `${safeBase || `image-${i + 1}`}.${norm.ext}`;
     const resourceUrl = await stageUploadShopifyImage(shop, accessToken, uploadName, norm.mime, norm.bytes);
     if (!resourceUrl) { errors.push(`image ${i + 1}: upload failed`); continue; }
     media.push({ originalSource: resourceUrl, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
@@ -21987,7 +22019,7 @@ function CollectionReleaseCell({ value, onCommit }: { value: string; onCommit: (
 //     the full bytes stored in CollectionImage and fetched lazily.
 // parseMultiImageValue normalises everything to { thumb, key? } so
 // downstream code can render uniformly.
-type CollectionImageEntry = { thumb: string; key?: string; alt?: string; filename?: string; src?: string };
+type CollectionImageEntry = { thumb: string; key?: string; alt?: string; filename?: string; src?: string; kind?: "image" | "video" };
 // Identity used to detect duplicate images. `src` is a STABLE source id (e.g.
 // the Dropbox file path) — preferred first because every Dropbox import mints a
 // NEW random CollectionImage key, so keying off `key` would never catch the same
@@ -22012,6 +22044,13 @@ function dropDuplicateImages(existing: CollectionImageEntry[], incoming: Collect
   }
   return { kept, skipped };
 }
+// Full-quality source URL for an entry (video or image): the key stream when
+// stored in CollectionImage, else the inline thumb / remote URL.
+function collectionMediaSrc(e: CollectionImageEntry): string {
+  return e.key ? `/portal/collection-image/${e.key}` : (e.thumb || "");
+}
+const entryIsVideo = (e: CollectionImageEntry): boolean =>
+  e.kind === "video" || /\.(mp4|mov|m4v|webm)(\?|$)/i.test(`${e.filename ?? ""} ${e.src ?? ""}`);
 function parseMultiImageValue(value: string): CollectionImageEntry[] {
   const v = value?.trim() ?? "";
   if (!v) return [];
@@ -22027,7 +22066,7 @@ function parseMultiImageValue(value: string): CollectionImageEntry[] {
             const key = typeof x.key === "string" ? x.key : undefined;
             // Keep entries that have EITHER an inline thumb OR a key (key-only
             // entries are served on demand from /portal/collection-image/<key>).
-            if (thumb || key) return { thumb, key, alt: typeof x.alt === "string" ? x.alt : undefined, filename: typeof x.filename === "string" ? x.filename : undefined, src: typeof x.src === "string" ? x.src : undefined };
+            if (thumb || key) return { thumb, key, alt: typeof x.alt === "string" ? x.alt : undefined, filename: typeof x.filename === "string" ? x.filename : undefined, src: typeof x.src === "string" ? x.src : undefined, kind: x.kind === "video" ? "video" : undefined };
           }
           return null;
         })
@@ -22042,13 +22081,14 @@ function serializeMultiImageValue(images: CollectionImageEntry[]): string {
   // Always object form when there's a key or alt to preserve; else keep the
   // compact string form for plain thumbs.
   return JSON.stringify(images.map((i) => {
-    if (i.key || i.alt || i.filename || i.src) {
-      const o: { thumb?: string; key?: string; alt?: string; filename?: string; src?: string } = {};
+    if (i.key || i.alt || i.filename || i.src || i.kind === "video") {
+      const o: { thumb?: string; key?: string; alt?: string; filename?: string; src?: string; kind?: "video" } = {};
       if (i.thumb) o.thumb = i.thumb;   // omit empty thumb (key-only entries)
       if (i.key) o.key = i.key;
       if (i.alt) o.alt = i.alt;
       if (i.filename) o.filename = i.filename;  // keep the original file name for Shopify
       if (i.src) o.src = i.src;   // stable source id (e.g. Dropbox path) for dedup across re-imports
+      if (i.kind === "video") o.kind = "video";   // video media (vs image)
       return o;
     }
     return i.thumb;
@@ -22084,7 +22124,7 @@ function DropboxImagePicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [importFetcher.state, importFetcher.data]);
 
-  const results = (searchFetcher.data?.entries ?? []).filter((e) => e.type === "file" && e.kind === "image");
+  const results = (searchFetcher.data?.entries ?? []).filter((e) => e.type === "file" && (e.kind === "image" || e.kind === "video"));
   const importing = importFetcher.state !== "idle";
   const toggle = (path: string) => { if (isAdded(path)) return; setSelected((cur) => { const n = new Set(cur); if (n.has(path)) n.delete(path); else n.add(path); return n; }); };
   const addSelected = () => {
@@ -22132,7 +22172,17 @@ function DropboxImagePicker({
                     style={{ position: "relative", border: added ? "2px solid #0d9488" : isSel ? "3px solid #0061FF" : "1px solid #d1d5db", borderRadius: 8, padding: 0, background: "#f1f5f9", cursor: added ? "default" : "pointer", overflow: "hidden", aspectRatio: "3 / 4", opacity: added ? 0.55 : 1 }}
                     title={added ? `${r.name} — already added` : r.name}
                   >
-                    <DropboxThumb path={r.path} rev={r.rev} size="w256h256" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    {r.kind === "video" ? (
+                      <div style={{ width: "100%", height: "100%", background: "#0b0b0b", color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, padding: 6 }}>
+                        <span style={{ fontSize: 22 }}>▶</span>
+                        <span style={{ fontSize: 10, textAlign: "center", wordBreak: "break-word", lineHeight: 1.2, maxHeight: 40, overflow: "hidden" }}>{r.name}</span>
+                      </div>
+                    ) : (
+                      <DropboxThumb path={r.path} rev={r.rev} size="w256h256" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                    )}
+                    {r.kind === "video" && (
+                      <span style={{ position: "absolute", bottom: 4, right: 4, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 800 }}>video</span>
+                    )}
                     {added ? (
                       <span style={{ position: "absolute", top: 4, left: 4, background: "#0d9488", color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 800 }}>✓ Added</span>
                     ) : isSel ? (
@@ -22172,6 +22222,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
     setDupNotice(`${n} duplicate image${n > 1 ? "s" : ""} skipped — already added.`);
     window.setTimeout(() => setDupNotice(null), 3500);
   };
+  const flashErr = (msg: string) => { setDupNotice(msg); window.setTimeout(() => setDupNotice(null), 4500); };
   // On a locked, linked row the gallery is VIEW-ONLY: every mutation funnels
   // through commit(), so blocking it here stops add / remove / reorder / alt
   // edits from any source (buttons, drag, keyboard paste) and raises the
@@ -22184,13 +22235,35 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
   const addFiles = async (files: FileList | File[] | null | undefined) => {
     if (locked) { onLocked?.(); return; }
     if (!files) return;
-    const arr = Array.from(files).filter((f) => f.type.startsWith("image/"));
-    if (!arr.length) return;
+    const all = Array.from(files);
+    const imgs = all.filter((f) => f.type.startsWith("image/"));
+    // Videos only make sense in the multi-image product gallery (not fabric/mani).
+    const vids = singleImage ? [] : all.filter((f) => f.type.startsWith("video/"));
+    if (!imgs.length && !vids.length) return;
     setBusy(true);
     try {
-      const dataUrls = await Promise.all(arr.map((f) => compressImageToDataUrl(f)));
-      // Keep the original file name so Shopify shows it (not image-1.jpg).
-      const incoming = dataUrls.map((d, i): CollectionImageEntry => ({ thumb: d, filename: arr[i]?.name || undefined }));
+      const incoming: CollectionImageEntry[] = [];
+      if (imgs.length) {
+        const dataUrls = await Promise.all(imgs.map((f) => compressImageToDataUrl(f)));
+        // Keep the original file name so Shopify shows it (not image-1.jpg).
+        imgs.forEach((f, i) => incoming.push({ thumb: dataUrls[i], filename: f.name || undefined }));
+      }
+      // Videos are too large to inline in the row — upload the bytes to the
+      // server (CollectionImage) and keep only the key.
+      for (const f of vids) {
+        if (f.size > 100 * 1024 * 1024) { flashErr(`${f.name || "Video"} is over 100 MB — skipped.`); continue; }
+        if (collectionId == null) { flashErr("Can't upload video here."); continue; }
+        try {
+          const fd = new FormData();
+          fd.set("collectionId", String(collectionId));
+          fd.set("file", f);
+          const res = await fetch("/api/collection-media-upload", { method: "POST", body: fd });
+          const json = await res.json() as { ok?: boolean; key?: string; error?: string };
+          if (json.ok && json.key) incoming.push({ thumb: "", key: json.key, kind: "video", filename: f.name || undefined });
+          else flashErr(json.error || "Video upload failed.");
+        } catch { flashErr("Video upload failed."); }
+      }
+      if (!incoming.length) return;
       // Single-image cells (fabric) replace; multi cells append — minus duplicates.
       if (singleImage) { commit(incoming.slice(-1)); return; }
       const { kept, skipped } = dropDuplicateImages(images, incoming);
@@ -22258,7 +22331,20 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
       >
         {images.length > 0 ? (
           <>
-            <img src={images[0].thumb || (images[0].key ? `/portal/collection-image/${images[0].key}` : "")} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
+            {entryIsVideo(images[0]) ? (
+              <div style={{ width: "100%", height: "100%", position: "relative", background: "#0b0b0b" }}>
+                {images[0].thumb ? (
+                  <img src={images[0].thumb} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+                ) : (
+                  <video src={collectionMediaSrc(images[0])} muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+                )}
+                <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+                  <span style={{ width: 38, height: 38, borderRadius: "50%", background: "rgba(0,0,0,0.55)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>▶</span>
+                </div>
+              </div>
+            ) : (
+              <img src={images[0].thumb || (images[0].key ? `/portal/collection-image/${images[0].key}` : "")} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
+            )}
             {images.length > 1 && (
               <span style={{
                 position: "absolute", bottom: 6, right: 6,
@@ -22313,7 +22399,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
         document.body,
       )}
       <input
-        ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+        ref={fileRef} type="file" accept={singleImage ? "image/*" : "image/*,video/*"} multiple style={{ display: "none" }}
         onChange={(e) => { void addFiles(e.target.files); e.target.value = ""; }}
       />
     </>
@@ -22492,8 +22578,8 @@ function CollectionImageManagerModal({
             <div style={{ fontWeight: 700, fontSize: 15 }}>Model pictures</div>
             <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
               {locked
-                ? `${images.length} image${images.length === 1 ? "" : "s"} — view only while this product is locked.`
-                : `${images.length} image${images.length === 1 ? "" : "s"} — drag to reorder. Position number = image order in Shopify. Duplicates are skipped automatically.`}
+                ? `${images.length} item${images.length === 1 ? "" : "s"} — view only while this product is locked.`
+                : `${images.length} item${images.length === 1 ? "" : "s"} — images & videos. Drag to reorder. Position number = media order in Shopify. Duplicates skipped.`}
             </div>
             {locked && (
               <div style={{ fontSize: 12, color: unlocking ? "#0d9488" : "#b45309", fontWeight: 700, marginTop: 4 }}>
@@ -22543,7 +22629,11 @@ function CollectionImageManagerModal({
                 }}
                 title={locked ? `Position ${idx + 1}` : `Position ${idx + 1} — drag to reorder`}
               >
-                <img src={fullSrc} alt={`pos ${idx + 1}`} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />
+                {entryIsVideo(entry) ? (
+                  <video src={collectionMediaSrc(entry)} poster={entry.thumb || undefined} controls playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#0b0b0b" }} />
+                ) : (
+                  <img src={fullSrc} alt={`pos ${idx + 1}`} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />
+                )}
                 <span style={{
                   position: "absolute", top: 6, left: 6,
                   background: "rgba(17,24,39,0.9)", color: "#fff",
@@ -22595,13 +22685,13 @@ function CollectionImageManagerModal({
                   display: "flex", alignItems: "center", justifyContent: "center",
                   aspectRatio: "3 / 4",
                 }}
-                title="Add image(s)"
+                title="Add images or videos"
               >{busy ? "…" : "+"}</button>
             )}
           </div>
           {images.length === 0 && (
             <div style={{ marginTop: 14, padding: 14, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 13, color: "#6b7280", textAlign: "center" }}>
-              {locked ? "No images." : "No images yet. Click + to add, paste, or pick from Product Information below."}
+              {locked ? "No media." : "No media yet. Click + to add images or a video (up to 100 MB), paste, or pick from Dropbox / Product Information below."}
             </div>
           )}
 
@@ -22616,7 +22706,7 @@ function CollectionImageManagerModal({
                 onClick={() => setDropboxOpen(true)}
                 style={{ background: "#0061FF", color: "#fff", border: "none", borderRadius: 6, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
               >
-                Find images in Dropbox{rowName ? ` for “${rowName}”` : ""}
+                Find images & videos in Dropbox{rowName ? ` for “${rowName}”` : ""}
               </button>
               {dropboxOpen && (
                 <DropboxImagePicker
