@@ -18715,6 +18715,8 @@ function CollectionSpreadsheetPage({
   const [dragOverRowIdx, setDragOverRowIdx] = useState<number | null>(null);
   // Which row's "Print barcodes" popup is open (null = none).
   const [printRowIdx, setPrintRowIdx] = useState<number | null>(null);
+  // Row whose shipment-breakdown grid popup is open (click the Status chip).
+  const [shipGridRowIdx, setShipGridRowIdx] = useState<number | null>(null);
 
   const moveRow = (from: number, to: number) => {
     if (from === to) return;
@@ -20133,15 +20135,19 @@ function CollectionSpreadsheetPage({
                             else if (rowShippedTotal < totalOrdered) { label = "Partly in shipment"; bg = "#fef3c7"; color = "#92400e"; }
                             else { label = "Fully in shipment"; bg = "#dcfce7"; color = "#166534"; }
                           }
-                          const shipTip = rowShipDetail
-                            ? Object.entries(rowShipDetail).map(([sz, d]) => `${sz.toUpperCase()}: ${d.parts.map((p) => `${p.qty} in #${p.ship}`).join(", ")}`).join("\n")
-                            : "";
+                          const canOpen = totalOrdered > 0 || rowShippedTotal > 0;
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky}>
-                              <span
-                                title={`${rowShippedTotal} of ${totalOrdered} shipped${shipTip ? `\n${shipTip}` : ""}`}
-                                style={{ display: "inline-block", fontSize: 11, fontWeight: 800, padding: "4px 9px", borderRadius: 999, background: bg, color, whiteSpace: "nowrap" }}
-                              >{label}</span>
+                              <button
+                                type="button"
+                                disabled={!canOpen}
+                                onClick={() => { if (canOpen) setShipGridRowIdx(rIdx); }}
+                                title={canOpen ? `${rowShippedTotal} of ${totalOrdered} shipped — click for the per-size shipment breakdown` : "No order quantities yet"}
+                                style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 999, background: bg, color, whiteSpace: "nowrap", border: "none", cursor: canOpen ? "pointer" : "default", fontFamily: "inherit" }}
+                              >
+                                {label}
+                                {canOpen && <span aria-hidden style={{ fontSize: 8, opacity: 0.7 }}>▼</span>}
+                              </button>
                             </Td>
                           );
                         }
@@ -20521,6 +20527,98 @@ function CollectionSpreadsheetPage({
           items={collectionRowBarcodeItems(rows[printRowIdx])}
           onClose={() => setPrintRowIdx(null)}
         />
+      )}
+      {/* Shipment breakdown popup (click the Status chip): shipments down the
+          left, sizes across the top, with Shipped / Ordered / Remaining totals.
+          Read-only — all figures come from Packing Lists. */}
+      {shipGridRowIdx !== null && rows[shipGridRowIdx] && typeof document !== "undefined" && createPortal(
+        (() => {
+          const row = rows[shipGridRowIdx];
+          const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
+          const detail = pid ? (shipmentDetailByProductId[pid] ?? {}) : {};
+          const sizeDefs: Array<[string, string]> = [["freeSize", "Free"], ...COLLECTION_SIZE_COLUMN_LABELS];
+          const sizes = sizeDefs
+            .map(([id, lbl]) => {
+              const canon = COLLECTION_SIZE_ID_TO_CANON[id];
+              const ordered = Number(row[id]) || 0;
+              const shipped = detail[canon]?.total ?? 0;
+              return { id, canon, label: lbl, ordered, shipped, remaining: Math.max(0, ordered - shipped) };
+            })
+            .filter((s) => s.ordered > 0 || s.shipped > 0);
+          const shipOrder: string[] = [];
+          const seenShip = new Set<string>();
+          for (const s of sizes) for (const p of (detail[s.canon]?.parts ?? [])) if (!seenShip.has(p.ship)) { seenShip.add(p.ship); shipOrder.push(p.ship); }
+          const shipments = shipOrder.map((ship) => {
+            const cells: Record<string, number> = {};
+            let total = 0;
+            for (const s of sizes) { const part = (detail[s.canon]?.parts ?? []).find((p) => p.ship === ship); const q = part?.qty ?? 0; cells[s.canon] = q; total += q; }
+            return { ship, cells, total };
+          });
+          const tOrdered = sizes.reduce((a, s) => a + s.ordered, 0);
+          const tShipped = sizes.reduce((a, s) => a + s.shipped, 0);
+          const tRemaining = Math.max(0, tOrdered - tShipped);
+          const statusLabel = tShipped <= 0 ? "Not shipped" : tShipped < tOrdered ? "Partly in shipment" : "Fully in shipment";
+          const statusBg = tShipped <= 0 ? "#f3f4f6" : tShipped < tOrdered ? "#fef3c7" : "#dcfce7";
+          const statusColor = tShipped <= 0 ? "#6b7280" : tShipped < tOrdered ? "#92400e" : "#166534";
+          const cell: React.CSSProperties = { padding: "7px 6px", textAlign: "center", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
+          const headCell: React.CSSProperties = { ...cell, background: "#f8fafc", fontSize: 11, fontWeight: 800, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: "1px solid #e5e7eb" };
+          return (
+            <div onClick={() => setShipGridRowIdx(null)} style={{ position: "fixed", inset: 0, background: "rgba(15,23,42,0.5)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+              <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 14, width: "min(680px, 96vw)", maxHeight: "90vh", overflow: "hidden", boxShadow: "0 24px 60px rgba(15,23,42,0.3)", display: "flex", flexDirection: "column" }}>
+                <div style={{ padding: "16px 18px", borderBottom: "1px solid #e5e7eb", display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 15, fontWeight: 800, color: "#111827" }}>{row.name ?? row.title ?? "Product"}</div>
+                    <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}><b style={{ color: "#111827" }}>{tShipped}</b> of <b style={{ color: "#111827" }}>{tOrdered}</b> shipped · {tRemaining} still to go</div>
+                  </div>
+                  <span style={{ fontSize: 11, fontWeight: 800, padding: "5px 10px", borderRadius: 999, background: statusBg, color: statusColor, whiteSpace: "nowrap" }}>{statusLabel}</span>
+                  <button type="button" onClick={() => setShipGridRowIdx(null)} title="Close" style={{ border: "none", background: "#f1f5f9", color: "#6b7280", width: 26, height: 26, borderRadius: 7, fontSize: 14, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>×</button>
+                </div>
+                <div style={{ overflow: "auto", padding: "6px 10px 12px" }}>
+                  {shipments.length === 0 ? (
+                    <div style={{ padding: 28, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>Nothing shipped yet — this product isn’t in any packing list.</div>
+                  ) : (
+                    <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ ...headCell, textAlign: "left", paddingLeft: 12 }}>Shipment</th>
+                          {sizes.map((s) => <th key={s.canon} style={headCell}>{s.label}</th>)}
+                          <th style={{ ...headCell, color: "#0f766e", borderLeft: "1px solid #e5e7eb" }}>Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {shipments.map((sh) => (
+                          <tr key={sh.ship}>
+                            <th style={{ ...cell, textAlign: "left", paddingLeft: 12, fontWeight: 700, fontSize: 12.5, color: "#111827", borderBottom: "1px solid #f1f5f9" }}>
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#0d9488", flexShrink: 0 }} />#{sh.ship}</span>
+                            </th>
+                            {sizes.map((s) => <td key={s.canon} style={{ ...cell, fontWeight: sh.cells[s.canon] ? 700 : 400, color: sh.cells[s.canon] ? "#111827" : "#cbd5e1", borderBottom: "1px solid #f1f5f9" }}>{sh.cells[s.canon] || "–"}</td>)}
+                            <td style={{ ...cell, fontWeight: 800, color: "#0f766e", borderLeft: "1px solid #e5e7eb", borderBottom: "1px solid #f1f5f9" }}>{sh.total}</td>
+                          </tr>
+                        ))}
+                        <tr>
+                          <th style={{ ...cell, textAlign: "left", paddingLeft: 12, fontWeight: 800, color: "#0f766e", borderTop: "2px solid #e5e7eb" }}>Shipped</th>
+                          {sizes.map((s) => <td key={s.canon} style={{ ...cell, fontWeight: 800, color: "#0f766e", borderTop: "2px solid #e5e7eb" }}>{s.shipped}</td>)}
+                          <td style={{ ...cell, fontWeight: 800, color: "#0f766e", borderTop: "2px solid #e5e7eb", borderLeft: "1px solid #e5e7eb" }}>{tShipped}</td>
+                        </tr>
+                        <tr>
+                          <th style={{ ...cell, textAlign: "left", paddingLeft: 12, fontWeight: 700, color: "#6b7280" }}>Ordered</th>
+                          {sizes.map((s) => <td key={s.canon} style={{ ...cell, fontWeight: 700, color: "#6b7280" }}>{s.ordered}</td>)}
+                          <td style={{ ...cell, fontWeight: 700, color: "#6b7280", borderLeft: "1px solid #e5e7eb" }}>{tOrdered}</td>
+                        </tr>
+                        <tr style={{ background: "#fffbeb" }}>
+                          <th style={{ ...cell, textAlign: "left", paddingLeft: 12, fontWeight: 800, color: "#92400e" }}>Remaining</th>
+                          {sizes.map((s) => <td key={s.canon} style={{ ...cell, fontWeight: s.remaining ? 800 : 400, color: s.remaining ? "#92400e" : "#cbd5e1" }}>{s.remaining || "–"}</td>)}
+                          <td style={{ ...cell, fontWeight: 800, color: "#92400e", borderLeft: "1px solid #e5e7eb" }}>{tRemaining}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })(),
+        document.body,
       )}
       {/* Fabric bar: the fabric(s) attached to this collection. Starts empty —
           search + attach the correct fabric with "+ Pick fabric" (you can add
