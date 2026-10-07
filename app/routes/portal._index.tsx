@@ -92,6 +92,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     COLLECTION_ORDER_STATUS_KEY,
     COLLECTION_FABRIC_LINK_KEY,
     COLLECTION_GROUPS_KEY,
+    COLLECTION_TILE_ORDER_KEY,
     INR_AUD_CACHE_KEY,
   ];
   // usa-stock: a tile view of every open order marked "Send to USA" (across
