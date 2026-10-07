@@ -19714,6 +19714,47 @@ function CollectionSpreadsheetPage({
                           );
                         }
                         const value = computed !== null ? computed : (row[col.id] ?? "");
+                        // LOCK GUARD (read-only): on a locked, linked row every
+                        // Shopify-bound field is rendered NON-EDITABLE — you
+                        // literally can't type into it. Clicking it opens the
+                        // "unlock to edit" popup immediately. Pictures
+                        // (modelPicture) and all portal-only fields (status,
+                        // sample, notes, eta, fabric, size qtys, tickboxes…)
+                        // stay freely editable, so they're not intercepted here.
+                        // The Name cell is handled below (keeps its Shopify
+                        // buttons + status chip but shows the name read-only).
+                        if (
+                          shopifyLocked && linked &&
+                          SHOPIFY_SYNCED_COLUMN_IDS.has(col.id) &&
+                          col.id !== "modelPicture" && col.id !== "name"
+                        ) {
+                          const isNum = col.type === "number" || col.id === "price" || col.id === "priceRupees" || col.id === "compareAtPrice";
+                          const preview = (col.id === "description" || col.id === "seoTitle" || col.id === "seoDescription")
+                            ? String(value).replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim()
+                            : String(value);
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} {...tdSticky}>
+                              <div
+                                onClick={() => setLockPromptIdx(rIdx)}
+                                title="🔒 Locked — click to unlock before editing"
+                                style={{
+                                  cursor: "pointer",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: isNum ? "center" : "flex-start",
+                                  gap: 5,
+                                  minHeight: 28,
+                                  padding: "4px 6px",
+                                  fontSize: "var(--portal-table-font-size, 14px)",
+                                  color: preview ? "#64748b" : "#cbd5e1",
+                                }}
+                              >
+                                <span aria-hidden style={{ fontSize: 11, opacity: 0.65, flexShrink: 0 }}>🔒</span>
+                                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 240 }}>{preview || "—"}</span>
+                              </div>
+                            </Td>
+                          );
+                        }
                         if (col.type === "chip" && (col.id === "status" || col.id === "sample")) {
                           const opts = col.id === "status" ? localStatusOptions : localSampleOptions;
                           return (
@@ -19896,10 +19937,11 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
-                        // Everything stays editable after the product is created —
-                        // edit any cell, the row highlights + the "Update in Shopify"
-                        // button appears, and you can push again whenever you want.
-                        const lockedDisplay = false;
+                        // The Name cell shows its name READ-ONLY on a locked,
+                        // linked row (the Shopify buttons + status chip around it
+                        // stay live). Clicking the name opens the unlock popup.
+                        // Every other non-synced cell stays fully editable.
+                        const lockedDisplay = col.id === "name" && shopifyLocked && linked;
                         // Notes cells need the table-layout "height: 1"
                         // trick + zero padding so the inner wrap can
                         // fill the cell exactly (height:100% works
@@ -19926,14 +19968,12 @@ function CollectionSpreadsheetPage({
                             }
                           : {};
                         const cellInner = lockedDisplay ? (
-                          // Size / qty columns: keep the same big centred font as the
-                          // editable cell, but red (inventory is now managed elsewhere).
-                          col.type === "number" && !["price", "priceRupees", "compareAtPrice"].includes(col.id) ? (
-                            <span style={{ display: "block", width: "100%", textAlign: "center", fontSize: "calc(var(--portal-table-font-size, 14px) + 2px)", fontWeight: 600, color: "#dc2626", padding: "1px 2px" }}>{value}</span>
-                          ) : (
-                            // Other locked cells: normal table text size, centered.
-                            <span style={{ fontSize: "var(--portal-table-font-size, 14px)", color: "var(--portal-table-text-color, #374151)", padding: "2px 4px", display: "block", width: "100%", textAlign: "center" }}>{value}</span>
-                          )
+                          // Locked product name: read-only, click to open the unlock popup.
+                          <span
+                            onClick={() => setLockPromptIdx(rIdx)}
+                            title="🔒 Locked — click to unlock before editing"
+                            style={{ cursor: "pointer", fontSize: "var(--portal-table-font-size, 14px)", fontWeight: 700, color: "#111827", padding: "2px 4px", display: "block", width: "100%", textAlign: "center", lineHeight: 1.3 }}
+                          >{value || "—"}</span>
                         ) : (
                           <CollectionCell
                             value={value}
