@@ -434,23 +434,32 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Collections shipment/ETA per product — computed from packing-list lines +
   // ordered totals. Both queries run in parallel, and the whole thing runs in
   // parallel with the collections + photo-shoot list queries below.
-  const shipmentDataPromise: Promise<{ eta: Record<string, string>; shipment: Record<string, { label: string; partial: boolean }>; shipDetail: Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>> }> =
+  const shipmentDataPromise: Promise<{ eta: Record<string, string>; shipment: Record<string, { label: string; partial: boolean }>; shipDetail: Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>>; restockStatus: Record<string, string> }> =
     collectionIsOpen
       ? (async () => {
           const eta: Record<string, string> = {};
           const shipment: Record<string, { label: string; partial: boolean }> = {};
           // Per-product, per-size shipment breakdown: how many of each size went
-          // in which shipment. Drives the collection size-cell annotation + the
-          // auto "Not / Partly / Fully in shipment" status. Keyed by canonical size.
+          // in which shipment. Drives the shipment-breakdown popup. Keyed by canonical size.
           const shipDetail: Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>> = {};
+          // Restock supplier status per product — the collection Status chip mirrors
+          // this (the restock page is the source of truth for the product's status).
+          const restockStatus: Record<string, string> = {};
           try {
             const [lines, orders] = await Promise.all([
               prisma.packingListLine.findMany({
                 where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } },
                 select: { productId: true, qtys: true, packingList: { select: { id: true, title: true, invoiceNumber: true, expectedLeaveFactoryDate: true, shipmentDate: true } } },
               }),
-              prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true } }).catch(() => [] as Array<{ productId: string; totalQty: number }>),
+              prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true, supplierStatus: true } }).catch(() => [] as Array<{ productId: string; totalQty: number; supplierStatus: string }>),
             ]);
+            // Furthest-along status wins when a product has several restock orders.
+            const STATUS_RANK: Record<string, number> = { cancelled: 0, on_order: 1, on_production: 2, ready: 3, in_shipment: 4 };
+            for (const o of orders) {
+              if (!o.productId || !o.supplierStatus) continue;
+              const cur = restockStatus[o.productId];
+              if (!cur || (STATUS_RANK[o.supplierStatus] ?? 0) > (STATUS_RANK[cur] ?? 0)) restockStatus[o.productId] = o.supplierStatus;
+            }
             for (const line of lines) {
               if (!line.productId) continue;
               const ship = (line.packingList.invoiceNumber || line.packingList.title || `${line.packingList.id}`).trim();
@@ -497,9 +506,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           } catch (e) {
             console.warn("[collection eta] lookup failed:", e);
           }
-          return { eta, shipment, shipDetail };
+          return { eta, shipment, shipDetail, restockStatus };
         })()
-      : Promise.resolve({ eta: {}, shipment: {}, shipDetail: {} as Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>> });
+      : Promise.resolve({ eta: {}, shipment: {}, shipDetail: {} as Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>>, restockStatus: {} as Record<string, string> });
 
   // Run the three collections-page queries together instead of one-after-another.
   const [collections, photoShoots, shipmentData] = await Promise.all([collectionsPromise, photoShootsPromise, shipmentDataPromise]);
@@ -507,6 +516,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const collectionEtaByProductId = shipmentData.eta;
   const collectionShipmentByProductId = shipmentData.shipment;
   const collectionShipmentDetailByProductId = shipmentData.shipDetail;
+  const collectionRestockStatusByProductId = shipmentData.restockStatus;
   // activityLogs is fetched in the initial Promise.all above (parallel).
   const users = normalizePortalUsers(usersSetting?.value);
   const customColumns = normalizeTableCustomColumns(customColumnsSetting?.value);
@@ -1287,6 +1297,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     collectionEtaByProductId,
     collectionShipmentByProductId,
     collectionShipmentDetailByProductId,
+    collectionRestockStatusByProductId,
     photoShoots,
     photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
     jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
@@ -12345,6 +12356,7 @@ export default function PortalDashboard() {
     collectionEtaByProductId,
     collectionShipmentByProductId,
     collectionShipmentDetailByProductId,
+    collectionRestockStatusByProductId,
     photoShoots,
     photoShootColumnWidths,
     jjColumnWidths,
@@ -13449,6 +13461,7 @@ export default function PortalDashboard() {
                 etaByProductId={collectionEtaByProductId}
                 shipmentByProductId={collectionShipmentByProductId}
                 shipmentDetailByProductId={collectionShipmentDetailByProductId}
+                restockStatusByProductId={collectionRestockStatusByProductId}
                 collectionGroups={collectionGroups}
                 collectionTileOrder={collectionTileOrder}
                 canSeeProductStatus={Boolean(currentUser?.admin || currentUser?.canSeeProductStatus)}
@@ -17513,7 +17526,7 @@ function ButtonSpinner({ size = 14, color = "currentColor" }: { size?: number; c
 // which shipments each size went in and how many. Drives the collection size-cell
 // annotation + the auto "Not / Partly / Fully in shipment" status.
 type CollectionShipDetailMap = Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>>;
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, shipmentDetailByProductId = {}, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], collectionTileOrder = [], canSeeProductStatus = false, search = "", onTotalsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; shipmentDetailByProductId?: CollectionShipDetailMap; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; collectionTileOrder?: string[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, shipmentDetailByProductId = {}, restockStatusByProductId = {}, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], collectionTileOrder = [], canSeeProductStatus = false, search = "", onTotalsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; shipmentDetailByProductId?: CollectionShipDetailMap; restockStatusByProductId?: Record<string, string>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; collectionTileOrder?: string[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -17762,6 +17775,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         etaByProductId={etaByProductId}
         shipmentByProductId={shipmentByProductId}
         shipmentDetailByProductId={shipmentDetailByProductId}
+        restockStatusByProductId={restockStatusByProductId}
         onBack={collectionKind === "jj-new" ? undefined : closeCollection}
         canSeeProductStatus={canSeeProductStatus}
         hidePhotoShootToggle={hidePhotoShootToggle}
@@ -18522,6 +18536,7 @@ function CollectionSpreadsheetPage({
   etaByProductId,
   shipmentByProductId,
   shipmentDetailByProductId = {},
+  restockStatusByProductId = {},
   onBack,
   onLocalNameChange,
   onSetFabricLink,
@@ -18544,6 +18559,7 @@ function CollectionSpreadsheetPage({
   etaByProductId: Record<string, string>;
   shipmentByProductId: Record<string, { label: string; partial: boolean }>;
   shipmentDetailByProductId?: CollectionShipDetailMap;
+  restockStatusByProductId?: Record<string, string>;
   onBack?: () => void;
   onLocalNameChange: (name: string) => void;
   onSetFabricLink: (fabricName: string, fabricKey: string) => void;
@@ -19925,6 +19941,8 @@ function CollectionSpreadsheetPage({
                 // size-cell annotation + the auto shipment status.
                 const rowShipDetail = linkedProductId ? (shipmentDetailByProductId[linkedProductId] ?? null) : null;
                 const rowShippedTotal = rowShipDetail ? Object.values(rowShipDetail).reduce((s, sz) => s + sz.total, 0) : 0;
+                // The product's status mirrors its restock order (source of truth).
+                const rowRestockStatus = linkedProductId ? (restockStatusByProductId[linkedProductId] ?? "") : "";
                 const adminLink = shopifyAdminLinkForRow(row, shopDomain);
                 const storefrontLink = shopifyStorefrontLinkForRow(row, shopDomain);
                 // Computed values for readonly cells. Rendered through
@@ -20123,31 +20141,40 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
-                        // STATUS is now READ-ONLY and auto-derived from shipments
-                        // (Packing Lists): nothing sent → "Not shipped", some sent
-                        // → "Partly in shipment", all ordered sent → "Fully in
-                        // shipment". The restock/packing side is the single source
-                        // of truth, so it can't be edited here.
+                        // STATUS cell = two stacked chips:
+                        //  • TOP: the product's status, mirrored (read-only) from
+                        //    its restock order — the restock page is the source of
+                        //    truth, so it isn't edited here.
+                        //  • BOTTOM: a shipment chip (Not / Partly / Fully in
+                        //    shipment) built ONLY from Packing Lists; click it for
+                        //    the per-size shipment breakdown popup.
                         if (col.type === "chip" && col.id === "status") {
-                          let label = "—", bg = "#f3f4f6", color = "#9ca3af";
+                          const rsOpt = rowRestockStatus ? restockSettings.statusOptions.find((o) => o.value === rowRestockStatus) : null;
+                          let shipLabel = "—", shipBg = "#f3f4f6", shipColor = "#9ca3af";
                           if (totalOrdered > 0 || rowShippedTotal > 0) {
-                            if (rowShippedTotal <= 0) { label = "Not shipped"; bg = "#f3f4f6"; color = "#6b7280"; }
-                            else if (rowShippedTotal < totalOrdered) { label = "Partly in shipment"; bg = "#fef3c7"; color = "#92400e"; }
-                            else { label = "Fully in shipment"; bg = "#dcfce7"; color = "#166534"; }
+                            if (rowShippedTotal <= 0) { shipLabel = "Not shipped"; shipBg = "#f3f4f6"; shipColor = "#6b7280"; }
+                            else if (rowShippedTotal < totalOrdered) { shipLabel = "Partly in shipment"; shipBg = "#fef3c7"; shipColor = "#92400e"; }
+                            else { shipLabel = "Fully in shipment"; shipBg = "#dcfce7"; shipColor = "#166534"; }
                           }
                           const canOpen = totalOrdered > 0 || rowShippedTotal > 0;
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky}>
-                              <button
-                                type="button"
-                                disabled={!canOpen}
-                                onClick={() => { if (canOpen) setShipGridRowIdx(rIdx); }}
-                                title={canOpen ? `${rowShippedTotal} of ${totalOrdered} shipped — click for the per-size shipment breakdown` : "No order quantities yet"}
-                                style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 999, background: bg, color, whiteSpace: "nowrap", border: "none", cursor: canOpen ? "pointer" : "default", fontFamily: "inherit" }}
-                              >
-                                {label}
-                                {canOpen && <span aria-hidden style={{ fontSize: 8, opacity: 0.7 }}>▼</span>}
-                              </button>
+                              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                                <span
+                                  title={rsOpt ? `Status from the restock page: ${rsOpt.label}` : "No restock order for this product yet"}
+                                  style={{ display: "inline-block", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 999, whiteSpace: "nowrap", background: rsOpt?.bg ?? "#f3f4f6", color: rsOpt?.color ?? "#9ca3af" }}
+                                >{rsOpt?.label ?? "—"}</span>
+                                <button
+                                  type="button"
+                                  disabled={!canOpen}
+                                  onClick={() => { if (canOpen) setShipGridRowIdx(rIdx); }}
+                                  title={canOpen ? `${rowShippedTotal} of ${totalOrdered} shipped — click for the per-size shipment breakdown` : "No order quantities yet"}
+                                  style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 999, background: shipBg, color: shipColor, whiteSpace: "nowrap", border: "none", cursor: canOpen ? "pointer" : "default", fontFamily: "inherit" }}
+                                >
+                                  {shipLabel}
+                                  {canOpen && <span aria-hidden style={{ fontSize: 8, opacity: 0.7 }}>▼</span>}
+                                </button>
+                              </div>
                             </Td>
                           );
                         }
