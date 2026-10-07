@@ -22404,17 +22404,22 @@ function DropboxPickerTile({ r, added, selected, onToggle }: {
   }, [r.path]);
   const border = added ? "2px solid #0d9488" : selected ? "3px solid #0061FF" : "1px solid #d1d5db";
   return (
-    <div style={{ breakInside: "avoid", marginBottom: 10, position: "relative", borderRadius: 8, overflow: "hidden", border, background: "#f1f5f9", opacity: added ? 0.6 : 1 }}>
-      {/* Clicking anywhere on the tile selects it (the ▶ button is separate). */}
-      <div onClick={() => { if (!added) onToggle(); }} style={{ cursor: added ? "default" : "pointer", display: "block" }} title={added ? `${r.name} — already added` : `${r.name}${isVideo ? " — tap ▶ to preview" : ""}`}>
+    <div style={{ position: "relative", borderRadius: 8, overflow: "hidden", border, background: isVideo ? "#0b0b0b" : "#f1f5f9", opacity: added ? 0.6 : 1 }}>
+      {/* Fixed-size box reserves space so the grid never jumps as images load;
+          the media is shown uncropped (contain) inside it. Clicking selects. */}
+      <div
+        onClick={() => { if (!added) onToggle(); }}
+        style={{ cursor: added ? "default" : "pointer", aspectRatio: "3 / 4", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}
+        title={added ? `${r.name} — already added` : `${r.name}${isVideo ? " — tap ▶ to preview" : ""}`}
+      >
         {isVideo ? (
           videoUrl ? (
-            <video src={`${videoUrl}#t=0.1`} muted playsInline preload="metadata" style={{ width: "100%", height: "auto", display: "block", background: "#000", minHeight: 120, pointerEvents: "none" }} />
+            <video src={`${videoUrl}#t=0.1`} muted playsInline preload="metadata" style={{ maxWidth: "100%", maxHeight: "100%", width: "100%", height: "100%", objectFit: "contain", display: "block", pointerEvents: "none" }} />
           ) : (
-            <div style={{ width: "100%", aspectRatio: "3 / 4", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", background: "#0b0b0b", fontSize: 30 }}>🎬</div>
+            <span style={{ color: "#fff", fontSize: 30 }}>🎬</span>
           )
         ) : (
-          <DropboxThumb path={r.path} rev={r.rev} size="w640h480" mode="bestfit" style={{ width: "100%", height: "auto", display: "block", pointerEvents: "none" }} />
+          <DropboxThumb path={r.path} rev={r.rev} size="w640h480" mode="bestfit" style={{ maxWidth: "100%", maxHeight: "100%", width: "100%", height: "100%", objectFit: "contain", display: "block", pointerEvents: "none" }} />
         )}
       </div>
       {/* Small ▶ in the bottom-left corner — plays the clip in a lightbox so the
@@ -22505,9 +22510,10 @@ function DropboxImagePicker({
           ) : results.length === 0 ? (
             <div style={{ padding: 24, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>No images found. Try a different search.</div>
           ) : (
-            // Masonry columns so each tile keeps its NATURAL shape (landscape /
-            // square / portrait) instead of being cropped to a fixed box.
-            <div style={{ columnWidth: 170, columnGap: 10 }}>
+            // Stable uniform grid (no layout jumping as images load); each image
+            // is shown UNCROPPED (object-fit: contain) so landscape / square /
+            // portrait all read correctly within the fixed tile.
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, alignContent: "start" }}>
               {results.map((r) => (
                 <DropboxPickerTile
                   key={r.path}
