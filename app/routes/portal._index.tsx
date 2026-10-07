@@ -11379,6 +11379,36 @@ async function stageUploadShopifyImage(shop: string, accessToken: string, filena
   } catch { return null; }
 }
 
+// Re-encode an image so Shopify can ALWAYS process it. Shopify rejects a media
+// source with "Media processing failed" (often after a thumbnail already
+// appears) when it's over ~20 megapixels, is HEIC, has a CMYK / odd colour
+// profile, or is slightly corrupt — all common in full-res Dropbox / camera
+// originals. sharp decodes forgivingly (failOn "none"), honours EXIF
+// orientation, caps the longest side at 3000px (≤9MP, well under Shopify's
+// limit), drops the colour profile and writes a clean sRGB JPEG — or a PNG when
+// the image has real transparency. Falls back to the original bytes if sharp
+// can't read them at all.
+async function normalizeImageForShopify(bytes: Buffer, mime: string): Promise<{ bytes: Buffer; mime: string; ext: string }> {
+  const MAX_DIM = 3000;
+  try {
+    const sharp = (await import("sharp")).default;
+    const base = sharp(bytes, { failOn: "none", animated: false }).rotate();
+    const meta = await base.metadata().catch(() => null);
+    const resized = base.resize({ width: MAX_DIM, height: MAX_DIM, fit: "inside", withoutEnlargement: true });
+    if (meta?.hasAlpha) {
+      const out = await resized.png({ compressionLevel: 9 }).toBuffer();
+      if (out.length) return { bytes: out, mime: "image/png", ext: "png" };
+    } else {
+      const out = await resized.flatten({ background: "#ffffff" }).jpeg({ quality: 88, mozjpeg: true }).toBuffer();
+      if (out.length) return { bytes: out, mime: "image/jpeg", ext: "jpg" };
+    }
+  } catch (e) {
+    console.warn("[image] normalize for Shopify failed, using original bytes:", e);
+  }
+  const ext = mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : mime.includes("gif") ? "gif" : "jpg";
+  return { bytes, mime, ext };
+}
+
 // Push a collection row's images to its Shopify product, with per-image alt
 // text. Local images (stored in CollectionImage by key, or inline data URLs)
 // go through a staged upload; public http(s) URLs are attached directly.
@@ -11402,20 +11432,37 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
       if (m) { mime = m[1]; bytes = Buffer.from(m[2], "base64"); }
     }
     if (!bytes && /^https?:\/\//i.test(entry.thumb || "")) {
-      // Public URL — Shopify can fetch it directly.
-      media.push({ originalSource: entry.thumb, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
-      continue;
+      const url = entry.thumb as string;
+      // Shopify's own CDN images are already processed — attach directly.
+      if (/cdn\.shopify\.com/i.test(url)) {
+        media.push({ originalSource: url, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
+        continue;
+      }
+      // Other public URLs (Dropbox / product-info): fetch the bytes so we can
+      // re-encode them below — a huge/HEIC source fetched directly by Shopify
+      // is exactly what fails "Media processing". Fall back to direct attach
+      // if the fetch fails.
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+        if (r.ok) { bytes = Buffer.from(await r.arrayBuffer()); mime = (r.headers.get("content-type") || mime).split(";")[0].trim() || mime; }
+      } catch { /* fall back below */ }
+      if (!bytes) {
+        media.push({ originalSource: url, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
+        continue;
+      }
     }
     if (!bytes) continue;
-    const ext = mime.includes("png") ? "png" : mime.includes("webp") ? "webp" : mime.includes("gif") ? "gif" : "jpg";
+    // Re-encode so Shopify can always process it (caps megapixels, fixes
+    // HEIC / CMYK / corrupt sources that trigger "Media processing failed").
+    const norm = await normalizeImageForShopify(bytes, mime);
     // Preserve the original file name (base) so Shopify keeps it, with the
-    // extension matching the actual bytes; fall back to image-N when unknown.
+    // extension matching the RE-ENCODED bytes; fall back to image-N when unknown.
     const rawName = (entry.filename ?? "").trim();
     const base = rawName
       ? rawName.replace(/\.[a-z0-9]+$/i, "").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 120)
       : "";
-    const uploadName = `${base || `image-${i + 1}`}.${ext}`;
-    const resourceUrl = await stageUploadShopifyImage(shop, accessToken, uploadName, mime, bytes);
+    const uploadName = `${base || `image-${i + 1}`}.${norm.ext}`;
+    const resourceUrl = await stageUploadShopifyImage(shop, accessToken, uploadName, norm.mime, norm.bytes);
     if (!resourceUrl) { errors.push(`image ${i + 1}: upload failed`); continue; }
     media.push({ originalSource: resourceUrl, mediaContentType: "IMAGE", ...(entry.alt ? { alt: entry.alt } : {}) });
   }
