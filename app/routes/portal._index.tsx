@@ -19387,6 +19387,17 @@ function CollectionSpreadsheetPage({
       return next;
     });
   };
+  const removeSelectedRows = () => {
+    const n = selectedRowIdxs.size;
+    if (!n) return;
+    if (!window.confirm(`Delete ${n} selected row${n === 1 ? "" : "s"}?`)) return;
+    setRows((prev) => {
+      const next = prev.filter((_, i) => !selectedRowIdxs.has(i));
+      persistRows(next, prev, `Undo delete ${n} rows`);
+      return next;
+    });
+    setSelectedRowIdxs(new Set());
+  };
 
   // Shopify push (single row or batch). On success, we patch local
   // state with the returned product IDs so the row visibly flips to
@@ -19719,6 +19730,14 @@ function CollectionSpreadsheetPage({
                 <option key={c.id} value={c.id} style={{ color: "#111827", background: "#fff" }}>{c.name}</option>
               ))}
             </select>
+          )}
+          {selectedRowIdxs.size > 0 && (
+            <button
+              type="button"
+              onClick={removeSelectedRows}
+              style={{ fontSize: 12, fontWeight: 700, padding: "6px 10px", border: "1px solid #dc2626", borderRadius: 6, background: "#fee2e2", color: "#b91c1c", cursor: "pointer" }}
+              title="Delete the selected rows"
+            >🗑 Delete {selectedRowIdxs.size}</button>
           )}
           {otherCollections.length > 0 && (
             <select
