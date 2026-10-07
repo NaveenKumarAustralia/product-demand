@@ -434,11 +434,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Collections shipment/ETA per product — computed from packing-list lines +
   // ordered totals. Both queries run in parallel, and the whole thing runs in
   // parallel with the collections + photo-shoot list queries below.
-  const shipmentDataPromise: Promise<{ eta: Record<string, string>; shipment: Record<string, { label: string; partial: boolean }> }> =
+  const shipmentDataPromise: Promise<{ eta: Record<string, string>; shipment: Record<string, { label: string; partial: boolean }>; shipDetail: Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>> }> =
     collectionIsOpen
       ? (async () => {
           const eta: Record<string, string> = {};
           const shipment: Record<string, { label: string; partial: boolean }> = {};
+          // Per-product, per-size shipment breakdown: how many of each size went
+          // in which shipment. Drives the collection size-cell annotation + the
+          // auto "Not / Partly / Fully in shipment" status. Keyed by canonical size.
+          const shipDetail: Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>> = {};
           try {
             const [lines, orders] = await Promise.all([
               prisma.packingListLine.findMany({
@@ -447,6 +451,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               }),
               prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true } }).catch(() => [] as Array<{ productId: string; totalQty: number }>),
             ]);
+            for (const line of lines) {
+              if (!line.productId) continue;
+              const ship = (line.packingList.invoiceNumber || line.packingList.title || `${line.packingList.id}`).trim();
+              const qtys = normalizeQtys(line.qtys);
+              for (const [sizeRaw, nRaw] of Object.entries(qtys)) {
+                const qty = Number(nRaw) || 0;
+                if (qty <= 0) continue;
+                const size = collectionCanonSize(sizeRaw);
+                const prod = (shipDetail[line.productId] ??= {});
+                const sz = (prod[size] ??= { total: 0, parts: [] });
+                sz.total += qty;
+                const part = sz.parts.find((p) => p.ship === ship);
+                if (part) part.qty += qty; else sz.parts.push({ ship, qty });
+              }
+            }
             const byProduct = new Map<string, Map<number, { qty: number; label: string }>>();
             for (const line of lines) {
               if (!line.productId) continue;
@@ -478,15 +497,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
           } catch (e) {
             console.warn("[collection eta] lookup failed:", e);
           }
-          return { eta, shipment };
+          return { eta, shipment, shipDetail };
         })()
-      : Promise.resolve({ eta: {}, shipment: {} });
+      : Promise.resolve({ eta: {}, shipment: {}, shipDetail: {} as Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>> });
 
   // Run the three collections-page queries together instead of one-after-another.
   const [collections, photoShoots, shipmentData] = await Promise.all([collectionsPromise, photoShootsPromise, shipmentDataPromise]);
   perfMarks.lists = Date.now();
   const collectionEtaByProductId = shipmentData.eta;
   const collectionShipmentByProductId = shipmentData.shipment;
+  const collectionShipmentDetailByProductId = shipmentData.shipDetail;
   // activityLogs is fetched in the initial Promise.all above (parallel).
   const users = normalizePortalUsers(usersSetting?.value);
   const customColumns = normalizeTableCustomColumns(customColumnsSetting?.value);
@@ -1266,6 +1286,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     collections,
     collectionEtaByProductId,
     collectionShipmentByProductId,
+    collectionShipmentDetailByProductId,
     photoShoots,
     photoShootColumnWidths: normalizeColumnWidths(photoShootColumnWidthsSetting?.value),
     jjColumnWidths: normalizeColumnWidths(jjColumnWidthsSetting?.value),
@@ -10586,6 +10607,24 @@ function collectionSizeSfx(size: string): string {
   }
 }
 
+// Canonical size key for matching a collection size COLUMN (label "XS", "2XL",
+// "S/M", "Free Size") against a packing-list variant SIZE ("XS", "XXL", "S-M",
+// "Free"). Lowercases, strips spaces, "-"→"/", and folds the common aliases so
+// 2XL/XXL and 3XL/XXXL line up across the two systems.
+function collectionCanonSize(label: string): string {
+  let n = String(label ?? "").trim().toLowerCase().replace(/\s+/g, "").replace(/-/g, "/");
+  if (n === "2xl" || n === "xxl") return "xxl";
+  if (n === "3xl" || n === "xxxl") return "xxxl";
+  if (n === "4xl" || n === "xxxxl") return "xxxxl";
+  if (n === "free" || n === "freesize" || n === "onesize" || n === "os" || n === "o/s") return "freesize";
+  return n;
+}
+// Collection size COLUMN id → its canonical size key (matches collectionCanonSize).
+const COLLECTION_SIZE_ID_TO_CANON: Record<string, string> = {
+  freeSize: "freesize", xs: "xs", s: "s", m: "m", l: "l", xl: "xl",
+  xxl: "xxl", xxxl: "xxxl", sm: "s/m", ml: "m/l", lxl: "l/xl",
+};
+
 function sumCollectionRowQuantity(row: Record<string, string>): number {
   let n = 0;
   for (const id of COLLECTION_QTY_COLUMN_IDS) n += Number(row[id] ?? 0) || 0;
@@ -12285,6 +12324,7 @@ export default function PortalDashboard() {
     collections,
     collectionEtaByProductId,
     collectionShipmentByProductId,
+    collectionShipmentDetailByProductId,
     photoShoots,
     photoShootColumnWidths,
     jjColumnWidths,
@@ -13388,6 +13428,7 @@ export default function PortalDashboard() {
                 photoShoots={photoShoots}
                 etaByProductId={collectionEtaByProductId}
                 shipmentByProductId={collectionShipmentByProductId}
+                shipmentDetailByProductId={collectionShipmentDetailByProductId}
                 collectionGroups={collectionGroups}
                 collectionTileOrder={collectionTileOrder}
                 canSeeProductStatus={Boolean(currentUser?.admin || currentUser?.canSeeProductStatus)}
@@ -17448,7 +17489,11 @@ function ButtonSpinner({ size = 14, color = "currentColor" }: { size?: number; c
   );
 }
 
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], collectionTileOrder = [], canSeeProductStatus = false, search = "", onTotalsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; collectionTileOrder?: string[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void }) {
+// Per-product, per-canonical-size shipment breakdown (from Packing Lists):
+// which shipments each size went in and how many. Drives the collection size-cell
+// annotation + the auto "Not / Partly / Fully in shipment" status.
+type CollectionShipDetailMap = Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>>;
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, shipmentDetailByProductId = {}, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], collectionTileOrder = [], canSeeProductStatus = false, search = "", onTotalsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; shipmentDetailByProductId?: CollectionShipDetailMap; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; collectionTileOrder?: string[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -17696,6 +17741,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         photoShoots={photoShoots}
         etaByProductId={etaByProductId}
         shipmentByProductId={shipmentByProductId}
+        shipmentDetailByProductId={shipmentDetailByProductId}
         onBack={collectionKind === "jj-new" ? undefined : closeCollection}
         canSeeProductStatus={canSeeProductStatus}
         hidePhotoShootToggle={hidePhotoShootToggle}
@@ -18455,6 +18501,7 @@ function CollectionSpreadsheetPage({
   photoShoots,
   etaByProductId,
   shipmentByProductId,
+  shipmentDetailByProductId = {},
   onBack,
   onLocalNameChange,
   onSetFabricLink,
@@ -18476,6 +18523,7 @@ function CollectionSpreadsheetPage({
   photoShoots: PhotoShootListItem[];
   etaByProductId: Record<string, string>;
   shipmentByProductId: Record<string, { label: string; partial: boolean }>;
+  shipmentDetailByProductId?: CollectionShipDetailMap;
   onBack?: () => void;
   onLocalNameChange: (name: string) => void;
   onSetFabricLink: (fabricName: string, fabricKey: string) => void;
@@ -19851,6 +19899,10 @@ function CollectionSpreadsheetPage({
                 // A linked row with edits not yet pushed to Shopify — highlight it.
                 const rowDirty = linked && (row[COL_ROW_SHOPIFY_DIRTY] ?? "") === "1";
                 const totalOrdered = sumCollectionRowQuantity(row);
+                // Shipment breakdown for this product (from Packing Lists) → the
+                // size-cell annotation + the auto shipment status.
+                const rowShipDetail = linkedProductId ? (shipmentDetailByProductId[linkedProductId] ?? null) : null;
+                const rowShippedTotal = rowShipDetail ? Object.values(rowShipDetail).reduce((s, sz) => s + sz.total, 0) : 0;
                 const adminLink = shopifyAdminLinkForRow(row, shopDomain);
                 const storefrontLink = shopifyStorefrontLinkForRow(row, shopDomain);
                 // Computed values for readonly cells. Rendered through
@@ -20049,16 +20101,39 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
-                        if (col.type === "chip" && (col.id === "status" || col.id === "sample")) {
-                          const opts = col.id === "status" ? localStatusOptions : localSampleOptions;
+                        // STATUS is now READ-ONLY and auto-derived from shipments
+                        // (Packing Lists): nothing sent → "Not shipped", some sent
+                        // → "Partly in shipment", all ordered sent → "Fully in
+                        // shipment". The restock/packing side is the single source
+                        // of truth, so it can't be edited here.
+                        if (col.type === "chip" && col.id === "status") {
+                          let label = "—", bg = "#f3f4f6", color = "#9ca3af";
+                          if (totalOrdered > 0 || rowShippedTotal > 0) {
+                            if (rowShippedTotal <= 0) { label = "Not shipped"; bg = "#f3f4f6"; color = "#6b7280"; }
+                            else if (rowShippedTotal < totalOrdered) { label = "Partly in shipment"; bg = "#fef3c7"; color = "#92400e"; }
+                            else { label = "Fully in shipment"; bg = "#dcfce7"; color = "#166534"; }
+                          }
+                          const shipTip = rowShipDetail
+                            ? Object.entries(rowShipDetail).map(([sz, d]) => `${sz.toUpperCase()}: ${d.parts.map((p) => `${p.qty} in #${p.ship}`).join(", ")}`).join("\n")
+                            : "";
+                          return (
+                            <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky}>
+                              <span
+                                title={`${rowShippedTotal} of ${totalOrdered} shipped${shipTip ? `\n${shipTip}` : ""}`}
+                                style={{ display: "inline-block", fontSize: 11, fontWeight: 800, padding: "4px 9px", borderRadius: 999, background: bg, color, whiteSpace: "nowrap" }}
+                              >{label}</span>
+                            </Td>
+                          );
+                        }
+                        if (col.type === "chip" && col.id === "sample") {
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky}>
                               <CollectionChipDropdown
                                 value={value}
-                                options={opts}
+                                options={localSampleOptions}
                                 emptyLabel="—"
                                 onChange={(v) => updateCell(rIdx, col.id, v)}
-                                onOptionsChange={(next) => saveChipOptions(col.id === "status" ? "statusOptions" : "sampleOptions", next)}
+                                onOptionsChange={(next) => saveChipOptions("sampleOptions", next)}
                               />
                             </Td>
                           );
@@ -20230,6 +20305,43 @@ function CollectionSpreadsheetPage({
                               />
                             </Td>
                           );
+                        }
+                        // Size qty cells: keep the editable ordered-qty input, but
+                        // when this product has shipment data for this size, show a
+                        // small read-only line under it (how many went in which
+                        // shipment, e.g. "15 in #15") — sourced from Packing Lists.
+                        {
+                          const sizeCanon = COLLECTION_SIZE_ID_TO_CANON[col.id];
+                          const sizeShip = sizeCanon && rowShipDetail ? rowShipDetail[sizeCanon] : null;
+                          if (sizeCanon && sizeShip && sizeShip.total > 0) {
+                            return (
+                              <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky} style={{ verticalAlign: "top" }}>
+                                <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch" }}>
+                                  <CollectionCell
+                                    value={value}
+                                    type="number"
+                                    columnId={col.id}
+                                    rowIndex={rIdx}
+                                    updateCell={updateCell}
+                                    productInfo={productInfo}
+                                    generateSkuAndBarcode={generateSkuAndBarcode}
+                                    onAutoGenerateSku={autoGenerateSku}
+                                    placeholder=""
+                                    users={users}
+                                    rowKey={row.__rowKey ?? ""}
+                                    collectionId={listItem.id}
+                                    rowName={row.name ?? row.title ?? ""}
+                                    threadCounts={threadCounts}
+                                    costCurrency={costCurrency}
+                                  />
+                                  <div
+                                    title={`${sizeShip.total} shipped in: ${sizeShip.parts.map((p) => `${p.qty} in #${p.ship}`).join(", ")}`}
+                                    style={{ fontSize: 9.5, color: "#0e7490", fontWeight: 700, lineHeight: 1.25, textAlign: "center", marginTop: 1, whiteSpace: "normal", wordBreak: "break-word" }}
+                                  >{sizeShip.parts.map((p) => `${p.qty} in #${p.ship}`).join(" · ")}</div>
+                                </div>
+                              </Td>
+                            );
+                          }
                         }
                         // Model Pictures gallery: on a locked, linked row it's
                         // VIEW-ONLY — the manager opens so you can see the images,
