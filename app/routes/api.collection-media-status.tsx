@@ -65,10 +65,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
               mimeType
               mediaErrors { code details message }
               mediaWarnings { code message }
-              fileStatus
-              fileErrors { code details message }
               image { url width height }
-              originalSource { fileSize }
               preview { status }
             }
             ... on Video { id status mediaErrors { code details message } }
@@ -86,16 +83,14 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     i,
     type: n.__typename,
     status: n.status,
-    fileStatus: n.fileStatus,
+    previewStatus: n.preview?.status ?? null,
     mediaErrors: n.mediaErrors ?? [],
-    fileErrors: n.fileErrors ?? [],
     mediaWarnings: n.mediaWarnings ?? [],
     mime: n.mimeType,
     dims: n.image ? `${n.image.width}x${n.image.height}` : null,
-    bytes: n.originalSource?.fileSize ?? null,
     url: n.image?.url ?? null,
   }));
-  const failed = summary.filter((s) => String(s.status) === "FAILED" || (s.mediaErrors?.length ?? 0) > 0 || (s.fileErrors?.length ?? 0) > 0);
+  const failed = summary.filter((s) => String(s.status) === "FAILED" || (s.mediaErrors?.length ?? 0) > 0);
 
   return Response.json(
     {
