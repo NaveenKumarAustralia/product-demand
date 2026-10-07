@@ -4621,7 +4621,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           const t = await dbxThumbnail(path, "w640h480");
           thumb = `data:image/jpeg;base64,${t.toString("base64")}`;
         } catch { /* thumb best-effort; the key still serves the full image */ }
-        entries.push({ thumb, key });
+        // src = the Dropbox path (stable across re-imports) so the SAME file
+        // can't be added twice even though each import gets a fresh key.
+        // filename = the Dropbox file name so Shopify keeps a real name.
+        const filename = (path.split("/").pop() || "").trim() || undefined;
+        entries.push({ thumb, key, src: path, ...(filename ? { filename } : {}) });
       } catch (e) {
         console.warn("[dropbox_import_images] failed for", path, e);
       }
@@ -21824,11 +21828,15 @@ function CollectionReleaseCell({ value, onCommit }: { value: string; onCommit: (
 //     the full bytes stored in CollectionImage and fetched lazily.
 // parseMultiImageValue normalises everything to { thumb, key? } so
 // downstream code can render uniformly.
-type CollectionImageEntry = { thumb: string; key?: string; alt?: string; filename?: string };
-// Identity used to detect duplicate images: same stored bytes (key) OR the exact
-// same image data/URL (thumb). compressImageToDataUrl is deterministic, so
-// re-adding the same file produces the same thumb → it's caught here.
+type CollectionImageEntry = { thumb: string; key?: string; alt?: string; filename?: string; src?: string };
+// Identity used to detect duplicate images. `src` is a STABLE source id (e.g.
+// the Dropbox file path) — preferred first because every Dropbox import mints a
+// NEW random CollectionImage key, so keying off `key` would never catch the same
+// Dropbox file added twice. Otherwise fall back to the stored bytes (key) or the
+// exact image data/URL (thumb; compressImageToDataUrl is deterministic, so
+// re-adding the same local file reproduces the same thumb).
 function imageIdentity(e: CollectionImageEntry): string {
+  if (e.src) return `s:${e.src.toLowerCase()}`;
   return e.key ? `k:${e.key}` : `t:${e.thumb ?? ""}`;
 }
 // Drop entries that are already present (by identity) or repeated in the incoming
@@ -21860,7 +21868,7 @@ function parseMultiImageValue(value: string): CollectionImageEntry[] {
             const key = typeof x.key === "string" ? x.key : undefined;
             // Keep entries that have EITHER an inline thumb OR a key (key-only
             // entries are served on demand from /portal/collection-image/<key>).
-            if (thumb || key) return { thumb, key, alt: typeof x.alt === "string" ? x.alt : undefined, filename: typeof x.filename === "string" ? x.filename : undefined };
+            if (thumb || key) return { thumb, key, alt: typeof x.alt === "string" ? x.alt : undefined, filename: typeof x.filename === "string" ? x.filename : undefined, src: typeof x.src === "string" ? x.src : undefined };
           }
           return null;
         })
@@ -21875,12 +21883,13 @@ function serializeMultiImageValue(images: CollectionImageEntry[]): string {
   // Always object form when there's a key or alt to preserve; else keep the
   // compact string form for plain thumbs.
   return JSON.stringify(images.map((i) => {
-    if (i.key || i.alt || i.filename) {
-      const o: { thumb?: string; key?: string; alt?: string; filename?: string } = {};
+    if (i.key || i.alt || i.filename || i.src) {
+      const o: { thumb?: string; key?: string; alt?: string; filename?: string; src?: string } = {};
       if (i.thumb) o.thumb = i.thumb;   // omit empty thumb (key-only entries)
       if (i.key) o.key = i.key;
       if (i.alt) o.alt = i.alt;
       if (i.filename) o.filename = i.filename;  // keep the original file name for Shopify
+      if (i.src) o.src = i.src;   // stable source id (e.g. Dropbox path) for dedup across re-imports
       return o;
     }
     return i.thumb;
@@ -21891,13 +21900,15 @@ function serializeMultiImageValue(images: CollectionImageEntry[]): string {
 // files are imported server-side into CollectionImage and returned as
 // { thumb, key } entries so they push to Shopify like any other image.
 function DropboxImagePicker({
-  collectionId, initialQuery, onAdd, onClose,
+  collectionId, initialQuery, onAdd, onClose, addedPaths,
 }: {
   collectionId: number;
   initialQuery: string;
   onAdd: (entries: CollectionImageEntry[]) => void;
   onClose: () => void;
+  addedPaths?: Set<string>;
 }) {
+  const isAdded = (p: string) => !!addedPaths && addedPaths.has(p.toLowerCase());
   const [query, setQuery] = useState(initialQuery);
   const searchFetcher = useFetcher<{ entries?: Array<{ type: string; name: string; path: string; kind?: string; rev?: string }>; error?: string; configured?: boolean }>();
   const importFetcher = useFetcher<{ ok?: boolean; entries?: CollectionImageEntry[]; error?: string }>();
@@ -21916,7 +21927,7 @@ function DropboxImagePicker({
 
   const results = (searchFetcher.data?.entries ?? []).filter((e) => e.type === "file" && e.kind === "image");
   const importing = importFetcher.state !== "idle";
-  const toggle = (path: string) => setSelected((cur) => { const n = new Set(cur); if (n.has(path)) n.delete(path); else n.add(path); return n; });
+  const toggle = (path: string) => { if (isAdded(path)) return; setSelected((cur) => { const n = new Set(cur); if (n.has(path)) n.delete(path); else n.add(path); return n; }); };
   const addSelected = () => {
     if (!selected.size || importing) return;
     importFetcher.submit({ intent: "dropbox_import_images", collectionId: String(collectionId), paths: JSON.stringify(Array.from(selected)) }, { method: "post" });
@@ -21951,17 +21962,23 @@ function DropboxImagePicker({
           ) : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(110px, 1fr))", gap: 10 }}>
               {results.map((r) => {
+                const added = isAdded(r.path);
                 const isSel = selected.has(r.path);
                 return (
                   <button
                     key={r.path}
                     type="button"
                     onClick={() => toggle(r.path)}
-                    style={{ position: "relative", border: isSel ? "3px solid #0061FF" : "1px solid #d1d5db", borderRadius: 8, padding: 0, background: "#f1f5f9", cursor: "pointer", overflow: "hidden", aspectRatio: "3 / 4" }}
-                    title={r.name}
+                    disabled={added}
+                    style={{ position: "relative", border: added ? "2px solid #0d9488" : isSel ? "3px solid #0061FF" : "1px solid #d1d5db", borderRadius: 8, padding: 0, background: "#f1f5f9", cursor: added ? "default" : "pointer", overflow: "hidden", aspectRatio: "3 / 4", opacity: added ? 0.55 : 1 }}
+                    title={added ? `${r.name} — already added` : r.name}
                   >
                     <DropboxThumb path={r.path} rev={r.rev} size="w256h256" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                    {isSel && <span style={{ position: "absolute", top: 4, left: 4, background: "#0061FF", color: "#fff", borderRadius: "50%", width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800 }}>✓</span>}
+                    {added ? (
+                      <span style={{ position: "absolute", top: 4, left: 4, background: "#0d9488", color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 800 }}>✓ Added</span>
+                    ) : isSel ? (
+                      <span style={{ position: "absolute", top: 4, left: 4, background: "#0061FF", color: "#fff", borderRadius: "50%", width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800 }}>✓</span>
+                    ) : null}
                   </button>
                 );
               })}
@@ -22447,6 +22464,7 @@ function CollectionImageManagerModal({
                 <DropboxImagePicker
                   collectionId={collectionId}
                   initialQuery={rowName ?? ""}
+                  addedPaths={new Set(images.map((im) => (im.src ?? "").toLowerCase()).filter(Boolean))}
                   onAdd={(entries) => onAddEntries(entries)}
                   onClose={() => setDropboxOpen(false)}
                 />
