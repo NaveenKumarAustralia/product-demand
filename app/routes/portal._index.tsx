@@ -22409,7 +22409,7 @@ function DropboxImagePicker({
 
   return createPortal(
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1600, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
-      <div style={{ background: "#fff", borderRadius: 10, width: 640, maxHeight: "85vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
+      <div style={{ background: "#fff", borderRadius: 10, width: 944, maxWidth: "90vw", maxHeight: "90vh", display: "flex", flexDirection: "column", boxShadow: "0 20px 50px rgba(0,0,0,0.3)" }} onClick={(e) => e.stopPropagation()}>
         <div style={{ padding: "14px 16px", borderBottom: "1px solid #e5e7eb" }}>
           <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>Add images from Dropbox</div>
           <div style={{ display: "flex", gap: 8 }}>
