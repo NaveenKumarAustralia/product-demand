@@ -23152,11 +23152,18 @@ function CollectionDuplicateFromCell({
   const suggestFetcher = useFetcher<{ products?: DuplicateProductSummary[] }>();
   const [suggestion, setSuggestion] = useState<DuplicateProductSummary | null>(null);
   const suggestTriedRef = useRef(false);
+  const searchTimerRef = useRef<number | null>(null);
 
   const runSearch = (q: string) => {
     const params = new URLSearchParams();
     if (q.trim()) params.set("q", q.trim());
     searchFetcher.load(`/api/collection-duplicate-search?${params.toString()}`);
+  };
+  // Debounced: wait until the user pauses typing so the list doesn't churn on
+  // every keystroke.
+  const runSearchDebounced = (q: string) => {
+    if (searchTimerRef.current) window.clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = window.setTimeout(() => runSearch(q), 250);
   };
   useEffect(() => {
     if (!open) return;
@@ -23288,13 +23295,16 @@ function CollectionDuplicateFromCell({
               <input
                 autoFocus
                 value={query}
-                onChange={(e) => { setQuery(e.target.value); runSearch(e.target.value); }}
+                onChange={(e) => { setQuery(e.target.value); runSearchDebounced(e.target.value); }}
                 placeholder="Search by title…"
                 style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 10px", fontSize: 13, boxSizing: "border-box" }}
               />
             </div>
-            <div style={{ overflowY: "auto", flex: 1 }}>
-              {isSearching && <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>Loading…</div>}
+            <div style={{ overflowY: "auto", flex: 1, opacity: isSearching && products.length > 0 ? 0.6 : 1, transition: "opacity 0.1s" }}>
+              {/* Only show "Loading…" when there's nothing to show yet, so the
+                  list doesn't jump up/down on every keystroke while re-searching.
+                  When results already exist, keep them in place (just dimmed). */}
+              {isSearching && products.length === 0 && <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>Loading…</div>}
               {!isSearching && products.length === 0 && (
                 <div style={{ padding: 20, textAlign: "center", color: "#9ca3af", fontSize: 13 }}>No products found.</div>
               )}
