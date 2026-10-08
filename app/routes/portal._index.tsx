@@ -4646,6 +4646,33 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return null;
   }
 
+  // Delete specific collection rows SERVER-SIDE by __rowKey (and index for any
+  // keyless rows). This avoids re-sending the whole (possibly many-MB) rows JSON
+  // on a bulk delete — which could be dropped/truncated and silently not save,
+  // so the deleted rows came back on refresh.
+  if (intent === "delete_collection_rows") {
+    const id = Number(form.get("collectionId"));
+    if (!id) return jsonResponse({ ok: false, error: "bad_collection" });
+    let keys: string[] = [];
+    let indices: number[] = [];
+    try { keys = JSON.parse(String(form.get("rowKeys") ?? "[]")) as string[]; } catch { /* ignore */ }
+    try { indices = JSON.parse(String(form.get("rowIndices") ?? "[]")) as number[]; } catch { /* ignore */ }
+    const keySet = new Set(keys.map((k) => String(k)).filter(Boolean));
+    const idxSet = new Set(indices.filter((n) => Number.isInteger(n)));
+    if (!keySet.size && !idxSet.size) return jsonResponse({ ok: false, error: "nothing_to_delete" });
+    const collection = await prisma.collection.findUnique({ where: { id }, select: { rows: true } }).catch(() => null);
+    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
+    const rows = normalizeCollectionRows(collection.rows);
+    const next = rows.filter((r, i) => {
+      const k = String(r?.__rowKey ?? "");
+      if (k && keySet.has(k)) return false;       // matched by stable key
+      if (!k && idxSet.has(i)) return false;       // keyless row → match by index
+      return true;
+    });
+    await prisma.collection.update({ where: { id }, data: { rows: next as unknown as object, updatedAt: new Date() } });
+    return jsonResponse({ ok: true, deleted: rows.length - next.length, remaining: next.length });
+  }
+
   // ─── Collections — import Dropbox image(s) into a row's picture gallery.
   // Downloads each Dropbox file's bytes into the CollectionImage table (same
   // storage manual uploads use) and returns { thumb, key } entries for the
@@ -6648,6 +6675,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // sees the new items prop.
   if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
+  if (intent === "delete_collection_rows") return false;
   if (intent === "set_collection_fabric_status" || intent === "set_collection_order_status" || intent === "set_collection_fabric_link") return false;
   if (intent === "set_collection_groups") return false;
   if (intent === "set_collection_tile_order") return false;
@@ -19395,12 +19423,21 @@ function CollectionSpreadsheetPage({
     const n = selectedRowIdxs.size;
     if (!n) return;
     if (!window.confirm(`Delete ${n} selected row${n === 1 ? "" : "s"}?`)) return;
-    setRows((prev) => {
-      const next = prev.filter((_, i) => !selectedRowIdxs.has(i));
-      persistRows(next, prev, `Undo delete ${n} rows`);
-      return next;
-    });
+    const idxs = Array.from(selectedRowIdxs);
+    // Delete server-side by stable __rowKey (index for any keyless rows), so we
+    // don't re-POST the whole (possibly many-MB) rows JSON — which could be
+    // dropped and silently not save, making the rows reappear on refresh.
+    const rowKeys = idxs.map((i) => String(rows[i]?.__rowKey ?? "")).filter(Boolean);
+    const rowIndices = idxs.filter((i) => !String(rows[i]?.__rowKey ?? ""));
+    const prev = rows;
+    const next = rows.filter((_, i) => !selectedRowIdxs.has(i));
+    pushUndo({ label: `Undo delete ${n} rows`, rows: prev });
+    setRows(next); // optimistic
     setSelectedRowIdxs(new Set());
+    fetcher.submit(
+      { intent: "delete_collection_rows", collectionId: String(listItem.id), rowKeys: JSON.stringify(rowKeys), rowIndices: JSON.stringify(rowIndices) },
+      { method: "post" },
+    );
   };
 
   // Shopify push (single row or batch). On success, we patch local
