@@ -29960,10 +29960,14 @@ function OrderRow({
         {/* Factory notes */}
         <Td rowIndex={rowIndex} colIndex={0} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Factory notes" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[0]} style={{ ...destinationRowBg, height: 1, padding: 0, verticalAlign: "top" }}><NotesCell orderId={order.id} field="factory_notes" value={order.factoryNotes ?? ""} users={users} /></Td>
 
-        {/* Order date */}
+        {/* Order date — labelled "Order date" box, with the editable "✂ Cut date"
+            box underneath when the order has been cut. */}
         <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={destinationRowBg}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "center" }}>
-            <span style={s.dateText} title="Order date">{orderDate}</span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "stretch", width: "100%" }}>
+            <div style={{ background: "#eef2f7", borderRadius: 9, padding: "4px 8px", display: "flex", flexDirection: "column", gap: 1, alignItems: "center" }} title="Order date">
+              <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.05em", textTransform: "uppercase", color: "#64748b" }}>Order date</span>
+              <span style={{ fontSize: 15, fontWeight: 800, color: "#1f2937" }}>{orderDate}</span>
+            </div>
             {cutDate !== "" && <ProductionDateCell orderId={order.id} value={cutDate} onCommit={setCutDate} />}
           </div>
         </Td>
@@ -31589,8 +31593,11 @@ function ProductionDateCell({ orderId, value, onCommit }: { orderId: number; val
   const [text, setText] = useState(value);
   useEffect(() => { setText(value); }, [value]);
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }} title="On-production (cut) date — editable">
-      <span aria-hidden style={{ fontSize: 11, color: "#2563eb" }}>✂</span>
+    <div
+      style={{ width: "100%", background: "#fef3c7", borderRadius: 9, padding: "4px 8px", display: "flex", flexDirection: "column", gap: 1, alignItems: "center" }}
+      title="On-production (cut) date — editable"
+    >
+      <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.05em", textTransform: "uppercase", color: "#92400e" }}>✂ Cut date</span>
       <input
         type="text"
         value={text}
@@ -31604,10 +31611,10 @@ function ProductionDateCell({ orderId, value, onCommit }: { orderId: number; val
             { label: "Undo cut date", fields: { intent: "update_production_date", orderId, value } },
           );
         }}
-        style={{ ...s.dateInput, width: 62, color: "#1d4ed8", fontWeight: 700 }}
+        style={{ width: "100%", maxWidth: 80, textAlign: "center", border: "none", background: "transparent", color: "#92400e", fontWeight: 800, fontSize: 15, outline: "none", padding: 0, cursor: "text" }}
         placeholder="dd/mm/yy"
       />
-    </span>
+    </div>
   );
 }
 
