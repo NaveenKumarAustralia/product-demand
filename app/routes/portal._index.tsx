@@ -29964,7 +29964,7 @@ function OrderRow({
             box underneath when the order has been cut. */}
         <Td rowIndex={rowIndex} colIndex={1} center stickyLeft={frozenOffsets?.[1]} style={destinationRowBg}>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "stretch", width: "100%" }}>
-            <div style={{ background: "#eef2f7", borderRadius: 9, padding: "4px 8px", display: "flex", flexDirection: "column", gap: 1, alignItems: "center" }} title="Order date">
+            <div style={{ width: "100%", boxSizing: "border-box", background: "#eef2f7", borderRadius: 9, padding: "4px 8px", display: "flex", flexDirection: "column", gap: 1, alignItems: "center" }} title="Order date">
               <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.05em", textTransform: "uppercase", color: "#64748b" }}>Order date</span>
               <span style={{ fontSize: 15, fontWeight: 800, lineHeight: 1.2, color: "#1f2937" }}>{orderDate}</span>
             </div>
@@ -31594,7 +31594,7 @@ function ProductionDateCell({ orderId, value, onCommit }: { orderId: number; val
   useEffect(() => { setText(value); }, [value]);
   return (
     <div
-      style={{ width: "100%", background: "#fef3c7", borderRadius: 9, padding: "4px 8px", display: "flex", flexDirection: "column", gap: 1, alignItems: "center" }}
+      style={{ width: "100%", boxSizing: "border-box", background: "#fef3c7", borderRadius: 9, padding: "4px 8px", display: "flex", flexDirection: "column", gap: 1, alignItems: "center" }}
       title="On-production (cut) date — editable"
     >
       <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.05em", textTransform: "uppercase", color: "#92400e" }}>✂ Cut date</span>
