@@ -29966,7 +29966,7 @@ function OrderRow({
           <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "stretch", width: "100%" }}>
             <div style={{ background: "#eef2f7", borderRadius: 9, padding: "4px 8px", display: "flex", flexDirection: "column", gap: 1, alignItems: "center" }} title="Order date">
               <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.05em", textTransform: "uppercase", color: "#64748b" }}>Order date</span>
-              <span style={{ fontSize: 15, fontWeight: 800, color: "#1f2937" }}>{orderDate}</span>
+              <span style={{ fontSize: 15, fontWeight: 800, lineHeight: 1.2, color: "#1f2937" }}>{orderDate}</span>
             </div>
             {cutDate !== "" && <ProductionDateCell orderId={order.id} value={cutDate} onCommit={setCutDate} />}
           </div>
@@ -31611,7 +31611,7 @@ function ProductionDateCell({ orderId, value, onCommit }: { orderId: number; val
             { label: "Undo cut date", fields: { intent: "update_production_date", orderId, value } },
           );
         }}
-        style={{ width: "100%", maxWidth: 80, textAlign: "center", border: "none", background: "transparent", color: "#92400e", fontWeight: 800, fontSize: 15, outline: "none", padding: 0, cursor: "text" }}
+        style={{ width: "100%", maxWidth: 80, textAlign: "center", border: "none", background: "transparent", color: "#92400e", fontWeight: 800, fontSize: 15, lineHeight: 1.2, fontFamily: "inherit", outline: "none", padding: 0, margin: 0, cursor: "text" }}
         placeholder="dd/mm/yy"
       />
     </div>
