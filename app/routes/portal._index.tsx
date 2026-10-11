@@ -458,8 +458,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             const STATUS_RANK: Record<string, number> = { cancelled: 0, on_order: 1, on_production: 2, ready: 3, in_shipment: 4 };
             for (const o of orders) {
               if (!o.productId || !o.supplierStatus) continue;
-              const cur = restockStatus[o.productId];
-              if (!cur || (STATUS_RANK[o.supplierStatus] ?? 0) > (STATUS_RANK[cur] ?? 0)) restockStatus[o.productId] = o.supplierStatus;
+              // Key by NUMERIC id — restock orders and collection rows store the
+              // product id in different shapes (gid:// vs plain number), so an
+              // exact-string match would silently miss and the chip wouldn't follow.
+              const num = String(o.productId).replace(/\D/g, "");
+              if (!num) continue;
+              const cur = restockStatus[num];
+              if (!cur || (STATUS_RANK[o.supplierStatus] ?? 0) > (STATUS_RANK[cur] ?? 0)) restockStatus[num] = o.supplierStatus;
             }
             for (const line of lines) {
               if (!line.productId) continue;
@@ -20010,7 +20015,7 @@ function CollectionSpreadsheetPage({
                 const rowShipDetail = linkedProductId ? (shipmentDetailByProductId[linkedProductId] ?? null) : null;
                 const rowShippedTotal = rowShipDetail ? Object.values(rowShipDetail).reduce((s, sz) => s + sz.total, 0) : 0;
                 // The product's status mirrors its restock order (source of truth).
-                const rowRestockStatus = linkedProductId ? (restockStatusByProductId[linkedProductId] ?? "") : "";
+                const rowRestockStatus = linkedProductId ? (restockStatusByProductId[linkedProductId.replace(/\D/g, "")] ?? "") : "";
                 const adminLink = shopifyAdminLinkForRow(row, shopDomain);
                 const storefrontLink = shopifyStorefrontLinkForRow(row, shopDomain);
                 // Computed values for readonly cells. Rendered through
