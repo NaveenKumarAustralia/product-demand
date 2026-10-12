@@ -7,6 +7,7 @@ import {
   type PreorderPermissionSettings,
 } from "./preorder-permissions.server";
 import { getPreorderEligibility } from "./preorder-rules.server";
+import { reconcilePreorderInventoryPolicyForVariants } from "./preorder-inventory-policy.server";
 
 export class PreorderPermissionError extends Error {
   constructor(message = "You do not have permission to manage preorder availability.") {
@@ -163,6 +164,20 @@ export async function setPreorderBatchEnabled(input: SetPreorderEnabledInput) {
     field: "preorderEnabled",
     toValue: input.enabled ? "true" : "false",
   });
+
+  // Disabling/pausing pre-order must UNTICK "continue selling when out of stock"
+  // (set inventoryPolicy DENY) in Shopify, so the variant stops overselling the
+  // moment pre-order is turned off. reconcile re-checks every LIVE batch, so a
+  // variant that's still a live pre-order in ANOTHER batch stays CONTINUE.
+  if (!input.enabled) {
+    try {
+      const lines = await prisma.orderLine.findMany({ where: { orderId: order.id }, select: { variantId: true } });
+      const variantIds = lines.map((l) => String(l.variantId ?? "").trim()).filter(Boolean);
+      if (variantIds.length) await reconcilePreorderInventoryPolicyForVariants(order.shop, variantIds);
+    } catch (e) {
+      console.warn("[preorder disable] could not restore DENY inventory policy:", e instanceof Error ? e.message : e);
+    }
+  }
 
   return setting;
 }
