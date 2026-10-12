@@ -242,6 +242,7 @@ export async function reportLivePreorderInventoryPolicies(): Promise<{
 export type StrayContinueResult = {
   ok: boolean; shop?: string; error?: string;
   excludedPreorderProducts: number; scannedProducts: number;
+  continueProductsTotal?: number; continueVariantsTotal?: number;
   affected: Array<{ productId: string; title: string; variants: string[] }>;
   totalVariants: number; applied: boolean; changedProducts: number; changedVariants: number;
   errors: string[]; truncated: boolean;
@@ -256,13 +257,21 @@ export async function sweepStrayContinueInventoryPolicies(opts: { apply?: boolea
   if (!token) return { ...base, shop, error: "no_token" };
 
   // Products that legitimately may have CONTINUE: those with a pre-order batch
-  // that is currently ENABLED. Keyed by numeric product id.
-  const enabled = await prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true } });
-  const supplierIds = enabled.map((e) => e.supplierOrderId);
-  const orders = supplierIds.length
-    ? await prisma.supplierOrder.findMany({ where: { id: { in: supplierIds } }, select: { productId: true } })
+  // that is actually LIVE = enabled AND activated (selling plan registered). An
+  // enabled-but-not-activated setting is NOT "on", so it isn't excluded. Keyed by
+  // numeric product id.
+  const [enabled, registry] = await Promise.all([
+    prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true } }),
+    getPreorderSellingPlanRegistryEntries(shop),
+  ]);
+  const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
+  const liveSupplierIds = enabled.map((e) => e.supplierOrderId).filter((id) => activatedIds.has(id));
+  const orders = liveSupplierIds.length
+    ? await prisma.supplierOrder.findMany({ where: { id: { in: liveSupplierIds } }, select: { productId: true } })
     : [];
   const excludeNums = new Set(orders.map((o) => numericId(o.productId ?? "")).filter(Boolean));
+  let continueProductsTotal = 0;
+  let continueVariantsTotal = 0;
 
   const gql = async (query: string, variables: Record<string, unknown>) => {
     const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
@@ -286,8 +295,9 @@ export async function sweepStrayContinueInventoryPolicies(opts: { apply?: boolea
     if (!conn) break;
     for (const p of conn.nodes ?? []) {
       scanned++;
-      if (excludeNums.has(numericId(p.id))) continue; // enabled pre-order → leave alone
       const continueVars = (p.variants?.nodes ?? []).filter((v: any) => String(v?.inventoryPolicy ?? "").toUpperCase() === "CONTINUE");
+      if (continueVars.length) { continueProductsTotal++; continueVariantsTotal += continueVars.length; }
+      if (excludeNums.has(numericId(p.id))) continue; // LIVE pre-order → leave alone
       if (continueVars.length) {
         affected.push({ productId: p.id, title: String(p.title ?? ""), variantGids: continueVars.map((v: any) => String(v.id)), variants: continueVars.map((v: any) => String(v.title ?? "")) });
       }
@@ -314,6 +324,7 @@ export async function sweepStrayContinueInventoryPolicies(opts: { apply?: boolea
 
   return {
     ok: true, shop, excludedPreorderProducts: excludeNums.size, scannedProducts: scanned,
+    continueProductsTotal, continueVariantsTotal,
     affected: affected.map((a) => ({ productId: a.productId, title: a.title, variants: a.variants })),
     totalVariants, applied: apply, changedProducts, changedVariants, errors: base.errors, truncated,
   };
