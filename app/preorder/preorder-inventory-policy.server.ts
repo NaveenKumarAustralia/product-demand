@@ -266,8 +266,12 @@ export async function sweepStrayContinueInventoryPolicies(opts: { apply?: boolea
   ]);
   const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
   const liveSupplierIds = enabled.map((e) => e.supplierOrderId).filter((id) => activatedIds.has(id));
+  // Only an OPEN live batch legitimately keeps CONTINUE. Once a shipment loads,
+  // the order is CLOSED (status "closed") — the stock has landed, so the pre-order
+  // is done and its variants should be DENY again. Closed orders are NOT excluded,
+  // so this sweep now catches products left on CONTINUE after their shipment loaded.
   const orders = liveSupplierIds.length
-    ? await prisma.supplierOrder.findMany({ where: { id: { in: liveSupplierIds } }, select: { productId: true } })
+    ? await prisma.supplierOrder.findMany({ where: { id: { in: liveSupplierIds }, status: "open" }, select: { productId: true } })
     : [];
   const excludeNums = new Set(orders.map((o) => numericId(o.productId ?? "")).filter(Boolean));
   let continueProductsTotal = 0;
@@ -328,4 +332,50 @@ export async function sweepStrayContinueInventoryPolicies(opts: { apply?: boolea
     affected: affected.map((a) => ({ productId: a.productId, title: a.title, variants: a.variants })),
     totalVariants, applied: apply, changedProducts, changedVariants, errors: base.errors, truncated,
   };
+}
+
+// When a shipment loads and CLOSES a pre-order's supplier order, the stock has
+// landed so the pre-order is done — its variants must go back to DENY (untick
+// "continue selling when out of stock"). reconcile won't do it (it leaves
+// variants not in an OPEN live batch alone), so set DENY directly. A product that
+// still has ANOTHER open live pre-order batch is left on CONTINUE.
+export async function denyClosedPreorderOrderVariants(orderIds: number[]): Promise<void> {
+  const ids = orderIds.filter((n) => Number.isInteger(n));
+  if (!ids.length) return;
+  const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true } });
+  if (!session?.shop) return;
+  const token = await getOfflineToken(session.shop);
+  if (!token) return;
+
+  const orders = await prisma.supplierOrder.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, productId: true, lines: { select: { variantId: true } } },
+  });
+  const productNums = Array.from(new Set(orders.map((o) => numericId(o.productId ?? "")).filter(Boolean)));
+  if (!productNums.length) return;
+
+  // Products that still have an OPEN live pre-order batch → keep CONTINUE.
+  const [enabled, registry] = await Promise.all([
+    prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true } }),
+    getPreorderSellingPlanRegistryEntries(session.shop),
+  ]);
+  const activatedIds = new Set(registry.map((r) => r.supplierOrderId));
+  const liveIds = enabled.map((e) => e.supplierOrderId).filter((id) => activatedIds.has(id));
+  const liveOpen = liveIds.length
+    ? await prisma.supplierOrder.findMany({ where: { id: { in: liveIds }, status: "open" }, select: { productId: true } })
+    : [];
+  const stillLive = new Set(liveOpen.map((o) => numericId(o.productId ?? "")).filter(Boolean));
+
+  for (const o of orders) {
+    const pnum = numericId(o.productId ?? "");
+    if (!pnum || stillLive.has(pnum)) continue; // another open live batch → leave CONTINUE
+    const gids = o.lines
+      .map((l) => numericId(l.variantId ?? ""))
+      .filter(Boolean)
+      .map((n) => `gid://shopify/ProductVariant/${n}`);
+    if (gids.length) {
+      await setVariantsInventoryPolicy(session.shop, token, String(o.productId), gids, "DENY")
+        .catch((e) => console.warn("[preorder on-load DENY] failed:", e instanceof Error ? e.message : e));
+    }
+  }
 }

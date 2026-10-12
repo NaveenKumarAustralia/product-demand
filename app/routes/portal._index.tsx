@@ -16,6 +16,7 @@ import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server
 import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
 import { marketFromDestination, calculatePreorderCapacity } from "../preorder/preorder-rules.server";
 import { releaseArrivedPreorders } from "../preorder/preorder-release.server";
+import { denyClosedPreorderOrderVariants } from "../preorder/preorder-inventory-policy.server";
 import { unauthenticated } from "../shopify.server";
 import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
 
@@ -2033,18 +2034,24 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // actually loaded yet.
     if (loadedProductIds.size > 0) {
       try {
-        await prisma.supplierOrder.updateMany({
+        // Capture which orders we're closing so we can untick "continue selling
+        // when out of stock" for any pre-order on them (stock has now landed).
+        const closing = await prisma.supplierOrder.findMany({
           where: {
             supplierStatus: "in_shipment",
             status: "open",
             productId: { in: Array.from(loadedProductIds) },
-            OR: [
-              { packingListId: packingId },
-              { packingListId: null },
-            ],
+            OR: [{ packingListId: packingId }, { packingListId: null }],
           },
-          data: { status: "closed" },
+          select: { id: true },
         });
+        const closedIds = closing.map((o) => o.id);
+        if (closedIds.length) {
+          await prisma.supplierOrder.updateMany({ where: { id: { in: closedIds } }, data: { status: "closed" } });
+          // Shipment loaded → pre-order for these batches is done → revert their
+          // variants to DENY in Shopify (unless still live in another open batch).
+          denyClosedPreorderOrderVariants(closedIds).catch((e) => console.warn("[preorder on-load DENY] failed:", e instanceof Error ? e.message : e));
+        }
       } catch (e) {
         console.warn("[restock auto-close] failed:", e);
       }
