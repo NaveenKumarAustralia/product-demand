@@ -231,3 +231,90 @@ export async function reportLivePreorderInventoryPolicies(): Promise<{
   const stillOversellable = rows.filter((r) => r.availableToPreorder <= 0 && (r.currentPolicy ?? "").toUpperCase() === "CONTINUE").length;
   return { ok: true, shop: session.shop, rows, summary: { liveVariants: rows.length, full, needChange, stillOversellable } };
 }
+
+// ─── Stray "continue selling when out of stock" cleanup ─────────────────────────
+// Bug sweep: many products ended up with variants set to inventoryPolicy CONTINUE
+// ("continue selling when out of stock") WITHOUT pre-order being enabled — most
+// likely because creating a product by DUPLICATING a pre-order product copies its
+// CONTINUE policy. This scans every Shopify product, and for any product that is
+// NOT a currently-enabled pre-order batch, flips its CONTINUE variants back to
+// DENY. Dry-run by default (apply:false) so you can review first.
+export type StrayContinueResult = {
+  ok: boolean; shop?: string; error?: string;
+  excludedPreorderProducts: number; scannedProducts: number;
+  affected: Array<{ productId: string; title: string; variants: string[] }>;
+  totalVariants: number; applied: boolean; changedProducts: number; changedVariants: number;
+  errors: string[]; truncated: boolean;
+};
+export async function sweepStrayContinueInventoryPolicies(opts: { apply?: boolean; maxPages?: number } = {}): Promise<StrayContinueResult> {
+  const apply = opts.apply === true;
+  const base: StrayContinueResult = { ok: false, excludedPreorderProducts: 0, scannedProducts: 0, affected: [], totalVariants: 0, applied: apply, changedProducts: 0, changedVariants: 0, errors: [], truncated: false };
+  const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true } });
+  if (!session?.shop) return { ...base, error: "no_session" };
+  const shop = session.shop;
+  const token = await getOfflineToken(shop);
+  if (!token) return { ...base, shop, error: "no_token" };
+
+  // Products that legitimately may have CONTINUE: those with a pre-order batch
+  // that is currently ENABLED. Keyed by numeric product id.
+  const enabled = await prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true } });
+  const supplierIds = enabled.map((e) => e.supplierOrderId);
+  const orders = supplierIds.length
+    ? await prisma.supplierOrder.findMany({ where: { id: { in: supplierIds } }, select: { productId: true } })
+    : [];
+  const excludeNums = new Set(orders.map((o) => numericId(o.productId ?? "")).filter(Boolean));
+
+  const gql = async (query: string, variables: Record<string, unknown>) => {
+    const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": token }, body: JSON.stringify({ query, variables }),
+    });
+    if (!res.ok) throw new Error(`Shopify HTTP ${res.status}`);
+    return res.json() as Promise<any>;
+  };
+
+  const affected: Array<{ productId: string; title: string; variantGids: string[]; variants: string[] }> = [];
+  let scanned = 0;
+  let cursor: string | null = null;
+  const maxPages = opts.maxPages ?? 400;
+  let truncated = false;
+  for (let page = 0; page < maxPages; page++) {
+    const j: any = await gql(
+      `query($cursor:String){ products(first:40, after:$cursor){ pageInfo{ hasNextPage endCursor } nodes{ id title variants(first:100){ nodes{ id title inventoryPolicy } } } } }`,
+      { cursor },
+    ).catch((e) => { base.errors.push(`page ${page}: ${e instanceof Error ? e.message : String(e)}`); return null; });
+    const conn: any = j?.data?.products;
+    if (!conn) break;
+    for (const p of conn.nodes ?? []) {
+      scanned++;
+      if (excludeNums.has(numericId(p.id))) continue; // enabled pre-order → leave alone
+      const continueVars = (p.variants?.nodes ?? []).filter((v: any) => String(v?.inventoryPolicy ?? "").toUpperCase() === "CONTINUE");
+      if (continueVars.length) {
+        affected.push({ productId: p.id, title: String(p.title ?? ""), variantGids: continueVars.map((v: any) => String(v.id)), variants: continueVars.map((v: any) => String(v.title ?? "")) });
+      }
+    }
+    if (!conn.pageInfo?.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+    if (page === maxPages - 1) truncated = true;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  const totalVariants = affected.reduce((a, x) => a + x.variantGids.length, 0);
+  let changedProducts = 0, changedVariants = 0;
+  if (apply) {
+    for (const a of affected) {
+      try {
+        await setVariantsInventoryPolicy(shop, token, a.productId, a.variantGids, "DENY");
+        changedProducts++; changedVariants += a.variantGids.length;
+      } catch (e) {
+        base.errors.push(`${a.title}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      await new Promise((r) => setTimeout(r, 120));
+    }
+  }
+
+  return {
+    ok: true, shop, excludedPreorderProducts: excludeNums.size, scannedProducts: scanned,
+    affected: affected.map((a) => ({ productId: a.productId, title: a.title, variants: a.variants })),
+    totalVariants, applied: apply, changedProducts, changedVariants, errors: base.errors, truncated,
+  };
+}
