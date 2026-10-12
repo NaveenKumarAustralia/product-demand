@@ -302,6 +302,8 @@ export async function sweepStrayContinueInventoryPolicies(opts: { apply?: boolea
       const continueVars = (p.variants?.nodes ?? []).filter((v: any) => String(v?.inventoryPolicy ?? "").toUpperCase() === "CONTINUE");
       if (continueVars.length) { continueProductsTotal++; continueVariantsTotal += continueVars.length; }
       if (excludeNums.has(numericId(p.id))) continue; // LIVE pre-order → leave alone
+      // Gift voucher / gift card legitimately sells "out of stock" forever — never untick it.
+      if (/gift\s*(voucher|card)|e-?gift/i.test(String(p.title ?? ""))) continue;
       if (continueVars.length) {
         affected.push({ productId: p.id, title: String(p.title ?? ""), variantGids: continueVars.map((v: any) => String(v.id)), variants: continueVars.map((v: any) => String(v.title ?? "")) });
       }
