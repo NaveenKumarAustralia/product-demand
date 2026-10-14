@@ -22453,12 +22453,13 @@ function DropboxPickerTile({ r, added, selected, onToggle }: {
   }, [r.path]);
   const border = added ? "2px solid #0d9488" : selected ? "3px solid #0061FF" : "1px solid #d1d5db";
   return (
-    <div style={{ position: "relative", borderRadius: 8, overflow: "hidden", border, background: isVideo ? "#0b0b0b" : "#f1f5f9", opacity: added ? 0.6 : 1 }}>
+    <div style={{ borderRadius: 8, overflow: "hidden", border, background: "#fff", opacity: added ? 0.6 : 1, display: "flex", flexDirection: "column" }}>
       {/* Fixed-size box reserves space so the grid never jumps as images load;
-          the media is shown uncropped (contain) inside it. Clicking selects. */}
+          the media is shown uncropped (contain) inside it. Clicking selects.
+          position:relative so the overlays anchor to the media, not the caption. */}
       <div
         onClick={() => { if (!added) onToggle(); }}
-        style={{ cursor: added ? "default" : "pointer", aspectRatio: "3 / 4", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}
+        style={{ position: "relative", cursor: added ? "default" : "pointer", aspectRatio: "3 / 4", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: isVideo ? "#0b0b0b" : "#f1f5f9" }}
         title={added ? `${r.name} — already added` : `${r.name}${isVideo ? " — tap ▶ to preview" : ""}`}
       >
         {isVideo ? (
@@ -22470,20 +22471,26 @@ function DropboxPickerTile({ r, added, selected, onToggle }: {
         ) : (
           <DropboxThumb path={r.path} rev={r.rev} size="w640h480" mode="bestfit" style={{ maxWidth: "100%", maxHeight: "100%", width: "100%", height: "100%", objectFit: "contain", display: "block", pointerEvents: "none" }} />
         )}
+        {/* Small ▶ in the bottom-left corner — plays the clip in a lightbox so the
+            rest of the tile stays tappable for selecting. */}
+        {isVideo && videoUrl && (
+          <button type="button" onClick={(e) => { e.stopPropagation(); setPlaying(true); }} title="Play video"
+            style={{ position: "absolute", bottom: 6, left: 6, width: 32, height: 32, borderRadius: "50%", background: "rgba(0,0,0,0.65)", color: "#fff", border: "2px solid rgba(255,255,255,0.85)", cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", paddingLeft: 3, boxShadow: "0 1px 4px rgba(0,0,0,0.4)" }}
+          >▶</button>
+        )}
+        {isVideo && <span style={{ position: "absolute", bottom: 6, right: 6, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 800, pointerEvents: "none" }}>video</span>}
+        {added ? (
+          <span style={{ position: "absolute", top: 4, left: 4, background: "#0d9488", color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 800 }}>✓ Added</span>
+        ) : selected ? (
+          <span style={{ position: "absolute", top: 4, left: 4, background: "#0061FF", color: "#fff", borderRadius: "50%", width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800 }}>✓</span>
+        ) : null}
       </div>
-      {/* Small ▶ in the bottom-left corner — plays the clip in a lightbox so the
-          rest of the tile stays tappable for selecting. */}
-      {isVideo && videoUrl && (
-        <button type="button" onClick={(e) => { e.stopPropagation(); setPlaying(true); }} title="Play video"
-          style={{ position: "absolute", bottom: 6, left: 6, width: 32, height: 32, borderRadius: "50%", background: "rgba(0,0,0,0.65)", color: "#fff", border: "2px solid rgba(255,255,255,0.85)", cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", paddingLeft: 3, boxShadow: "0 1px 4px rgba(0,0,0,0.4)" }}
-        >▶</button>
-      )}
-      {isVideo && <span style={{ position: "absolute", bottom: 6, right: 6, background: "rgba(0,0,0,0.6)", color: "#fff", borderRadius: 4, padding: "1px 6px", fontSize: 10, fontWeight: 800, pointerEvents: "none" }}>video</span>}
-      {added ? (
-        <span style={{ position: "absolute", top: 4, left: 4, background: "#0d9488", color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 800 }}>✓ Added</span>
-      ) : selected ? (
-        <span style={{ position: "absolute", top: 4, left: 4, background: "#0061FF", color: "#fff", borderRadius: "50%", width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800 }}>✓</span>
-      ) : null}
+      {/* Filename caption so you can tell exactly which file you're picking. */}
+      <div
+        onClick={() => { if (!added) onToggle(); }}
+        title={r.name}
+        style={{ fontSize: 10.5, lineHeight: 1.25, color: "#374151", fontWeight: 600, padding: "5px 6px", borderTop: "1px solid #eef2f7", cursor: added ? "default" : "pointer", wordBreak: "break-word", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+      >{r.name}</div>
       {playing && videoUrl && typeof document !== "undefined" && createPortal(
         <div onClick={() => setPlaying(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.82)", zIndex: 2000, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <video src={videoUrl} controls autoPlay playsInline onClick={(e) => e.stopPropagation()} style={{ maxWidth: "92vw", maxHeight: "90vh", borderRadius: 8, background: "#000", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }} />
