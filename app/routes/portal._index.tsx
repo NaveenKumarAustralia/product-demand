@@ -19846,18 +19846,6 @@ function CollectionSpreadsheetPage({
           </button>
           <button
             type="button"
-            onClick={matchAllFromShopify}
-            disabled={matchAllBusy || !loaded}
-            style={{
-              background: "#fff", color: "#0d9488", border: "1px solid #0d9488", borderRadius: 6,
-              padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: matchAllBusy ? "wait" : "pointer",
-            }}
-            title="Pull Shopify's current values into every linked row (Shopify wins) and lock them — brings the portal up to date with Shopify and keeps it in sync"
-          >
-            {matchAllBusy ? "Matching…" : "⤓ Match all from Shopify & lock"}
-          </button>
-          <button
-            type="button"
             onClick={backfillFromShopify}
             disabled={isBackfilling || !loaded}
             style={{
@@ -20105,13 +20093,6 @@ function CollectionSpreadsheetPage({
                                 style={{ background: "#f59e0b", color: "#fff", border: "none", borderRadius: 5, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: updateBusy ? "wait" : "pointer", width: "100%", opacity: updateBusy ? 0.85 : 1 }}
                                 title="Push this row's changes to Shopify, then lock it again. You can keep pressing other rows — jobs queue in the background."
                               >{btnLabel(updateBusy, "Updating…", "↑ Update in Shopify")}</button>
-                              <button
-                                type="button"
-                                onClick={() => matchRowFromShopify(rIdx)}
-                                disabled={matchBusy}
-                                style={{ background: "#fff", color: "#0d9488", border: "1px solid #0d9488", borderRadius: 5, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: matchBusy ? "wait" : "pointer", width: "100%", opacity: matchBusy ? 0.85 : 1 }}
-                                title="Pull Shopify's CURRENT values into this row (Shopify wins) and lock it — use when Shopify has the correct data, so a push can't overwrite it"
-                              >{btnLabel(matchBusy, "Matching…", "⤓ Match Shopify & lock")}</button>
                             </>
                           )}
                         </div>
