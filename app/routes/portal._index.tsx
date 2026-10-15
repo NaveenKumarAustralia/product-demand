@@ -469,13 +469,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             }
             for (const line of lines) {
               if (!line.productId) continue;
+              // Key by NUMERIC id (same as restockStatus) — packing lines and
+              // collection rows store the product id in different shapes.
+              const prodNum = String(line.productId).replace(/\D/g, "");
+              if (!prodNum) continue;
               const ship = (line.packingList.invoiceNumber || line.packingList.title || `${line.packingList.id}`).trim();
               const qtys = normalizeQtys(line.qtys);
               for (const [sizeRaw, nRaw] of Object.entries(qtys)) {
                 const qty = Number(nRaw) || 0;
                 if (qty <= 0) continue;
                 const size = collectionCanonSize(sizeRaw);
-                const prod = (shipDetail[line.productId] ??= {});
+                const prod = (shipDetail[prodNum] ??= {});
                 const sz = (prod[size] ??= { total: 0, parts: [] });
                 sz.total += qty;
                 const part = sz.parts.find((p) => p.ship === ship);
@@ -20007,7 +20011,7 @@ function CollectionSpreadsheetPage({
                 const totalOrdered = sumCollectionRowQuantity(row);
                 // Shipment breakdown for this product (from Packing Lists) → the
                 // size-cell annotation + the auto shipment status.
-                const rowShipDetail = linkedProductId ? (shipmentDetailByProductId[linkedProductId] ?? null) : null;
+                const rowShipDetail = linkedProductId ? (shipmentDetailByProductId[linkedProductId.replace(/\D/g, "")] ?? null) : null;
                 const rowShippedTotal = rowShipDetail ? Object.values(rowShipDetail).reduce((s, sz) => s + sz.total, 0) : 0;
                 // The product's status mirrors its restock order (source of truth).
                 const rowRestockStatus = linkedProductId ? (restockStatusByProductId[linkedProductId.replace(/\D/g, "")] ?? "") : "";
@@ -20605,7 +20609,7 @@ function CollectionSpreadsheetPage({
         (() => {
           const row = rows[shipGridRowIdx];
           const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
-          const detail = pid ? (shipmentDetailByProductId[pid] ?? {}) : {};
+          const detail = pid ? (shipmentDetailByProductId[pid.replace(/\D/g, "")] ?? {}) : {};
           const sizeDefs: Array<[string, string]> = [["freeSize", "Free"], ...COLLECTION_SIZE_COLUMN_LABELS];
           const sizes = sizeDefs
             .map(([id, lbl]) => {

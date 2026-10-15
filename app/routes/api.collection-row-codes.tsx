@@ -56,13 +56,31 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         sku_lineCount: String(row.sku ?? "").split("\n").filter(Boolean).length,
         barcode_lineCount: String(row.barcode ?? "").split("\n").filter(Boolean).length,
         shopifyProductId: row.__shopifyProductId ?? "",
+        shopifyProductIdNumeric: String(row.__shopifyProductId ?? "").replace(/\D/g, ""),
         locked: row.__shopifyLocked ?? "",
         editedFields: row.__shopifyEditedFields ?? "",
       });
     });
   }
+
+  // Cross-reference: for each matched row's product, show the restock order(s) and
+  // packing-list line(s) the collection page tries to match — and whether the
+  // product ids line up (the cause of the missing status/shipment chip).
+  const nums = Array.from(new Set((matches as Array<{ shopifyProductIdNumeric: string }>).map((m) => m.shopifyProductIdNumeric).filter(Boolean)));
+  const [orders, lines] = nums.length ? await Promise.all([
+    prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { id: true, productId: true, supplierStatus: true, status: true } }),
+    prisma.packingListLine.findMany({ where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } }, select: { productId: true, qtys: true, packingList: { select: { id: true, invoiceNumber: true, title: true } } } }),
+  ]) : [[], []];
+  const numOf = (s: unknown) => String(s ?? "").replace(/\D/g, "");
+  const cross = (matches as Array<{ shopifyProductIdNumeric: string; name: string }>).map((m) => ({
+    name: m.name,
+    rowProductIdNumeric: m.shopifyProductIdNumeric,
+    restockOrders: orders.filter((o) => numOf(o.productId) === m.shopifyProductIdNumeric).map((o) => ({ rawProductId: o.productId, supplierStatus: o.supplierStatus, status: o.status })),
+    packingLines: lines.filter((l) => numOf(l.productId) === m.shopifyProductIdNumeric).map((l) => ({ rawProductId: l.productId, ship: l.packingList.invoiceNumber || l.packingList.title || `#${l.packingList.id}`, qtys: l.qtys })),
+  }));
+
   return Response.json(
-    { ok: true, query: q, count: matches.length, matches, hint: "Paste this back — compare the GOOD row (Paige) vs the bad one: sku_visible / barcode_visible (⏎ = newline) and line counts show the format difference." },
+    { ok: true, query: q, count: matches.length, matches, crossReference: cross, hint: "crossReference shows, per product, the restock orders + packing lines whose productId matches NUMERICALLY. If restockOrders/packingLines is empty, the product isn't in restock/packing (or the id differs); if non-empty but the chip is wrong, the match key format differs." },
     { headers: { "Cache-Control": "no-store" } },
   );
 };
