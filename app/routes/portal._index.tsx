@@ -18067,13 +18067,12 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 ) : (
                   <div style={s.productStyleImageEmpty}>Group</div>
                 )}
-                <div style={{ position: "absolute", top: 8, left: 8, background: "rgba(15,118,110,0.92)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>📦 {memberCount}</div>
+                <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(15,118,110,0.95)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)", pointerEvents: "none" }}>📦 {memberCount} collection{memberCount !== 1 ? "s" : ""}</div>
                 <button type="button" title="Change cover image" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 8, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 6, padding: "3px 7px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>🖼</button>
                 <div style={{ position: "absolute", inset: 0, boxShadow: "inset 0 0 0 3px rgba(255,255,255,0.5)", borderRadius: 6, pointerEvents: "none" }} />
               </div>
               <div style={{ padding: "8px 4px 2px" }}>
                 <div style={{ fontWeight: 800, fontSize: 14, color: "#111827", textAlign: "center" }}>{g.name}</div>
-                <div style={{ fontSize: 11, color: "#6b7280", textAlign: "center" }}>{memberCount} collections</div>
               </div>
             </div>
           );
