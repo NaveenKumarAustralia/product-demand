@@ -91,6 +91,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     COLLECTION_HIDDEN_KEY,
     COLLECTION_FABRIC_STATUS_KEY,
     COLLECTION_ORDER_STATUS_KEY,
+    COLLECTION_RELEASE_DATE_KEY,
     COLLECTION_FABRIC_LINK_KEY,
     COLLECTION_GROUPS_KEY,
     COLLECTION_TILE_ORDER_KEY,
@@ -395,6 +396,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         const fabricStatusMap = (fabricStatusRaw && typeof fabricStatusRaw === "object" && !Array.isArray(fabricStatusRaw)) ? fabricStatusRaw as Record<string, string> : {};
         const orderStatusRaw = settingsMap.get(COLLECTION_ORDER_STATUS_KEY);
         const orderStatusMap = (orderStatusRaw && typeof orderStatusRaw === "object" && !Array.isArray(orderStatusRaw)) ? orderStatusRaw as Record<string, string> : {};
+        const releaseDateRaw = settingsMap.get(COLLECTION_RELEASE_DATE_KEY);
+        const releaseDateMap = (releaseDateRaw && typeof releaseDateRaw === "object" && !Array.isArray(releaseDateRaw)) ? releaseDateRaw as Record<string, string> : {};
         const fabricLinkRaw = settingsMap.get(COLLECTION_FABRIC_LINK_KEY);
         const fabricLinkMap = (fabricLinkRaw && typeof fabricLinkRaw === "object" && !Array.isArray(fabricLinkRaw)) ? fabricLinkRaw as Record<string, unknown> : {};
         return rows.map((r) => {
@@ -411,11 +414,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
             hidden: hiddenIds.has(r.id),
             fabricStatus: String(fabricStatusMap[String(r.id)] ?? ""),
             orderStatus: String(orderStatusMap[String(r.id)] ?? ""),
+            releaseDate: String(releaseDateMap[String(r.id)] ?? ""),
             fabricLinks,
           };
         });
-      }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string; orderStatus: string; fabricLinks: Record<string, string> }>)
-    : Promise.resolve([] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string; orderStatus: string; fabricLinks: Record<string, string> }>);
+      }).catch(() => [] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string; orderStatus: string; releaseDate: string; fabricLinks: Record<string, string> }>)
+    : Promise.resolve([] as Array<{ id: number; name: string; sortOrder: number; hasThumbnail: boolean; rowCount: number; createdAt: Date; updatedAt: Date; hidden: boolean; fabricStatus: string; orderStatus: string; releaseDate: string; fabricLinks: Record<string, string> }>);
   // Photo shoots: slim tab list (id/name/sortOrder/rowCount). The active
   // shoot's full rows are fetched on demand via ps_get_shoot. Loaded for
   // both pages so the collection "Send to photo shoot" picker has the list.
@@ -4400,6 +4404,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
     return null;
   }
+  if (intent === "set_collection_release_date") {
+    // Per-collection expected release date (YYYY-MM-DD), stored as a
+    // { [collectionId]: date } object. Empty clears it.
+    const id = Number(form.get("collectionId"));
+    const date = String(form.get("date") ?? "").trim();
+    if (!id) return null;
+    const existing = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_RELEASE_DATE_KEY }, select: { value: true } });
+    const map: Record<string, string> = (existing?.value && typeof existing.value === "object" && !Array.isArray(existing.value)) ? { ...(existing.value as Record<string, string>) } : {};
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) map[String(id)] = date; else delete map[String(id)];
+    await prisma.portalSetting.upsert({
+      where: { key: COLLECTION_RELEASE_DATE_KEY },
+      create: { key: COLLECTION_RELEASE_DATE_KEY, value: map },
+      update: { value: map },
+    });
+    return null;
+  }
   if (intent === "set_collection_groups") {
     // Save the whole collection-groups list (create / rename / add-remove members
     // / ungroup). The client sends the full normalized list.
@@ -6692,7 +6712,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "delete_collection_rows") return false;
-  if (intent === "set_collection_fabric_status" || intent === "set_collection_order_status" || intent === "set_collection_fabric_link") return false;
+  if (intent === "set_collection_fabric_status" || intent === "set_collection_order_status" || intent === "set_collection_fabric_link" || intent === "set_collection_release_date") return false;
   if (intent === "set_collection_groups") return false;
   if (intent === "set_collection_tile_order") return false;
   // Match-and-lock patches the row locally (per-row) or reloads (bulk); no heavy loader re-run.
@@ -7080,6 +7100,8 @@ const COLLECTION_FABRIC_STATUS_KEY = "collections-fabric-status-v1";
 // Per-collection "products ordered?" status ("yes" | "no" | "partial"),
 // keyed by collection id — has the factory order for these styles been placed.
 const COLLECTION_ORDER_STATUS_KEY = "collections-order-status-v1";
+// Per-collection expected release date (YYYY-MM-DD), keyed by collection id.
+const COLLECTION_RELEASE_DATE_KEY = "collections-release-date-v1";
 // Per-collection link to a specific fabric-in-stock entry (a fabricKey), keyed
 // by collection id. When set, the detail-page "in stock" meters read that
 // fabric's on-hand meters instead of guessing from the rows.
@@ -16593,6 +16615,7 @@ type CollectionListItem = {
   hidden?: boolean;
   fabricStatus?: string;
   orderStatus?: string;
+  releaseDate?: string;
   // Per-fabric pins: fabricNameLower → the exact fabric-in-stock entry key.
   fabricLinks?: Record<string, string>;
 };
@@ -17742,6 +17765,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     setCollections((prev) => prev.map((c) => c.id === id ? { ...c, orderStatus: status } : c));
     fetcher.submit({ intent: "set_collection_order_status", collectionId: String(id), status }, { method: "post" });
   };
+  const handleSetReleaseDate = (id: number, date: string) => {
+    setCollections((prev) => prev.map((c) => c.id === id ? { ...c, releaseDate: date } : c));
+    fetcher.submit({ intent: "set_collection_release_date", collectionId: String(id), date }, { method: "post" });
+  };
   const handleSetFabricLink = (id: number, fabricName: string, fabricKey: string) => {
     const nameKey = fabricName.trim().toLowerCase();
     setCollections((prev) => prev.map((c) => {
@@ -17932,6 +17959,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             onSetFabricStatus={(st) => handleSetFabricStatus(c.id, st)}
             orderStatus={c.orderStatus ?? ""}
             onSetOrderStatus={(st) => handleSetOrderStatus(c.id, st)}
+            releaseDate={c.releaseDate ?? ""}
+            onSetReleaseDate={(d) => handleSetReleaseDate(c.id, d)}
             onSetCover={(file) => handleSetCover(c.id, file)}
             selectable={!c.hidden}
             selected={selectedIds.has(c.id)}
@@ -18067,6 +18096,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               onSetFabricStatus={(st) => handleSetFabricStatus(c.id, st)}
               orderStatus={c.orderStatus ?? ""}
               onSetOrderStatus={(st) => handleSetOrderStatus(c.id, st)}
+              releaseDate={c.releaseDate ?? ""}
+              onSetReleaseDate={(d) => handleSetReleaseDate(c.id, d)}
               onSetCover={(file) => handleSetCover(c.id, file)}
               selectable={!c.hidden}
               selected={selectedIds.has(c.id)}
@@ -18344,6 +18375,8 @@ function CollectionCard({
   onSetFabricStatus,
   orderStatus,
   onSetOrderStatus,
+  releaseDate,
+  onSetReleaseDate,
   onSetCover,
   onDragStart,
   onDragOver,
@@ -18374,6 +18407,9 @@ function CollectionCard({
   onSetFabricStatus?: (status: string) => void;
   orderStatus?: string;
   onSetOrderStatus?: (status: string) => void;
+  // Expected release date (YYYY-MM-DD), Collections tiles only.
+  releaseDate?: string;
+  onSetReleaseDate?: (date: string) => void;
   onSetCover: (file: File) => void;
   onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
@@ -18463,6 +18499,10 @@ function CollectionCard({
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
         )}
+        {/* Row/collection count — badge in the image's bottom-left corner. */}
+        <span style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(17,24,39,0.82)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.25)", pointerEvents: "none" }}>
+          {collection.rowCount} {countNoun}{collection.rowCount !== 1 ? "s" : ""}
+        </span>
         {(hover || !collection.hasThumbnail) && (
           <button
             type="button"
@@ -18507,9 +18547,6 @@ function CollectionCard({
             title="Click to rename"
           >{collection.name || "Untitled"}</span>
         )}
-        <span style={{ fontSize: 11, color: "#9ca3af", marginTop: 2 }}>
-          {collection.rowCount} {countNoun}{collection.rowCount !== 1 ? "s" : ""}
-        </span>
         {onSetFabricStatus && (
           <div
             style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}
@@ -18557,6 +18594,22 @@ function CollectionCard({
               </label>
             )}
           </div>
+        )}
+        {onSetReleaseDate && (
+          <label
+            onClick={(e) => e.stopPropagation()}
+            style={{ marginTop: onSetFabricStatus ? 6 : 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 11, fontWeight: 700, color: "#6b7280" }}
+          >
+            <span>Release</span>
+            <input
+              type="date"
+              value={releaseDate ?? ""}
+              onChange={(e) => { e.stopPropagation(); onSetReleaseDate(e.target.value); }}
+              onClick={(e) => e.stopPropagation()}
+              title="Expected release date"
+              style={{ flex: 1, maxWidth: 140, fontSize: 11, fontWeight: 700, padding: "4px 6px", borderRadius: 6, cursor: "pointer", outline: "none", border: `1px solid ${releaseDate ? "#6366f1" : "#e5e7eb"}`, background: releaseDate ? "#eef2ff" : "#fff", color: releaseDate ? "#3730a3" : "#6b7280" }}
+            />
+          </label>
         )}
       </div>
     </div>
