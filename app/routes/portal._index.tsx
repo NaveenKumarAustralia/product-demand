@@ -1111,8 +1111,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Collect all unique size names across all orders, sorted logically
   const sizeOrder = ["XS","S","M","L","XL","2XL","3XL","S-M","M-L","L-XL","S/M","M/L","L/XL","4XL","ONE SIZE"];
   const allSizes = [...new Set([
-    ...orders.flatMap((o) => o.lines.map((l) => l.variantTitle)),
-    ...restockProductResults.flatMap((product) => product.variants.map((variant) => variant.title)),
+    ...orders.flatMap((o) => o.lines.map((l) => canonicalRestockSize(l.variantTitle))),
+    ...restockProductResults.flatMap((product) => product.variants.map((variant) => canonicalRestockSize(variant.title))),
   ])];
   allSizes.sort((a, b) => {
     const ai = sizeOrder.indexOf(a.toUpperCase());
@@ -6496,7 +6496,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "update_qty") {
-    const size = String(form.get("size") ?? "");
+    // Fold hyphen size variants (S-M/M-L/L-XL) into the slash form the restock
+    // page uses, and match the underlying line whichever way it's stored, so
+    // editing a merged cell never leaves a stray hyphen line behind.
+    const size = canonicalRestockSize(String(form.get("size") ?? ""));
     const qtyOrdered = Math.max(0, Number(form.get("value") ?? 0) || 0);
     const orderForVariant = await prisma.supplierOrder.findUnique({
       where: { id: orderId },
@@ -6506,7 +6509,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       ? matchingVariantForSize(await getShopifyProductVariants(orderForVariant.shop, orderForVariant.productId), size)
       : null;
     const existingLines = await prisma.orderLine.findMany({
-      where: { orderId, variantTitle: size },
+      where: { orderId, variantTitle: { in: restockSizeEquivalents(size) } },
       orderBy: { id: "asc" },
       select: { id: true, variantId: true, qtyOrdered: true },
     });
@@ -6521,7 +6524,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           data: {
             orderId,
             variantId: matchingVariant?.id ?? `${orderId}:${size}`,
-            variantTitle: matchingVariant?.title ?? size,
+            variantTitle: size,
             sku: matchingVariant?.sku ?? null,
             qtyOrdered,
           },
@@ -6531,9 +6534,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           where: { id: lines[0].id },
           data: {
             qtyOrdered,
+            variantTitle: size,
             ...(matchingVariant ? {
               variantId: matchingVariant.id,
-              variantTitle: matchingVariant.title,
               sku: matchingVariant.sku,
             } : {}),
           },
@@ -10168,6 +10171,24 @@ async function getShopifyProductVariants(shop: string, productId: string): Promi
 
 function normalizeVariantSizeLabel(value: string) {
   return value.trim().toLowerCase().replace(/\s+/g, "").replace(/-/g, "/");
+}
+
+// The restock page shows ONLY the slash size variants (S/M, M/L, L/XL). The
+// equivalent hyphen variants from Shopify (S-M, M-L, L-XL) mean exactly the same
+// thing, so we fold them into the slash label everywhere the restock grid reads
+// or writes a size — one column per size, quantities merged, regardless of what
+// Shopify calls the variant. Any other label is returned unchanged.
+const RESTOCK_HYPHEN_TO_SLASH: Record<string, string> = { "S-M": "S/M", "M-L": "M/L", "L-XL": "L/XL" };
+function canonicalRestockSize(label: string): string {
+  const t = String(label ?? "").trim();
+  return RESTOCK_HYPHEN_TO_SLASH[t.toUpperCase()] ?? t;
+}
+// Every raw label that folds into the given (already-canonical) label — used to
+// find the underlying OrderLine(s) when editing a merged slash cell.
+function restockSizeEquivalents(canonical: string): string[] {
+  const out = [canonical];
+  for (const [hyphen, slash] of Object.entries(RESTOCK_HYPHEN_TO_SLASH)) if (slash === canonical) out.push(hyphen);
+  return out;
 }
 
 // Derive a packing-list-friendly size label for a Shopify variant.
@@ -29869,7 +29890,8 @@ function OrderRow({
   const [splitOpen, setSplitOpen] = useState(false);
   const [printOpen, setPrintOpen] = useState(false);
   const qtyBySize = order.lines.reduce<Record<string, number>>((acc, line) => {
-    acc[line.variantTitle] = (acc[line.variantTitle] ?? 0) + line.qtyOrdered;
+    const sz = canonicalRestockSize(line.variantTitle);
+    acc[sz] = (acc[sz] ?? 0) + line.qtyOrdered;
     return acc;
   }, {});
   const fetchedInventory = inventoryFetcher.data?.variantsBySize ?? null;
