@@ -16697,7 +16697,6 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "schedules", label: "Schedules", type: "tickbox", width: 90 },
   { id: "reviews", label: "Reviews", type: "tickbox", width: 80 },
   { id: "swatches", label: "Swatches", type: "tickbox", width: 90 },
-  { id: "combineListing", label: "Combine listing", type: "tickbox", width: 110 },
   { id: "imageAltText", label: "Image alt text", type: "tickbox", width: 110 },
 ];
 
@@ -16869,16 +16868,16 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   // "Loading Notes" column removed (Oct 2026, user asked) — its content is
   // migrated into the Notes column server-side (see mergeLoadingNotesIntoNotes
   // in get_collection_full). Drop the now-empty column from existing collections.
-  for (const dropId of ["maniPicsTaken", "link", "loadingNotes"]) {
+  for (const dropId of ["maniPicsTaken", "link", "loadingNotes", "combineListing"]) {
     const idx = cols.findIndex((c) => c.id === dropId);
     if (idx !== -1) cols.splice(idx, 1);
   }
   insertAfter("price", { id: "priceRupees", label: "Price ₹", type: "number", width: 90 });
   insertAfter("priceRupees", { id: "priceAud", label: "Unit A$", type: "readonly", width: 90 });
   insertAfter("duplicateFrom", { id: "categoryMetafields", label: "Category metafields", width: 180 });
-  // Two tickbox columns added later — surface them on existing collections too.
-  insertAfter("swatches", { id: "combineListing", label: "Combine listing", type: "tickbox", width: 110 });
-  insertAfter("combineListing", { id: "imageAltText", label: "Image alt text", type: "tickbox", width: 110 });
+  // "Image alt text" tickbox added later — surface it on existing collections.
+  // ("Combine listing" column was removed; it's pruned above.)
+  insertAfter("swatches", { id: "imageAltText", label: "Image alt text", type: "tickbox", width: 110 });
   // Factory Notes was added later as the leftmost column. Drop it in
   // at index 0 for existing collections so staff don't have to drag
   // it to the front manually.
