@@ -15,6 +15,7 @@ const K_PRODUCT_ID = "__shopifyProductId";
 const K_LOCKED = "__shopifyLocked";
 const K_CATEGORY = "__categoryMetafields";
 const K_EDITED = "__shopifyEditedFields";
+const K_STATUS = "__shopifyStatus";
 
 async function gql(shop: string, token: string, query: string, variables: Record<string, unknown>) {
   const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
@@ -62,7 +63,7 @@ export async function pullShopifyProductFields(shop: string, accessToken: string
   const json = await gql(shop, accessToken, `
     query CollectionsSyncPull($id: ID!) {
       product(id: $id) {
-        id descriptionHtml productType vendor tags
+        id status descriptionHtml productType vendor tags
         seo { title description }
         category { id fullName }
         media(first: 25) { nodes { ... on MediaImage { image { url } } } }
@@ -93,6 +94,10 @@ export async function pullShopifyProductFields(shop: string, accessToken: string
     hsCode: String(v0.inventoryItem?.harmonizedSystemCode ?? ""),
     countryOfOrigin: String(v0.inventoryItem?.countryCodeOfOrigin ?? ""),
   };
+  // Keep the row's status chip in step with Shopify (ACTIVE/DRAFT/ARCHIVED), so a
+  // product activated in Shopify shows as linked+active here and a later push
+  // never reverts it. Reserved row key, not a user field.
+  if (product.status) pulled[K_STATUS] = String(product.status);
   // Tags: mirror Shopify's, but never remove the pre-order system tags.
   {
     const kept = shopTags.filter((t: string) => { const s = t.toLowerCase(); return s !== "pre-order" && !s.startsWith("pre-order: ") && !s.startsWith("pre-order ships "); });

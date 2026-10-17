@@ -6058,8 +6058,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const inrPerAud = await getCachedInrPerAud().catch(() => null);
     const thbPerAud = isJJNew ? await getCachedThbPerAud().catch(() => null) : null;
     const productInfoForUpdate = await loadProductInfoForAction().catch(() => null);
-    const storedStatus = (row[COL_ROW_SHOPIFY_STATUS] ?? "").toUpperCase();
-    const status = storedStatus === "ACTIVE" || storedStatus === "DRAFT" ? (storedStatus as "ACTIVE" | "DRAFT") : undefined;
+    // NEVER send the status on an UPDATE of an existing product. The row's stored
+    // __shopifyStatus is captured at create time (usually DRAFT); if the product
+    // was later ACTIVATED or scheduled in Shopify, sending the stale DRAFT would
+    // revert it to draft when you add images / push. Leaving status undefined
+    // makes productSet keep Shopify's current status untouched.
+    const status: "DRAFT" | "ACTIVE" | undefined = undefined;
 
     // MERGE push (so a push can't wipe a Shopify change you didn't touch): pull
     // Shopify's CURRENT values and apply them to the row for every syncable field
