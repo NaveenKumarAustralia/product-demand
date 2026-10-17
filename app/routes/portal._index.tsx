@@ -26123,43 +26123,19 @@ function resolveOrderFabricForDeduction(productInfo: ProductInfo, sheets: Fabric
   return { fabricKey: key, metersPerPiece: mpp };
 }
 
-// Reconcile one order's fabric consumption against its CURRENT supplierStatus.
-// Deducts from physical stock when it enters a consumed status; restores the
-// exact deducted amount when it leaves. Idempotent — keyed on fabricConsumed, so
-// repeated calls / flip-flopping never double-deduct. Never throws to the caller.
-async function reconcileOrderFabricConsumption(orderId: number): Promise<void> {
-  try {
-    const order = await prisma.supplierOrder.findUnique({
-      where: { id: orderId },
-      select: { id: true, productTitle: true, totalQty: true, supplierStatus: true, fabricConsumed: true, fabricConsumedMeters: true, fabricKey: true, lines: { select: { qtyOrdered: true } } },
-    });
-    if (!order) return;
-    const shouldConsume = FABRIC_CONSUMED_STATUSES.has(order.supplierStatus);
-    if (shouldConsume === order.fabricConsumed) return; // already reconciled
-    await withFabricSheetsLock(async () => {
-      const sheets = await loadManualFabricSheetsForAction();
-      if (shouldConsume) {
-        const productInfo = await loadProductInfoForAction();
-        const resolved = resolveOrderFabricForDeduction(productInfo, sheets, order.productTitle ?? "");
-        if (!resolved) return; // fabric unknown → leave in stock (stays reserved)
-        const qty = (order.totalQty ?? 0) > 0 ? order.totalQty : (order.lines ?? []).reduce((s, l) => s + (l.qtyOrdered || 0), 0);
-        if (qty <= 0) return;
-        const meters = qty * resolved.metersPerPiece;
-        // Only mark consumed if we actually found the fabric row and deducted —
-        // otherwise leave it un-consumed so it stays reserved and can retry.
-        if (!adjustFabricStockMeters(sheets, resolved.fabricKey, -meters)) return;
-        await saveManualFabricSheets(sheets);
-        await prisma.supplierOrder.update({ where: { id: orderId }, data: { fabricConsumed: true, fabricConsumedMeters: meters, fabricKey: resolved.fabricKey, metersPerPiece: resolved.metersPerPiece } });
-      } else {
-        const meters = order.fabricConsumedMeters ?? 0;
-        const key = order.fabricKey ?? "";
-        if (meters > 0 && key && adjustFabricStockMeters(sheets, key, meters)) await saveManualFabricSheets(sheets);
-        await prisma.supplierOrder.update({ where: { id: orderId }, data: { fabricConsumed: false, fabricConsumedMeters: null } });
-      }
-    });
-  } catch (e) {
-    console.warn("[fabric consume reconcile]", e);
-  }
+// Fabric stock is managed MANUALLY (per user request, 2026-10-18). Orders no
+// longer auto-deduct meters from "Meters in Stock" when they enter On Production/
+// Ready/In Shipment, and leaving those statuses no longer auto-restores. The
+// "N on order · Xm" chip (/api/reorder-fabric) still PREVIEWS how much fabric
+// on-order products will use — it was always display-only and is unaffected.
+//
+// NOTE: the deduction helpers (FABRIC_CONSUMED_STATUSES, adjustFabricStockMeters,
+// resolveOrderFabricForDeduction) are kept intact but unused so automatic
+// deduction can be restored from git if we ever want it back. We deliberately do
+// NOT touch already-deducted stock here (no auto-restore) — the user corrects
+// current values by hand.
+async function reconcileOrderFabricConsumption(_orderId: number): Promise<void> {
+  return; // no-op: fabric stock is manual
 }
 
 // Keep the permanent cut log (ProductionCutRecord) and the order's editable
