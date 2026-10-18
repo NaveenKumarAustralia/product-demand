@@ -11541,7 +11541,12 @@ async function createShopifyProductFromRow(
       }
     } catch { /* malformed blob → skip category rather than block the create */ }
   }
-  if (metafields.length) input.metafields = metafields;
+  // IMPORTANT: do NOT put metafields on the productSet input. productSet treats
+  // `metafields` as a LIST field — it deletes every product metafield NOT in the
+  // array — so sending only colour/categories wipes the merchant's other custom
+  // metafields (e.g. "Complementary products"). Instead we write colour/
+  // categories through the additive metafieldsSet call below (same as the
+  // category metafields), which upserts and never deletes the others.
 
   const json = await shopifyGraphql<any>(shop, accessToken, `
     mutation CreateCollectionRowProduct($input: ProductSetInput!) {
@@ -11571,9 +11576,13 @@ async function createShopifyProductFromRow(
   // is already created, so we surface any errors but don't fail the whole create.
   let categoryErrors: string[] = [];
   let categoryWrote = 0;
-  const categoryAttempted = categoryMfs.length;
-  if (categoryMfs.length) {
-    const mfIn = categoryMfs.map((m) => ({ ownerId: String(product.id), namespace: m.namespace, key: m.key, type: m.type, value: m.value }));
+  // colour/categories (custom namespace) + category taxonomy metafields (shopify
+  // namespace) are written together here via metafieldsSet, which UPSERTS and
+  // leaves the merchant's other metafields intact (unlike productSet).
+  const allMfs = [...metafields, ...categoryMfs];
+  const categoryAttempted = allMfs.length;
+  if (allMfs.length) {
+    const mfIn = allMfs.map((m) => ({ ownerId: String(product.id), namespace: m.namespace, key: m.key, type: m.type, value: m.value }));
     const mfRes = await shopifyGraphql<any>(shop, accessToken, `
       mutation KeSetCategoryMetafields($metafields: [MetafieldsSetInput!]!) {
         metafieldsSet(metafields: $metafields) {
@@ -11733,7 +11742,10 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
   `, { productId, media });
   const errs = json?.data?.productCreateMedia?.mediaUserErrors ?? [];
   for (const e of errs) errors.push(e.message || "media error");
-  const createdIds: string[] = (json?.data?.productCreateMedia?.media ?? []).map((m: any) => String(m?.id ?? "")).filter(Boolean);
+  const createdMedia: Array<{ id: string; type: string }> = (json?.data?.productCreateMedia?.media ?? [])
+    .map((m: any) => ({ id: String(m?.id ?? ""), type: String(m?.mediaContentType ?? "") }))
+    .filter((m: { id: string }) => !!m.id);
+  const createdIds: string[] = createdMedia.map((m) => m.id);
 
   // productCreateMedia returns immediately with status PROCESSING; Shopify then
   // processes the file asynchronously and may fail AFTER we've "succeeded" — the
@@ -11764,6 +11776,34 @@ async function pushRowImagesToShopify(shop: string, accessToken: string, product
     }
     if (errors.some((e) => e.startsWith("media processing failed"))) {
       console.error(`[shopify media] product ${productId} processing failures:`, errors.filter((e) => e.startsWith("media processing failed")));
+    }
+  }
+
+  // Auto-fill the variant image: assign the product's FIRST gallery image (the
+  // first created IMAGE media, skipping any videos) as the image for EVERY
+  // variant, so the merchant never has to set variant images by hand. Runs on
+  // every image push — on an update (replaceExisting) the old media was just
+  // cleared, so this picks up the new first image. Best-effort: a failure here
+  // never fails the media push (the images are already live on the product).
+  const firstImageId = createdMedia.find((m) => m.type === "IMAGE")?.id;
+  if (firstImageId) {
+    try {
+      const variants = await getShopifyVariantCodes(shop, accessToken, productId);
+      const variantIds = variants.map((v) => v.id).filter(Boolean);
+      if (variantIds.length) {
+        const vr = await shopifyGraphql<any>(shop, accessToken, `
+          mutation KeSetVariantImage($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+            productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+              productVariants { id }
+              userErrors { field message }
+            }
+          }
+        `, { productId, variants: variantIds.map((id) => ({ id, mediaId: firstImageId })) });
+        const vErrs = vr?.data?.productVariantsBulkUpdate?.userErrors ?? [];
+        if (vErrs.length) console.warn(`[shopify variant image] ${productId}:`, vErrs.map((e: { message?: string }) => e.message).join("; "));
+      }
+    } catch (e) {
+      console.warn(`[shopify variant image] failed for ${productId}:`, e);
     }
   }
   return errors;
