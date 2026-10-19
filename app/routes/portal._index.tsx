@@ -31153,14 +31153,21 @@ function StatusCell({
   // remove action is in the shouldRevalidate skip list).
   const [removedListIds, setRemovedListIds] = useState<Set<number>>(new Set());
   const effectiveBadges = packingListBadges.filter((b) => !removedListIds.has(b.packingListId));
-  // Picker option pool: prefer packing lists that actually contain this
-  // product (so the user's first guess is right), then any other open
-  // packing list as a backup.
-  const productListIds = new Set(effectiveBadges.map((b) => b.packingListId));
-  const pickerOptions: PackingListBadge[] = [
-    ...effectiveBadges,
-    ...openPackingLists.filter((list) => !productListIds.has(list.packingListId) && !removedListIds.has(list.packingListId)),
-  ];
+  // Picker options = every packing list the product is/was in (badges) PLUS every
+  // OPEN (not-yet-loaded) packing list, deduped. Deliberately NOT filtered by the
+  // optimistic removedListIds, so a list you crossed off — even by accident —
+  // stays in the dropdown and can be re-selected. Loaded/hidden lists are already
+  // excluded upstream by the openPackingLists + packingListsByProductId loaders.
+  const pickerOptions: PackingListBadge[] = (() => {
+    const seen = new Set<number>();
+    const out: PackingListBadge[] = [];
+    for (const b of [...packingListBadges, ...openPackingLists]) {
+      if (seen.has(b.packingListId)) continue;
+      seen.add(b.packingListId);
+      out.push(b);
+    }
+    return out;
+  })();
   // Resolve the linked packing list to a badge for display. Falls back to
   // the productId-based lookup so legacy rows without an explicit link
   // still show their badge.
@@ -31170,6 +31177,9 @@ function StatusCell({
   const showLinkUI = statusLocal === "in_shipment";
   const submitLink = (next: number | null) => {
     setLinkLocal(next);
+    // Re-selecting a list you had crossed off un-hides it, so its badge shows
+    // again (and the create in update_packing_list_link re-adds the line).
+    if (next !== null) setRemovedListIds((prev) => { if (!prev.has(next)) return prev; const n = new Set(prev); n.delete(next); return n; });
     submitPortalCell(
       linkFetcher,
       { intent: "update_packing_list_link", orderId, value: next === null ? "" : String(next) },
