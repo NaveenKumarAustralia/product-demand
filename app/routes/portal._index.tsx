@@ -6474,6 +6474,50 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const parsed = raw === "" ? null : Number(raw);
     if (parsed !== null && (!Number.isFinite(parsed) || parsed <= 0)) return null;
     updates.packingListId = parsed;
+    // Actually PUT the product into the shipment. The restock "in #N" badge AND
+    // the Collections shipment chip both come from a real PackingListLine, NOT
+    // from this soft packingListId link — so without creating a line, choosing a
+    // packing list did nothing that stuck (the badge vanished on reload and
+    // Collections never updated). When a list is chosen, create a line for this
+    // order's product (with its ordered sizes/qtys) in that packing list, unless
+    // one is already there. (Removal is handled by remove_order_from_packing_list.)
+    if (parsed !== null) {
+      const order = await prisma.supplierOrder.findUnique({
+        where: { id: orderId },
+        select: { productId: true, productTitle: true, productImageUrl: true, lines: { select: { variantTitle: true, qtyOrdered: true, sku: true } } },
+      });
+      if (order?.productId) {
+        const existingLine = await prisma.packingListLine.findFirst({
+          where: { packingListId: parsed, productId: order.productId, isCustom: false },
+          select: { id: true },
+        });
+        if (!existingLine) {
+          const qtys: Record<string, number> = {};
+          for (const l of order.lines) {
+            const sz = canonicalRestockSize(l.variantTitle);
+            if (!sz) continue;
+            qtys[sz] = (qtys[sz] ?? 0) + (l.qtyOrdered || 0);
+          }
+          const skus = Array.from(new Set(order.lines.map((l) => (l.sku ?? "").trim()).filter(Boolean)));
+          const maxLine = await prisma.packingListLine.findFirst({
+            where: { packingListId: parsed },
+            orderBy: { sortOrder: "desc" },
+            select: { sortOrder: true },
+          });
+          await prisma.packingListLine.create({
+            data: {
+              packingListId: parsed,
+              productId: order.productId,
+              productTitle: order.productTitle || "Untitled product",
+              productImageUrl: order.productImageUrl || null,
+              sku: skus.length ? skus.join("\n") : null,
+              qtys,
+              sortOrder: (maxLine?.sortOrder ?? 0) + 1,
+            },
+          }).catch((e) => { console.warn("[update_packing_list_link] create packing line failed:", e); });
+        }
+      }
+    }
   }
 
   // Actually REMOVE this product from a shipment: the "in #N" badge on the
