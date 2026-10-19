@@ -29937,13 +29937,26 @@ function OrderRow({
   const fetchedInventory = inventoryFetcher.data?.variantsBySize ?? null;
   const inventoryBySize: Record<string, number | null> = (() => {
     if (fetchedInventory) {
-      const out: Record<string, number | null> = {};
-      for (const size of sizes) out[size] = fetchedInventory[size] ?? 0;
-      // Also include any variant titles the API returned that aren't in
-      // the size list (rare — e.g. an extra size in Shopify staff
-      // haven't ordered yet).
+      // Match Shopify variant titles to the column sizes by NORMALIZED label, so
+      // the portal treats S-M and S/M (and any spacing/case difference) as the
+      // same size — a product changed in Shopify still shows its inventory here.
+      const byNorm = new Map<string, number>();
       for (const [title, qty] of Object.entries(fetchedInventory)) {
-        if (!(title in out)) out[title] = qty;
+        const k = normalizeVariantSizeLabel(title);
+        byNorm.set(k, (byNorm.get(k) ?? 0) + qty);
+      }
+      const out: Record<string, number | null> = {};
+      const usedNorms = new Set<string>();
+      for (const size of sizes) {
+        const k = normalizeVariantSizeLabel(size);
+        out[size] = byNorm.get(k) ?? 0;
+        usedNorms.add(k);
+      }
+      // Also include any variant titles the API returned that aren't in the size
+      // list (rare — e.g. an extra size in Shopify staff haven't ordered yet).
+      for (const [title, qty] of Object.entries(fetchedInventory)) {
+        const k = normalizeVariantSizeLabel(title);
+        if (!usedNorms.has(k)) { out[title] = qty; usedNorms.add(k); }
       }
       return out;
     }
@@ -32325,9 +32338,16 @@ function JJOrderRow({
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const fetchedInventory = inventoryFetcher.data?.variantsBySize ?? null;
   const inventoryLoading = inventoryFetcher.state !== "idle";
-  const inventoryBySize: Record<string, number | null> = fetchedInventory
-    ? Object.fromEntries(sizes.map((sz) => [sz, fetchedInventory[sz] ?? 0]))
-    : Object.fromEntries(sizes.map((sz) => [sz, null]));
+  // Match by NORMALIZED label so Shopify S-M and the portal's S/M line up.
+  const inventoryBySize: Record<string, number | null> = (() => {
+    if (!fetchedInventory) return Object.fromEntries(sizes.map((sz) => [sz, null]));
+    const byNorm = new Map<string, number>();
+    for (const [title, qty] of Object.entries(fetchedInventory)) {
+      const k = normalizeVariantSizeLabel(title);
+      byNorm.set(k, (byNorm.get(k) ?? 0) + qty);
+    }
+    return Object.fromEntries(sizes.map((sz) => [sz, byNorm.get(normalizeVariantSizeLabel(sz)) ?? 0]));
+  })();
   const inventoryTotal = fetchedInventory ? (inventoryFetcher.data?.total ?? 0) : 0;
   const canSeeInventory = isAdmin && linked && !!order.productId;
   const toggleInventory = () => setInventoryOpen((cur) => {
