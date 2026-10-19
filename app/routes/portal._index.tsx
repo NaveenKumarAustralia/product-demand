@@ -13403,7 +13403,7 @@ export default function PortalDashboard() {
                     value={collectionSearch}
                     onChange={(event) => setCollectionSearch(event.currentTarget.value)}
                     style={s.searchInput}
-                    placeholder="Collection name"
+                    placeholder="Collection or product name / SKU"
                   />
                 </label>
               )}
@@ -17950,6 +17950,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     return (
       <CollectionSpreadsheetPage
         listItem={selectedCollection}
+        search={search}
         collectionSettings={collectionSettings}
         restockSettings={restockSettings}
         productInfo={productInfo}
@@ -18736,6 +18737,7 @@ function collectionColWidth(col: { label: string; width?: number }): number {
 
 function CollectionSpreadsheetPage({
   listItem,
+  search = "",
   collectionSettings,
   restockSettings,
   productInfo,
@@ -18785,6 +18787,7 @@ function CollectionSpreadsheetPage({
   // Bubble up the sheet's total quantity + value so the page header (next to the
   // title / product count) can show them, like the restock page. null = clear.
   onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void;
+  search?: string;
 }) {
   const isThb = costCurrency === "THB";
   // JJ New Products sheet (the only THB collection). Used to tidy its toolbar:
@@ -18925,9 +18928,16 @@ function CollectionSpreadsheetPage({
   // shoot"). Empty string = no filter on that column; both apply together.
   const [statusFilter, setStatusFilter] = useState("");
   const [sampleFilter, setSampleFilter] = useState("");
+  // Text search from the toolbar box: when a collection is open, the same box
+  // filters its product ROWS by name/title/SKU/barcode (case-insensitive), not
+  // just the tile grid. Folded into rowMatchesFilters so every render path uses it.
+  const searchQ = (search ?? "").trim().toLowerCase();
+  const rowMatchesSearch = (row: Record<string, string>) =>
+    !searchQ || ["name", "title", "sku", "barcode"].some((k) => (row[k] ?? "").toLowerCase().includes(searchQ));
   const rowMatchesFilters = (row: Record<string, string>) =>
     (!statusFilter || (row.status ?? "") === statusFilter)
-    && (!sampleFilter || (row.sample ?? "") === sampleFilter);
+    && (!sampleFilter || (row.sample ?? "") === sampleFilter)
+    && rowMatchesSearch(row);
   const [loaded, setLoaded] = useState(false);
   const [nameDraft, setNameDraft] = useState(listItem.name);
   const [editingName, setEditingName] = useState(false);
