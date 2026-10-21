@@ -10531,16 +10531,31 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
     .filter((variant: ShopifyInventoryVariantInfo) => variant.id && variant.title);
 }
 
+// The Shopify location that incoming inventory (packing-list + JJ loads) is
+// added to. The store now has MORE THAN ONE location, so we must NOT just grab
+// the first active one — all loaded stock belongs in Karma East HQ. We match HQ
+// by name (exact "Karma East HQ" first, then any location whose name contains
+// "karma east"), and only fall back to the first active location if no HQ-named
+// location exists, so a rename never leaves a load with nowhere to go.
+const HQ_LOCATION_NAME = "karma east hq";
 async function getPrimaryShopifyLocationId(shop: string, accessToken: string) {
   const json = await shopifyGraphql<any>(shop, accessToken, `
     query PrimaryInventoryLocation {
-      locations(first: 10) {
-        nodes { id isActive }
+      locations(first: 50) {
+        nodes { id name isActive }
       }
     }
   `);
-  const locations = json?.data?.locations?.nodes ?? [];
-  return (locations.find((location: any) => location.isActive) ?? locations[0])?.id ?? null;
+  const locations: Array<{ id?: string; name?: string; isActive?: boolean }> = json?.data?.locations?.nodes ?? [];
+  const norm = (s: unknown) => String(s ?? "").trim().toLowerCase();
+  const hqExact = locations.find((l) => norm(l.name) === HQ_LOCATION_NAME);
+  const hqLike = locations.find((l) => norm(l.name).includes("karma east"));
+  const firstActive = locations.find((l) => l.isActive);
+  const chosen = hqExact ?? hqLike ?? firstActive ?? locations[0];
+  if (chosen && !hqExact && !hqLike) {
+    console.warn(`[inventory location] no "Karma East HQ" location found; falling back to ${chosen.name ?? chosen.id}. Loaded stock may land in the wrong location.`);
+  }
+  return chosen?.id ?? null;
 }
 
 async function addShopifyInventory(shop: string, accessToken: string, changes: ShopifyInventoryChange[]) {
