@@ -16822,6 +16822,7 @@ const DEFAULT_COLLECTION_COLUMNS: CollectionColumnDef[] = [
   { id: "reviews", label: "Reviews", type: "tickbox", width: 80 },
   { id: "swatches", label: "Swatches", type: "tickbox", width: 90 },
   { id: "imageAltText", label: "Image alt text", type: "tickbox", width: 110 },
+  { id: "adsCreated", label: "Ads created", type: "tickbox", width: 100 },
 ];
 
 // Columns whose value is now set automatically at Shopify-create, so they no
@@ -17002,6 +17003,7 @@ function normalizeCollectionColumns(value: unknown): CollectionColumnDef[] {
   // "Image alt text" tickbox added later — surface it on existing collections.
   // ("Combine listing" column was removed; it's pruned above.)
   insertAfter("swatches", { id: "imageAltText", label: "Image alt text", type: "tickbox", width: 110 });
+  insertAfter("imageAltText", { id: "adsCreated", label: "Ads created", type: "tickbox", width: 100 });
   // Factory Notes was added later as the leftmost column. Drop it in
   // at index 0 for existing collections so staff don't have to drag
   // it to the front manually.
