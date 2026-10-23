@@ -6480,20 +6480,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // order's link now, then rebuild the line(s) for each affected list from all
     // their linked orders — so the Collections shipment chip shows the combined
     // total. (Removal is handled by remove_order_from_packing_list below.)
+    // Link ONLY this order to the chosen list (no auto-pull of other orders — the
+    // user picks each order's shipment manually), then rebuild the line(s) for
+    // each affected list from whatever orders are linked to it, so a list that
+    // several orders point at still sums them.
     const ord = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { productId: true, packingListId: true } });
     if (ord?.productId) {
       await prisma.supplierOrder.update({ where: { id: orderId }, data: { packingListId: parsed } }).catch(() => {});
-      // Group the product's shipment: pull every OTHER unlinked in-shipment order
-      // of the same product into the chosen list too, so all of a product's
-      // orders that are in a shipment land in the same one and the Collections
-      // total sums them all. Orders already assigned to a different list are left
-      // alone (the user put them there on purpose).
-      if (parsed !== null) {
-        await prisma.supplierOrder.updateMany({
-          where: { productId: ord.productId, packingListId: null, supplierStatus: "in_shipment", id: { not: orderId } },
-          data: { packingListId: parsed },
-        }).catch(() => {});
-      }
       const affected = new Set<number>();
       if (parsed !== null) affected.add(parsed);
       if (ord.packingListId && ord.packingListId !== parsed) affected.add(ord.packingListId);
@@ -6620,28 +6613,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const newStatusForCut = String(form.get("value") ?? "");
       const isOnOrderToOnProduction = newStatusForCut === "on_production" && (prevSupplierStatusForCut === "on_order" || !prevSupplierStatusForCut);
       await reconcileProductionCutRecord(orderId, currentUser?.name ?? null, { allowCreate: isOnOrderToOnProduction });
-      // Entering "In Shipment": auto-join the shipment the product is already in
-      // (the auto-select the user relies on) AND count this order in the total.
-      // If the order isn't linked yet but the product has exactly one shipment,
-      // link it there; then rebuild that line from all linked orders.
-      if (newStatusForCut === "in_shipment") {
-        const o = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { productId: true, packingListId: true } });
-        if (o?.productId) {
-          let listId = o.packingListId ?? null;
-          if (!listId) {
-            const lists = await prisma.packingListLine.findMany({
-              where: { productId: o.productId, isCustom: false, packingList: { hiddenAt: null, masterInventoryLoadedAt: null } },
-              select: { packingListId: true },
-              distinct: ["packingListId"],
-            }).catch(() => [] as Array<{ packingListId: number }>);
-            if (lists.length === 1) {
-              listId = lists[0].packingListId;
-              await prisma.supplierOrder.update({ where: { id: orderId }, data: { packingListId: listId } }).catch(() => {});
-            }
-          }
-          if (listId) await reconcilePackingLineFromOrders(listId, o.productId);
-        }
-      }
+      // NOTE: entering "In Shipment" does NOT auto-select a packing list — the
+      // user picks the shipment manually via the Status-cell dropdown (an order
+      // is only put into a list when that list is explicitly chosen). This avoids
+      // the wrong shipment being picked when a product belongs to more than one.
     }
     if (intent === "update_factory_notes" || intent === "update_notes") {
       await syncOrderNoteMessages({
@@ -31230,7 +31205,6 @@ function StatusCell({
   // badge disappears instantly even though the loader prop won't refresh (the
   // remove action is in the shouldRevalidate skip list).
   const [removedListIds, setRemovedListIds] = useState<Set<number>>(new Set());
-  const effectiveBadges = packingListBadges.filter((b) => !removedListIds.has(b.packingListId));
   // Picker options = every packing list the product is/was in (badges) PLUS every
   // OPEN (not-yet-loaded) packing list, deduped. Deliberately NOT filtered by the
   // optimistic removedListIds, so a list you crossed off — even by accident —
@@ -31246,12 +31220,13 @@ function StatusCell({
     }
     return out;
   })();
-  // Resolve the linked packing list to a badge for display. Falls back to
-  // the productId-based lookup so legacy rows without an explicit link
-  // still show their badge.
-  const linkedBadge = linkLocal && !removedListIds.has(linkLocal)
-    ? pickerOptions.find((opt) => opt.packingListId === linkLocal) ?? null
-    : (effectiveBadges[0] ?? null);
+  // Show a packing-list badge ONLY when THIS order is explicitly linked to a list
+  // (order.packingListId). An unlinked order shows the picker dropdown instead —
+  // no auto-selected shipment — so the user chooses which shipment each order
+  // goes into (a product can be in more than one).
+  const linkedBadge: PackingListBadge | null = linkLocal && !removedListIds.has(linkLocal)
+    ? (pickerOptions.find((opt) => opt.packingListId === linkLocal) ?? { packingListId: linkLocal, invoiceNumber: null, title: `List #${linkLocal}` })
+    : null;
   const showLinkUI = statusLocal === "in_shipment";
   const submitLink = (next: number | null) => {
     setLinkLocal(next);
