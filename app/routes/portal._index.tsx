@@ -6473,40 +6473,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const raw = String(form.get("value") ?? "").trim();
     const parsed = raw === "" ? null : Number(raw);
     if (parsed !== null && (!Number.isFinite(parsed) || parsed <= 0)) return null;
+    // SOFT association ONLY. The restock page must NEVER create, modify or delete
+    // PackingListLine rows — packing lists are owned and filled in by hand by
+    // staff and their quantities must stay exactly as entered. This records only
+    // which shipment the order is associated with (drives the restock badge); the
+    // Collections shipment view reads the real staff-managed PackingListLine rows.
     updates.packingListId = parsed;
-    // Put the order into the shipment AND keep the shipment total correct when a
-    // product has SEVERAL restock orders: a product's packing-list line is the
-    // SUM of every order of that product linked to that list. Persist this
-    // order's link now, then rebuild the line(s) for each affected list from all
-    // their linked orders — so the Collections shipment chip shows the combined
-    // total. (Removal is handled by remove_order_from_packing_list below.)
-    // Link ONLY this order to the chosen list (no auto-pull of other orders — the
-    // user picks each order's shipment manually), then rebuild the line(s) for
-    // each affected list from whatever orders are linked to it, so a list that
-    // several orders point at still sums them.
-    const ord = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { productId: true, packingListId: true } });
-    if (ord?.productId) {
-      await prisma.supplierOrder.update({ where: { id: orderId }, data: { packingListId: parsed } }).catch(() => {});
-      const affected = new Set<number>();
-      if (parsed !== null) affected.add(parsed);
-      if (ord.packingListId && ord.packingListId !== parsed) affected.add(ord.packingListId);
-      for (const pl of affected) await reconcilePackingLineFromOrders(pl, ord.productId);
-    }
   }
 
-  // Remove THIS order from a shipment: unlink it, then rebuild the product's line
-  // from whatever orders remain linked to that list (so other orders of the same
-  // product stay in the shipment with the right total). If no linked orders
-  // remain, the line is deleted — the product is truly out of the shipment and
-  // the picker reappears to assign a different one.
+  // Clear the soft shipment association for this order. Does NOT touch the
+  // packing-list line — staff own the packing-list contents.
   if (intent === "remove_order_from_packing_list") {
     const listId = Number(form.get("packingListId"));
     if (!listId) return jsonResponse({ ok: false, error: "no_list" });
-    const order = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { productId: true, packingListId: true } });
+    const order = await prisma.supplierOrder.findUnique({ where: { id: orderId }, select: { packingListId: true } });
     if (order?.packingListId === listId) {
       await prisma.supplierOrder.update({ where: { id: orderId }, data: { packingListId: null } }).catch(() => {});
     }
-    if (order?.productId) await reconcilePackingLineFromOrders(listId, order.productId);
     return jsonResponse({ ok: true });
   }
 
@@ -26245,66 +26228,12 @@ async function reconcileOrderFabricConsumption(_orderId: number): Promise<void> 
   return; // no-op: fabric stock is manual
 }
 
-// The packing-list LINE for a product = the SUM of every restock order of that
-// product currently linked to that packing list (SupplierOrder.packingListId).
-// Rebuilt whenever an order is linked to / unlinked from a shipment, so when a
-// product has several restock orders in one shipment the Collections page shows
-// their COMBINED total. Writes only `qtys` on an existing line (preserving the
-// loaded-qty tracking); deletes the order-driven line when no linked order with
-// quantity remains. Best-effort; never throws.
-async function reconcilePackingLineFromOrders(packingListId: number, productId: string): Promise<void> {
-  try {
-    if (!packingListId || !productId) return;
-    const orders = await prisma.supplierOrder.findMany({
-      where: { packingListId, productId },
-      select: { productTitle: true, productImageUrl: true, lines: { select: { variantTitle: true, qtyOrdered: true, sku: true } } },
-    });
-    const qtys: Record<string, number> = {};
-    const skus = new Set<string>();
-    let title = "";
-    let image: string | null = null;
-    for (const o of orders) {
-      if (!title && o.productTitle) title = o.productTitle;
-      if (!image && o.productImageUrl) image = o.productImageUrl;
-      for (const l of o.lines) {
-        const sz = canonicalRestockSize(l.variantTitle);
-        if (sz) qtys[sz] = (qtys[sz] ?? 0) + (l.qtyOrdered || 0);
-        if (l.sku?.trim()) skus.add(l.sku.trim());
-      }
-    }
-    const hasQty = Object.values(qtys).some((n) => n > 0);
-    const existing = await prisma.packingListLine.findFirst({
-      where: { packingListId, productId, isCustom: false },
-      orderBy: { id: "asc" },
-      select: { id: true },
-    });
-    if (!orders.length || !hasQty) {
-      // No linked orders left with quantity → remove the order-driven line(s).
-      await prisma.packingListLine.deleteMany({ where: { packingListId, productId, isCustom: false } }).catch(() => {});
-      return;
-    }
-    if (existing) {
-      await prisma.packingListLine.update({ where: { id: existing.id }, data: { qtys } });
-      // Collapse any duplicate order-driven lines for this product into the one.
-      await prisma.packingListLine.deleteMany({ where: { packingListId, productId, isCustom: false, id: { not: existing.id } } }).catch(() => {});
-    } else {
-      const maxLine = await prisma.packingListLine.findFirst({ where: { packingListId }, orderBy: { sortOrder: "desc" }, select: { sortOrder: true } });
-      await prisma.packingListLine.create({
-        data: {
-          packingListId,
-          productId,
-          productTitle: title || "Untitled product",
-          productImageUrl: image,
-          sku: skus.size ? [...skus].join("\n") : null,
-          qtys,
-          sortOrder: (maxLine?.sortOrder ?? 0) + 1,
-        },
-      });
-    }
-  } catch (e) {
-    console.warn("[reconcilePackingLineFromOrders] failed:", e);
-  }
-}
+// NOTE: packing-list lines are NEVER derived from restock orders. Packing lists
+// are filled in by hand by staff and their quantities are the source of truth;
+// the restock page only keeps a soft SupplierOrder.packingListId association and
+// must not create/modify/delete PackingListLine rows. (An earlier
+// reconcilePackingLineFromOrders that rebuilt lines from order quantities was
+// removed because it overwrote staff-entered quantities.)
 
 // Keep the permanent cut log (ProductionCutRecord) and the order's editable
 // productionDate in step with the order's status. A cut is recorded ONLY on the
