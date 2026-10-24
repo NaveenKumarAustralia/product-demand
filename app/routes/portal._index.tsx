@@ -4425,9 +4425,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // / ungroup). The client sends the full normalized list.
     let groups: CollectionGroup[] = [];
     try { groups = normalizeCollectionGroups(JSON.parse(String(form.get("groups") ?? "[]"))); } catch { groups = []; }
-    // Keep ALL groups, including empty ones — a group may be an empty CONTAINER
-    // the user just created to nest child groups/collections into. Groups are
-    // only removed explicitly (Ungroup), never auto-dropped for being empty.
+    // Drop empty groups (no members) so ungrouping the last member removes it.
+    groups = groups.filter((g) => g.collectionIds.length > 0);
     await prisma.portalSetting.upsert({
       where: { key: COLLECTION_GROUPS_KEY },
       create: { key: COLLECTION_GROUPS_KEY, value: { groups } },
@@ -7117,16 +7116,12 @@ const COLLECTION_RELEASE_DATE_KEY = "collections-release-date-v1";
 // fabric's on-hand meters instead of guessing from the rows.
 const COLLECTION_FABRIC_LINK_KEY = "collections-fabric-link-v1";
 // Collection groups (reversible folders): a group bundles several collections
-// under one tile, AND can be NESTED inside another group via parentId — so you
-// can have e.g. "2027 summer" › "sep-oct" › … arbitrarily deep.
-// { groups: [{ id, name, collectionIds:[], parentId? }] }. Collections not in any
-// group show as top-level tiles; a collection lives in at most one group. A group
-// with no collections and no children is allowed (an empty container you fill in).
+// under one tile. { groups: [{ id, name, collectionIds:[] }] }. Collections not
+// in any group show as normal tiles; a collection lives in at most one group.
 const COLLECTION_GROUPS_KEY = "collections-groups-v1";
 // coverCollectionId: which member collection's thumbnail is the group's cover
 // tile. Optional — falls back to the first member that has a thumbnail.
-// parentId: the group this group lives inside (undefined = top level).
-type CollectionGroup = { id: string; name: string; collectionIds: number[]; coverCollectionId?: number; parentId?: string };
+type CollectionGroup = { id: string; name: string; collectionIds: number[]; coverCollectionId?: number };
 function normalizeCollectionGroups(value: unknown): CollectionGroup[] {
   const arr = value && typeof value === "object" && Array.isArray((value as { groups?: unknown }).groups)
     ? (value as { groups: unknown[] }).groups : Array.isArray(value) ? value : [];
@@ -7142,9 +7137,7 @@ function normalizeCollectionGroups(value: unknown): CollectionGroup[] {
       const rawCover = Number((g as CollectionGroup).coverCollectionId);
       // Keep the cover only if it's still a member of the group.
       const coverCollectionId = Number.isInteger(rawCover) && collectionIds.includes(rawCover) ? rawCover : undefined;
-      const parentId = String((g as CollectionGroup).parentId ?? "").trim();
-      // A group can't be its own parent; deeper cycles are broken at render time.
-      return id && name ? { id, name, collectionIds, ...(coverCollectionId != null ? { coverCollectionId } : {}), ...(parentId && parentId !== id ? { parentId } : {}) } : null;
+      return id && name ? { id, name, collectionIds, ...(coverCollectionId != null ? { coverCollectionId } : {}) } : null;
     })
     .filter((g): g is CollectionGroup => Boolean(g));
 }
@@ -17714,8 +17707,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   useEffect(() => { setGroups(collectionGroups); }, [collectionGroups]);
   const groupFetcher = useFetcher();
   const saveGroups = (next: CollectionGroup[]) => {
-    setGroups(next); // optimistic — empty groups are kept (containers to fill in)
-    groupFetcher.submit({ intent: "set_collection_groups", groups: JSON.stringify(next) }, { method: "post" });
+    const cleaned = next.filter((g) => g.collectionIds.length > 0);
+    setGroups(cleaned); // optimistic
+    groupFetcher.submit({ intent: "set_collection_groups", groups: JSON.stringify(cleaned) }, { method: "post" });
   };
   // ── Unified tile order (group folders + collection tiles, drag anywhere) ──
   const [tileOrder, setTileOrder] = useState<string[]>(collectionTileOrder);
@@ -17737,46 +17731,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     setSearchParams(next, { replace: false });
   };
   const groupedIds = useMemo(() => { const s = new Set<number>(); groups.forEach((g) => g.collectionIds.forEach((id) => s.add(id))); return s; }, [groups]);
-  // ── Nested-group tree helpers ────────────────────────────────────────────
-  const groupById = useMemo(() => new Map(groups.map((g) => [g.id, g] as const)), [groups]);
-  // The valid parent of a group: null if it has none, the parent doesn't exist,
-  // or following parents would form a cycle (then treat the group as top level).
-  const resolveParentId = (g: CollectionGroup): string | null => {
-    const pid = g.parentId;
-    if (!pid || !groupById.has(pid)) return null;
-    const seen = new Set<string>([g.id]);
-    let cur: string | undefined = pid;
-    while (cur) { if (cur === g.id) return null; if (seen.has(cur)) break; seen.add(cur); cur = groupById.get(cur)?.parentId; }
-    return pid;
-  };
-  // Groups whose (resolved) parent is containerId (null = top level).
-  const childGroups = (containerId: string | null): CollectionGroup[] => groups.filter((g) => resolveParentId(g) === containerId);
-  // Breadcrumb chain root-most → … → the given group.
-  const groupAncestors = (gid: string): CollectionGroup[] => {
-    const chain: CollectionGroup[] = []; const seen = new Set<string>();
-    let cur: CollectionGroup | undefined = groupById.get(gid);
-    while (cur && !seen.has(cur.id)) { chain.unshift(cur); seen.add(cur.id); const p = resolveParentId(cur); cur = p ? groupById.get(p) : undefined; }
-    return chain;
-  };
-  // Is `maybe` the group itself or any ancestor of it? (used to block cycles)
-  const isSelfOrAncestor = (maybe: string, gid: string): boolean => {
-    let cur: string | undefined = gid; const seen = new Set<string>();
-    while (cur && !seen.has(cur)) { if (cur === maybe) return true; seen.add(cur); cur = resolveParentId(groupById.get(cur) ?? ({} as CollectionGroup)) ?? undefined; }
-    return false;
-  };
-  // Total collections in a group including all nested descendants.
-  const totalCollectionsIn = (gid: string): number => {
-    const g = groupById.get(gid); if (!g) return 0;
-    return g.collectionIds.length + childGroups(gid).reduce((n, c) => n + totalCollectionsIn(c.id), 0);
-  };
-  // A collection id in a group or any descendant with a thumbnail (for the cover).
-  const firstThumbIn = (gid: string): number | null => {
-    const g = groupById.get(gid); if (!g) return null;
-    const direct = g.collectionIds.find((id) => collections.some((c) => c.id === id && c.hasThumbnail));
-    if (direct != null) return direct;
-    for (const child of childGroups(gid)) { const t = firstThumbIn(child.id); if (t != null) return t; }
-    return null;
-  };
   // Progressive reveal of the (potentially long) ungrouped tile list so the
   // page paints instantly and fills in batch-by-batch.
   const ungroupedVisibleCount = collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter) && (showHidden || !groupedIds.has(c.id))).length;
@@ -17785,24 +17739,15 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const toggleSelect = (id: number) => setSelectedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const clearSelection = () => setSelectedIds(new Set());
-  const newGroupId = () => `g_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
-  // Create a group from the selected collections, nested inside the container
-  // currently being viewed (parentId = the open group, or top level).
   const groupSelected = () => {
     const ids = Array.from(selectedIds);
     if (ids.length < 2) return;
     const name = window.prompt("Name this group of collections:", "")?.trim();
     if (!name) return;
     const stripped = groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !selectedIds.has(id)) }));
-    saveGroups([...stripped, { id: newGroupId(), name, collectionIds: ids, ...(groupIdParam ? { parentId: groupIdParam } : {}) }]);
+    const id = `g_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+    saveGroups([...stripped, { id, name, collectionIds: ids }]);
     clearSelection();
-  };
-  // Create a new EMPTY group inside the container being viewed (nested under the
-  // open group, or at the top level) — a folder to fill with collections/subgroups.
-  const createGroupHere = () => {
-    const name = window.prompt(groupIdParam ? "Name the new group (inside this group):" : "Name the new group:", "")?.trim();
-    if (!name) return;
-    saveGroups([...groups, { id: newGroupId(), name, collectionIds: [], ...(groupIdParam ? { parentId: groupIdParam } : {}) }]);
   };
   // Add the currently-selected collections to an EXISTING group. A collection
   // only ever belongs to one group, so first pull them out of any other group.
@@ -17815,24 +17760,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
       : g));
     clearSelection();
   };
-  // Move (re-parent) a group under another group, or to the top level (null).
-  // Blocked if it would create a cycle (moving a group into itself/a descendant).
-  const moveGroupToParent = (groupId: string, parentId: string | null) => {
-    if (parentId && (parentId === groupId || isSelfOrAncestor(groupId, parentId))) return;
-    saveGroups(groups.map((g) => g.id === groupId ? { ...g, parentId: parentId ?? undefined } : g));
-  };
   const removeFromGroup = (collectionId: number) => saveGroups(groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => id !== collectionId) })));
-  // Ungroup/delete a group: its child groups and its collections move up into its
-  // parent (or to the top level when it has no parent), so nothing is lost.
-  const ungroup = (groupId: string) => {
-    const g = groupById.get(groupId); if (!g) return;
-    const parent = resolveParentId(g);
-    let next = groups.filter((x) => x.id !== groupId)
-      .map((x) => resolveParentId(x) === groupId ? { ...x, parentId: parent ?? undefined } : x);
-    if (parent) next = next.map((x) => x.id === parent ? { ...x, collectionIds: [...x.collectionIds, ...g.collectionIds.filter((id) => !x.collectionIds.includes(id))] } : x);
-    saveGroups(next);
-    openGroupNav(parent);
-  };
+  const ungroup = (groupId: string) => { saveGroups(groups.filter((g) => g.id !== groupId)); openGroupNav(null); };
   const renameGroup = (groupId: string) => { const g = groups.find((x) => x.id === groupId); if (!g) return; const name = window.prompt("Rename group:", g.name)?.trim(); if (!name) return; saveGroups(groups.map((x) => x.id === groupId ? { ...x, name } : x)); };
   // Group cover image: pick which member collection's thumbnail represents the
   // group tile (null = back to auto / first member with an image).
@@ -17972,18 +17901,13 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   // collection) to the dropped-on tile's position within the full ordered list.
   const reorderTiles = (orderedTokens: string[], targetToken: string) => {
     if (!dragToken || dragToken === targetToken) return;
-    // Reorder within the GLOBAL saved order (not just this container's subset),
-    // so moving a tile inside one group never reshuffles another container. Each
-    // container renders its own tokens sorted by their position in this list.
-    const global = [...tileOrder];
-    for (const t of orderedTokens) if (!global.includes(t)) global.push(t);
-    const from = global.indexOf(dragToken);
-    if (from < 0) return;
-    global.splice(from, 1);
-    const to = global.indexOf(targetToken);
-    if (to < 0) return;
-    global.splice(to, 0, dragToken);
-    saveTileOrder(global);
+    const from = orderedTokens.indexOf(dragToken);
+    const to = orderedTokens.indexOf(targetToken);
+    if (from < 0 || to < 0) return;
+    const next = [...orderedTokens];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    saveTileOrder(next);
   };
   // Shared drag handlers for a tile (group or collection). CollectionCard already
   // sets `draggable` on its handle; the group tile div adds `draggable` itself.
@@ -18040,33 +17964,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         <div style={{ ...s.productInfoToolbarLeft, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           {openGroup ? (
             <>
-              {/* Breadcrumb: All collections › 2027 summer › sep-oct › … */}
-              <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", fontSize: 13, fontWeight: 700 }}>
-                <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontWeight: 700, cursor: "pointer", color: "#374151" }}>← All collections</button>
-                {groupAncestors(openGroup.id).map((a, i, arr) => (
-                  <span key={a.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <span style={{ color: "#9ca3af" }}>›</span>
-                    {i === arr.length - 1
-                      ? <span style={{ color: "#0f766e", padding: "6px 4px" }}>{a.name}</span>
-                      : <button type="button" onClick={() => { clearSelection(); openGroupNav(a.id); }} style={{ background: "transparent", border: "none", padding: "6px 4px", fontWeight: 700, cursor: "pointer", color: "#374151", textDecoration: "underline" }}>{a.name}</button>}
-                  </span>
-                ))}
-              </div>
-              <button type="button" onClick={createGroupHere} style={{ background: "#0f766e", border: "1px solid #0f766e", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#fff" }} title="Create a new group inside this group">＋ New group</button>
+              <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#374151" }}>← All collections</button>
+              <button type="button" onClick={() => { const next = new URLSearchParams(searchParams); next.set("page", "photoshoot"); next.delete("collectionId"); next.delete("shootId"); next.delete("groupId"); setSearchParams(next); }} style={{ padding: "8px 20px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer" }}>Photo Shoot</button>
               <button type="button" onClick={() => renameGroup(openGroup.id)} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Rename</button>
-              <select
-                value=""
-                onChange={(e) => { const v = e.target.value; if (v === "__top") moveGroupToParent(openGroup.id, null); else if (v) moveGroupToParent(openGroup.id, v); }}
-                title="Move this group into another group (or to the top level)"
-                style={{ background: "#fff", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 8px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}
-              >
-                <option value="">Move to…</option>
-                {resolveParentId(openGroup) !== null && <option value="__top">Top level</option>}
-                {groups.filter((g) => g.id !== openGroup.id && !isSelfOrAncestor(openGroup.id, g.id) && resolveParentId(openGroup) !== g.id).map((g) => (
-                  <option key={g.id} value={g.id}>{"— ".repeat(groupAncestors(g.id).length - 1)}{g.name}</option>
-                ))}
-              </select>
-              <button type="button" onClick={() => { if (window.confirm("Ungroup — put this group's collections and sub-groups back one level up?")) ungroup(openGroup.id); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Ungroup</button>
+              <button type="button" onClick={() => { if (window.confirm("Ungroup — put these collections back as individual tiles?")) ungroup(openGroup.id); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Ungroup</button>
             </>
           ) : (
             <>
@@ -18088,9 +17989,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           )}
         </div>
         <div style={s.productInfoActions}>
-          {!openGroup && !showHidden && (
-            <button type="button" onClick={createGroupHere} style={{ padding: "8px 16px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #0f766e", background: "#fff", color: "#0f766e", cursor: "pointer" }} title="Create an empty group tile to fill with collections and sub-groups">＋ New group</button>
-          )}
           <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
             Add Collection
           </button>
@@ -18164,25 +18062,45 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         const selectionBar = selectedIds.size > 0 ? (
           <div style={{ margin: "0 14px 12px", padding: "8px 12px", background: "#0d9488", color: "#fff", borderRadius: 8, display: "flex", alignItems: "center", gap: 12, fontSize: 13, fontWeight: 700, flexWrap: "wrap" }}>
             <span>{selectedIds.size} selected</span>
-            <button type="button" onClick={groupSelected} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title={openGroup ? "Keep these as separate tiles inside a NEW sub-group here" : "Keep separate tiles inside one folder"}>📁 Combine into group</button>
-            <button type="button" onClick={combineIntoCollection} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#b45309", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title="Merge all rows into one collection and delete the rest">⧉ Combine into collection</button>
-            {groups.length > 0 && (
-              <select
-                value=""
-                onChange={(e) => { if (e.target.value) addSelectedToGroup(e.target.value); }}
-                title="Move the selected collections into a group (nested groups are indented)"
-                style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 10px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
-              >
-                <option value="">＋ Move to group…</option>
-                {groups.map((g) => <option key={g.id} value={g.id}>{"— ".repeat(Math.max(0, groupAncestors(g.id).length - 1))}{g.name}</option>)}
-              </select>
-            )}
-            {openGroup && (
+            {openGroup ? (
               <button type="button" onClick={() => { Array.from(selectedIds).forEach((id) => removeFromGroup(id)); clearSelection(); }} style={{ background: "#fff", color: "#b91c1c", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: "pointer" }}>Remove from group</button>
+            ) : (
+              <>
+                <button type="button" onClick={groupSelected} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title="Keep separate tiles inside one folder">📁 Combine into group</button>
+                <button type="button" onClick={combineIntoCollection} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#b45309", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title="Merge all rows into one collection and delete the rest">⧉ Combine into collection</button>
+                {groups.length > 0 && (
+                  <select
+                    value=""
+                    onChange={(e) => { if (e.target.value) addSelectedToGroup(e.target.value); }}
+                    title="Add the selected collections to an existing group"
+                    style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 10px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+                  >
+                    <option value="">＋ Add to existing group…</option>
+                    {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select>
+                )}
+              </>
             )}
             <button type="button" onClick={clearSelection} style={{ background: "transparent", color: "#fff", border: "1px solid rgba(255,255,255,0.5)", borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}>Cancel</button>
           </div>
         ) : null;
+
+        if (openGroup) {
+          const members = visibleCollections.filter((c) => openGroup.collectionIds.includes(c.id));
+          return (
+            <div>
+              {/* Group nav (← All collections / name / Rename / Ungroup / count) now
+                  lives in the top toolbar; only the tiles render here. */}
+              {selectionBar}
+              <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
+                {members.map(card)}
+                {members.length === 0 && (
+                  <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>This group is empty.</div>
+                )}
+              </div>
+            </div>
+          );
+        }
 
         // While SEARCHING or viewing HIDDEN: no groups — show the flat (old)
         // collection list with the per-collection drag (reorder()).
@@ -18203,24 +18121,19 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           );
         }
 
-        // Unified container grid: the child GROUPS + the direct collections of the
-        // container being viewed (top level, or the open group), as one freely-
-        // draggable token grid. Same at every nesting depth. Saved order wins.
-        const containerId = openGroup ? openGroup.id : null;
-        const kidGroups = childGroups(containerId);
-        const directCols = containerId === null
-          ? visibleCollections.filter((c) => !groupedIds.has(c.id))
-          : visibleCollections.filter((c) => (groupById.get(containerId)?.collectionIds ?? []).includes(c.id));
-        const defaultOrder = [...kidGroups.map((g) => `g:${g.id}`), ...directCols.map((c) => `c:${c.id}`)];
+        // DEFAULT view: one unified, freely-draggable grid of group folders +
+        // ungrouped collection tiles. Saved tile order wins; brand-new tiles
+        // append (groups first). Drag any tile — group or collection — anywhere.
+        const ungroupedCols = visibleCollections.filter((c) => !groupedIds.has(c.id));
+        const defaultOrder = [...groups.map((g) => `g:${g.id}`), ...ungroupedCols.map((c) => `c:${c.id}`)];
         const savedValid = tileOrder.filter((t) => defaultOrder.includes(t));
         const orderedTokens = [...savedValid, ...defaultOrder.filter((t) => !savedValid.includes(t))];
-        const kidGroupById = new Map(kidGroups.map((g) => [g.id, g] as const));
-        const colById = new Map(directCols.map((c) => [c.id, c] as const));
+        const groupById = new Map(groups.map((g) => [g.id, g] as const));
+        const colById = new Map(ungroupedCols.map((c) => [c.id, c] as const));
         const groupTile = (g: CollectionGroup) => {
-          const childCount = childGroups(g.id).length;
-          const colCount = totalCollectionsIn(g.id);
-          const coverId = (g.coverCollectionId != null && collections.some((c) => c.id === g.coverCollectionId && c.hasThumbnail)) ? g.coverCollectionId : firstThumbIn(g.id);
-          const cover = coverId != null ? collections.find((c) => c.id === coverId) : undefined;
+          const memberCount = g.collectionIds.length;
+          const picked = g.coverCollectionId != null ? collections.find((c) => c.id === g.coverCollectionId && c.hasThumbnail) : null;
+          const cover = picked ?? collections.find((c) => g.collectionIds.includes(c.id) && c.hasThumbnail);
           const token = `g:${g.id}`;
           const over = dragOverToken === token && dragToken !== token;
           return (
@@ -18238,7 +18151,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 ) : (
                   <div style={s.productStyleImageEmpty}>Group</div>
                 )}
-                <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(15,118,110,0.95)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)", pointerEvents: "none" }}>📦 {childCount > 0 ? `${childCount} group${childCount !== 1 ? "s" : ""} · ` : ""}{colCount} collection{colCount !== 1 ? "s" : ""}</div>
+                <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(15,118,110,0.95)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)", pointerEvents: "none" }}>📦 {memberCount} collection{memberCount !== 1 ? "s" : ""}</div>
                 <button type="button" title="Change cover image" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 8, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 6, padding: "3px 7px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>🖼</button>
                 <div style={{ position: "absolute", inset: 0, boxShadow: "inset 0 0 0 3px rgba(255,255,255,0.5)", borderRadius: 6, pointerEvents: "none" }} />
               </div>
@@ -18282,7 +18195,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             {selectionBar}
             <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
               {orderedTokens.map((token) => {
-                if (token.startsWith("g:")) { const g = kidGroupById.get(token.slice(2)); return g ? groupTile(g) : null; }
+                if (token.startsWith("g:")) { const g = groupById.get(token.slice(2)); return g ? groupTile(g) : null; }
                 const c = colById.get(Number(token.slice(2)));
                 if (!c) return null;
                 if (shownCols >= tileLimit) return null;
@@ -18291,9 +18204,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               })}
               {orderedTokens.length === 0 && (
                 <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-                  {containerId !== null
-                    ? "This group is empty — use ＋ New group to add a sub-group, or select collections and ‘Move to group’."
-                    : (fabricStatusFilter ? "No collections with this fabric status." : "No collections yet. Click Add Collection to create your first one.")}
+                  {fabricStatusFilter ? "No collections with this fabric status." : "No collections yet. Click Add Collection to create your first one."}
                 </div>
               )}
             </div>
