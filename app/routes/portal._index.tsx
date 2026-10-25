@@ -17777,10 +17777,20 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     for (const child of childGroups(gid)) { const t = firstThumbIn(child.id); if (t != null) return t; }
     return null;
   };
-  // Progressive reveal of the (potentially long) ungrouped tile list so the
-  // page paints instantly and fills in batch-by-batch.
-  const ungroupedVisibleCount = collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter) && (showHidden || !groupedIds.has(c.id))).length;
-  const tileLimit = useProgressiveReveal(ungroupedVisibleCount, `${showHidden}|${fabricStatusFilter}|${groupIdParam ?? ""}`);
+  // Progressive reveal of the (potentially long) tile list so the page paints
+  // instantly and fills in batch-by-batch. The cap is based on the number of
+  // collections IN THE CURRENT VIEW — the open group's members when inside a
+  // group, the flat list when searching/hidden, else the ungrouped tiles — so a
+  // group's members are NEVER capped by the (much smaller) ungrouped count.
+  const searchActive = search.trim().length > 0;
+  const revealTotal = useMemo(() => {
+    const vis = collections.filter((c) => (showHidden ? c.hidden : !c.hidden) && (!fabricStatusFilter || (c.fabricStatus ?? "") === fabricStatusFilter));
+    if (showHidden || searchActive) return vis.length;
+    const og = groupIdParam ? groups.find((g) => g.id === groupIdParam) : null;
+    if (og) return vis.filter((c) => og.collectionIds.includes(c.id)).length;
+    return vis.filter((c) => !groupedIds.has(c.id)).length;
+  }, [collections, showHidden, fabricStatusFilter, searchActive, groupIdParam, groups, groupedIds]);
+  const tileLimit = useProgressiveReveal(revealTotal, `${showHidden}|${fabricStatusFilter}|${groupIdParam ?? ""}|${searchActive}`);
   // Selection (checkbox) for creating a group.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const toggleSelect = (id: number) => setSelectedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
