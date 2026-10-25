@@ -46,6 +46,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     url.searchParams.get("productGroup") ?? url.searchParams.get("productType") ?? "",
   );
   const selectedStatus = url.searchParams.get("status") ?? "";
+  const selectedStatusEx = url.searchParams.get("statusEx") ?? "";
+  // Status filter is multi-select with include AND exclude: `status` is a
+  // comma-separated INCLUDE list, `statusEx` a comma-separated EXCLUDE list.
+  const statusIncludeSet = new Set(selectedStatus.split(",").map((s) => s.trim()).filter(Boolean));
+  const statusExcludeSet = new Set(selectedStatusEx.split(",").map((s) => s.trim()).filter(Boolean));
   const selectedPriority = url.searchParams.get("priority") ?? "";
   const selectedDestination = url.searchParams.get("destination") ?? "";
   const searchTitle = url.searchParams.get("q") ?? "";
@@ -765,7 +770,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .sort((a, b) => labelForOption(restockSettings.destinationOptions, a).localeCompare(labelForOption(restockSettings.destinationOptions, b)));
   const filteredOrdersUngrouped = normalizedOrders
     .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
-    .filter((order) => !selectedStatus || order.supplierStatus === selectedStatus)
+    .filter((order) => {
+      const st = order.supplierStatus ?? "";
+      if (statusIncludeSet.size && !statusIncludeSet.has(st)) return false;
+      if (statusExcludeSet.size && statusExcludeSet.has(st)) return false;
+      return true;
+    })
     .filter((order) => !selectedPriority || order.priority === selectedPriority)
     .filter((order) => !selectedDestination || order.destination === selectedDestination)
     .filter((order) => !serverSearchTitle || order.productTitle.toLowerCase().includes(serverSearchTitle.toLowerCase()))
@@ -1258,6 +1268,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     productGroups,
     selectedProductGroup,
     selectedStatus,
+    selectedStatusEx,
     selectedPriority,
     selectedDestination,
     searchTitle,
@@ -12471,6 +12482,7 @@ export default function PortalDashboard() {
     productGroups,
     selectedProductGroup,
     selectedStatus,
+    selectedStatusEx,
     selectedPriority,
     selectedDestination,
     searchTitle,
@@ -13292,7 +13304,7 @@ export default function PortalDashboard() {
               return <span style={{ fontSize: 14, fontWeight: 600, color: "#ffffff" }}>{n.toLocaleString()} sheet{n === 1 ? "" : "s"}</span>;
             })()}
             {isRestockPage && (() => {
-              const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
+              const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedStatusEx) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
               const showFiltered = filtersActive && (
                 restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
                 || restockTotalsFiltered.totalQty !== restockTotalsAll.totalQty
@@ -13499,12 +13511,14 @@ export default function PortalDashboard() {
             </label>
             <label style={s.filterLabel}>
               Status
-              <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
-                <option value="">All statuses</option>
-                {statusFilters.map((status) => (
-                  <option key={status} value={status}>{labelForOption(restockSettings.statusOptions, status)} ({statusFilterCounts[status] ?? 0})</option>
-                ))}
-              </select>
+              <StatusFilterMultiSelect
+                options={statusFilters}
+                counts={statusFilterCounts}
+                labelFor={(v) => labelForOption(restockSettings.statusOptions, v)}
+                include={selectedStatus ? selectedStatus.split(",").filter(Boolean) : []}
+                exclude={selectedStatusEx ? selectedStatusEx.split(",").filter(Boolean) : []}
+                onApply={(inc, exc) => updateParams({ status: inc.join(","), statusEx: exc.join(",") })}
+              />
             </label>
             <label style={s.filterLabel}>
               Priority
@@ -13544,12 +13558,14 @@ export default function PortalDashboard() {
             </label>
             <label style={s.filterLabel}>
               Status
-              <select value={selectedStatus} onChange={(event) => updateParams({ status: event.currentTarget.value })} style={s.productTypeFilter}>
-                <option value="">All statuses</option>
-                {statusFilters.map((status: string) => (
-                  <option key={status} value={status}>{labelForOption(restockSettings.statusOptions, status)} ({statusFilterCounts[status] ?? 0})</option>
-                ))}
-              </select>
+              <StatusFilterMultiSelect
+                options={statusFilters as string[]}
+                counts={statusFilterCounts}
+                labelFor={(v) => labelForOption(restockSettings.statusOptions, v)}
+                include={selectedStatus ? selectedStatus.split(",").filter(Boolean) : []}
+                exclude={selectedStatusEx ? selectedStatusEx.split(",").filter(Boolean) : []}
+                onApply={(inc, exc) => updateParams({ status: inc.join(","), statusEx: exc.join(",") })}
+              />
             </label>
             <label style={s.filterLabel}>
               Destination
@@ -17375,6 +17391,71 @@ function DropboxPanel() {
 
 type PhotoShootListItem = { id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date | string; updatedAt: Date | string };
 type PhotoShootFullType = { id: number; name: string; rows: unknown };
+
+// Restock Status filter: multi-select with INCLUDE and EXCLUDE. Each status
+// cycles neutral → include (green ✓) → exclude (red ✕) → neutral. Changes are
+// applied (to the URL params, which re-run the loader) when the popover closes,
+// so picking several statuses is one reload, not one per click.
+function StatusFilterMultiSelect({ options, counts, labelFor, include, exclude, onApply }: {
+  options: string[];
+  counts: Record<string, number>;
+  labelFor: (v: string) => string;
+  include: string[];
+  exclude: string[];
+  onApply: (include: string[], exclude: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const buildState = () => { const m: Record<string, "inc" | "exc"> = {}; include.forEach((s) => { m[s] = "inc"; }); exclude.forEach((s) => { m[s] = "exc"; }); return m; };
+  const [state, setState] = useState<Record<string, "inc" | "exc">>(buildState);
+  const ref = useRef<HTMLDivElement>(null);
+  // Re-sync when the applied filter changes elsewhere (e.g. loader reload / Clear).
+  useEffect(() => { setState(buildState()); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [include.join(","), exclude.join(",")]);
+  const apply = () => {
+    const inc = Object.keys(state).filter((k) => state[k] === "inc");
+    const exc = Object.keys(state).filter((k) => state[k] === "exc");
+    if (inc.join(",") !== include.join(",") || exc.join(",") !== exclude.join(",")) onApply(inc, exc);
+  };
+  // Apply + close when clicking outside.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) { apply(); setOpen(false); } };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  });
+  const cycle = (status: string) => setState((prev) => { const cur = prev[status]; const next = { ...prev }; if (!cur) next[status] = "inc"; else if (cur === "inc") next[status] = "exc"; else delete next[status]; return next; });
+  const incN = include.length, excN = exclude.length;
+  const summary = incN === 0 && excN === 0 ? "All statuses" : [incN ? `${incN} incl` : "", excN ? `${excN} excl` : ""].filter(Boolean).join(" · ");
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button type="button" onClick={() => { if (open) { apply(); setOpen(false); } else setOpen(true); }} style={{ ...s.productTypeFilter, textAlign: "left", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, minWidth: 140, background: (incN || excN) ? "#eef2ff" : "#fff" }} title="Include / exclude statuses">
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</span>
+        <span style={{ color: "#6b7280", fontSize: 10 }}>▾</span>
+      </button>
+      {open && (
+        <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 1400, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 12px 30px rgba(0,0,0,0.18)", padding: 6, minWidth: 230, maxHeight: 340, overflow: "auto" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 8px 6px", fontSize: 11, color: "#6b7280" }}>
+            <span>Click to cycle: incl → excl → off</span>
+            <button type="button" onClick={() => setState({})} style={{ background: "transparent", border: "none", color: "#0d9488", fontWeight: 700, fontSize: 11, cursor: "pointer" }}>Clear</button>
+          </div>
+          {options.length === 0 && <div style={{ padding: "8px 10px", fontSize: 12, color: "#9ca3af" }}>No statuses.</div>}
+          {options.map((status) => {
+            const st = state[status];
+            const bg = st === "inc" ? "#dcfce7" : st === "exc" ? "#fee2e2" : "#f9fafb";
+            const mark = st === "inc" ? "✓" : st === "exc" ? "✕" : "";
+            const markColor = st === "inc" ? "#15803d" : st === "exc" ? "#b91c1c" : "#9ca3af";
+            return (
+              <button key={status} type="button" onClick={() => cycle(status)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "7px 9px", margin: "2px 0", border: "1px solid #e5e7eb", borderRadius: 6, background: bg, cursor: "pointer", fontSize: 13, fontWeight: 600, color: "#111827", textAlign: "left" }}>
+                <span style={{ width: 16, textAlign: "center", color: markColor, fontWeight: 800 }}>{mark}</span>
+                <span style={{ flex: 1 }}>{labelFor(status)}</span>
+                <span style={{ color: "#6b7280", fontSize: 12 }}>{counts[status] ?? 0}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Segmented toggle at the top of the Collections / Photo Shoot section.
 // Switches the page param (and clears any open collection/shoot).
