@@ -18053,12 +18053,15 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         <div style={{ ...s.productInfoToolbarLeft, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           {openGroup ? (
             <>
-              {/* Breadcrumb: All collections › 2027 summer › sep-oct › … */}
+              {/* ← Back (up one level) + Collections (home) + path breadcrumb. */}
+              <button type="button" onClick={() => { clearSelection(); openGroupNav(resolveParentId(openGroup)); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#374151" }} title="Back one level">← Back</button>
+              {resolveParentId(openGroup) !== null && (
+                <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#374151" }} title="Back to Collections home">Collections</button>
+              )}
               <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", fontSize: 13, fontWeight: 700 }}>
-                <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontWeight: 700, cursor: "pointer", color: "#374151" }}>← Collections</button>
                 {groupAncestors(openGroup.id).map((a, i, arr) => (
                   <span key={a.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <span style={{ color: "#9ca3af" }}>›</span>
+                    {i > 0 && <span style={{ color: "#9ca3af" }}>›</span>}
                     {i === arr.length - 1
                       ? <span style={{ color: "#0f766e", padding: "6px 4px" }}>{a.name}</span>
                       : <button type="button" onClick={() => { clearSelection(); openGroupNav(a.id); }} style={{ background: "transparent", border: "none", padding: "6px 4px", fontWeight: 700, cursor: "pointer", color: "#374151", textDecoration: "underline" }}>{a.name}</button>}
@@ -18998,6 +19001,16 @@ function CollectionSpreadsheetPage({
     next.set("page", "photoshoot");
     next.delete("collectionId");
     next.delete("shootId");
+    next.delete("groupId");
+    setSheetSearchParams(next);
+  };
+  // This sheet's group context: when opened from inside a group, the URL keeps
+  // groupId, so "← Back" (onBack) returns to that group. "Collections" jumps
+  // straight to the tile home (clears both the sheet and the group).
+  const sheetGroupId = sheetSearchParams.get("groupId");
+  const goCollectionsHome = () => {
+    const next = new URLSearchParams(sheetSearchParams);
+    next.delete("collectionId");
     next.delete("groupId");
     setSheetSearchParams(next);
   };
@@ -20002,8 +20015,17 @@ function CollectionSpreadsheetPage({
             <button
               type="button"
               onClick={onBack}
+              title={sheetGroupId ? "Back to the group" : "Back to Collections"}
               style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-            >← Collections</button>
+            >← Back</button>
+          )}
+          {onBack && sheetGroupId && (
+            <button
+              type="button"
+              onClick={goCollectionsHome}
+              title="Back to Collections home"
+              style={{ background: "transparent", border: "1px solid #d1d5db", color: "#374151", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+            >Collections</button>
           )}
           {!hidePhotoShootToggle && (
             <button type="button" onClick={goToPhotoShoot} style={{ padding: "8px 20px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer" }}>Photo Shoot</button>
