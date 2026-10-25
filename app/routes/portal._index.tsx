@@ -17407,7 +17407,9 @@ function StatusFilterMultiSelect({ options, counts, labelFor, include, exclude, 
   const [open, setOpen] = useState(false);
   const buildState = () => { const m: Record<string, "inc" | "exc"> = {}; include.forEach((s) => { m[s] = "inc"; }); exclude.forEach((s) => { m[s] = "exc"; }); return m; };
   const [state, setState] = useState<Record<string, "inc" | "exc">>(buildState);
-  const ref = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   // Re-sync when the applied filter changes elsewhere (e.g. loader reload / Clear).
   useEffect(() => { setState(buildState()); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [include.join(","), exclude.join(",")]);
   const apply = () => {
@@ -17415,24 +17417,29 @@ function StatusFilterMultiSelect({ options, counts, labelFor, include, exclude, 
     const exc = Object.keys(state).filter((k) => state[k] === "exc");
     if (inc.join(",") !== include.join(",") || exc.join(",") !== exclude.join(",")) onApply(inc, exc);
   };
-  // Apply + close when clicking outside.
+  const placeMenu = () => { const r = btnRef.current?.getBoundingClientRect(); if (r) setPos({ top: r.bottom + 4, left: r.left }); };
+  const openMenu = () => { placeMenu(); setOpen(true); };
+  const closeMenu = () => { apply(); setOpen(false); };
+  // Close on outside click; keep the menu pinned under the button on scroll/resize.
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) { apply(); setOpen(false); } };
+    const onDoc = (e: MouseEvent) => { const t = e.target as Node; if (btnRef.current?.contains(t) || popRef.current?.contains(t)) return; closeMenu(); };
     document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    window.addEventListener("scroll", placeMenu, true);
+    window.addEventListener("resize", placeMenu);
+    return () => { document.removeEventListener("mousedown", onDoc); window.removeEventListener("scroll", placeMenu, true); window.removeEventListener("resize", placeMenu); };
   });
   const cycle = (status: string) => setState((prev) => { const cur = prev[status]; const next = { ...prev }; if (!cur) next[status] = "inc"; else if (cur === "inc") next[status] = "exc"; else delete next[status]; return next; });
   const incN = include.length, excN = exclude.length;
   const summary = incN === 0 && excN === 0 ? "All statuses" : [incN ? `${incN} incl` : "", excN ? `${excN} excl` : ""].filter(Boolean).join(" · ");
   return (
-    <div ref={ref} style={{ position: "relative" }}>
-      <button type="button" onClick={() => { if (open) { apply(); setOpen(false); } else setOpen(true); }} style={{ ...s.productTypeFilter, textAlign: "left", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, minWidth: 140, background: (incN || excN) ? "#eef2ff" : "#fff" }} title="Include / exclude statuses">
+    <>
+      <button ref={btnRef} type="button" onClick={() => { if (open) closeMenu(); else openMenu(); }} style={{ ...s.productTypeFilter, fontFamily: "inherit", boxSizing: "border-box", textAlign: "left", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: (incN || excN) ? "#eef2ff" : "#fff" }} title="Include / exclude statuses">
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</span>
         <span style={{ color: "#6b7280", fontSize: 10 }}>▾</span>
       </button>
-      {open && (
-        <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, zIndex: 1400, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 12px 30px rgba(0,0,0,0.18)", padding: 6, minWidth: 230, maxHeight: 340, overflow: "auto" }}>
+      {open && pos && typeof document !== "undefined" && createPortal(
+        <div ref={popRef} style={{ position: "fixed", top: pos.top, left: pos.left, zIndex: 3000, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 12px 30px rgba(0,0,0,0.22)", padding: 6, minWidth: 230, maxHeight: 340, overflow: "auto" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 8px 6px", fontSize: 11, color: "#6b7280" }}>
             <span>Click to cycle: incl → excl → off</span>
             <button type="button" onClick={() => setState({})} style={{ background: "transparent", border: "none", color: "#0d9488", fontWeight: 700, fontSize: 11, cursor: "pointer" }}>Clear</button>
@@ -17451,9 +17458,10 @@ function StatusFilterMultiSelect({ options, counts, labelFor, include, exclude, 
               </button>
             );
           })}
-        </div>
+        </div>,
+        document.body,
       )}
-    </div>
+    </>
   );
 }
 
