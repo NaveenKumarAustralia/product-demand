@@ -14,28 +14,41 @@ const PRODUCT_GROUP_RENAMES: Record<string, string> = {
   "Short Sleeve Dresses": "Dresses",
 };
 const RESTOCK_SETTINGS_KEY = "supplier-portal-restock-settings-v1";
+// The restock page's chip lists and colours (portal._index.tsx). Each option is
+// stored with its own bg/color in the restock settings and staff can edit them,
+// so callers get the colours here rather than keeping their own copy. Keep the
+// defaults and the obsolete/"ready" rules in step with normalizeRestockSettings
+// there.
+type RestockOption = { value: string; label: string; bg: string; color: string };
+
 const DEFAULT_STATUS_OPTIONS = [
   { value: "on_order", label: "On Order" },
   { value: "on_production", label: "On Production" },
+  { value: "ready", label: "Ready" },
   { value: "in_shipment", label: "In Shipment" },
-  { value: "packed", label: "Packed" },
-  { value: "arrived", label: "Arrived" },
-  { value: "arrived_loaded", label: "Arrived and Loaded" },
   { value: "cancelled", label: "Cancelled" },
-  { value: "ready_to_send", label: "Ready To Send" },
 ];
+const DEFAULT_STATUS_COLORS: Record<string, { bg: string; color: string }> = {
+  on_order: { bg: "#fef9c3", color: "#374151" },
+  on_production: { bg: "#dbeafe", color: "#374151" },
+  ready: { bg: "#ede9fe", color: "#4c1d95" },
+  in_shipment: { bg: "#dcfce7", color: "#14532d" },
+  cancelled: { bg: "#fee2e2", color: "#991b1b" },
+};
+// Merged into "ready" by the portal; never offered as a chip any more.
+const OBSOLETE_STATUS_VALUES = new Set(["packed", "ready_to_send", "arrived", "arrived_loaded"]);
+const STATUS_LABEL_NOISE = /^\s*invoice\b/i;
 const DEFAULT_PRIORITY_OPTIONS = [
-  { value: "low", label: "LOW" },
-  { value: "high", label: "HIGH" },
-  { value: "urgent", label: "URGENT" },
-  { value: "cancelled", label: "Cancelled" },
+  { value: "low", label: "LOW", bg: "#3b82f6", color: "#fff" },
+  { value: "high", label: "HIGH", bg: "#7c3aed", color: "#fff" },
+  { value: "urgent", label: "URGENT", bg: "#dc2626", color: "#fff" },
+  { value: "cancelled", label: "Cancelled", bg: "#d97706", color: "#fff" },
 ];
-// Mirrors DEFAULT_DESTINATION_OPTIONS in portal._index.tsx. Callers that let a
-// destination be changed need the same list the portal itself offers.
+// Callers that let a destination be changed need the same list the portal offers.
 const DEFAULT_DESTINATION_OPTIONS = [
-  { value: "keep_at_factory", label: "Keep at factory" },
-  { value: "send_to_au", label: "Send to AUS" },
-  { value: "send_to_usa", label: "Send to USA" },
+  { value: "keep_at_factory", label: "Keep at factory", bg: "#fee2e2", color: "#b91c1c" },
+  { value: "send_to_au", label: "Send to AUS", bg: "#fef9c3", color: "#a16207" },
+  { value: "send_to_usa", label: "Send to USA", bg: "#cffafe", color: "#0e7490" },
 ];
 
 function normalizeProductGroup(value?: string | null) {
@@ -43,35 +56,67 @@ function normalizeProductGroup(value?: string | null) {
   return PRODUCT_GROUP_RENAMES[trimmed] ?? trimmed;
 }
 
-function normalizeOptions(value: unknown, defaults: Array<{ value: string; label: string }>) {
+function slugForOption(label: string) {
+  return label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function normalizeHexColor(value: unknown, fallback: string) {
+  const color = String(value ?? "").trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color : fallback;
+}
+
+function normalizeOptions(
+  value: unknown,
+  defaults: Array<{ value: string; label: string; bg?: string; color?: string }>,
+  defaultColors?: Record<string, { bg: string; color: string }>,
+): RestockOption[] {
   const usingDefaults = !Array.isArray(value);
-  const items = usingDefaults ? defaults : value;
+  const items = usingDefaults ? defaults : (value as unknown[]);
   const seen = new Set<string>();
   const normalized = items
     .map((item) => {
       if (!item || typeof item !== "object") return null;
       const option = item as Record<string, unknown>;
-      const optionValue = String(option.value ?? "").trim();
       const label = String(option.label ?? "").trim();
-      if (!optionValue || !label || seen.has(optionValue)) return null;
+      const optionValue = slugForOption(String(option.value ?? label));
+      if (!label || !optionValue || seen.has(optionValue)) return null;
       seen.add(optionValue);
-      return { value: optionValue, label };
+      const fallback = (defaultColors?.[optionValue] ?? defaults.find((d) => d.value === optionValue) ?? {}) as { bg?: string; color?: string };
+      return {
+        value: optionValue,
+        label,
+        bg: normalizeHexColor(option.bg, fallback.bg ?? "#f3f4f6"),
+        color: normalizeHexColor(option.color, fallback.color ?? "#374151"),
+      };
     })
-    .filter(Boolean) as Array<{ value: string; label: string }>;
+    .filter(Boolean) as RestockOption[];
   if (usingDefaults) {
-    for (const defaultOption of defaults) {
-      if (!seen.has(defaultOption.value)) normalized.push(defaultOption);
+    for (const d of defaults) {
+      if (seen.has(d.value)) continue;
+      const fallback = defaultColors?.[d.value] ?? d;
+      normalized.push({
+        value: d.value,
+        label: d.label,
+        bg: normalizeHexColor(d.bg, fallback.bg ?? "#f3f4f6"),
+        color: normalizeHexColor(d.color, fallback.color ?? "#374151"),
+      });
     }
   }
-  return normalized;
+  return normalized.length ? normalized : normalizeOptions(defaults, defaults, defaultColors);
 }
 
 function normalizeRestockSettings(value: unknown) {
   const settings = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
+  const statusOptions = normalizeOptions(settings.statusOptions, DEFAULT_STATUS_OPTIONS, DEFAULT_STATUS_COLORS)
+    .filter((option) => !OBSOLETE_STATUS_VALUES.has(option.value) && !STATUS_LABEL_NOISE.test(option.label));
+  if (!statusOptions.some((option) => option.value === "ready")) {
+    const insertAt = Math.max(0, statusOptions.findIndex((option) => option.value === "on_production") + 1);
+    statusOptions.splice(insertAt, 0, { value: "ready", label: "Ready", ...DEFAULT_STATUS_COLORS.ready });
+  }
   return {
-    statusOptions: normalizeOptions(settings.statusOptions, DEFAULT_STATUS_OPTIONS),
+    statusOptions,
     priorityOptions: normalizeOptions(settings.priorityOptions, DEFAULT_PRIORITY_OPTIONS),
     destinationOptions: normalizeOptions(settings.destinationOptions, DEFAULT_DESTINATION_OPTIONS),
   };
