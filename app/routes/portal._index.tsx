@@ -4297,7 +4297,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const existing = await prisma.collection.count();
     const initialThumb = form.get("thumbnail");
     const thumbnail = typeof initialThumb === "string" && initialThumb.length > 0 ? initialThumb : null;
-    await prisma.collection.create({ data: { name, kind, sortOrder: existing, thumbnail } });
+    const created = await prisma.collection.create({ data: { name, kind, sortOrder: existing, thumbnail } });
+    // When the sheet is added from inside a group, drop it into that group so it
+    // appears there straight away (the new id isn't known client-side).
+    const groupId = String(form.get("groupId") ?? "").trim();
+    if (groupId) {
+      const setting = await prisma.portalSetting.findUnique({ where: { key: COLLECTION_GROUPS_KEY }, select: { value: true } });
+      const groups = normalizeCollectionGroups(setting?.value);
+      if (groups.some((g) => g.id === groupId)) {
+        const next = groups.map((g) => g.id === groupId ? { ...g, collectionIds: [...g.collectionIds, created.id] } : g);
+        await prisma.portalSetting.upsert({ where: { key: COLLECTION_GROUPS_KEY }, create: { key: COLLECTION_GROUPS_KEY, value: { groups: next } }, update: { value: { groups: next } } });
+      }
+    }
     return null;
   }
   // Order-first "new product" flow: copy a (new/unlinked) JJ order row into the
@@ -12686,6 +12697,13 @@ export default function PortalDashboard() {
   // Totals (pieces + value) for the OPEN collection sheet — bubbled up from
   // CollectionSpreadsheetPage so the page header can show them next to the title.
   const [collectionTotals, setCollectionTotals] = useState<{ qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null>(null);
+  // Live group names reported up from CollectionsPanel, so the page-title header
+  // shows the current name (opening a group skips loader revalidation) and can
+  // trigger a rename by clicking the title. Stable callback → no render loop.
+  const [liveGroupNames, setLiveGroupNames] = useState<Record<string, string>>({});
+  const handleGroupsChange = useCallback((gs: CollectionGroup[]) => {
+    setLiveGroupNames(Object.fromEntries(gs.map((g) => [g.id, g.name])));
+  }, []);
   const [reorderSearch, setReorderSearch] = useState("");
   const [preorderSearch, setPreorderSearch] = useState("");
   useEffect(() => {
@@ -13224,8 +13242,20 @@ export default function PortalDashboard() {
                 const cid = searchParams.get("collectionId");
                 if (cid) { const c = collections.find((x: { id: number; name: string }) => x.id === Number(cid)); if (c) return c.name; }
                 const gid = searchParams.get("groupId");
-                const grp = gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
-                if (grp) return grp.name;
+                if (gid) {
+                  const name = liveGroupNames[gid] ?? collectionGroups.find((g: CollectionGroup) => g.id === gid)?.name ?? "Group";
+                  const triggerRename = () => window.dispatchEvent(new CustomEvent("portal:rename-group", { detail: { id: gid } }));
+                  return (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      title="Click to rename this group"
+                      onClick={triggerRename}
+                      onKeyDown={(e) => { if (e.key === "Enter") triggerRename(); }}
+                      style={{ cursor: "pointer", borderBottom: "2px dashed rgba(255,255,255,0.45)" }}
+                    >{name}</span>
+                  );
+                }
               }
               // Pre-orders: the header title IS the current sub-tab (the tabs now
               // live in the sidebar), so drop the generic "Pre-orders" heading.
@@ -13627,6 +13657,7 @@ export default function PortalDashboard() {
                 canSeeProductStatus={Boolean(currentUser?.admin || currentUser?.canSeeProductStatus)}
                 search={collectionSearch}
                 onTotalsChange={setCollectionTotals}
+                onGroupsChange={handleGroupsChange}
               />
             </div>
           </div>
@@ -17691,7 +17722,7 @@ function ButtonSpinner({ size = 14, color = "currentColor" }: { size?: number; c
 // which shipments each size went in and how many. Drives the collection size-cell
 // annotation + the auto "Not / Partly / Fully in shipment" status.
 type CollectionShipDetailMap = Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>>;
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, shipmentDetailByProductId = {}, restockStatusByProductId = {}, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], collectionTileOrder = [], canSeeProductStatus = false, search = "", onTotalsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; shipmentDetailByProductId?: CollectionShipDetailMap; restockStatusByProductId?: Record<string, string>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; collectionTileOrder?: string[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, shipmentDetailByProductId = {}, restockStatusByProductId = {}, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], collectionTileOrder = [], canSeeProductStatus = false, search = "", onTotalsChange, onGroupsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; shipmentDetailByProductId?: CollectionShipDetailMap; restockStatusByProductId?: Record<string, string>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; collectionTileOrder?: string[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void; onGroupsChange?: (groups: CollectionGroup[]) => void }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -17718,8 +17749,12 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const groupFetcher = useFetcher();
   const saveGroups = (next: CollectionGroup[]) => {
     setGroups(next); // optimistic — empty groups are kept (containers to fill in)
+    onGroupsChange?.(next); // keep the page-title header's group names in step
     groupFetcher.submit({ intent: "set_collection_groups", groups: JSON.stringify(next) }, { method: "post" });
   };
+  // Report the current group names up to the header on mount (so the page title
+  // shows the live name even though opening a group skips loader revalidation).
+  useEffect(() => { onGroupsChange?.(groups); }, [groups, onGroupsChange]);
   // ── Unified tile order (group folders + collection tiles, drag anywhere) ──
   const [tileOrder, setTileOrder] = useState<string[]>(collectionTileOrder);
   useEffect(() => { setTileOrder(collectionTileOrder); }, [collectionTileOrder]);
@@ -17847,6 +17882,15 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     openGroupNav(parent);
   };
   const renameGroup = (groupId: string) => { const g = groups.find((x) => x.id === groupId); if (!g) return; const name = window.prompt("Rename group:", g.name)?.trim(); if (!name) return; saveGroups(groups.map((x) => x.id === groupId ? { ...x, name } : x)); };
+  // The page-title header (parent component) triggers a group rename by
+  // dispatching this event, so the rename runs HERE with the live groups state.
+  const renameGroupRef = useRef(renameGroup);
+  renameGroupRef.current = renameGroup;
+  useEffect(() => {
+    const h = (e: Event) => { const id = (e as CustomEvent<{ id?: string }>).detail?.id; if (id) renameGroupRef.current(id); };
+    window.addEventListener("portal:rename-group", h);
+    return () => window.removeEventListener("portal:rename-group", h);
+  }, []);
   // Group cover image: pick which member collection's thumbnail represents the
   // group tile (null = back to auto / first member with an image).
   const [coverPickerGroupId, setCoverPickerGroupId] = useState<string | null>(null);
@@ -17908,7 +17952,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
 
   const submitAdd = () => {
     const name = addName.trim() || "Untitled collection";
-    fetcher.submit({ intent: "add_collection", name, kind: collectionKind }, { method: "post" });
+    // When adding from inside a group, the server drops the new sheet into it.
+    fetcher.submit({ intent: "add_collection", name, kind: collectionKind, ...(groupIdParam ? { groupId: groupIdParam } : {}) }, { method: "post" });
     setAddOpen(false);
     setAddName("");
   };
@@ -18047,9 +18092,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           few collections (which left big empty gaps top and bottom). */}
       <div style={{ ...s.productInfoPage, flex: 1, minHeight: 0, alignContent: "start" }}>
       <div style={s.productInfoToolbar}>
-        {/* Left of the bar: normally the Collections/Photo Shoot toggle + Fabric
-            filter. When a GROUP folder is open, it becomes the group nav instead —
-            "← All collections", the group name, Rename, Ungroup, and its count. */}
+        {/* Left of the bar: normally the Collections/Photo Shoot toggle. When a
+            GROUP folder is open, it becomes the group nav instead — ← Back,
+            Collections (home), the clickable parent path, and Move to…. The
+            group's own name is the page title up top (click it to rename). */}
         <div style={{ ...s.productInfoToolbarLeft, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
           {openGroup ? (
             <>
@@ -18058,18 +18104,14 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               {resolveParentId(openGroup) !== null && (
                 <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#374151" }} title="Back to Collections home">Collections</button>
               )}
-              <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", fontSize: 13, fontWeight: 700 }}>
-                {groupAncestors(openGroup.id).map((a, i, arr) => (
-                  <span key={a.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    {i > 0 && <span style={{ color: "#9ca3af" }}>›</span>}
-                    {i === arr.length - 1
-                      ? <span style={{ color: "#0f766e", padding: "6px 4px" }}>{a.name}</span>
-                      : <button type="button" onClick={() => { clearSelection(); openGroupNav(a.id); }} style={{ background: "transparent", border: "none", padding: "6px 4px", fontWeight: 700, cursor: "pointer", color: "#374151", textDecoration: "underline" }}>{a.name}</button>}
-                  </span>
-                ))}
-              </div>
-              <button type="button" onClick={createGroupHere} style={{ background: "#0f766e", border: "1px solid #0f766e", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#fff" }} title="Create a new group inside this group">＋ New group</button>
-              <button type="button" onClick={() => renameGroup(openGroup.id)} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Rename</button>
+              {/* Parent path only (clickable) — the CURRENT group's name is the
+                  page title up top, not repeated here. */}
+              {groupAncestors(openGroup.id).slice(0, -1).map((a) => (
+                <span key={a.id} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 700 }}>
+                  <button type="button" onClick={() => { clearSelection(); openGroupNav(a.id); }} style={{ background: "transparent", border: "none", padding: "6px 4px", fontWeight: 700, cursor: "pointer", color: "#374151", textDecoration: "underline" }}>{a.name}</button>
+                  <span style={{ color: "#9ca3af" }}>›</span>
+                </span>
+              ))}
               <select
                 value=""
                 onChange={(e) => { const v = e.target.value; if (v === "__top") moveGroupToParent(openGroup.id, null); else if (v) moveGroupToParent(openGroup.id, v); }}
@@ -18082,33 +18124,19 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                   <option key={g.id} value={g.id}>{"— ".repeat(groupAncestors(g.id).length - 1)}{g.name}</option>
                 ))}
               </select>
-              <button type="button" onClick={() => { if (window.confirm("Ungroup — put this group's sheets and sub-groups back one level up?")) ungroup(openGroup.id); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Ungroup</button>
             </>
           ) : (
             <>
               {!hidePhotoShootToggle && <CollectionsPhotoShootToggle active="collections" />}
-              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "#374151" }}>
-                Fabric
-                <select
-                  value={fabricStatusFilter}
-                  onChange={(e) => setFabricStatusFilter(e.target.value)}
-                  style={{ fontSize: 12, padding: "5px 8px", border: "1px solid #d1d5db", borderRadius: 6, background: fabricStatusFilter ? "#eef2ff" : "#fff", color: "#111827", cursor: "pointer", outline: "none" }}
-                  title="Show collections by fabric status"
-                >
-                  <option value="">All</option>
-                  <option value="in_stock">In stock</option>
-                  <option value="on_order">On order</option>
-                </select>
-              </label>
             </>
           )}
         </div>
         <div style={s.productInfoActions}>
-          {!openGroup && !showHidden && (
-            <button type="button" onClick={createGroupHere} style={{ padding: "8px 16px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #0f766e", background: "#fff", color: "#0f766e", cursor: "pointer" }} title="Create an empty group tile to fill with sheets and sub-groups">＋ New group</button>
+          {!showHidden && (
+            <button type="button" onClick={createGroupHere} style={{ padding: "8px 16px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #0f766e", background: "#fff", color: "#0f766e", cursor: "pointer" }} title={openGroup ? "Create a new group inside this group" : "Create an empty group tile to fill with sheets and sub-groups"}>＋ New group</button>
           )}
-          <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }} title="Add a collection sheet">
-            Add sheet
+          <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }} title={openGroup ? "Add a collection sheet to this group" : "Add a collection sheet"}>
+            Add collection sheet
           </button>
         </div>
       </div>
