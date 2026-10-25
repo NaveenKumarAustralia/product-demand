@@ -49,10 +49,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const selectedStatusEx = url.searchParams.get("statusEx") ?? "";
   // Status filter is multi-select with include AND exclude: `status` is a
   // comma-separated INCLUDE list, `statusEx` a comma-separated EXCLUDE list.
-  const statusIncludeSet = new Set(selectedStatus.split(",").map((s) => s.trim()).filter(Boolean));
-  const statusExcludeSet = new Set(selectedStatusEx.split(",").map((s) => s.trim()).filter(Boolean));
+  const csvSet = (v: string) => new Set(v.split(",").map((s) => s.trim()).filter(Boolean));
+  const statusIncludeSet = csvSet(selectedStatus);
+  const statusExcludeSet = csvSet(selectedStatusEx);
+  // Priority + Destination filters are the same include/exclude multi-select.
   const selectedPriority = url.searchParams.get("priority") ?? "";
+  const selectedPriorityEx = url.searchParams.get("priorityEx") ?? "";
+  const priorityIncludeSet = csvSet(selectedPriority);
+  const priorityExcludeSet = csvSet(selectedPriorityEx);
   const selectedDestination = url.searchParams.get("destination") ?? "";
+  const selectedDestinationEx = url.searchParams.get("destinationEx") ?? "";
+  const destIncludeSet = csvSet(selectedDestination);
+  const destExcludeSet = csvSet(selectedDestinationEx);
   const searchTitle = url.searchParams.get("q") ?? "";
   const serverSearchTitle = isRestockPage ? "" : searchTitle;
   const messageOrderId = Number(url.searchParams.get("messageOrderId") ?? 0) || null;
@@ -757,13 +765,19 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     .sort((a, b) => a.localeCompare(b));
   const statusFilters = Array.from(new Set(normalizedOrders.map((order) => order.supplierStatus).filter(Boolean)))
     .sort((a, b) => labelForOption(restockSettings.statusOptions, a).localeCompare(labelForOption(restockSettings.statusOptions, b)));
-  const statusFilterCounts = normalizedOrders
-    .filter((order) => !selectedProductGroup || order.productType === selectedProductGroup)
-    .filter((order) => !selectedPriority || order.priority === selectedPriority)
-    .reduce<Record<string, number>>((counts, order) => {
-      if (order.supplierStatus) counts[order.supplierStatus] = (counts[order.supplierStatus] ?? 0) + 1;
-      return counts;
-    }, {});
+  const groupScoped = normalizedOrders.filter((order) => !selectedProductGroup || order.productType === selectedProductGroup);
+  const statusFilterCounts = groupScoped.reduce<Record<string, number>>((counts, order) => {
+    if (order.supplierStatus) counts[order.supplierStatus] = (counts[order.supplierStatus] ?? 0) + 1;
+    return counts;
+  }, {});
+  const priorityFilterCounts = groupScoped.reduce<Record<string, number>>((counts, order) => {
+    if (order.priority) counts[order.priority] = (counts[order.priority] ?? 0) + 1;
+    return counts;
+  }, {});
+  const destinationFilterCounts = groupScoped.reduce<Record<string, number>>((counts, order) => {
+    if (order.destination) counts[order.destination] = (counts[order.destination] ?? 0) + 1;
+    return counts;
+  }, {});
   const priorityFilters = Array.from(new Set(normalizedOrders.map((order) => order.priority).filter(Boolean) as string[]))
     .sort((a, b) => labelForOption(restockSettings.priorityOptions, a).localeCompare(labelForOption(restockSettings.priorityOptions, b)));
   const destinationFilters = Array.from(new Set(normalizedOrders.map((order) => order.destination).filter(Boolean) as string[]))
@@ -776,8 +790,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (statusExcludeSet.size && statusExcludeSet.has(st)) return false;
       return true;
     })
-    .filter((order) => !selectedPriority || order.priority === selectedPriority)
-    .filter((order) => !selectedDestination || order.destination === selectedDestination)
+    .filter((order) => {
+      const p = order.priority ?? "";
+      if (priorityIncludeSet.size && !priorityIncludeSet.has(p)) return false;
+      if (priorityExcludeSet.size && priorityExcludeSet.has(p)) return false;
+      return true;
+    })
+    .filter((order) => {
+      const d = order.destination ?? "";
+      if (destIncludeSet.size && !destIncludeSet.has(d)) return false;
+      if (destExcludeSet.size && destExcludeSet.has(d)) return false;
+      return true;
+    })
     .filter((order) => !serverSearchTitle || order.productTitle.toLowerCase().includes(serverSearchTitle.toLowerCase()))
     .filter((order) => !messageOrderId || order.id === messageOrderId);
 
@@ -1274,6 +1298,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     searchTitle,
     statusFilters,
     statusFilterCounts,
+    selectedPriorityEx,
+    selectedDestinationEx,
+    priorityFilterCounts,
+    destinationFilterCounts,
     priorityFilters,
     destinationFilters,
     packingListsByProductId: Object.fromEntries(packingListsByProductId),
@@ -12488,6 +12516,10 @@ export default function PortalDashboard() {
     searchTitle,
     statusFilters,
     statusFilterCounts,
+    selectedPriorityEx,
+    selectedDestinationEx,
+    priorityFilterCounts,
+    destinationFilterCounts,
     priorityFilters,
     destinationFilters,
     packingListsByProductId,
@@ -13304,7 +13336,7 @@ export default function PortalDashboard() {
               return <span style={{ fontSize: 14, fontWeight: 600, color: "#ffffff" }}>{n.toLocaleString()} sheet{n === 1 ? "" : "s"}</span>;
             })()}
             {isRestockPage && (() => {
-              const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedStatusEx) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
+              const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedStatusEx) || Boolean(selectedPriority) || Boolean(selectedPriorityEx) || Boolean(selectedDestination) || Boolean(selectedDestinationEx) || Boolean(searchTitle);
               const showFiltered = filtersActive && (
                 restockTotalsFiltered.orderCount !== restockTotalsAll.orderCount
                 || restockTotalsFiltered.totalQty !== restockTotalsAll.totalQty
@@ -13522,21 +13554,27 @@ export default function PortalDashboard() {
             </label>
             <label style={s.filterLabel}>
               Priority
-              <select value={selectedPriority} onChange={(event) => updateParams({ priority: event.currentTarget.value })} style={s.productTypeFilter}>
-                <option value="">All priorities</option>
-                {priorityFilters.map((priority) => (
-                  <option key={priority} value={priority}>{labelForOption(restockSettings.priorityOptions, priority)}</option>
-                ))}
-              </select>
+              <StatusFilterMultiSelect
+                options={priorityFilters}
+                counts={priorityFilterCounts}
+                labelFor={(v) => labelForOption(restockSettings.priorityOptions, v)}
+                include={selectedPriority ? selectedPriority.split(",").filter(Boolean) : []}
+                exclude={selectedPriorityEx ? selectedPriorityEx.split(",").filter(Boolean) : []}
+                onApply={(inc, exc) => updateParams({ priority: inc.join(","), priorityEx: exc.join(",") })}
+                allLabel="All priorities"
+              />
             </label>
             <label style={s.filterLabel}>
               Destination
-              <select value={selectedDestination} onChange={(event) => updateParams({ destination: event.currentTarget.value })} style={s.productTypeFilter}>
-                <option value="">All destinations</option>
-                {destinationFilters.map((destination) => (
-                  <option key={destination} value={destination}>{labelForOption(restockSettings.destinationOptions, destination)}</option>
-                ))}
-              </select>
+              <StatusFilterMultiSelect
+                options={destinationFilters}
+                counts={destinationFilterCounts}
+                labelFor={(v) => labelForOption(restockSettings.destinationOptions, v)}
+                include={selectedDestination ? selectedDestination.split(",").filter(Boolean) : []}
+                exclude={selectedDestinationEx ? selectedDestinationEx.split(",").filter(Boolean) : []}
+                onApply={(inc, exc) => updateParams({ destination: inc.join(","), destinationEx: exc.join(",") })}
+                allLabel="All destinations"
+              />
             </label>
           </div>
         )}
@@ -13569,12 +13607,15 @@ export default function PortalDashboard() {
             </label>
             <label style={s.filterLabel}>
               Destination
-              <select value={selectedDestination} onChange={(event) => updateParams({ destination: event.currentTarget.value })} style={s.productTypeFilter}>
-                <option value="">All destinations</option>
-                {destinationFilters.map((destination: string) => (
-                  <option key={destination} value={destination}>{labelForOption(restockSettings.destinationOptions, destination)}</option>
-                ))}
-              </select>
+              <StatusFilterMultiSelect
+                options={destinationFilters as string[]}
+                counts={destinationFilterCounts}
+                labelFor={(v) => labelForOption(restockSettings.destinationOptions, v)}
+                include={selectedDestination ? selectedDestination.split(",").filter(Boolean) : []}
+                exclude={selectedDestinationEx ? selectedDestinationEx.split(",").filter(Boolean) : []}
+                onApply={(inc, exc) => updateParams({ destination: inc.join(","), destinationEx: exc.join(",") })}
+                allLabel="All destinations"
+              />
             </label>
           </div>
         )}
@@ -17392,17 +17433,19 @@ function DropboxPanel() {
 type PhotoShootListItem = { id: number; name: string; sortOrder: number; rowCount: number; hasThumbnail: boolean; createdAt: Date | string; updatedAt: Date | string };
 type PhotoShootFullType = { id: number; name: string; rows: unknown };
 
-// Restock Status filter: multi-select with INCLUDE and EXCLUDE. Each status
-// cycles neutral → include (green ✓) → exclude (red ✕) → neutral. Changes are
-// applied (to the URL params, which re-run the loader) when the popover closes,
-// so picking several statuses is one reload, not one per click.
-function StatusFilterMultiSelect({ options, counts, labelFor, include, exclude, onApply }: {
+// Restock filter: multi-select with INCLUDE and EXCLUDE (design #9). Each row has
+// a "Show" button (include — show only these) and a "Hide" button (exclude —
+// hide these). The include/exclude lists apply to the URL params (which re-run
+// the loader) when the popover closes, so picking several is one reload, not one
+// per click. Used for Status, Priority and Destination.
+function StatusFilterMultiSelect({ options, counts, labelFor, include, exclude, onApply, allLabel = "All statuses" }: {
   options: string[];
-  counts: Record<string, number>;
+  counts?: Record<string, number>;
   labelFor: (v: string) => string;
   include: string[];
   exclude: string[];
   onApply: (include: string[], exclude: string[]) => void;
+  allLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const buildState = () => { const m: Record<string, "inc" | "exc"> = {}; include.forEach((s) => { m[s] = "inc"; }); exclude.forEach((s) => { m[s] = "exc"; }); return m; };
@@ -17429,33 +17472,38 @@ function StatusFilterMultiSelect({ options, counts, labelFor, include, exclude, 
     window.addEventListener("resize", placeMenu);
     return () => { document.removeEventListener("mousedown", onDoc); window.removeEventListener("scroll", placeMenu, true); window.removeEventListener("resize", placeMenu); };
   });
-  const cycle = (status: string) => setState((prev) => { const cur = prev[status]; const next = { ...prev }; if (!cur) next[status] = "inc"; else if (cur === "inc") next[status] = "exc"; else delete next[status]; return next; });
+  // "Show" sets include, "Hide" sets exclude; clicking the active one clears it.
+  const toggle = (status: string, mode: "inc" | "exc") => setState((prev) => { const next = { ...prev }; if (prev[status] === mode) delete next[status]; else next[status] = mode; return next; });
   const incN = include.length, excN = exclude.length;
-  const summary = incN === 0 && excN === 0 ? "All statuses" : [incN ? `${incN} incl` : "", excN ? `${excN} excl` : ""].filter(Boolean).join(" · ");
+  const summary = incN === 0 && excN === 0 ? allLabel : [incN ? `${incN} shown` : "", excN ? `${excN} hidden` : ""].filter(Boolean).join(" · ");
+  const pillBtn = (active: boolean, kind: "inc" | "exc"): React.CSSProperties => ({
+    fontFamily: "inherit", fontSize: 12, fontWeight: 700, borderRadius: 7, padding: "4px 11px", cursor: "pointer", flex: "0 0 auto",
+    border: `1px solid ${active ? (kind === "inc" ? "#16a34a" : "#dc2626") : "#e5e7eb"}`,
+    background: active ? (kind === "inc" ? "#16a34a" : "#dc2626") : "#fff",
+    color: active ? "#fff" : "#6b7280",
+  });
   return (
     <>
-      <button ref={btnRef} type="button" onClick={() => { if (open) closeMenu(); else openMenu(); }} style={{ ...s.productTypeFilter, fontFamily: "inherit", boxSizing: "border-box", textAlign: "left", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: (incN || excN) ? "#eef2ff" : "#fff" }} title="Include / exclude statuses">
+      <button ref={btnRef} type="button" onClick={() => { if (open) closeMenu(); else openMenu(); }} style={{ ...s.productTypeFilter, fontFamily: "inherit", boxSizing: "border-box", textAlign: "left", cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 8, background: (incN || excN) ? "#eef2ff" : "#fff" }} title="Show (include) / hide (exclude)">
         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</span>
         <span style={{ color: "#6b7280", fontSize: 10 }}>▾</span>
       </button>
       {open && pos && typeof document !== "undefined" && createPortal(
-        <div ref={popRef} style={{ position: "fixed", top: pos.top, left: pos.left, zIndex: 3000, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 12px 30px rgba(0,0,0,0.22)", padding: 6, minWidth: 230, maxHeight: 340, overflow: "auto" }}>
+        <div ref={popRef} style={{ position: "fixed", top: pos.top, left: pos.left, zIndex: 3000, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 12px 30px rgba(0,0,0,0.22)", padding: 6, minWidth: 260, maxHeight: 360, overflow: "auto" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 8px 6px", fontSize: 11, color: "#6b7280" }}>
-            <span>Click to cycle: incl → excl → off</span>
+            <span><b style={{ color: "#16a34a" }}>Show</b> = only these · <b style={{ color: "#dc2626" }}>Hide</b> = exclude</span>
             <button type="button" onClick={() => setState({})} style={{ background: "transparent", border: "none", color: "#0d9488", fontWeight: 700, fontSize: 11, cursor: "pointer" }}>Clear</button>
           </div>
-          {options.length === 0 && <div style={{ padding: "8px 10px", fontSize: 12, color: "#9ca3af" }}>No statuses.</div>}
+          {options.length === 0 && <div style={{ padding: "8px 10px", fontSize: 12, color: "#9ca3af" }}>Nothing to filter.</div>}
           {options.map((status) => {
             const st = state[status];
-            const bg = st === "inc" ? "#dcfce7" : st === "exc" ? "#fee2e2" : "#f9fafb";
-            const mark = st === "inc" ? "✓" : st === "exc" ? "✕" : "";
-            const markColor = st === "inc" ? "#15803d" : st === "exc" ? "#b91c1c" : "#9ca3af";
             return (
-              <button key={status} type="button" onClick={() => cycle(status)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "7px 9px", margin: "2px 0", border: "1px solid #e5e7eb", borderRadius: 6, background: bg, cursor: "pointer", fontSize: 13, fontWeight: 600, color: "#111827", textAlign: "left" }}>
-                <span style={{ width: 16, textAlign: "center", color: markColor, fontWeight: 800 }}>{mark}</span>
-                <span style={{ flex: 1 }}>{labelFor(status)}</span>
-                <span style={{ color: "#6b7280", fontSize: 12 }}>{counts[status] ?? 0}</span>
-              </button>
+              <div key={status} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", margin: "2px 0", borderRadius: 7, background: st === "inc" ? "#dcfce7" : st === "exc" ? "#fee2e2" : "transparent", border: `1px solid ${st === "inc" ? "#bbf7d0" : st === "exc" ? "#fecaca" : "transparent"}` }}>
+                <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#111827", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{labelFor(status)}</span>
+                {counts && counts[status] != null && <span style={{ color: "#6b7280", fontSize: 12, fontVariantNumeric: "tabular-nums" }}>{counts[status]}</span>}
+                <button type="button" onClick={() => toggle(status, "inc")} style={pillBtn(st === "inc", "inc")}>Show</button>
+                <button type="button" onClick={() => toggle(status, "exc")} style={pillBtn(st === "exc", "exc")}>Hide</button>
+              </div>
             );
           })}
         </div>,
