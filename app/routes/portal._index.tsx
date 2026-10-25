@@ -13259,7 +13259,7 @@ export default function PortalDashboard() {
               const gid = searchParams.get("groupId");
               const grp = gid ? collectionGroups.find((g: CollectionGroup) => g.id === gid) : null;
               const n = grp ? grp.collectionIds.length : collections.length;
-              return <span style={{ fontSize: 14, fontWeight: 600, color: "#ffffff" }}>{n.toLocaleString()} collection{n === 1 ? "" : "s"}</span>;
+              return <span style={{ fontSize: 14, fontWeight: 600, color: "#ffffff" }}>{n.toLocaleString()} sheet{n === 1 ? "" : "s"}</span>;
             })()}
             {isRestockPage && (() => {
               const filtersActive = Boolean(selectedProductGroup) || Boolean(selectedStatus) || Boolean(selectedPriority) || Boolean(selectedDestination) || Boolean(searchTitle);
@@ -13383,7 +13383,7 @@ export default function PortalDashboard() {
                     value={collectionSearch}
                     onChange={(event) => setCollectionSearch(event.currentTarget.value)}
                     style={s.searchInput}
-                    placeholder="Collection or product name / SKU"
+                    placeholder="Sheet or product name / SKU"
                   />
                 </label>
               )}
@@ -17804,7 +17804,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const groupSelected = () => {
     const ids = Array.from(selectedIds);
     if (ids.length < 2) return;
-    const name = window.prompt("Name this group of collections:", "")?.trim();
+    const name = window.prompt("Name this group of sheets:", "")?.trim();
     if (!name) return;
     const stripped = groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !selectedIds.has(id)) }));
     saveGroups([...stripped, { id: newGroupId(), name, collectionIds: ids, ...(groupIdParam ? { parentId: groupIdParam } : {}) }]);
@@ -17867,7 +17867,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     const target = chosen[0];
     const sources = chosen.slice(1);
     const sourceIds = sources.map((s) => s.id);
-    if (!window.confirm(`Combine ${chosen.length} collections into "${target.name}"?\n\nAll rows from the other ${sources.length} collection${sources.length === 1 ? "" : "s"} will be moved into "${target.name}", and those will be DELETED. This can't be undone.`)) return;
+    if (!window.confirm(`Combine ${chosen.length} sheets into "${target.name}"?\n\nAll rows from the other ${sources.length} sheet${sources.length === 1 ? "" : "s"} will be moved into "${target.name}", and those will be DELETED. This can't be undone.`)) return;
     // Optimistic: drop the source tiles immediately (deletedRef keeps them gone
     // through the revalidation that follows).
     sourceIds.forEach((id) => deletedRef.current.add(id));
@@ -18055,7 +18055,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
             <>
               {/* Breadcrumb: All collections › 2027 summer › sep-oct › … */}
               <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", fontSize: 13, fontWeight: 700 }}>
-                <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontWeight: 700, cursor: "pointer", color: "#374151" }}>← All collections</button>
+                <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 10px", fontWeight: 700, cursor: "pointer", color: "#374151" }}>← Collections</button>
                 {groupAncestors(openGroup.id).map((a, i, arr) => (
                   <span key={a.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
                     <span style={{ color: "#9ca3af" }}>›</span>
@@ -18079,7 +18079,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                   <option key={g.id} value={g.id}>{"— ".repeat(groupAncestors(g.id).length - 1)}{g.name}</option>
                 ))}
               </select>
-              <button type="button" onClick={() => { if (window.confirm("Ungroup — put this group's collections and sub-groups back one level up?")) ungroup(openGroup.id); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Ungroup</button>
+              <button type="button" onClick={() => { if (window.confirm("Ungroup — put this group's sheets and sub-groups back one level up?")) ungroup(openGroup.id); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" }}>Ungroup</button>
             </>
           ) : (
             <>
@@ -18102,10 +18102,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         </div>
         <div style={s.productInfoActions}>
           {!openGroup && !showHidden && (
-            <button type="button" onClick={createGroupHere} style={{ padding: "8px 16px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #0f766e", background: "#fff", color: "#0f766e", cursor: "pointer" }} title="Create an empty group tile to fill with collections and sub-groups">＋ New group</button>
+            <button type="button" onClick={createGroupHere} style={{ padding: "8px 16px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #0f766e", background: "#fff", color: "#0f766e", cursor: "pointer" }} title="Create an empty group tile to fill with sheets and sub-groups">＋ New group</button>
           )}
-          <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }}>
-            Add Collection
+          <button type="button" style={s.primaryActionButton} onClick={() => { setAddName(""); setAddOpen(true); }} title="Add a collection sheet">
+            Add sheet
           </button>
         </div>
       </div>
@@ -18178,12 +18178,12 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           <div style={{ margin: "0 14px 12px", padding: "8px 12px", background: "#0d9488", color: "#fff", borderRadius: 8, display: "flex", alignItems: "center", gap: 12, fontSize: 13, fontWeight: 700, flexWrap: "wrap" }}>
             <span>{selectedIds.size} selected</span>
             <button type="button" onClick={groupSelected} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title={openGroup ? "Keep these as separate tiles inside a NEW sub-group here" : "Keep separate tiles inside one folder"}>📁 Combine into group</button>
-            <button type="button" onClick={combineIntoCollection} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#b45309", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title="Merge all rows into one collection and delete the rest">⧉ Combine into collection</button>
+            <button type="button" onClick={combineIntoCollection} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#b45309", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title="Merge all rows into one sheet and delete the rest">⧉ Combine into one sheet</button>
             {groups.length > 0 && (
               <select
                 value=""
                 onChange={(e) => { if (e.target.value) addSelectedToGroup(e.target.value); }}
-                title="Move the selected collections into a group (nested groups are indented)"
+                title="Move the selected sheets into a group (nested groups are indented)"
                 style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 10px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
               >
                 <option value="">＋ Move to group…</option>
@@ -18208,7 +18208,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 {flat.slice(0, tileLimit).map(card)}
                 {flat.length === 0 && (
                   <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-                    {searchQ ? `No collections match "${search.trim()}".` : "No hidden collections."}
+                    {searchQ ? `No sheets match "${search.trim()}".` : "No hidden sheets."}
                   </div>
                 )}
               </div>
@@ -18251,7 +18251,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 ) : (
                   <div style={s.productStyleImageEmpty}>Group</div>
                 )}
-                <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(15,118,110,0.95)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)", pointerEvents: "none" }}>📦 {childCount > 0 ? `${childCount} group${childCount !== 1 ? "s" : ""} · ` : ""}{colCount} collection{colCount !== 1 ? "s" : ""}</div>
+                <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(15,118,110,0.95)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)", pointerEvents: "none" }}>📦 {childCount > 0 ? `${childCount} group${childCount !== 1 ? "s" : ""} · ` : ""}{colCount} sheet{colCount !== 1 ? "s" : ""}</div>
                 <button type="button" title="Change cover image" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 8, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 6, padding: "3px 7px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>🖼</button>
                 <div style={{ position: "absolute", inset: 0, boxShadow: "inset 0 0 0 3px rgba(255,255,255,0.5)", borderRadius: 6, pointerEvents: "none" }} />
               </div>
@@ -18305,8 +18305,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               {orderedTokens.length === 0 && (
                 <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
                   {containerId !== null
-                    ? "This group is empty — use ＋ New group to add a sub-group, or select collections and ‘Move to group’."
-                    : (fabricStatusFilter ? "No collections with this fabric status." : "No collections yet. Click Add Collection to create your first one.")}
+                    ? "This group is empty — use ＋ New group to add a sub-group, or select sheets and ‘Move to group’."
+                    : (fabricStatusFilter ? "No sheets with this fabric status." : "No sheets yet. Click Add sheet to create your first one.")}
                 </div>
               )}
             </div>
@@ -18325,7 +18325,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               onClick={() => setShowHidden((v) => !v)}
               style={{ background: "transparent", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 14px", fontSize: 13, color: "#6b7280", cursor: "pointer" }}
             >
-              {showHidden ? "← Back to active collections" : `Show hidden collections (${hiddenCount})`}
+              {showHidden ? "← Back to active sheets" : `Show hidden sheets (${hiddenCount})`}
             </button>
           </div>
         );
@@ -18343,7 +18343,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 <h3 style={{ margin: 0, fontSize: 16 }}>Cover image — {g.name}</h3>
                 <button type="button" onClick={() => setCoverPickerGroupId(null)} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 10px", fontSize: 13, cursor: "pointer" }}>Close</button>
               </div>
-              <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>Pick which collection’s image shows on the group tile.</div>
+              <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 14 }}>Pick which sheet’s image shows on the group tile.</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(118px, 1fr))", gap: 10 }}>
                 <button type="button" onClick={() => setGroupCover(g.id, null)} style={{ ...coverPickCard, border: g.coverCollectionId == null ? "2px solid #0f766e" : "1px solid #e5e7eb" }}>
                   <div style={{ aspectRatio: "1.3/1.8", background: "#f3f4f6", borderRadius: 6, display: "grid", placeItems: "center", color: "#6b7280", fontSize: 12, fontWeight: 800 }}>Auto</div>
@@ -18372,13 +18372,13 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
       {addOpen && typeof document !== "undefined" && createPortal(
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div style={{ background: "#fff", borderRadius: 10, padding: 22, minWidth: 360, boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>New Collection</h3>
+            <h3 style={{ margin: "0 0 12px", fontSize: 16 }}>New collection sheet</h3>
             <input
               autoFocus
               value={addName}
               onChange={(e) => setAddName(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") submitAdd(); if (e.key === "Escape") setAddOpen(false); }}
-              placeholder="Collection name"
+              placeholder="Sheet name"
               style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: "8px 10px", fontSize: 14, boxSizing: "border-box" }}
             />
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 14 }}>
