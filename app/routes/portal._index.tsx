@@ -17370,10 +17370,13 @@ function CollectionsPhotoShootToggle({ active }: { active: "collections" | "phot
       }}
     >{label}</button>
   );
+  // Only show the button for the view you're NOT on — the current view's button
+  // is just a non-clickable highlight, so it's dropped (on Collections you see
+  // only "Photo Shoot"; on Photo Shoot you see only "Collections").
   return (
     <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
-      {btn("collections", "Collections")}
-      {btn("photoshoot", "Photo Shoot")}
+      {active !== "collections" && btn("collections", "Collections")}
+      {active !== "photoshoot" && btn("photoshoot", "Photo Shoot")}
     </div>
   );
 }
