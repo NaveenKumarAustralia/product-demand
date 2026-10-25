@@ -2,6 +2,8 @@ import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { normalizePortalMessageUsers, PORTAL_USERS_KEY } from "../portal-messages.server";
 import { authorizeApiRequest } from "../api-auth.server";
+import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
+import { marketFromDestination } from "../preorder/preorder-rules.server";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -144,6 +146,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }),
     ]);
     const restockSettings = normalizeRestockSettings(restockSettingsSetting?.value);
+
+    // Pre-order state per order (batch), read-only — the same three facts the
+    // restock page's Status cell shows: enabled in the portal, live on Shopify
+    // (has a selling plan in the registry), and the customer ship date.
+    const orderIds = orders.map((order) => order.id);
+    const [preorderSettings, registryEntries] = orderIds.length
+      ? await Promise.all([
+          prisma.preorderBatchSetting.findMany({
+            where: { supplierOrderId: { in: orderIds } },
+            select: { supplierOrderId: true, enabled: true, shipDate: true },
+          }),
+          getPreorderSellingPlanRegistryEntries(shop),
+        ])
+      : [[], []];
+    const preorderSettingById = new Map(preorderSettings.map((setting) => [setting.supplierOrderId, setting]));
+    const liveOrderIds = new Set(registryEntries.map((entry) => entry.supplierOrderId));
     const staffNames = normalizePortalMessageUsers(usersSetting?.value)
       .filter((user) => user.active !== false)
       .map((user) => user.name);
@@ -153,6 +171,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       ...order,
       productType: normalizeProductGroup(order.productType) || null,
       eta: order.eta?.toISOString() ?? null,
+      preorder: {
+        enabled: preorderSettingById.get(order.id)?.enabled === true,
+        live: liveOrderIds.has(order.id),
+        shipDate: preorderSettingById.get(order.id)?.shipDate?.toISOString() ?? null,
+        market: marketFromDestination(order.destination),
+      },
     }));
     const totalQty = orders.reduce((sum, order) => sum + order.totalQty, 0);
 
