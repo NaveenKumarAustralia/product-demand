@@ -12641,7 +12641,10 @@ export default function PortalDashboard() {
       if (cancelled) return;
       const el = document.getElementById(`order-${orderId}`);
       if (el) { lastScrolledThreadRef.current = thread; flash(el); return; }
-      if (tries++ < 20) window.setTimeout(tryScroll, 150); // wait for the table to render
+      // Keep polling well past the ~3s default: when the target row is beyond
+      // the 50-row window, the expand effect below has to bump the render count
+      // and React re-render before the row exists in the DOM. (~12s window.)
+      if (tries++ < 80) window.setTimeout(tryScroll, 150);
     };
     const t = window.setTimeout(tryScroll, 200);
     return () => { cancelled = true; window.clearTimeout(t); };
@@ -12966,8 +12969,11 @@ export default function PortalDashboard() {
     if (!thread) return;
     const [entityType, orderId] = thread.split(":");
     if (entityType !== "supplier_order" || !orderId) return;
+    // Expand the 50-row render window so the targeted row actually mounts (with a
+    // small buffer so it isn't the very last row). The scroll effect above then
+    // finds it on its next poll.
     const idx = visibleOrders.findIndex((o) => String(o.id) === String(orderId));
-    if (idx >= 0 && idx + 1 > restockVisibleCount) setRestockVisibleCount(idx + 1);
+    if (idx >= 0 && idx + 1 > restockVisibleCount) setRestockVisibleCount(Math.min(visibleOrders.length, idx + 10));
   }, [page, searchParams, visibleOrders, restockVisibleCount]);
   // Lookup: product title (e.g. "Vivien Dress Queen Protea") → per-piece
   // rupee cost. Style data drives stitching/factory/profit/etc. Fabric
@@ -14222,8 +14228,15 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+// Absolute date + time stamp for a message, e.g. "26/10/26 · 14:32".
+function messageStamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${formatPortalDate(d)} · ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
 function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser: PortalUser | null }) {
-  void users;
+  const replyRef = useRef<HTMLTextAreaElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const threadKey = searchParams.get("thread");
   const rowParam = searchParams.get("row");
@@ -14326,6 +14339,15 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
     ...messages.filter((m) => m.parentMessageId !== null),
     ...optimisticReplies,
   ];
+  // @-mention autocomplete for the reply box (same behaviour as the note cells).
+  const replyTag = currentTagQuery(replyDraft);
+  const mentionSuggestions = replyTag == null ? [] : users
+    .filter((u) => u.active !== false && u.name.toLowerCase().includes(replyTag))
+    .slice(0, 6);
+  const pickMention = (name: string) => {
+    setReplyDraft((d) => insertStaffTag(d, name));
+    window.setTimeout(() => replyRef.current?.focus(), 0);
+  };
   const submitReply = () => {
     const body = replyDraft.trim();
     if (!body || !topLevel) return;
@@ -14449,6 +14471,9 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
                 <div style={{ fontSize: 18, fontWeight: 700, color: "#111827", marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
                   {topLevel.body}
                 </div>
+                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>
+                  {topLevel.fromName ? `${topLevel.fromName} · ` : ""}{messageStamp(topLevel.createdAt)}{topLevel.editedAt ? " · edited" : ""}
+                </div>
                 {canEdit && (
                   <div style={{ display: "flex", gap: 12, marginTop: 6 }}>
                     <button
@@ -14506,7 +14531,7 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div>
                       <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>{author}</span>
-                      <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 6 }}>{relativeTime(m.createdAt)}{m.editedAt && " · edited"}</span>
+                      <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 6 }} title={relativeTime(m.createdAt)}>{messageStamp(m.createdAt)}{m.editedAt && " · edited"}</span>
                     </div>
                     {isAuthor && !isPending && editingId !== m.id && (
                       <div style={{ display: "flex", gap: 8 }}>
@@ -14555,8 +14580,24 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
         <div style={{ borderTop: "1px solid #e5e7eb", padding: "12px 20px" }}>
           <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
             <ThreadAvatar name={currentName} size={32} />
-            <div style={{ flex: 1, border: "1px solid #d1d5db", borderRadius: 8, padding: 8 }}>
+            <div style={{ flex: 1, border: "1px solid #d1d5db", borderRadius: 8, padding: 8, position: "relative" }}>
+              {mentionSuggestions.length > 0 && (
+                <div style={{ position: "absolute", bottom: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 -8px 24px rgba(0,0,0,0.14)", padding: 4, zIndex: 10, maxHeight: 200, overflow: "auto" }}>
+                  {mentionSuggestions.map((u) => (
+                    <button
+                      key={u.id}
+                      type="button"
+                      onMouseDown={(e) => { e.preventDefault(); pickMention(u.name); }}
+                      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", background: "none", border: "none", borderRadius: 6, padding: "7px 8px", cursor: "pointer", fontSize: 13, color: "#111827" }}
+                    >
+                      <ThreadAvatar name={u.name} size={22} />
+                      <span style={{ fontWeight: 600 }}>{u.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <textarea
+                ref={replyRef}
                 value={replyDraft}
                 onChange={(e) => setReplyDraft(e.target.value)}
                 placeholder="Write a reply..."

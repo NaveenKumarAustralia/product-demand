@@ -280,6 +280,22 @@ export async function createReplyMessage({
 
 // Edit / delete a message (anyone can — the user said so). Returns
 // the updated row count.
+// A logical note/reply is stored as one row PER RECIPIENT, so edit/delete must
+// act on EVERY copy (same cell, author, parent and body) — otherwise an edited
+// copy and the un-edited copies become different messages and the note "doubles".
+async function logicalCopyIds(messageId: number): Promise<number[]> {
+  const target = await prisma.portalMessage.findUnique({ where: { id: messageId } });
+  if (!target) return [];
+  const copies = await prisma.portalMessage.findMany({
+    where: {
+      entityType: target.entityType, orderId: target.orderId, entityKey: target.entityKey,
+      field: target.field, parentMessageId: target.parentMessageId, fromName: target.fromName, body: target.body,
+    },
+    select: { id: true },
+  });
+  return copies.map((c) => c.id);
+}
+
 export async function editPortalMessage({
   messageId,
   body,
@@ -287,14 +303,18 @@ export async function editPortalMessage({
   messageId: number;
   body: string;
 }) {
-  return prisma.portalMessage.update({
-    where: { id: messageId },
+  const ids = await logicalCopyIds(messageId);
+  if (!ids.length) return { count: 0 };
+  return prisma.portalMessage.updateMany({
+    where: { id: { in: ids } },
     data: { body: body.trim(), editedAt: new Date() },
   });
 }
 
 export async function deletePortalMessage({ messageId }: { messageId: number }) {
-  // Deleting a parent cascades to its direct replies for cleanliness.
-  await prisma.portalMessage.deleteMany({ where: { parentMessageId: messageId } });
-  return prisma.portalMessage.delete({ where: { id: messageId } });
+  const ids = await logicalCopyIds(messageId);
+  if (!ids.length) return { count: 0 };
+  // Delete every copy of this message AND the replies pointing at any copy.
+  await prisma.portalMessage.deleteMany({ where: { parentMessageId: { in: ids } } });
+  return prisma.portalMessage.deleteMany({ where: { id: { in: ids } } });
 }

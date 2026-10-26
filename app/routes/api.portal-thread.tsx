@@ -50,9 +50,20 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     entityKey: entityKey ? entityKey : null,
     field,
   };
-  const messages = await prisma.portalMessage.findMany({
+  const rawMessages = await prisma.portalMessage.findMany({
     where,
     orderBy: { createdAt: "asc" },
+  });
+  // A single logical note/reply is stored as ONE ROW PER RECIPIENT (so the
+  // unread bell stays simple). For the thread view we want each note once, so
+  // collapse those per-recipient copies — same parent, author and body — keeping
+  // the earliest. Without this, a reply shows once per recipient (the "doubling").
+  const seen = new Set<string>();
+  const messages = rawMessages.filter((m) => {
+    const key = `${m.parentMessageId ?? "T"}|${(m.fromName ?? "").toLowerCase()}|${m.body}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 
   if (url.searchParams.get("markRead") === "1") {
