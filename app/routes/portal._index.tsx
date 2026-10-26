@@ -18282,14 +18282,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               {resolveParentId(openGroup) !== null && (
                 <button type="button" onClick={() => { clearSelection(); openGroupNav(null); }} style={{ background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "6px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer", color: "#374151" }} title="Back to Collections home">Collections</button>
               )}
-              {/* Parent path only (clickable) — the CURRENT group's name is the
-                  page title up top, not repeated here. */}
-              {groupAncestors(openGroup.id).slice(0, -1).map((a) => (
-                <span key={a.id} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, fontWeight: 700 }}>
-                  <button type="button" onClick={() => { clearSelection(); openGroupNav(a.id); }} style={{ background: "transparent", border: "none", padding: "6px 4px", fontWeight: 700, cursor: "pointer", color: "#374151", textDecoration: "underline" }}>{a.name}</button>
-                  <span style={{ color: "#9ca3af" }}>›</span>
-                </span>
-              ))}
+              {/* No group-name breadcrumb in the bar — ← Back goes up one level,
+                  Collections goes home, and the group's name is the page title. */}
               <select
                 value=""
                 onChange={(e) => { const v = e.target.value; if (v === "__top") moveGroupToParent(openGroup.id, null); else if (v) moveGroupToParent(openGroup.id, v); }}
