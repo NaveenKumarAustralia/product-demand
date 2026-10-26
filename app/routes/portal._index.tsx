@@ -34723,12 +34723,16 @@ const s: Record<string, React.CSSProperties> = {
     flexDirection: "column",
     alignItems: "flex-end",
     gap: 8,
+    minWidth: 0,
   },
   utilityBar: {
     display: "flex",
     alignItems: "center",
     justifyContent: "flex-end",
-    flexWrap: "wrap",
+    // Keep the header on a SINGLE row (don't let "Active + avatars" drop to a
+    // second line); the search field shrinks instead when space is tight.
+    flexWrap: "nowrap",
+    minWidth: 0,
     gap: 12,
     padding: "6px 8px",
     border: "1px solid #dbe3ee",
@@ -34780,6 +34784,7 @@ const s: Record<string, React.CSSProperties> = {
     borderRadius: 6,
     padding: "7px 10px",
     width: 180,
+    minWidth: 90,
     background: "#fff",
     fontSize: 13,
     fontWeight: 600,
