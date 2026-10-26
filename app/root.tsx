@@ -1,4 +1,37 @@
+import { useEffect } from "react";
 import { Links, Meta, Outlet, Scripts, ScrollRestoration, useRouteError, isRouteErrorResponse } from "react-router";
+
+// App-wide: stop the mouse wheel from changing a focused <input type="number">
+// (quantities, prices, etc.) — a native browser behaviour that kept nudging
+// numbers by accident. The wheel still scrolls the nearest scroll container (or
+// the page), and the field keeps focus, so nothing is saved by accident.
+function useNoWheelNumberChange() {
+  useEffect(() => {
+    const block = (e: WheelEvent) => {
+      const el = e.currentTarget as HTMLElement;
+      e.preventDefault();
+      let node = el.parentElement;
+      while (node) {
+        const oy = getComputedStyle(node).overflowY;
+        if ((oy === "auto" || oy === "scroll") && node.scrollHeight > node.clientHeight) break;
+        node = node.parentElement;
+      }
+      if (node) { node.scrollTop += e.deltaY; node.scrollLeft += e.deltaX; }
+      else window.scrollBy(e.deltaX, e.deltaY);
+    };
+    const onFocusIn = (e: FocusEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el instanceof HTMLInputElement && el.type === "number") el.addEventListener("wheel", block, { passive: false });
+    };
+    const onFocusOut = (e: FocusEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el instanceof HTMLInputElement && el.type === "number") el.removeEventListener("wheel", block);
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    return () => { document.removeEventListener("focusin", onFocusIn); document.removeEventListener("focusout", onFocusOut); };
+  }, []);
+}
 
 export function ErrorBoundary() {
   const error = useRouteError();
@@ -24,6 +57,7 @@ export function ErrorBoundary() {
 }
 
 export default function App() {
+  useNoWheelNumberChange();
   return (
     <html lang="en">
       <head>
