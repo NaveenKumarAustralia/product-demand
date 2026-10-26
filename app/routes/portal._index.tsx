@@ -18097,6 +18097,10 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   // Group cover image: pick which member collection's thumbnail represents the
   // group tile (null = back to auto / first member with an image).
   const [coverPickerGroupId, setCoverPickerGroupId] = useState<string | null>(null);
+  // Hover (for the group tile's hover actions) + the group whose contents are
+  // shown in the quick-preview popup.
+  const [hoverGroupId, setHoverGroupId] = useState<string | null>(null);
+  const [previewGroupId, setPreviewGroupId] = useState<string | null>(null);
   const setGroupCover = (groupId: string, collectionId: number | null) => {
     saveGroups(groups.map((g) => g.id === groupId ? { ...g, coverCollectionId: collectionId ?? undefined } : g));
     setCoverPickerGroupId(null);
@@ -18216,6 +18220,11 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
       console.warn("[cover] upload failed:", e);
       window.alert("Couldn't upload that image. Try a different file.");
     }
+  };
+  // Remove a sheet's cover image. Server stores an empty thumbnail as null.
+  const handleClearCover = (id: number) => {
+    setCollections((prev) => prev.map((c) => c.id === id ? { ...c, hasThumbnail: false, updatedAt: new Date() } : c));
+    fetcher.submit({ intent: "update_collection", collectionId: String(id), thumbnail: "" }, { method: "post" });
   };
 
   const reorder = (targetId: number) => {
@@ -18462,6 +18471,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         const orderedTokens = [...savedValid, ...defaultOrder.filter((t) => !savedValid.includes(t))];
         const kidGroupById = new Map(kidGroups.map((g) => [g.id, g] as const));
         const colById = new Map(directCols.map((c) => [c.id, c] as const));
+        const tileActionBtn: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 5, background: "#fff", color: "#111827", border: "none", borderRadius: 7, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" };
         const groupTile = (g: CollectionGroup) => {
           const childCount = childGroups(g.id).length;
           const colCount = totalCollectionsIn(g.id);
@@ -18470,29 +18480,50 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           const token = `g:${g.id}`;
           const over = dragOverToken === token && dragToken !== token;
           const selected = selectedGroupIds.has(g.id);
+          const ghover = hoverGroupId === g.id;
+          const dp = tileDragProps(token, orderedTokens);
           return (
             <div
               key={g.id}
-              draggable
               onClick={() => { if (!dragToken && !justDraggedRef.current) openGroupNav(g.id); }}
-              {...tileDragProps(token, orderedTokens)}
-              style={{ ...s.productStyleCard, cursor: "grab", position: "relative", opacity: dragToken === token ? 0.4 : 1, outline: (over || selected) ? "3px solid #0d9488" : "none", outlineOffset: 2 }}
-              title={`Open ${g.name} — drag to reorder`}
+              onMouseEnter={() => setHoverGroupId(g.id)}
+              onMouseLeave={() => setHoverGroupId((cur) => cur === g.id ? null : cur)}
+              onDragOver={dp.onDragOver}
+              onDragLeave={dp.onDragLeave}
+              onDrop={dp.onDrop}
+              style={{ ...s.productStyleCard, cursor: "pointer", position: "relative", opacity: dragToken === token ? 0.4 : 1, outline: (over || selected) ? "3px solid #0d9488" : "none", outlineOffset: 2 }}
+              title={`Open ${g.name}`}
             >
               <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative", background: "#0f766e" }}>
+                {/* Drag handle (move / reorder) */}
+                <span draggable style={{ ...s.productStyleDragHandle, pointerEvents: "auto", cursor: "grab", opacity: ghover ? 1 : 0.5, transition: "opacity .15s" }} title="Drag to move / reorder" onDragStart={dp.onDragStart} onDragEnd={dp.onDragEnd} onClick={(e) => e.stopPropagation()}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M3 12h18M12 3v18" /></svg>
+                </span>
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); toggleSelectGroup(g.id); }}
                   title={selected ? "Deselect group" : "Select this group"}
-                  style={{ position: "absolute", top: 8, left: 8, zIndex: 3, width: 26, height: 26, borderRadius: 6, border: "1px solid rgba(0,0,0,0.15)", background: selected ? "#0d9488" : "rgba(255,255,255,0.92)", color: "#fff", display: "grid", placeItems: "center", cursor: "pointer", fontWeight: 800, fontSize: 14, boxShadow: "0 1px 3px rgba(0,0,0,0.25)" }}
+                  style={{ position: "absolute", top: 8, left: 44, zIndex: 5, width: 24, height: 24, borderRadius: 6, border: "1px solid rgba(0,0,0,0.15)", background: selected ? "#0d9488" : "rgba(255,255,255,0.92)", color: "#fff", display: "grid", placeItems: "center", cursor: "pointer", fontWeight: 900, fontSize: 15, boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }}
                 >{selected ? "✓" : ""}</button>
+                {/* Preview what's inside */}
+                <button type="button" title="Preview what's inside" onClick={(e) => { e.stopPropagation(); setPreviewGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 8, zIndex: 4, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 7, padding: "4px 9px", fontSize: 13, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>👁</button>
                 {cover ? (
                   <img src={`/portal/thumbnail/collection/${cover.id}?v=${new Date(cover.updatedAt).getTime()}`} alt={g.name} draggable={false} style={{ ...s.productStyleImage, filter: "brightness(0.9)", pointerEvents: "none" }} loading="lazy" decoding="async" />
                 ) : (
                   <div style={s.productStyleImageEmpty}>Group</div>
                 )}
-                <div style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(15,118,110,0.95)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", boxShadow: "0 2px 6px rgba(0,0,0,0.25)", pointerEvents: "none" }}>📦 {childCount > 0 ? `${childCount} group${childCount !== 1 ? "s" : ""} · ` : ""}{colCount} sheet{colCount !== 1 ? "s" : ""}</div>
-                <button type="button" title="Change cover image" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 8, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 6, padding: "3px 7px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>🖼</button>
+                {/* Hover: change the group's cover (picker also has reset-to-auto).
+                    Scrim is below the corner controls; a plain click still opens. */}
+                {ghover && (
+                  <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.28)", zIndex: 1 }}>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={tileActionBtn} title="Change the cover image for this group">🖼 Change cover</button>
+                  </div>
+                )}
+                {/* Bottom bar: what it is + how many. */}
+                <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 10px", background: "linear-gradient(to top, rgba(15,118,110,0.92), rgba(15,118,110,0.45))", color: "#fff", fontSize: 11, fontWeight: 800, letterSpacing: 0.4, pointerEvents: "none", zIndex: 2 }}>
+                  <span style={{ textTransform: "uppercase", opacity: 0.92 }}>Group</span>
+                  <span>{childCount > 0 ? `${childCount} group${childCount !== 1 ? "s" : ""} · ` : ""}{colCount} sheet{colCount !== 1 ? "s" : ""}</span>
+                </div>
                 <div style={{ position: "absolute", inset: 0, boxShadow: "inset 0 0 0 3px rgba(255,255,255,0.5)", borderRadius: 6, pointerEvents: "none" }} />
               </div>
               <div style={{ padding: "8px 4px 2px" }}>
@@ -18522,6 +18553,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               releaseDate={c.releaseDate ?? ""}
               onSetReleaseDate={(d) => handleSetReleaseDate(c.id, d)}
               onSetCover={(file) => handleSetCover(c.id, file)}
+              onClearCover={() => handleClearCover(c.id)}
+              typeLabel="Sheet"
               selectable={!c.hidden}
               selected={selectedIds.has(c.id)}
               onToggleSelected={() => toggleSelect(c.id)}
@@ -18602,6 +18635,56 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                     </button>
                   );
                 })}
+              </div>
+            </div>
+          </div>,
+          document.body,
+        );
+      })()}
+
+      {/* Group quick-preview: what's inside, with an Open button. */}
+      {previewGroupId && typeof document !== "undefined" && (() => {
+        const g = groups.find((x) => x.id === previewGroupId);
+        if (!g) return null;
+        const subGroups = childGroups(g.id);
+        const sheets = collections.filter((c) => g.collectionIds.includes(c.id));
+        const total = totalCollectionsIn(g.id);
+        const tileCss: React.CSSProperties = { background: "#fff", borderRadius: 8, border: "1px solid #e5e7eb", overflow: "hidden", textAlign: "center" };
+        return createPortal(
+          <div onClick={() => setPreviewGroupId(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 1300, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 12, padding: 20, width: "min(760px, 94vw)", maxHeight: "86vh", overflow: "auto", boxShadow: "0 20px 50px rgba(0,0,0,0.25)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 4 }}>
+                <h3 style={{ margin: 0, fontSize: 17 }}>{g.name}</h3>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" onClick={() => { const id = g.id; setPreviewGroupId(null); openGroupNav(id); }} style={{ background: "#0f766e", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Open group</button>
+                  <button type="button" onClick={() => setPreviewGroupId(null)} style={{ background: "#f3f4f6", border: "none", borderRadius: 7, padding: "7px 12px", fontSize: 13, cursor: "pointer" }}>Close</button>
+                </div>
+              </div>
+              <div style={{ fontSize: 12, color: "#6b7280", marginBottom: 14 }}>{subGroups.length > 0 ? `${subGroups.length} group${subGroups.length !== 1 ? "s" : ""} · ` : ""}{total} sheet{total !== 1 ? "s" : ""}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 10 }}>
+                {subGroups.map((sg) => {
+                  const cid = (sg.coverCollectionId != null && collections.some((c) => c.id === sg.coverCollectionId && c.hasThumbnail)) ? sg.coverCollectionId : firstThumbIn(sg.id);
+                  const cov = cid != null ? collections.find((c) => c.id === cid) : undefined;
+                  return (
+                    <button key={sg.id} type="button" onClick={() => { const id = sg.id; setPreviewGroupId(null); openGroupNav(id); }} style={{ ...tileCss, padding: 0, cursor: "pointer" }}>
+                      <div style={{ aspectRatio: "1.3/1.8", background: "#0f766e", overflow: "hidden", position: "relative" }}>
+                        {cov ? <img src={`/portal/thumbnail/collection/${cov.id}?v=${new Date(cov.updatedAt).getTime()}`} alt={sg.name} style={{ width: "100%", height: "100%", objectFit: "cover", filter: "brightness(0.9)" }} loading="lazy" /> : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center", color: "#d1fae5", fontWeight: 800, fontSize: 12 }}>Group</div>}
+                        <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, background: "rgba(15,118,110,0.9)", color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 6px", textTransform: "uppercase" }}>Group · {totalCollectionsIn(sg.id)}</div>
+                      </div>
+                      <div style={{ fontSize: 12, fontWeight: 700, padding: "6px 4px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sg.name}</div>
+                    </button>
+                  );
+                })}
+                {sheets.map((c) => (
+                  <button key={c.id} type="button" onClick={() => { setPreviewGroupId(null); openCollection(c.id); }} style={{ ...tileCss, padding: 0, cursor: "pointer" }}>
+                    <div style={{ aspectRatio: "1.3/1.8", background: "#eef2f7", overflow: "hidden", position: "relative" }}>
+                      {c.hasThumbnail ? <img src={`/portal/thumbnail/collection/${c.id}?v=${new Date(c.updatedAt).getTime()}`} alt={c.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} loading="lazy" /> : <div style={{ width: "100%", height: "100%", display: "grid", placeItems: "center", color: "#94a3b8", fontSize: 11 }}>No image</div>}
+                      <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, background: "rgba(17,24,39,0.82)", color: "#fff", fontSize: 10, fontWeight: 800, padding: "3px 6px" }}>SHEET · {c.rowCount}</div>
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 700, padding: "6px 4px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                  </button>
+                ))}
+                {subGroups.length === 0 && sheets.length === 0 && <div style={{ gridColumn: "1 / -1", padding: "30px 0", textAlign: "center", color: "#9ca3af" }}>This group is empty.</div>}
               </div>
             </div>
           </div>,
@@ -18803,6 +18886,7 @@ function CollectionCard({
   releaseDate,
   onSetReleaseDate,
   onSetCover,
+  onClearCover,
   onDragStart,
   onDragOver,
   onDragLeave,
@@ -18811,6 +18895,7 @@ function CollectionCard({
   thumbnailEntity = "collection",
   noun = "collection",
   countNoun = "row",
+  typeLabel,
   selectable = false,
   selected = false,
   onToggleSelected,
@@ -18836,6 +18921,7 @@ function CollectionCard({
   releaseDate?: string;
   onSetReleaseDate?: (date: string) => void;
   onSetCover: (file: File) => void;
+  onClearCover?: () => void;
   onDragStart: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragOver: (e: React.DragEvent<HTMLDivElement>) => void;
   onDragLeave: () => void;
@@ -18846,6 +18932,8 @@ function CollectionCard({
   thumbnailEntity?: string;
   noun?: string;
   countNoun?: string;
+  // Label shown in the bottom bar over the image (e.g. "Sheet"); defaults to noun.
+  typeLabel?: string;
   // Group-selection checkbox (Collections tiles): tick to bundle into a group.
   selectable?: boolean;
   selected?: boolean;
@@ -18857,6 +18945,7 @@ function CollectionCard({
   const [draft, setDraft] = useState(collection.name);
   const [coverPickerOpen, setCoverPickerOpen] = useState(false);
   useEffect(() => { setDraft(collection.name); }, [collection.name]);
+  const imgActionBtn: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 5, background: "#fff", color: "#111827", border: "none", borderRadius: 7, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" };
 
   return (
     <div
@@ -18879,12 +18968,14 @@ function CollectionCard({
       )}
       <span
         draggable
-        style={{ ...s.productStyleDragHandle, pointerEvents: "auto", cursor: "grab", opacity: hover ? 0.6 : 0.25, transition: "opacity 0.15s" }}
-        title="Drag to reorder"
+        style={{ ...s.productStyleDragHandle, pointerEvents: "auto", cursor: "grab", opacity: hover ? 1 : 0.5, transition: "opacity 0.15s" }}
+        title="Drag to move / reorder"
         onDragStart={onDragStart}
         onDragEnd={onDragEnd}
         onClick={(e) => e.stopPropagation()}
-      >::</span>
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M3 12h18M12 3v18" /></svg>
+      </span>
       {/* When hidden (Collections only), show an Unhide button instead of the
           hide/delete control. */}
       {hidden && onUnhide && (hover || true) && (
@@ -18924,27 +19015,26 @@ function CollectionCard({
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
         )}
-        {/* Row/collection count — badge in the image's bottom-left corner. */}
-        <span style={{ position: "absolute", bottom: 8, left: 8, background: "rgba(17,24,39,0.82)", color: "#fff", fontSize: 11, fontWeight: 800, borderRadius: 6, padding: "3px 8px", zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.25)", pointerEvents: "none" }}>
-          {collection.rowCount} {countNoun}{collection.rowCount !== 1 ? "s" : ""}
-        </span>
-        {(hover || !collection.hasThumbnail) && (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); setCoverPickerOpen(true); }}
-            style={{
-              position: "absolute", bottom: 8, right: 8,
-              padding: "4px 10px", borderRadius: 6,
-              border: "none", background: "rgba(17,24,39,0.85)",
-              color: "#fff", fontSize: 11, fontWeight: 600,
-              cursor: "pointer", zIndex: 3,
-              boxShadow: "0 2px 6px rgba(0,0,0,0.2)",
-            }}
-            title={`Pick a cover image for this ${noun}`}
-          >
-            {collection.hasThumbnail ? "Change cover" : "+ Cover image"}
-          </button>
+        {/* Hover: replace / delete / add the cover image. Scrim sits BELOW the
+            corner controls (drag handle / checkbox / delete) and lets a plain
+            click on it still open the card. */}
+        {hover && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "rgba(0,0,0,0.28)", zIndex: 1 }}>
+            {collection.hasThumbnail ? (
+              <>
+                <button type="button" onClick={(e) => { e.stopPropagation(); setCoverPickerOpen(true); }} style={imgActionBtn} title="Replace the cover image">↻ Replace</button>
+                {onClearCover && <button type="button" onClick={(e) => { e.stopPropagation(); onClearCover(); }} style={{ ...imgActionBtn, color: "#b91c1c" }} title="Remove the cover image">🗑 Delete</button>}
+              </>
+            ) : (
+              <button type="button" onClick={(e) => { e.stopPropagation(); setCoverPickerOpen(true); }} style={imgActionBtn} title="Add a cover image">＋ Add image</button>
+            )}
+          </div>
         )}
+        {/* Bottom bar over the image: what it is + how many. */}
+        <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 10px", background: "linear-gradient(to top, rgba(17,24,39,0.85), rgba(17,24,39,0.45))", color: "#fff", fontSize: 11, fontWeight: 800, letterSpacing: 0.4, pointerEvents: "none", zIndex: 2 }}>
+          <span style={{ textTransform: "uppercase", opacity: 0.92 }}>{typeLabel ?? noun}</span>
+          <span>{collection.rowCount} {countNoun}{collection.rowCount !== 1 ? "s" : ""}</span>
+        </div>
         {coverPickerOpen && (
           <CoverImagePickerModal
             noun={noun}
@@ -18973,57 +19063,57 @@ function CollectionCard({
           >{collection.name || "Untitled"}</span>
         )}
         {onSetFabricStatus && (
-          <div
-            style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 11, fontWeight: 700, color: "#6b7280" }}>
-              <span>Fabric</span>
-              <select
-                value={fabricStatus ?? ""}
-                onChange={(e) => { e.stopPropagation(); onSetFabricStatus(e.target.value); }}
-                onClick={(e) => e.stopPropagation()}
-                title="Fabric status for this collection"
-                style={{
-                  flex: 1, maxWidth: 130, fontSize: 11, fontWeight: 700, padding: "4px 6px", borderRadius: 6, cursor: "pointer", outline: "none",
-                  border: `1px solid ${fabricStatus === "in_stock" ? "#10b981" : fabricStatus === "on_order" ? "#f59e0b" : "#e5e7eb"}`,
-                  background: fabricStatus === "in_stock" ? "#d1fae5" : fabricStatus === "on_order" ? "#fef3c7" : "#fff",
-                  color: fabricStatus === "in_stock" ? "#065f46" : fabricStatus === "on_order" ? "#92400e" : "#6b7280",
-                }}
-              >
-                <option value="">— set —</option>
-                <option value="in_stock">In stock</option>
-                <option value="on_order">On order</option>
-              </select>
-            </label>
-            {onSetOrderStatus && (
-              <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 11, fontWeight: 700, color: "#6b7280" }}>
-                <span>Ordered?</span>
+          <div style={{ marginTop: 10, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+            {/* Fabric + Ordered? side by side, Release underneath. */}
+            <div style={{ display: "flex", gap: 8 }}>
+              <label style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3, fontSize: 11, fontWeight: 700, color: "#6b7280", textAlign: "left" }}>
+                <span>Fabric</span>
                 <select
-                  value={orderStatus ?? ""}
-                  onChange={(e) => { e.stopPropagation(); onSetOrderStatus(e.target.value); }}
+                  value={fabricStatus ?? ""}
+                  onChange={(e) => { e.stopPropagation(); onSetFabricStatus(e.target.value); }}
                   onClick={(e) => e.stopPropagation()}
-                  title="Has the factory order for these styles been placed?"
+                  title="Fabric status for this sheet"
                   style={{
-                    flex: 1, maxWidth: 130, fontSize: 11, fontWeight: 700, padding: "4px 6px", borderRadius: 6, cursor: "pointer", outline: "none",
-                    border: `1px solid ${orderStatus === "yes" ? "#10b981" : orderStatus === "partial" ? "#f59e0b" : orderStatus === "no" ? "#ef4444" : "#e5e7eb"}`,
-                    background: orderStatus === "yes" ? "#d1fae5" : orderStatus === "partial" ? "#fef3c7" : orderStatus === "no" ? "#fee2e2" : "#fff",
-                    color: orderStatus === "yes" ? "#065f46" : orderStatus === "partial" ? "#92400e" : orderStatus === "no" ? "#991b1b" : "#6b7280",
+                    width: "100%", fontSize: 11, fontWeight: 700, padding: "5px 6px", borderRadius: 6, cursor: "pointer", outline: "none",
+                    border: `1px solid ${fabricStatus === "in_stock" ? "#10b981" : fabricStatus === "on_order" ? "#f59e0b" : "#e5e7eb"}`,
+                    background: fabricStatus === "in_stock" ? "#d1fae5" : fabricStatus === "on_order" ? "#fef3c7" : "#fff",
+                    color: fabricStatus === "in_stock" ? "#065f46" : fabricStatus === "on_order" ? "#92400e" : "#6b7280",
                   }}
                 >
                   <option value="">— set —</option>
-                  <option value="yes">Yes</option>
-                  <option value="no">No</option>
-                  <option value="partial">Partially</option>
+                  <option value="in_stock">In stock</option>
+                  <option value="on_order">On order</option>
                 </select>
               </label>
-            )}
+              {onSetOrderStatus && (
+                <label style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3, fontSize: 11, fontWeight: 700, color: "#6b7280", textAlign: "left" }}>
+                  <span>Ordered?</span>
+                  <select
+                    value={orderStatus ?? ""}
+                    onChange={(e) => { e.stopPropagation(); onSetOrderStatus(e.target.value); }}
+                    onClick={(e) => e.stopPropagation()}
+                    title="Has the factory order for these styles been placed?"
+                    style={{
+                      width: "100%", fontSize: 11, fontWeight: 700, padding: "5px 6px", borderRadius: 6, cursor: "pointer", outline: "none",
+                      border: `1px solid ${orderStatus === "yes" ? "#10b981" : orderStatus === "partial" ? "#f59e0b" : orderStatus === "no" ? "#ef4444" : "#e5e7eb"}`,
+                      background: orderStatus === "yes" ? "#d1fae5" : orderStatus === "partial" ? "#fef3c7" : orderStatus === "no" ? "#fee2e2" : "#fff",
+                      color: orderStatus === "yes" ? "#065f46" : orderStatus === "partial" ? "#92400e" : orderStatus === "no" ? "#991b1b" : "#6b7280",
+                    }}
+                  >
+                    <option value="">— set —</option>
+                    <option value="yes">Yes</option>
+                    <option value="no">No</option>
+                    <option value="partial">Partially</option>
+                  </select>
+                </label>
+              )}
+            </div>
           </div>
         )}
         {onSetReleaseDate && (
           <label
             onClick={(e) => e.stopPropagation()}
-            style={{ marginTop: onSetFabricStatus ? 6 : 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, fontSize: 11, fontWeight: 700, color: "#6b7280" }}
+            style={{ marginTop: onSetFabricStatus ? 8 : 10, width: "100%", display: "flex", flexDirection: "column", gap: 3, fontSize: 11, fontWeight: 700, color: "#6b7280", textAlign: "left" }}
           >
             <span>Release</span>
             <input
@@ -19032,7 +19122,7 @@ function CollectionCard({
               onChange={(e) => { e.stopPropagation(); onSetReleaseDate(e.target.value); }}
               onClick={(e) => e.stopPropagation()}
               title="Expected release date"
-              style={{ flex: 1, maxWidth: 140, fontSize: 11, fontWeight: 700, padding: "4px 6px", borderRadius: 6, cursor: "pointer", outline: "none", border: `1px solid ${releaseDate ? "#6366f1" : "#e5e7eb"}`, background: releaseDate ? "#eef2ff" : "#fff", color: releaseDate ? "#3730a3" : "#6b7280" }}
+              style={{ width: "100%", fontSize: 11, fontWeight: 700, padding: "5px 6px", borderRadius: 6, cursor: "pointer", outline: "none", border: `1px solid ${releaseDate ? "#6366f1" : "#e5e7eb"}`, background: releaseDate ? "#eef2ff" : "#fff", color: releaseDate ? "#3730a3" : "#6b7280" }}
             />
           </label>
         )}
