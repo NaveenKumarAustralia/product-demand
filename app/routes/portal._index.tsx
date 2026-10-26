@@ -18009,18 +18009,28 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const tileLimit = useProgressiveReveal(revealTotal, `${showHidden}|${fabricStatusFilter}|${groupIdParam ?? ""}|${searchActive}`);
   // Selection (checkbox) for creating a group.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  // Group tiles can be selected too (by their string id) — so a group can be
+  // combined into a new group or moved into an existing one alongside sheets.
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Set<string>>(new Set());
   const toggleSelect = (id: number) => setSelectedIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
-  const clearSelection = () => setSelectedIds(new Set());
+  const toggleSelectGroup = (id: string) => setSelectedGroupIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const clearSelection = () => { setSelectedIds(new Set()); setSelectedGroupIds(new Set()); };
+  const selectedCount = selectedIds.size + selectedGroupIds.size;
   const newGroupId = () => `g_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
-  // Create a group from the selected collections, nested inside the container
-  // currently being viewed (parentId = the open group, or top level).
+  // Create a group from the selected sheets AND/OR groups, nested inside the
+  // container currently being viewed (parentId = the open group, or top level).
   const groupSelected = () => {
     const ids = Array.from(selectedIds);
-    if (ids.length < 2) return;
-    const name = window.prompt("Name this group of sheets:", "")?.trim();
+    if (selectedCount < 2) return;
+    const name = window.prompt("Name this group:", "")?.trim();
     if (!name) return;
-    const stripped = groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !selectedIds.has(id)) }));
-    saveGroups([...stripped, { id: newGroupId(), name, collectionIds: ids, ...(groupIdParam ? { parentId: groupIdParam } : {}) }]);
+    const newId = newGroupId();
+    let next = groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !selectedIds.has(id)) }));
+    // Selected groups become children of the new group (the new group is fresh,
+    // so this can never make a cycle).
+    next = next.map((g) => selectedGroupIds.has(g.id) ? { ...g, parentId: newId } : g);
+    next = [...next, { id: newId, name, collectionIds: ids, ...(groupIdParam ? { parentId: groupIdParam } : {}) }];
+    saveGroups(next);
     clearSelection();
   };
   // Create a new EMPTY group inside the container being viewed (nested under the
@@ -18030,15 +18040,29 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     if (!name) return;
     saveGroups([...groups, { id: newGroupId(), name, collectionIds: [], ...(groupIdParam ? { parentId: groupIdParam } : {}) }]);
   };
-  // Add the currently-selected collections to an EXISTING group. A collection
-  // only ever belongs to one group, so first pull them out of any other group.
+  // Move the selected sheets AND/OR groups into an EXISTING group. A sheet only
+  // ever belongs to one group, so first pull them out of any other group;
+  // selected groups are re-parented under the target (skipping any that would
+  // make a cycle — can't move a group into itself or one of its descendants).
   const addSelectedToGroup = (groupId: string) => {
+    if (selectedCount === 0 || !groupId) return;
     const ids = Array.from(selectedIds);
-    if (!ids.length || !groupId) return;
-    const stripped = groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !selectedIds.has(id)) }));
-    saveGroups(stripped.map((g) => g.id === groupId
+    let next = groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !selectedIds.has(id)) }));
+    next = next.map((g) => g.id === groupId
       ? { ...g, collectionIds: [...g.collectionIds, ...ids.filter((id) => !g.collectionIds.includes(id))] }
-      : g));
+      : g);
+    next = next.map((g) => (selectedGroupIds.has(g.id) && g.id !== groupId && !isSelfOrAncestor(g.id, groupId)) ? { ...g, parentId: groupId } : g);
+    saveGroups(next);
+    clearSelection();
+  };
+  // "Remove from group" (inside an open group): take the selected sheets/groups
+  // OUT of this group — sheets become ungrouped, groups move up to this group's
+  // parent.
+  const removeSelectedFromGroup = () => {
+    const parent = openGroup ? resolveParentId(openGroup) : null;
+    let next = groups.map((g) => ({ ...g, collectionIds: g.collectionIds.filter((id) => !selectedIds.has(id)) }));
+    next = next.map((g) => selectedGroupIds.has(g.id) ? { ...g, parentId: parent ?? undefined } : g);
+    saveGroups(next);
     clearSelection();
   };
   // Move (re-parent) a group under another group, or to the top level (null).
@@ -18376,25 +18400,26 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         );
         const smallBtn: React.CSSProperties = { background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" };
 
-        // Selection action bar (choose tiles → group them).
-        const selectionBar = selectedIds.size > 0 ? (
+        // Selection action bar (choose tiles → group them). Sheets AND groups.
+        const onlySheets = selectedGroupIds.size === 0;
+        const selectionBar = selectedCount > 0 ? (
           <div style={{ margin: "0 14px 12px", padding: "8px 12px", background: "#0d9488", color: "#fff", borderRadius: 8, display: "flex", alignItems: "center", gap: 12, fontSize: 13, fontWeight: 700, flexWrap: "wrap" }}>
-            <span>{selectedIds.size} selected</span>
-            <button type="button" onClick={groupSelected} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title={openGroup ? "Keep these as separate tiles inside a NEW sub-group here" : "Keep separate tiles inside one folder"}>📁 Combine into group</button>
-            <button type="button" onClick={combineIntoCollection} disabled={selectedIds.size < 2} style={{ background: "#fff", color: "#b45309", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedIds.size < 2 ? "default" : "pointer", opacity: selectedIds.size < 2 ? 0.6 : 1 }} title="Merge all rows into one sheet and delete the rest">⧉ Combine into one sheet</button>
+            <span>{selectedCount} selected</span>
+            <button type="button" onClick={groupSelected} disabled={selectedCount < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedCount < 2 ? "default" : "pointer", opacity: selectedCount < 2 ? 0.6 : 1 }} title="Put the selected sheets and groups inside one new group">📁 Combine into group</button>
+            <button type="button" onClick={combineIntoCollection} disabled={selectedIds.size < 2 || !onlySheets} style={{ background: "#fff", color: "#b45309", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: (selectedIds.size < 2 || !onlySheets) ? "default" : "pointer", opacity: (selectedIds.size < 2 || !onlySheets) ? 0.6 : 1 }} title={onlySheets ? "Merge all rows into one sheet and delete the rest" : "Only sheets can be merged into one sheet"}>⧉ Combine into one sheet</button>
             {groups.length > 0 && (
               <select
                 value=""
                 onChange={(e) => { if (e.target.value) addSelectedToGroup(e.target.value); }}
-                title="Move the selected sheets into a group (nested groups are indented)"
+                title="Move the selected sheets and groups into a group (nested groups are indented)"
                 style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 10px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
               >
                 <option value="">＋ Move to group…</option>
-                {groups.map((g) => <option key={g.id} value={g.id}>{"— ".repeat(Math.max(0, groupAncestors(g.id).length - 1))}{g.name}</option>)}
+                {groups.filter((g) => !selectedGroupIds.has(g.id)).map((g) => <option key={g.id} value={g.id}>{"— ".repeat(Math.max(0, groupAncestors(g.id).length - 1))}{g.name}</option>)}
               </select>
             )}
             {openGroup && (
-              <button type="button" onClick={() => { Array.from(selectedIds).forEach((id) => removeFromGroup(id)); clearSelection(); }} style={{ background: "#fff", color: "#b91c1c", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: "pointer" }}>Remove from group</button>
+              <button type="button" onClick={removeSelectedFromGroup} style={{ background: "#fff", color: "#b91c1c", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: "pointer" }}>Remove from group</button>
             )}
             <button type="button" onClick={clearSelection} style={{ background: "transparent", color: "#fff", border: "1px solid rgba(255,255,255,0.5)", borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}>Cancel</button>
           </div>
@@ -18439,16 +18464,23 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           const cover = coverId != null ? collections.find((c) => c.id === coverId) : undefined;
           const token = `g:${g.id}`;
           const over = dragOverToken === token && dragToken !== token;
+          const selected = selectedGroupIds.has(g.id);
           return (
             <div
               key={g.id}
               draggable
               onClick={() => { if (!dragToken && !justDraggedRef.current) openGroupNav(g.id); }}
               {...tileDragProps(token, orderedTokens)}
-              style={{ ...s.productStyleCard, cursor: "grab", position: "relative", opacity: dragToken === token ? 0.4 : 1, outline: over ? "3px solid #0d9488" : "none", outlineOffset: 2 }}
+              style={{ ...s.productStyleCard, cursor: "grab", position: "relative", opacity: dragToken === token ? 0.4 : 1, outline: (over || selected) ? "3px solid #0d9488" : "none", outlineOffset: 2 }}
               title={`Open ${g.name} — drag to reorder`}
             >
               <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative", background: "#0f766e" }}>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); toggleSelectGroup(g.id); }}
+                  title={selected ? "Deselect group" : "Select this group"}
+                  style={{ position: "absolute", top: 8, left: 8, zIndex: 3, width: 26, height: 26, borderRadius: 6, border: "1px solid rgba(0,0,0,0.15)", background: selected ? "#0d9488" : "rgba(255,255,255,0.92)", color: "#fff", display: "grid", placeItems: "center", cursor: "pointer", fontWeight: 800, fontSize: 14, boxShadow: "0 1px 3px rgba(0,0,0,0.25)" }}
+                >{selected ? "✓" : ""}</button>
                 {cover ? (
                   <img src={`/portal/thumbnail/collection/${cover.id}?v=${new Date(cover.updatedAt).getTime()}`} alt={g.name} draggable={false} style={{ ...s.productStyleImage, filter: "brightness(0.9)", pointerEvents: "none" }} loading="lazy" decoding="async" />
                 ) : (
