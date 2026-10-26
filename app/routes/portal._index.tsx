@@ -18401,27 +18401,31 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         const smallBtn: React.CSSProperties = { background: "#f3f4f6", border: "1px solid #e5e7eb", borderRadius: 6, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", color: "#374151" };
 
         // Selection action bar (choose tiles → group them). Sheets AND groups.
+        // Mockup #4: white, drops flush from the toolbar with a terracotta top
+        // line, bigger text, terracotta buttons.
         const onlySheets = selectedGroupIds.size === 0;
+        const canSheet = selectedIds.size >= 2 && onlySheets;
+        const selBtn: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 8, borderRadius: 9, padding: "9px 15px", fontSize: 15, fontWeight: 700, border: "1px solid transparent" };
         const selectionBar = selectedCount > 0 ? (
-          <div style={{ margin: "0 14px 12px", padding: "8px 12px", background: "#0d9488", color: "#fff", borderRadius: 8, display: "flex", alignItems: "center", gap: 12, fontSize: 13, fontWeight: 700, flexWrap: "wrap" }}>
-            <span>{selectedCount} selected</span>
-            <button type="button" onClick={groupSelected} disabled={selectedCount < 2} style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: selectedCount < 2 ? "default" : "pointer", opacity: selectedCount < 2 ? 0.6 : 1 }} title="Put the selected sheets and groups inside one new group">📁 Combine into group</button>
-            <button type="button" onClick={combineIntoCollection} disabled={selectedIds.size < 2 || !onlySheets} style={{ background: "#fff", color: "#b45309", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: (selectedIds.size < 2 || !onlySheets) ? "default" : "pointer", opacity: (selectedIds.size < 2 || !onlySheets) ? 0.6 : 1 }} title={onlySheets ? "Merge all rows into one sheet and delete the rest" : "Only sheets can be merged into one sheet"}>⧉ Combine into one sheet</button>
+          <div style={{ margin: "0 14px 14px", padding: "11px 16px", background: "#fff", color: "#241a15", borderTop: "3px solid #c0562f", borderRadius: "0 0 12px 12px", boxShadow: "0 14px 26px rgba(60,30,15,0.16)", display: "flex", alignItems: "center", gap: 12, fontSize: 15, fontWeight: 700, flexWrap: "wrap" }}>
+            <span style={{ fontWeight: 800 }}>{selectedCount} selected</span>
+            <button type="button" onClick={groupSelected} disabled={selectedCount < 2} style={{ ...selBtn, background: "#c0562f", color: "#fff", borderColor: "#c0562f", cursor: selectedCount < 2 ? "default" : "pointer", opacity: selectedCount < 2 ? 0.5 : 1 }} title="Put the selected sheets and groups inside one new group"><span style={{ fontSize: 16 }}>📁</span> Combine into group</button>
+            <button type="button" onClick={combineIntoCollection} disabled={!canSheet} style={{ ...selBtn, background: "#f6e3da", color: "#8f3a1c", borderColor: "#e4b5a1", cursor: canSheet ? "pointer" : "default", opacity: canSheet ? 1 : 0.5 }} title={onlySheets ? "Merge all rows into one sheet and delete the rest" : "Only sheets can be merged into one sheet"}><span style={{ fontSize: 16 }}>📄</span> Combine into one sheet</button>
             {groups.length > 0 && (
               <select
                 value=""
                 onChange={(e) => { if (e.target.value) addSelectedToGroup(e.target.value); }}
                 title="Move the selected sheets and groups into a group (nested groups are indented)"
-                style={{ background: "#fff", color: "#0f766e", border: "none", borderRadius: 6, padding: "5px 10px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+                style={{ appearance: "none", WebkitAppearance: "none", MozAppearance: "none", background: "#fff url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238f3a1c' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E\") no-repeat right 11px center", backgroundSize: "20px", color: "#8f3a1c", border: "1px solid #e4b5a1", borderRadius: 9, padding: "9px 40px 9px 15px", fontWeight: 700, fontSize: 15, cursor: "pointer" }}
               >
-                <option value="">＋ Move to group…</option>
+                <option value="">Move to group</option>
                 {groups.filter((g) => !selectedGroupIds.has(g.id)).map((g) => <option key={g.id} value={g.id}>{"— ".repeat(Math.max(0, groupAncestors(g.id).length - 1))}{g.name}</option>)}
               </select>
             )}
             {openGroup && (
-              <button type="button" onClick={removeSelectedFromGroup} style={{ background: "#fff", color: "#b91c1c", border: "none", borderRadius: 6, padding: "5px 12px", fontWeight: 700, cursor: "pointer" }}>Remove from group</button>
+              <button type="button" onClick={removeSelectedFromGroup} style={{ ...selBtn, background: "#fff", color: "#b3341f", borderColor: "#e6c0b8", cursor: "pointer" }}>Remove from group</button>
             )}
-            <button type="button" onClick={clearSelection} style={{ background: "transparent", color: "#fff", border: "1px solid rgba(255,255,255,0.5)", borderRadius: 6, padding: "5px 12px", cursor: "pointer" }}>Cancel</button>
+            <button type="button" onClick={clearSelection} style={{ ...selBtn, background: "transparent", color: "#7a6f68", cursor: "pointer" }}>Cancel</button>
           </div>
         ) : null;
 
