@@ -13479,14 +13479,7 @@ export default function PortalDashboard() {
                   />
                 </label>
               )}
-              {page === "restock" && (
-                <button
-                  type="button"
-                  onClick={() => updateParams({ page: "usa-stock" })}
-                  style={s.usaStockNavButton}
-                  title="View products marked Send to USA as a picture grid"
-                >🇺🇸 USA Stock</button>
-              )}
+              {/* USA Stock button moved to the restock filter row (right end). */}
               {page === "usa-stock" && (
                 <button
                   type="button"
@@ -13582,6 +13575,14 @@ export default function PortalDashboard() {
                 allLabel="All destinations"
               />
             </label>
+            {/* USA Stock lives here (right end of the filters) instead of the
+                search header, so the header doesn't wrap/drop as the screen grows. */}
+            <button
+              type="button"
+              onClick={() => updateParams({ page: "usa-stock" })}
+              style={{ ...s.usaStockNavButton, marginLeft: "auto" }}
+              title="View products marked Send to USA as a picture grid"
+            >🇺🇸 USA Stock</button>
           </div>
         )}
 
