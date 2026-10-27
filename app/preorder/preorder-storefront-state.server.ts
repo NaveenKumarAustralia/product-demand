@@ -19,47 +19,57 @@ function variantGid(value: string) {
   return text.startsWith("gid://shopify/ProductVariant/") ? text : `gid://shopify/ProductVariant/${text}`;
 }
 
-function productGid(value: string) {
-  const text = String(value ?? "").trim();
-  if (!text) return null;
-  return text.startsWith("gid://shopify/Product/") ? text : `gid://shopify/Product/${text.replace(/[^0-9]/g, "")}`;
-}
-
-// Fetch a product's public storefront URL so the back-in-stock email can deep
-// link straight to the product ("Shop now"). Best-effort — returns null if the
-// product is not published to the Online Store or on any error.
-async function getProductOnlineUrl(shop: string, accessToken: string, productId: string | null): Promise<string | null> {
-  const gid = productGid(productId ?? "");
-  if (!gid) return null;
+// Fetch a variant's public storefront URL + its product image so the
+// back-in-stock email can deep link ("Shop now") and show the product photo.
+// Prefers the variant's own image (e.g. the colourway) and falls back to the
+// product's featured image. Best-effort — returns nulls on any error / when the
+// product is not published to the Online Store.
+export type VariantStorefrontInfo = { productUrl: string | null; imageUrl: string | null };
+async function getVariantStorefrontInfo(shop: string, accessToken: string, variantId: string): Promise<VariantStorefrontInfo> {
   try {
     const response = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
       body: JSON.stringify({
         query: `#graphql
-          query BackInStockProductUrl($id: ID!) { product(id: $id) { onlineStoreUrl } }
+          query BackInStockVariantInfo($id: ID!) {
+            productVariant(id: $id) {
+              image { url }
+              product { onlineStoreUrl featuredImage { url } }
+            }
+          }
         `,
-        variables: { id: gid },
+        variables: { id: variantGid(variantId) },
       }),
     });
-    if (!response.ok) return null;
-    const json = await response.json() as { data?: { product?: { onlineStoreUrl?: string | null } } };
-    const url = json.data?.product?.onlineStoreUrl;
-    return typeof url === "string" && url.trim() ? url.trim() : null;
+    if (!response.ok) return { productUrl: null, imageUrl: null };
+    const json = await response.json() as {
+      data?: { productVariant?: {
+        image?: { url?: string | null } | null;
+        product?: { onlineStoreUrl?: string | null; featuredImage?: { url?: string | null } | null } | null;
+      } | null };
+    };
+    const v = json.data?.productVariant;
+    const url = v?.product?.onlineStoreUrl;
+    const img = v?.image?.url || v?.product?.featuredImage?.url;
+    return {
+      productUrl: typeof url === "string" && url.trim() ? url.trim() : null,
+      imageUrl: typeof img === "string" && img.trim() ? img.trim() : null,
+    };
   } catch {
-    return null;
+    return { productUrl: null, imageUrl: null };
   }
 }
 
-// Convenience for callers that only have the shop + productId (e.g. the manual
-// "Send via Klaviyo" endpoint): resolves the offline session itself. Null on any
-// failure so sending never blocks on a missing URL.
-export async function resolveProductOnlineUrl(shop: string, productId: string | null): Promise<string | null> {
+// Convenience for callers that only have the shop + variantId (e.g. the manual
+// "Send via Klaviyo" endpoint): resolves the offline session itself. Returns
+// nulls on any failure so sending never blocks on a missing URL/image.
+export async function resolveVariantStorefrontInfo(shop: string, variantId: string): Promise<VariantStorefrontInfo> {
   try {
     const accessToken = await getOfflineSession(shop);
-    return await getProductOnlineUrl(shop, accessToken, productId);
+    return await getVariantStorefrontInfo(shop, accessToken, variantId);
   } catch {
-    return null;
+    return { productUrl: null, imageUrl: null };
   }
 }
 
@@ -342,10 +352,6 @@ export async function notifyBackInStockForProduct(shop: string, productId: unkno
     let accessToken: string;
     try { accessToken = await getOfflineSession(shop); } catch { return { sent: 0, waiting: rows.length }; }
 
-    // All rows are the same product (queried by productId), so resolve its public
-    // storefront URL once for the "Shop now" button.
-    const productUrl = await getProductOnlineUrl(shop, accessToken, rows[0].productId);
-
     // Group waiters by variant + market (stock is checked per market location).
     const groups = new Map<string, BackInStockRow[]>();
     for (const r of rows) {
@@ -363,13 +369,16 @@ export async function notifyBackInStockForProduct(shop: string, productId: unkno
       let available = 0;
       try { available = await getPhysicalAvailable(shop, accessToken, grp[0].variantId, locationId); } catch { continue; }
       if (available < threshold) continue; // not enough stock yet — keep them waiting
+      // Resolve the "Shop now" URL + product photo once per variant (same for
+      // everyone waiting on this variant).
+      const { productUrl, imageUrl } = await getVariantStorefrontInfo(shop, accessToken, grp[0].variantId);
       for (const r of grp) {
         try {
           await sendBackInStockAvailableEvent({
             waitlistId: r.id, email: r.email, shop, market,
             productId: r.productId, productTitle: r.productTitle,
             variantId: r.variantId, variantTitle: r.variantTitle, sku: r.sku,
-            productUrl, availableQuantity: available,
+            productUrl, imageUrl, availableQuantity: available,
           });
           await prisma.$executeRawUnsafe(
             `UPDATE "PreorderWaitlist" SET "status" = 'notified', "notifiedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP WHERE "id" = $1 AND "status" = 'waiting'`,

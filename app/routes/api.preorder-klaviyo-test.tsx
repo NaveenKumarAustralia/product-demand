@@ -45,6 +45,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             variant_title: "M",
             sku: "SAMPLE-SKU",
             product_url: "https://www.karmaeast.com.au/collections/new-arrivals",
+            image: "https://d3k81ch9hvuctc.cloudfront.net/company/Th9m73/images/afa9f413-912d-4b29-a659-dc11e54d92b7.png",
             available_quantity: 3,
           }
         : {

@@ -134,6 +134,7 @@ export function sendBackInStockAvailableEvent(input: {
   variantTitle?: string | null;
   sku?: string | null;
   productUrl?: string | null;
+  imageUrl?: string | null;
   availableQuantity?: number | null;
 }) {
   return createKlaviyoEvent({
@@ -150,6 +151,7 @@ export function sendBackInStockAvailableEvent(input: {
       variant_title: input.variantTitle ?? null,
       sku: input.sku ?? null,
       product_url: input.productUrl ?? null,
+      image: input.imageUrl ?? null,
       available_quantity: input.availableQuantity ?? null,
       source: "karma-east-production-portal",
     },
