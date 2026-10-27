@@ -91,7 +91,38 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return Response.json({ ok: false, error: "You do not have permission to manage customer notifications." }, { status: 403 });
     }
 
-    const body = await request.json().catch(() => ({})) as { id?: unknown; status?: unknown };
+    const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+
+    // Manually add a customer to the waitlist (e.g. when they email/call to be
+    // notified). Re-activates an existing row for the same shop+email+variant+
+    // market instead of erroring on the unique index.
+    if (String(body.op ?? "") === "add") {
+      const email = String(body.email ?? "").trim().toLowerCase();
+      const variantId = String(body.variantId ?? "").trim();
+      const market = String(body.market ?? "").trim().toUpperCase();
+      if (!email || !email.includes("@") || email.length > 100) return Response.json({ ok: false, error: "Enter a valid customer email." }, { status: 400 });
+      if (!variantId) return Response.json({ ok: false, error: "Pick a product size/variant." }, { status: 400 });
+      if (market !== "AU" && market !== "USA") return Response.json({ ok: false, error: "Pick a market (AU or USA)." }, { status: 400 });
+      const str = (v: unknown) => { const t = v == null ? "" : String(v).trim(); return t || null; };
+      const productId = str(body.productId), productTitle = str(body.productTitle), variantTitle = str(body.variantTitle), sku = str(body.sku);
+      const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true } });
+      const shop = session?.shop;
+      if (!shop) return Response.json({ ok: false, error: "No Shopify session available." }, { status: 500 });
+      await prisma.$executeRawUnsafe(
+        `INSERT INTO "PreorderWaitlist" ("shop","email","productId","productTitle","variantId","variantTitle","sku","market","status","source","createdAt","updatedAt")
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'waiting','manual',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+         ON CONFLICT ("shop","email","variantId","market") DO UPDATE SET
+           "status" = 'waiting', "updatedAt" = CURRENT_TIMESTAMP,
+           "productId" = COALESCE(EXCLUDED."productId", "PreorderWaitlist"."productId"),
+           "productTitle" = COALESCE(EXCLUDED."productTitle", "PreorderWaitlist"."productTitle"),
+           "variantTitle" = COALESCE(EXCLUDED."variantTitle", "PreorderWaitlist"."variantTitle"),
+           "sku" = COALESCE(EXCLUDED."sku", "PreorderWaitlist"."sku")`,
+        shop, email, productId, productTitle, variantId, variantTitle, sku, market,
+      );
+      await prisma.activityLog.create({ data: { userName: actor.name, action: "preorder_waitlist_added", entity: "preorder_waitlist", entityId: variantId, field: "email", toValue: email } }).catch(() => undefined);
+      return Response.json({ ok: true });
+    }
+
     const id = Number(body.id);
     const status = String(body.status ?? "");
     if (!Number.isInteger(id) || id <= 0 || !["waiting", "notified", "converted", "removed"].includes(status)) {
