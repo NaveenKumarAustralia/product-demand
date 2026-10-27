@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { sendBackInStockAvailableEvent } from "../preorder/preorder-klaviyo.server";
+import { resolveProductOnlineUrl } from "../preorder/preorder-storefront-state.server";
 import { canSendPreorderNotifications, getPreorderPermissionContext } from "../preorder/preorder-permissions.server";
 import { requirePreorderPortalUser, requireSameOrigin } from "../preorder/preorder-portal-auth.server";
 
@@ -40,7 +41,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (row.market !== "AU" && row.market !== "USA") return Response.json({ ok: false, error: "Waitlist market is invalid." }, { status: 400 });
 
     const availableQuantity = Number(body.availableQuantity);
-    const productUrl = typeof body.productUrl === "string" && body.productUrl.trim() ? body.productUrl.trim() : null;
+    // Use the URL the caller passed, else resolve the product's storefront URL so
+    // the "Shop now" button deep-links to the product (best-effort, may be null).
+    const productUrl = typeof body.productUrl === "string" && body.productUrl.trim()
+      ? body.productUrl.trim()
+      : await resolveProductOnlineUrl(row.shop, row.productId);
     const event = await sendBackInStockAvailableEvent({
       waitlistId: row.id,
       email: row.email,

@@ -19,6 +19,50 @@ function variantGid(value: string) {
   return text.startsWith("gid://shopify/ProductVariant/") ? text : `gid://shopify/ProductVariant/${text}`;
 }
 
+function productGid(value: string) {
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+  return text.startsWith("gid://shopify/Product/") ? text : `gid://shopify/Product/${text.replace(/[^0-9]/g, "")}`;
+}
+
+// Fetch a product's public storefront URL so the back-in-stock email can deep
+// link straight to the product ("Shop now"). Best-effort — returns null if the
+// product is not published to the Online Store or on any error.
+async function getProductOnlineUrl(shop: string, accessToken: string, productId: string | null): Promise<string | null> {
+  const gid = productGid(productId ?? "");
+  if (!gid) return null;
+  try {
+    const response = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": accessToken },
+      body: JSON.stringify({
+        query: `#graphql
+          query BackInStockProductUrl($id: ID!) { product(id: $id) { onlineStoreUrl } }
+        `,
+        variables: { id: gid },
+      }),
+    });
+    if (!response.ok) return null;
+    const json = await response.json() as { data?: { product?: { onlineStoreUrl?: string | null } } };
+    const url = json.data?.product?.onlineStoreUrl;
+    return typeof url === "string" && url.trim() ? url.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Convenience for callers that only have the shop + productId (e.g. the manual
+// "Send via Klaviyo" endpoint): resolves the offline session itself. Null on any
+// failure so sending never blocks on a missing URL.
+export async function resolveProductOnlineUrl(shop: string, productId: string | null): Promise<string | null> {
+  try {
+    const accessToken = await getOfflineSession(shop);
+    return await getProductOnlineUrl(shop, accessToken, productId);
+  } catch {
+    return null;
+  }
+}
+
 function normalizeLocationId(value: string | null) {
   const text = String(value ?? "").trim();
   if (!text) return null;
@@ -298,6 +342,10 @@ export async function notifyBackInStockForProduct(shop: string, productId: unkno
     let accessToken: string;
     try { accessToken = await getOfflineSession(shop); } catch { return { sent: 0, waiting: rows.length }; }
 
+    // All rows are the same product (queried by productId), so resolve its public
+    // storefront URL once for the "Shop now" button.
+    const productUrl = await getProductOnlineUrl(shop, accessToken, rows[0].productId);
+
     // Group waiters by variant + market (stock is checked per market location).
     const groups = new Map<string, BackInStockRow[]>();
     for (const r of rows) {
@@ -321,7 +369,7 @@ export async function notifyBackInStockForProduct(shop: string, productId: unkno
             waitlistId: r.id, email: r.email, shop, market,
             productId: r.productId, productTitle: r.productTitle,
             variantId: r.variantId, variantTitle: r.variantTitle, sku: r.sku,
-            productUrl: null, availableQuantity: available,
+            productUrl, availableQuantity: available,
           });
           await prisma.$executeRawUnsafe(
             `UPDATE "PreorderWaitlist" SET "status" = 'notified', "notifiedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP WHERE "id" = $1 AND "status" = 'waiting'`,
