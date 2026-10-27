@@ -13,7 +13,7 @@ import {
 } from "./preorder/preorder-operations-panels";
 import { PreorderWebhookStatusPanel } from "./preorder/preorder-webhook-status-panel";
 import { PreorderShopifyReadinessPanel } from "./preorder/preorder-shopify-readiness-panel";
-import { PreorderWaitlistPanel } from "./preorder/preorder-waitlist-panel";
+import { PreorderWaitlistPanel, PreorderKlaviyoPanel } from "./preorder/preorder-waitlist-panel";
 import { PreorderNotificationsPanel } from "./preorder/preorder-notifications-panel";
 
 type Props = {
@@ -302,16 +302,15 @@ export function PreordersDashboard({ data, search: headerSearch = "", shopDomain
       ) : tab === "orders" ? (
         <PreorderCustomerOrdersPanel orders={data.customerOrders} search={headerSearch} colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} shopDomain={shopDomain} dateFrom={orderDateFrom} dateTo={orderDateTo} productFilter={orderProduct} statusFilter={orderStatus} />
       ) : tab === "waitlist" ? (
-        <>
-          <NotifyBlockToggle enabled={data.configuration.notifyBlockEnabled} />
-          <PreorderWaitlistPanel />
-        </>
+        <PreorderWaitlistPanel />
       ) : tab === "notifications" ? (
         <PreorderNotificationsPanel />
       ) : tab === "reports" ? (
         <PreorderReportsPanel />
       ) : tab === "settings" ? (
         <>
+          <NotifyBlockToggle enabled={data.configuration.notifyBlockEnabled} />
+          <PreorderKlaviyoPanel />
           <PreorderShopifyReadinessPanel />
           <PreorderWebhookStatusPanel />
           <PreorderSettingsPanel configuration={data.configuration} />
