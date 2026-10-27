@@ -1,6 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import { syncLockedCollectionRowsForProduct } from "../collections-sync.server";
+import { notifyBackInStockForProduct } from "../preorder/preorder-storefront-state.server";
 
 // products/update → keep LOCKED collection rows in sync with Shopify. Fires the
 // moment a product is saved in Shopify admin; updates the descriptive fields +
@@ -18,5 +19,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   void syncLockedCollectionRowsForProduct(shop, productId)
     .then((r) => { if (r.updated) console.log(`[collections sync] ${topic} ${shop}: updated ${r.updated} locked row(s) for product ${productId}`); })
     .catch((error) => { console.error(`[collections sync] ${topic} failed for ${shop}:`, error instanceof Error ? error.message : error); });
+  // Back in stock: if this product has waiting notify-me signups and a variant
+  // has returned to (at least) the threshold stock, auto-fire the Klaviyo event.
+  void notifyBackInStockForProduct(shop, productId)
+    .catch((error) => { console.error(`[backinstock] ${topic} failed for ${shop}:`, error instanceof Error ? error.message : error); });
   return new Response(null, { status: 200 });
 };

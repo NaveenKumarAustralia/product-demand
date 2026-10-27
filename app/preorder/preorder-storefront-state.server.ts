@@ -1,6 +1,7 @@
 import prisma from "../db.server";
 import { getPreorderLocationSettings } from "./preorder-locations.server";
-import { getPreorderNotifyEnabled } from "./preorder-storefront-settings.server";
+import { getPreorderNotifyEnabled, getBackInStockThreshold } from "./preorder-storefront-settings.server";
+import { sendBackInStockAvailableEvent } from "./preorder-klaviyo.server";
 import { calculatePreorderCapacity, getPreorderEligibility } from "./preorder-rules.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
 import {
@@ -266,4 +267,74 @@ export async function getStorefrontPreorderState(input: {
     locationId,
     state: suppressNotify(resolveStorefrontVariantState({ market: input.market, physicalAvailable: 0, candidates }), notifyEnabled),
   };
+}
+
+// AUTO back-in-stock: when a product's inventory changes, send the Klaviyo
+// "back in stock" event to everyone still WAITING on one of its variants —
+// but only once that variant's stock (at the waiter's market location) has
+// reached the configured threshold. Marks each notified so it never re-sends.
+// Called from the products/update webhook (background). Never throws.
+type BackInStockRow = {
+  id: number; email: string; productId: string | null; productTitle: string | null;
+  variantId: string; variantTitle: string | null; sku: string | null; market: string; status: string;
+};
+export async function notifyBackInStockForProduct(shop: string, productId: unknown): Promise<{ sent: number; waiting: number }> {
+  try {
+    const num = String(productId ?? "").replace(/\D/g, "");
+    if (!shop || !num) return { sent: 0, waiting: 0 };
+    // Only this product's still-waiting signups (productId is stored as gid OR
+    // numeric, so match on the numeric part).
+    const rows = await prisma.$queryRawUnsafe<BackInStockRow[]>(
+      `SELECT "id","email","productId","productTitle","variantId","variantTitle","sku","market","status"
+       FROM "PreorderWaitlist"
+       WHERE "shop" = $1 AND "status" = 'waiting'
+         AND regexp_replace(COALESCE("productId", ''), '[^0-9]', '', 'g') = $2`,
+      shop, num,
+    );
+    if (!rows.length) return { sent: 0, waiting: 0 };
+
+    const threshold = await getBackInStockThreshold();
+    const locations = await getPreorderLocationSettings();
+    let accessToken: string;
+    try { accessToken = await getOfflineSession(shop); } catch { return { sent: 0, waiting: rows.length }; }
+
+    // Group waiters by variant + market (stock is checked per market location).
+    const groups = new Map<string, BackInStockRow[]>();
+    for (const r of rows) {
+      const key = `${r.variantId}|${r.market}`;
+      const list = groups.get(key); if (list) list.push(r); else groups.set(key, [r]);
+    }
+
+    let sent = 0;
+    for (const grp of groups.values()) {
+      const market: StorefrontMarket = grp[0].market === "USA" ? "USA" : "AU";
+      // Same market→location rule as the storefront state (USA falls back to AU;
+      // no location = judge by total stock across all locations).
+      let locationId = normalizeLocationId(locations[market]);
+      if (!locationId && market !== "AU") locationId = normalizeLocationId(locations.AU);
+      let available = 0;
+      try { available = await getPhysicalAvailable(shop, accessToken, grp[0].variantId, locationId); } catch { continue; }
+      if (available < threshold) continue; // not enough stock yet — keep them waiting
+      for (const r of grp) {
+        try {
+          await sendBackInStockAvailableEvent({
+            waitlistId: r.id, email: r.email, shop, market,
+            productId: r.productId, productTitle: r.productTitle,
+            variantId: r.variantId, variantTitle: r.variantTitle, sku: r.sku,
+            productUrl: null, availableQuantity: available,
+          });
+          await prisma.$executeRawUnsafe(
+            `UPDATE "PreorderWaitlist" SET "status" = 'notified', "notifiedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP WHERE "id" = $1 AND "status" = 'waiting'`,
+            r.id,
+          );
+          sent += 1;
+        } catch (e) { console.warn("[backinstock] send failed for waitlist", r.id, e); }
+      }
+    }
+    if (sent) console.log(`[backinstock] ${shop} product ${num}: notified ${sent}/${rows.length} waiting (threshold ${threshold})`);
+    return { sent, waiting: rows.length };
+  } catch (e) {
+    console.warn("[backinstock] notifyBackInStockForProduct failed:", e);
+    return { sent: 0, waiting: 0 };
+  }
 }

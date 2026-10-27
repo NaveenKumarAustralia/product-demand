@@ -421,6 +421,7 @@ export function PreorderSettingsPanel({ configuration }: { configuration: Preord
   const [au, setAu] = useState(configuration.locations.AU ?? "");
   const [usa, setUsa] = useState(configuration.locations.USA ?? "");
   const [combineDays, setCombineDays] = useState(String(configuration.combineWindowDays ?? 8));
+  const [backInStock, setBackInStock] = useState(String(configuration.backInStockThreshold ?? 1));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: "error" | "success"; text: string } | null>(null);
   const [locations, setLocations] = useState<ShopifyLocationOption[]>([]);
@@ -511,6 +512,26 @@ export function PreorderSettingsPanel({ configuration }: { configuration: Preord
           }}>Apply to existing orders now</button>
         </div>
         <div style={{ ...s.muted, marginTop: 6 }}>“Apply to existing orders” holds the in-stock items of orders already placed whose pre-order is due within the window above (raise the days to catch more). Already-shipped items aren’t affected.</div>
+      </div>
+      <div style={s.card}>
+        <div style={s.title}>Back in stock — email threshold</div>
+        <div style={s.muted}>
+          When a sold-out product has customers on its “Notify me” waitlist and stock returns, the back-in-stock
+          email fires automatically (via Klaviyo). This sets how many units must be back in stock at the region’s
+          location before the email sends — <strong>1</strong> notifies the moment any stock returns; raise it to
+          hold the email until, say, 2 or 5 are in stock so you don’t notify on a single returned unit.
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+          <input
+            type="number" min={1} max={100000} value={backInStock}
+            onChange={(e) => setBackInStock(e.target.value.replace(/[^0-9]/g, ""))}
+            style={{ width: 90, height: 36, boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 8, padding: "0 10px", fontSize: 14 }}
+          />
+          <span style={s.muted}>units in stock before emailing</span>
+        </div>
+        <div style={s.actions}>
+          <button type="button" disabled={busy} style={s.primary} onClick={() => post({ operation: "set-backinstock-threshold", threshold: Math.max(1, Number(backInStock) || 1) }, `Back-in-stock threshold saved (${Math.max(1, Number(backInStock) || 1)} unit${Math.max(1, Number(backInStock) || 1) === 1 ? "" : "s"}).`)}>Save threshold</button>
+        </div>
       </div>
       <div style={s.card}>
         <div style={s.title}>Staff permissions</div>

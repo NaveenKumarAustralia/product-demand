@@ -1,6 +1,6 @@
 import prisma from "../db.server";
 import { getPreorderLocationSettings } from "./preorder-locations.server";
-import { getPreorderNotifyEnabled, getPreorderCombineWindowDays } from "./preorder-storefront-settings.server";
+import { getPreorderNotifyEnabled, getPreorderCombineWindowDays, getBackInStockThreshold } from "./preorder-storefront-settings.server";
 import { getPreorderPermissionContext } from "./preorder-permissions.server";
 import { calculatePreorderCapacity, getPreorderEligibility, isPreorderEligibleStatus } from "./preorder-rules.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
@@ -79,6 +79,7 @@ export type PreorderDashboardData = {
     locations: { AU: string | null; USA: string | null };
     notifyBlockEnabled: boolean;
     combineWindowDays: number;
+    backInStockThreshold: number;
     users: Array<{ id: string; name: string; admin: boolean }>;
     permissions: {
       managePreorderUserIds: string[];
@@ -129,7 +130,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
   });
 
   const orderIds = orders.map((order) => order.id);
-  const [settings, reservations, permissionContext, locations, sellingPlanEntries, notifyBlockEnabled, combineWindowDays] = await Promise.all([
+  const [settings, reservations, permissionContext, locations, sellingPlanEntries, notifyBlockEnabled, combineWindowDays, backInStockThreshold] = await Promise.all([
     orderIds.length
       ? prisma.preorderBatchSetting.findMany({ where: { supplierOrderId: { in: orderIds } } })
       : Promise.resolve([]),
@@ -145,6 +146,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
     getPreorderSellingPlanRegistryEntries(),
     getPreorderNotifyEnabled(),
     getPreorderCombineWindowDays(),
+    getBackInStockThreshold(),
   ]);
   const byOrder = new Map(settings.map((setting) => [setting.supplierOrderId, setting]));
   const sellingPlanByOrder = new Map(sellingPlanEntries.map((entry) => [entry.supplierOrderId, entry]));
@@ -290,6 +292,7 @@ export async function loadPreorderDashboardData(): Promise<PreorderDashboardData
       locations,
       notifyBlockEnabled,
       combineWindowDays,
+      backInStockThreshold,
       users: permissionContext.users.map((user) => ({
         id: user.id,
         name: user.name,

@@ -7,7 +7,7 @@ import {
 } from "../preorder/preorder-batch.service";
 import { getPreorderPermissionContext } from "../preorder/preorder-permissions.server";
 import { setPreorderLocationSettings } from "../preorder/preorder-locations.server";
-import { setPreorderNotifyEnabled, setPreorderCombineWindowDays } from "../preorder/preorder-storefront-settings.server";
+import { setPreorderNotifyEnabled, setPreorderCombineWindowDays, setBackInStockThreshold } from "../preorder/preorder-storefront-settings.server";
 import { combineExistingPreorderOrders } from "../preorder/preorder-release.server";
 import {
   PreorderSellingPlanError,
@@ -61,6 +61,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (actor.admin !== true) return jsonError("Only a portal admin can change the combine window.", 403);
       const days = await setPreorderCombineWindowDays(Number(payload.days), actor.name);
       return Response.json({ ok: true, combineWindowDays: days });
+    }
+
+    if (operation === "set-backinstock-threshold") {
+      if (actor.admin !== true) return jsonError("Only a portal admin can change the back-in-stock threshold.", 403);
+      const threshold = await setBackInStockThreshold(Number(payload.threshold), actor.name);
+      return Response.json({ ok: true, backInStockThreshold: threshold });
     }
 
     if (operation === "combine-existing") {

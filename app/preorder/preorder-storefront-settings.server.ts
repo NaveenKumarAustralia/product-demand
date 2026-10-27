@@ -65,3 +65,36 @@ export async function setPreorderCombineWindowDays(days: number, actorName: stri
   });
   return clean;
 }
+
+// Back-in-stock: minimum physical stock (at the market's location) a waitlisted
+// variant must reach before the Klaviyo "back in stock" email is auto-sent.
+// Default 1 (notify as soon as any stock returns). Raise it to hold the email
+// until, say, 2 or 5 are in stock, so you don't notify on a single returned unit.
+export const PREORDER_BACKINSTOCK_THRESHOLD_KEY = "preorder-backinstock-threshold-v1";
+export const PREORDER_BACKINSTOCK_THRESHOLD_DEFAULT = 1;
+
+export async function getBackInStockThreshold(): Promise<number> {
+  const setting = await prisma.portalSetting.findUnique({
+    where: { key: PREORDER_BACKINSTOCK_THRESHOLD_KEY },
+    select: { value: true },
+  });
+  const value: unknown = setting?.value;
+  if (value == null) return PREORDER_BACKINSTOCK_THRESHOLD_DEFAULT;
+  const raw = typeof value === "object" && value && "threshold" in (value as Record<string, unknown>)
+    ? (value as Record<string, unknown>).threshold
+    : value;
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n < 1) return PREORDER_BACKINSTOCK_THRESHOLD_DEFAULT;
+  return Math.min(n, 100000);
+}
+
+export async function setBackInStockThreshold(threshold: number, actorName: string): Promise<number> {
+  const clean = Math.max(1, Math.min(100000, Math.floor(Number(threshold) || 1)));
+  const value = { threshold: clean, updatedBy: actorName, updatedAt: new Date().toISOString() };
+  await prisma.portalSetting.upsert({
+    where: { key: PREORDER_BACKINSTOCK_THRESHOLD_KEY },
+    create: { key: PREORDER_BACKINSTOCK_THRESHOLD_KEY, value },
+    update: { value },
+  });
+  return clean;
+}
