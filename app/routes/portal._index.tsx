@@ -12599,6 +12599,17 @@ export default function PortalDashboard() {
   const submit = useSubmit();
   // Active Pre-orders sub-tab (drives both the sidebar submenu and the dashboard).
   const preorderTab = searchParams.get("preorderTab") ?? "batches";
+  // Back-in-Stock market filter — rendered next to the page title (in the header)
+  // and shared with the waitlist panel via the ?wlMarket= param.
+  const wlMarket = ((): "ALL" | "AU" | "USA" => {
+    const v = searchParams.get("wlMarket");
+    return v === "AU" || v === "USA" ? v : "ALL";
+  })();
+  const setWlMarket = (m: "ALL" | "AU" | "USA") => setSearchParams((prev) => {
+    const n = new URLSearchParams(prev);
+    if (m === "ALL") n.delete("wlMarket"); else n.set("wlMarket", m);
+    return n;
+  }, { preventScrollReset: true });
   const columnWidthsFetcher = useFetcher();
   const undoFetcher = useFetcher();
   const [addRowNonce, setAddRowNonce] = useState(0);
@@ -13314,6 +13325,22 @@ export default function PortalDashboard() {
               }
               return activePageTitle;
             })()}</h1>
+            {page === "preorders" && preorderTab === "waitlist" && (
+              <div style={{ display: "inline-flex", gap: 4, padding: 3, borderRadius: 9, background: "rgba(255,255,255,0.18)" }}>
+                {(["ALL", "AU", "USA"] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setWlMarket(m)}
+                    style={{
+                      border: 0, cursor: "pointer", padding: "5px 13px", borderRadius: 7, fontWeight: 800, fontSize: 12,
+                      background: wlMarket === m ? "#ffffff" : "transparent",
+                      color: wlMarket === m ? "#0f172a" : "#ffffff",
+                    }}
+                  >{m}</button>
+                ))}
+              </div>
+            )}
             {page === "jj-new-products" && (() => {
               const n = collections.reduce((sum: number, c: { rowCount?: number }) => sum + (c.rowCount || 0), 0);
               return <span style={{ fontSize: 14, fontWeight: 600, color: "#ffffff" }}>{n.toLocaleString()} row{n === 1 ? "" : "s"}</span>;
@@ -13740,7 +13767,7 @@ export default function PortalDashboard() {
             <AiChat variant="page" />
           </div>
         ) : page === "preorders" && preorderDashboard ? (
-          <PreordersDashboard data={preorderDashboard} search={preorderSearch} shopDomain={shopDomain} activeTab={preorderTab} />
+          <PreordersDashboard data={preorderDashboard} search={preorderSearch} shopDomain={shopDomain} activeTab={preorderTab} waitlistMarket={wlMarket} onWaitlistMarketChange={setWlMarket} />
         ) : page === "reorder" ? (
           <ReorderPlannerPage search={reorderSearch} restockSettings={restockSettings} canManagePreorder={canManagePreorder} />
         ) : page === "search" ? (

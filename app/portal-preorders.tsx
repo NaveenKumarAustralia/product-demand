@@ -21,6 +21,10 @@ type Props = {
   search?: string;
   shopDomain?: string | null;
   activeTab?: string;
+  // Back-in-Stock market filter — lifted to the page header (next to the title)
+  // and shared via the ?wlMarket= URL param, so the panel is controlled.
+  waitlistMarket?: "ALL" | "AU" | "USA";
+  onWaitlistMarketChange?: (m: "ALL" | "AU" | "USA") => void;
 };
 
 const ORDERS_COLS_LS = "preorder-customer-orders-cols-v2";
@@ -58,7 +62,7 @@ function dateInputValue(value: string | null) {
   return date.toISOString().slice(0, 10);
 }
 
-export function PreordersDashboard({ data, search: headerSearch = "", shopDomain = null, activeTab = "batches" }: Props) {
+export function PreordersDashboard({ data, search: headerSearch = "", shopDomain = null, activeTab = "batches", waitlistMarket = "ALL", onWaitlistMarketChange }: Props) {
   // Tab is driven by the sidebar submenu (via ?preorderTab=), not in-page tabs.
   const tab: TabId = (TABS.some((t) => t.id === activeTab) ? activeTab : "batches") as TabId;
   const [market, setMarket] = useState<"ALL" | "AU" | "USA">("ALL");
@@ -302,7 +306,7 @@ export function PreordersDashboard({ data, search: headerSearch = "", shopDomain
       ) : tab === "orders" ? (
         <PreorderCustomerOrdersPanel orders={data.customerOrders} search={headerSearch} colOrder={colOrder} hidden={colHidden} onReorder={reorderCols} shopDomain={shopDomain} dateFrom={orderDateFrom} dateTo={orderDateTo} productFilter={orderProduct} statusFilter={orderStatus} />
       ) : tab === "waitlist" ? (
-        <PreorderWaitlistPanel />
+        <PreorderWaitlistPanel market={waitlistMarket} onMarketChange={onWaitlistMarketChange} search={headerSearch} />
       ) : tab === "notifications" ? (
         <PreorderNotificationsPanel />
       ) : tab === "reports" ? (
