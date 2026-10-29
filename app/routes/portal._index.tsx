@@ -20,6 +20,91 @@ import { denyClosedPreorderOrderVariants } from "../preorder/preorder-inventory-
 import { unauthenticated } from "../shopify.server";
 import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
 
+// Collection shipment + restock-status maps, keyed by NUMERIC product id.
+// Drives the collection Status chip (top = restock supplier status, bottom =
+// shipment status from packing lists) and the per-size shipment-breakdown popup.
+// Shared by the page loader AND get_collection_full so opening a collection
+// always shows CURRENT status/packing numbers (the base loader is skipped on
+// collectionId change, so without this the detail view would be frozen at the
+// last full page load).
+type CollectionShipmentData = {
+  eta: Record<string, string>;
+  shipment: Record<string, { label: string; partial: boolean }>;
+  shipDetail: Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>>;
+  restockStatus: Record<string, string>;
+};
+async function buildCollectionShipmentData(): Promise<CollectionShipmentData> {
+  const eta: Record<string, string> = {};
+  const shipment: Record<string, { label: string; partial: boolean }> = {};
+  const shipDetail: Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>> = {};
+  const restockStatus: Record<string, string> = {};
+  try {
+    const [lines, orders] = await Promise.all([
+      prisma.packingListLine.findMany({
+        where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } },
+        select: { productId: true, qtys: true, packingList: { select: { id: true, title: true, invoiceNumber: true, expectedLeaveFactoryDate: true, shipmentDate: true } } },
+      }),
+      prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true, supplierStatus: true } }).catch(() => [] as Array<{ productId: string; totalQty: number; supplierStatus: string }>),
+    ]);
+    const STATUS_RANK: Record<string, number> = { cancelled: 0, on_order: 1, on_production: 2, ready: 3, in_shipment: 4 };
+    for (const o of orders) {
+      if (!o.productId || !o.supplierStatus) continue;
+      const num = String(o.productId).replace(/\D/g, "");
+      if (!num) continue;
+      const cur = restockStatus[num];
+      if (!cur || (STATUS_RANK[o.supplierStatus] ?? 0) > (STATUS_RANK[cur] ?? 0)) restockStatus[num] = o.supplierStatus;
+    }
+    for (const line of lines) {
+      if (!line.productId) continue;
+      const prodNum = String(line.productId).replace(/\D/g, "");
+      if (!prodNum) continue;
+      const ship = (line.packingList.invoiceNumber || line.packingList.title || `${line.packingList.id}`).trim();
+      const qtys = normalizeQtys(line.qtys);
+      for (const [sizeRaw, nRaw] of Object.entries(qtys)) {
+        const qty = Number(nRaw) || 0;
+        if (qty <= 0) continue;
+        const size = collectionCanonSize(sizeRaw);
+        const prod = (shipDetail[prodNum] ??= {});
+        const sz = (prod[size] ??= { total: 0, parts: [] });
+        sz.total += qty;
+        const part = sz.parts.find((p) => p.ship === ship);
+        if (part) part.qty += qty; else sz.parts.push({ ship, qty });
+      }
+    }
+    const byProduct = new Map<string, Map<number, { qty: number; label: string }>>();
+    for (const line of lines) {
+      if (!line.productId) continue;
+      const d = line.packingList.expectedLeaveFactoryDate ?? line.packingList.shipmentDate;
+      if (d) {
+        const iso = d.toISOString();
+        const existing = eta[line.productId];
+        if (!existing || iso > existing) eta[line.productId] = iso;
+      }
+      const shipQty = Object.values(normalizeQtys(line.qtys)).reduce((s, n) => s + (Number(n) || 0), 0);
+      const listId = line.packingList.id;
+      const label = (line.packingList.invoiceNumber || line.packingList.title || `Shipment ${listId}`).trim();
+      let m = byProduct.get(line.productId);
+      if (!m) { m = new Map(); byProduct.set(line.productId, m); }
+      const cur = m.get(listId) ?? { qty: 0, label };
+      cur.qty += shipQty;
+      m.set(listId, cur);
+    }
+    const orderedByProduct = new Map<string, number>();
+    for (const o of orders) if (o.productId) orderedByProduct.set(o.productId, (orderedByProduct.get(o.productId) ?? 0) + (o.totalQty ?? 0));
+    for (const [pid, lists] of byProduct) {
+      const entries = Array.from(lists.values());
+      const shipped = entries.reduce((s, e) => s + e.qty, 0);
+      const ordered = orderedByProduct.get(pid) ?? 0;
+      shipment[pid] = entries.length > 1
+        ? { label: `${entries.length} shipments`, partial: true }
+        : { label: entries[0].label, partial: ordered > 0 ? shipped < ordered : false };
+    }
+  } catch (e) {
+    console.warn("[collection shipment data] lookup failed:", e);
+  }
+  return { eta, shipment, shipDetail, restockStatus };
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   // TEMP diagnostic: add ?perf=1 to the URL to get a timing/size breakdown of
@@ -453,90 +538,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // Collections shipment/ETA per product — computed from packing-list lines +
   // ordered totals. Both queries run in parallel, and the whole thing runs in
   // parallel with the collections + photo-shoot list queries below.
-  const shipmentDataPromise: Promise<{ eta: Record<string, string>; shipment: Record<string, { label: string; partial: boolean }>; shipDetail: Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>>; restockStatus: Record<string, string> }> =
+  const shipmentDataPromise: Promise<CollectionShipmentData> =
     collectionIsOpen
-      ? (async () => {
-          const eta: Record<string, string> = {};
-          const shipment: Record<string, { label: string; partial: boolean }> = {};
-          // Per-product, per-size shipment breakdown: how many of each size went
-          // in which shipment. Drives the shipment-breakdown popup. Keyed by canonical size.
-          const shipDetail: Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>> = {};
-          // Restock supplier status per product — the collection Status chip mirrors
-          // this (the restock page is the source of truth for the product's status).
-          const restockStatus: Record<string, string> = {};
-          try {
-            const [lines, orders] = await Promise.all([
-              prisma.packingListLine.findMany({
-                where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } },
-                select: { productId: true, qtys: true, packingList: { select: { id: true, title: true, invoiceNumber: true, expectedLeaveFactoryDate: true, shipmentDate: true } } },
-              }),
-              prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true, supplierStatus: true } }).catch(() => [] as Array<{ productId: string; totalQty: number; supplierStatus: string }>),
-            ]);
-            // Furthest-along status wins when a product has several restock orders.
-            const STATUS_RANK: Record<string, number> = { cancelled: 0, on_order: 1, on_production: 2, ready: 3, in_shipment: 4 };
-            for (const o of orders) {
-              if (!o.productId || !o.supplierStatus) continue;
-              // Key by NUMERIC id — restock orders and collection rows store the
-              // product id in different shapes (gid:// vs plain number), so an
-              // exact-string match would silently miss and the chip wouldn't follow.
-              const num = String(o.productId).replace(/\D/g, "");
-              if (!num) continue;
-              const cur = restockStatus[num];
-              if (!cur || (STATUS_RANK[o.supplierStatus] ?? 0) > (STATUS_RANK[cur] ?? 0)) restockStatus[num] = o.supplierStatus;
-            }
-            for (const line of lines) {
-              if (!line.productId) continue;
-              // Key by NUMERIC id (same as restockStatus) — packing lines and
-              // collection rows store the product id in different shapes.
-              const prodNum = String(line.productId).replace(/\D/g, "");
-              if (!prodNum) continue;
-              const ship = (line.packingList.invoiceNumber || line.packingList.title || `${line.packingList.id}`).trim();
-              const qtys = normalizeQtys(line.qtys);
-              for (const [sizeRaw, nRaw] of Object.entries(qtys)) {
-                const qty = Number(nRaw) || 0;
-                if (qty <= 0) continue;
-                const size = collectionCanonSize(sizeRaw);
-                const prod = (shipDetail[prodNum] ??= {});
-                const sz = (prod[size] ??= { total: 0, parts: [] });
-                sz.total += qty;
-                const part = sz.parts.find((p) => p.ship === ship);
-                if (part) part.qty += qty; else sz.parts.push({ ship, qty });
-              }
-            }
-            const byProduct = new Map<string, Map<number, { qty: number; label: string }>>();
-            for (const line of lines) {
-              if (!line.productId) continue;
-              const d = line.packingList.expectedLeaveFactoryDate ?? line.packingList.shipmentDate;
-              if (d) {
-                const iso = d.toISOString();
-                const existing = eta[line.productId];
-                if (!existing || iso > existing) eta[line.productId] = iso;
-              }
-              const shipQty = Object.values(normalizeQtys(line.qtys)).reduce((s, n) => s + (Number(n) || 0), 0);
-              const listId = line.packingList.id;
-              const label = (line.packingList.invoiceNumber || line.packingList.title || `Shipment ${listId}`).trim();
-              let m = byProduct.get(line.productId);
-              if (!m) { m = new Map(); byProduct.set(line.productId, m); }
-              const cur = m.get(listId) ?? { qty: 0, label };
-              cur.qty += shipQty;
-              m.set(listId, cur);
-            }
-            const orderedByProduct = new Map<string, number>();
-            for (const o of orders) if (o.productId) orderedByProduct.set(o.productId, (orderedByProduct.get(o.productId) ?? 0) + (o.totalQty ?? 0));
-            for (const [pid, lists] of byProduct) {
-              const entries = Array.from(lists.values());
-              const shipped = entries.reduce((s, e) => s + e.qty, 0);
-              const ordered = orderedByProduct.get(pid) ?? 0;
-              shipment[pid] = entries.length > 1
-                ? { label: `${entries.length} shipments`, partial: true }
-                : { label: entries[0].label, partial: ordered > 0 ? shipped < ordered : false };
-            }
-          } catch (e) {
-            console.warn("[collection eta] lookup failed:", e);
-          }
-          return { eta, shipment, shipDetail, restockStatus };
-        })()
-      : Promise.resolve({ eta: {}, shipment: {}, shipDetail: {} as Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>>, restockStatus: {} as Record<string, string> });
+      ? buildCollectionShipmentData()
+      : Promise.resolve({ eta: {}, shipment: {}, shipDetail: {}, restockStatus: {} });
 
   // Run the three collections-page queries together instead of one-after-another.
   const [collections, photoShoots, shipmentData] = await Promise.all([collectionsPromise, photoShootsPromise, shipmentDataPromise]);
@@ -4594,11 +4599,18 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } catch (e) {
         console.warn("[get_collection_full] link prune failed:", e);
       }
-      if (changed || linkChanged || notesChanged) return jsonResponse({ collection: { ...collection, rows } });
+      if (changed || linkChanged || notesChanged) {
+        const shipData = await buildCollectionShipmentData();
+        return jsonResponse({ collection: { ...collection, rows }, shipDetail: shipData.shipDetail, restockStatus: shipData.restockStatus, eta: shipData.eta, shipment: shipData.shipment });
+      }
     } catch (e) {
       console.warn("[get_collection_full] image offload failed:", e);
     }
-    return jsonResponse({ collection });
+    // Fresh shipment + restock-status maps so the detail view's Status chip and
+    // packing-list breakdown popup reflect CURRENT data on open (not the page's
+    // last full load).
+    const shipData = await buildCollectionShipmentData();
+    return jsonResponse({ collection, shipDetail: shipData.shipDetail, restockStatus: shipData.restockStatus, eta: shipData.eta, shipment: shipData.shipment });
   }
 
   // Migrate a collection's inline base64 images out to the CollectionImage table
@@ -19515,6 +19527,12 @@ function CollectionSpreadsheetPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listItem.id]);
 
+  // Fresh shipment + restock-status maps returned by get_collection_full. The
+  // base page loader is skipped on collectionId change, so the prop versions can
+  // be stale; these override them so the Status chip and packing-breakdown popup
+  // reflect current data the moment the collection opens / reloads.
+  const [freshShipDetail, setFreshShipDetail] = useState<CollectionShipDetailMap | null>(null);
+  const [freshRestockStatus, setFreshRestockStatus] = useState<Record<string, string> | null>(null);
   useEffect(() => {
     const col = loadFetcher.data?.collection;
     if (col && col.id === listItem.id) {
@@ -19529,7 +19547,13 @@ function CollectionSpreadsheetPage({
       setMigratingRemaining(null);
       setLoaded(true);
     }
+    const d = loadFetcher.data as { shipDetail?: CollectionShipDetailMap; restockStatus?: Record<string, string> } | undefined;
+    if (d?.shipDetail) setFreshShipDetail(d.shipDetail);
+    if (d?.restockStatus) setFreshRestockStatus(d.restockStatus);
   }, [loadFetcher.data, listItem.id]);
+  // Effective maps: fresh (from get_collection_full) when available, else props.
+  const effShipDetail = freshShipDetail ?? shipmentDetailByProductId;
+  const effRestockStatus = freshRestockStatus ?? restockStatusByProductId;
 
   // (Image migration happens on the server in get_collection_full — it returns
   // slim rows so this response never hangs the browser.)
@@ -20634,10 +20658,10 @@ function CollectionSpreadsheetPage({
                 const totalOrdered = sumCollectionRowQuantity(row);
                 // Shipment breakdown for this product (from Packing Lists) → the
                 // size-cell annotation + the auto shipment status.
-                const rowShipDetail = linkedProductId ? (shipmentDetailByProductId[linkedProductId.replace(/\D/g, "")] ?? null) : null;
+                const rowShipDetail = linkedProductId ? (effShipDetail[linkedProductId.replace(/\D/g, "")] ?? null) : null;
                 const rowShippedTotal = rowShipDetail ? Object.values(rowShipDetail).reduce((s, sz) => s + sz.total, 0) : 0;
                 // The product's status mirrors its restock order (source of truth).
-                const rowRestockStatus = linkedProductId ? (restockStatusByProductId[linkedProductId.replace(/\D/g, "")] ?? "") : "";
+                const rowRestockStatus = linkedProductId ? (effRestockStatus[linkedProductId.replace(/\D/g, "")] ?? "") : "";
                 const adminLink = shopifyAdminLinkForRow(row, shopDomain);
                 const storefrontLink = shopifyStorefrontLinkForRow(row, shopDomain);
                 // Computed values for readonly cells. Rendered through
@@ -21232,7 +21256,7 @@ function CollectionSpreadsheetPage({
         (() => {
           const row = rows[shipGridRowIdx];
           const pid = (row[COL_ROW_SHOPIFY_PRODUCT_ID] ?? "").trim();
-          const detail = pid ? (shipmentDetailByProductId[pid.replace(/\D/g, "")] ?? {}) : {};
+          const detail = pid ? (effShipDetail[pid.replace(/\D/g, "")] ?? {}) : {};
           const sizeDefs: Array<[string, string]> = [["freeSize", "Free"], ...COLLECTION_SIZE_COLUMN_LABELS];
           const sizes = sizeDefs
             .map(([id, lbl]) => {
