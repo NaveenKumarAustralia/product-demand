@@ -11999,6 +11999,9 @@ async function seedRestockOrderFromCollectionRow(shop: string, accessToken: stri
       status: "open",
       // Carry over the collection row's status onto the restock order.
       supplierStatus: (row.status ?? "").trim() || "on_order",
+      // Carry over the collection row's notes so they aren't re-typed on restock.
+      notes: (row.notes ?? "").trim() || null,
+      factoryNotes: (row.factoryNotes ?? "").trim() || null,
       productImageUrl: imageUrl,
       destination: null,
       totalQty: total,
