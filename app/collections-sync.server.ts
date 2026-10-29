@@ -1,11 +1,15 @@
 import prisma from "./db.server";
 
-// Shopify → Collections one-way sync for LOCKED rows. When a product is saved in
-// Shopify (products/update webhook), any collection row that is linked to that
-// product AND locked ("Shopify is the source of truth") pulls the latest
-// descriptive fields + category metafields. Unlocked rows (mid-edit in the
-// portal) are left alone. Name, Price (RRP), Price ₹, size quantities, SKU/
-// barcode and other portal-managed fields are never overwritten.
+// Shopify → Collections one-way sync. When a product is saved in Shopify
+// (products/update webhook), its linked collection rows pull the latest from
+// Shopify:
+//  • LOCKED rows ("Shopify is the source of truth") get the FULL pull (incl.
+//    price + images), as before.
+//  • UNLOCKED rows now also mirror Shopify's DESCRIPTIVE fields (description,
+//    SEO, category, tags, type, vendor, status, HS/country) so a Shopify edit
+//    shows up in the portal without re-locking — but NEVER price, images, name,
+//    quantities or SKU/barcode (portal-managed), and never a field the user has
+//    edited in the portal but not yet pushed (tracked in __shopifyEditedFields).
 
 const API_VERSION = "2025-10";
 const numeric = (s: unknown) => String(s ?? "").replace(/\D/g, "");
@@ -16,6 +20,14 @@ const K_LOCKED = "__shopifyLocked";
 const K_CATEGORY = "__categoryMetafields";
 const K_EDITED = "__shopifyEditedFields";
 const K_STATUS = "__shopifyStatus";
+
+// Descriptive fields safe to mirror into an UNLOCKED row (Shopify → portal).
+// Excludes price (compareAtPrice) and images (modelPicture) — those stay
+// portal-managed; name / quantities / SKU aren't in the pulled set at all.
+const UNLOCKED_SYNC_KEYS = new Set<string>([
+  "description", "productType", "vendor", "seoTitle", "seoDescription",
+  "hsCode", "countryOfOrigin", "tags", K_STATUS, K_CATEGORY,
+]);
 
 async function gql(shop: string, token: string, query: string, variables: Record<string, unknown>) {
   const res = await fetch(`https://${shop}/admin/api/${API_VERSION}/graphql.json`, {
@@ -114,16 +126,17 @@ export async function pullShopifyProductFields(shop: string, accessToken: string
   return pulled;
 }
 
-export async function syncLockedCollectionRowsForProduct(shop: string, productId: unknown): Promise<{ updated: number }> {
+export async function syncCollectionRowsForProduct(shop: string, productId: unknown): Promise<{ updated: number }> {
   const num = numeric(productId);
   if (!num || !shop) return { updated: 0 };
 
-  // 1) Cheap first: is this product linked to any LOCKED row anywhere? If not,
-  //    return without touching Shopify (products/update fires often).
+  // 1) Cheap first: is this product linked to ANY collection row (locked or
+  //    unlocked)? If not, return without touching Shopify (products/update fires
+  //    often).
   const collections = await prisma.collection.findMany({ select: { id: true, rows: true } });
   const matched = collections.filter((c) =>
     (Array.isArray(c.rows) ? (c.rows as Array<Record<string, unknown>>) : []).some(
-      (r) => numeric(r?.[K_PRODUCT_ID]) === num && String(r?.[K_LOCKED] ?? "") === "1",
+      (r) => numeric(r?.[K_PRODUCT_ID]) === num,
     ),
   );
   if (!matched.length) return { updated: 0 };
@@ -135,23 +148,41 @@ export async function syncLockedCollectionRowsForProduct(shop: string, productId
   const pulled = await pullShopifyProductFields(shop, session.accessToken, num);
   if (!pulled) return { updated: 0 };
 
-  // 3) Update the locked linked rows in each matched collection.
+  // 3) Update the linked rows in each matched collection.
   let updated = 0;
   for (const c of matched) {
     const rows = Array.isArray(c.rows) ? (c.rows as Array<Record<string, unknown>>) : [];
     let changed = false;
     const next = rows.map((row) => {
-      if (numeric(row?.[K_PRODUCT_ID]) !== num || String(row?.[K_LOCKED] ?? "") !== "1") return row;
-      changed = true; updated += 1;
-      // Don't overwrite the row's pictures if the user has a pending picture edit
-      // here (images are portal-curated and editable even when locked).
+      if (numeric(row?.[K_PRODUCT_ID]) !== num) return row;
+      const locked = String(row?.[K_LOCKED] ?? "") === "1";
+      // Fields the user has edited in the portal but not yet pushed — never
+      // clobber these from Shopify.
       const edited = new Set(String(row?.[K_EDITED] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
-      if (edited.has("modelPicture")) {
-        const { modelPicture: _skip, ...rest } = pulled;
-        void _skip;
-        return { ...row, ...rest };
+
+      if (locked) {
+        changed = true; updated += 1;
+        // Don't overwrite the row's pictures if the user has a pending picture
+        // edit (images are portal-curated and editable even when locked).
+        if (edited.has("modelPicture")) {
+          const { modelPicture: _skip, ...rest } = pulled;
+          void _skip;
+          return { ...row, ...rest };
+        }
+        return { ...row, ...pulled };
       }
-      return { ...row, ...pulled };
+
+      // Unlocked: mirror only descriptive fields, skip anything the user is
+      // mid-editing, and only when the value actually differs (so a Shopify save
+      // doesn't needlessly bump every linked collection's updatedAt).
+      const apply: Record<string, string> = {};
+      for (const [k, v] of Object.entries(pulled)) {
+        if (!UNLOCKED_SYNC_KEYS.has(k) || edited.has(k)) continue;
+        if (String(row?.[k] ?? "") !== v) apply[k] = v;
+      }
+      if (!Object.keys(apply).length) return row;
+      changed = true; updated += 1;
+      return { ...row, ...apply };
     });
     if (changed) await prisma.collection.update({ where: { id: c.id }, data: { rows: next as unknown as object, updatedAt: new Date() } }).catch(() => {});
   }

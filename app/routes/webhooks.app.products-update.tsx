@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
-import { syncLockedCollectionRowsForProduct } from "../collections-sync.server";
+import { syncCollectionRowsForProduct } from "../collections-sync.server";
 import { notifyBackInStockForProduct } from "../preorder/preorder-storefront-state.server";
 
 // products/update → keep LOCKED collection rows in sync with Shopify. Fires the
@@ -16,7 +16,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // can exceed 5s, so run it in the BACKGROUND — Railway is a long-lived Node
   // process, so this promise keeps running after the response is sent. Errors
   // are logged, never re-queued.
-  void syncLockedCollectionRowsForProduct(shop, productId)
+  void syncCollectionRowsForProduct(shop, productId)
     .then((r) => { if (r.updated) console.log(`[collections sync] ${topic} ${shop}: updated ${r.updated} locked row(s) for product ${productId}`); })
     .catch((error) => { console.error(`[collections sync] ${topic} failed for ${shop}:`, error instanceof Error ? error.message : error); });
   // Back in stock: if this product has waiting notify-me signups and a variant
