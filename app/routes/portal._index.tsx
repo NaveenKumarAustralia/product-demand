@@ -7188,7 +7188,7 @@ const COLLECTION_GROUPS_KEY = "collections-groups-v1";
 // coverCollectionId: which member collection's thumbnail is the group's cover
 // tile. Optional — falls back to the first member that has a thumbnail.
 // parentId: the group this group lives inside (undefined = top level).
-type CollectionGroup = { id: string; name: string; collectionIds: number[]; coverCollectionId?: number; parentId?: string };
+type CollectionGroup = { id: string; name: string; collectionIds: number[]; coverCollectionId?: number; parentId?: string; hidden?: boolean };
 function normalizeCollectionGroups(value: unknown): CollectionGroup[] {
   const arr = value && typeof value === "object" && Array.isArray((value as { groups?: unknown }).groups)
     ? (value as { groups: unknown[] }).groups : Array.isArray(value) ? value : [];
@@ -7205,8 +7205,9 @@ function normalizeCollectionGroups(value: unknown): CollectionGroup[] {
       // Keep the cover only if it's still a member of the group.
       const coverCollectionId = Number.isInteger(rawCover) && collectionIds.includes(rawCover) ? rawCover : undefined;
       const parentId = String((g as CollectionGroup).parentId ?? "").trim();
+      const hidden = (g as CollectionGroup).hidden === true;
       // A group can't be its own parent; deeper cycles are broken at render time.
-      return id && name ? { id, name, collectionIds, ...(coverCollectionId != null ? { coverCollectionId } : {}), ...(parentId && parentId !== id ? { parentId } : {}) } : null;
+      return id && name ? { id, name, collectionIds, ...(coverCollectionId != null ? { coverCollectionId } : {}), ...(parentId && parentId !== id ? { parentId } : {}), ...(hidden ? { hidden: true } : {}) } : null;
     })
     .filter((g): g is CollectionGroup => Boolean(g));
 }
@@ -18009,7 +18010,11 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
     return pid;
   };
   // Groups whose (resolved) parent is containerId (null = top level).
-  const childGroups = (containerId: string | null): CollectionGroup[] => groups.filter((g) => resolveParentId(g) === containerId);
+  // Active views exclude hidden groups; the "Show hidden" view renders them
+  // separately so they can be unhidden.
+  const childGroups = (containerId: string | null): CollectionGroup[] => groups.filter((g) => resolveParentId(g) === containerId && !g.hidden);
+  const hideGroup = (groupId: string) => saveGroups(groups.map((g) => g.id === groupId ? { ...g, hidden: true } : g));
+  const unhideGroup = (groupId: string) => saveGroups(groups.map((g) => g.id === groupId ? { ...g, hidden: false } : g));
   // Breadcrumb chain root-most → … → the given group.
   const groupAncestors = (gid: string): CollectionGroup[] => {
     const chain: CollectionGroup[] = []; const seen = new Set<string>();
@@ -18471,7 +18476,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 style={{ appearance: "none", WebkitAppearance: "none", MozAppearance: "none", background: "#fff url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238f3a1c' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E\") no-repeat right 11px center", backgroundSize: "20px", color: "#8f3a1c", border: "1px solid #e4b5a1", borderRadius: 9, padding: "9px 40px 9px 15px", fontWeight: 700, fontSize: 15, cursor: "pointer" }}
               >
                 <option value="">Move to group</option>
-                {groups.filter((g) => !selectedGroupIds.has(g.id)).map((g) => <option key={g.id} value={g.id}>{"— ".repeat(Math.max(0, groupAncestors(g.id).length - 1))}{g.name}</option>)}
+                {groups.filter((g) => !selectedGroupIds.has(g.id) && !g.hidden).map((g) => <option key={g.id} value={g.id}>{"— ".repeat(Math.max(0, groupAncestors(g.id).length - 1))}{g.name}</option>)}
               </select>
             )}
             {openGroup && (
@@ -18485,14 +18490,43 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         // collection list with the per-collection drag (reorder()).
         if (searchQ || showHidden) {
           const flat = visibleCollections.filter((c) => searchQ || showHidden || !groupedIds.has(c.id));
+          // In the hidden view, also show hidden GROUPS so they can be unhidden.
+          const hiddenGroups = showHidden && !searchQ ? groups.filter((g) => g.hidden) : [];
+          const hiddenGroupTile = (g: CollectionGroup) => {
+            const colCount = totalCollectionsIn(g.id);
+            const coverId = (g.coverCollectionId != null && collections.some((c) => c.id === g.coverCollectionId && c.hasThumbnail)) ? g.coverCollectionId : firstThumbIn(g.id);
+            const cover = coverId != null ? collections.find((c) => c.id === coverId) : undefined;
+            return (
+              <div key={`g:${g.id}`} style={{ ...s.productStyleCard, position: "relative" }}>
+                <div style={{ ...s.productStyleImageWrap, aspectRatio: "1.3 / 1.8", position: "relative", background: "#0f766e" }}>
+                  {cover ? (
+                    <img src={`/portal/thumbnail/collection/${cover.id}?v=${new Date(cover.updatedAt).getTime()}`} alt={g.name} draggable={false} style={{ ...s.productStyleImage, filter: "brightness(0.55)" }} loading="lazy" decoding="async" />
+                  ) : (
+                    <div style={s.productStyleImageEmpty}>Group</div>
+                  )}
+                  <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2 }}>
+                    <button type="button" onClick={() => unhideGroup(g.id)} style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "#fff", color: "#111827", border: "none", borderRadius: 7, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" }} title="Unhide this group">↩ Unhide group</button>
+                  </div>
+                  <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 10px", background: "linear-gradient(to top, rgba(15,118,110,0.92), rgba(15,118,110,0.45))", color: "#fff", fontSize: 11, fontWeight: 800, letterSpacing: 0.4, pointerEvents: "none", zIndex: 1 }}>
+                    <span style={{ textTransform: "uppercase", opacity: 0.92 }}>Group</span>
+                    <span>{colCount} sheet{colCount !== 1 ? "s" : ""}</span>
+                  </div>
+                </div>
+                <div style={{ padding: "8px 4px 2px" }}>
+                  <div style={{ fontWeight: 800, fontSize: 14, color: "#111827", textAlign: "center" }}>{g.name}</div>
+                </div>
+              </div>
+            );
+          };
           return (
             <div>
               {selectionBar}
               <div style={{ ...s.productInfoList, gridTemplateColumns: "repeat(6, minmax(0, 1fr))" }}>
+                {hiddenGroups.map(hiddenGroupTile)}
                 {flat.slice(0, tileLimit).map(card)}
-                {flat.length === 0 && (
+                {flat.length === 0 && hiddenGroups.length === 0 && (
                   <div style={{ gridColumn: "1 / -1", padding: "48px 0", textAlign: "center", color: "#9ca3af", fontSize: 14 }}>
-                    {searchQ ? `No sheets match "${search.trim()}".` : "No hidden sheets."}
+                    {searchQ ? `No sheets match "${search.trim()}".` : "Nothing hidden."}
                   </div>
                 )}
               </div>
@@ -18557,8 +18591,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 {/* Hover: change the group's cover (picker also has reset-to-auto).
                     Scrim is below the corner controls; a plain click still opens. */}
                 {ghover && (
-                  <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.28)", zIndex: 1 }}>
+                  <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "rgba(0,0,0,0.28)", zIndex: 1 }}>
                     <button type="button" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={tileActionBtn} title="Change the cover image for this group">🖼 Change cover</button>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); hideGroup(g.id); }} style={tileActionBtn} title="Hide this group (it keeps all its sheets — unhide it from ‘Show hidden’)">🙈 Hide group</button>
                   </div>
                 )}
                 {/* Bottom bar: what it is + how many. */}
@@ -18631,7 +18666,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
 
       {/* Show hidden / back-to-active toggle, at the BOTTOM of the page. */}
       {(() => {
-        const hiddenCount = collections.filter((c) => c.hidden).length;
+        const hiddenCount = collections.filter((c) => c.hidden).length + groups.filter((g) => g.hidden).length;
         if (hiddenCount === 0 && !showHidden) return null;
         return (
           <div style={{ padding: "16px 14px 24px", display: "flex", justifyContent: "center" }}>
@@ -18640,7 +18675,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               onClick={() => setShowHidden((v) => !v)}
               style={{ background: "transparent", border: "1px solid #d1d5db", borderRadius: 6, padding: "6px 14px", fontSize: 13, color: "#6b7280", cursor: "pointer" }}
             >
-              {showHidden ? "← Back to active sheets" : `Show hidden sheets (${hiddenCount})`}
+              {showHidden ? "← Back to active" : `Show hidden (${hiddenCount})`}
             </button>
           </div>
         );
