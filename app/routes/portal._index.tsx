@@ -17,6 +17,7 @@ import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-sell
 import { marketFromDestination, calculatePreorderCapacity } from "../preorder/preorder-rules.server";
 import { releaseArrivedPreorders } from "../preorder/preorder-release.server";
 import { denyClosedPreorderOrderVariants, removeClosedPreorderSellingPlans } from "../preorder/preorder-inventory-policy.server";
+import { deactivatePreorderForDeletedBatch } from "../preorder/preorder-reconcile.server";
 import { unauthenticated } from "../shopify.server";
 import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
 
@@ -2296,6 +2297,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!id) return null;
     const ord = await prisma.supplierOrder.findUnique({ where: { id }, select: { supplier: true } });
     if (ord?.supplier !== "JJ") return { jjError: "Not a JJ order" };
+    await deactivatePreorderForDeletedBatch(id); // turn off pre-order before delete (avoid orphan)
     await prisma.supplierOrder.delete({ where: { id } }); // cascades to lines
     return { jjDeleted: id };
   }
@@ -2696,6 +2698,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // Snapshot the whole order first so the delete can be undone (restore_order
     // recreates it — with a new id, hence undo/redo keep the id in sync client-side).
     const existing = await prisma.supplierOrder.findUnique({ where: { id: orderId }, include: { lines: { orderBy: { id: "asc" } } } });
+    // Turn off any pre-order BEFORE deleting the row — a deleted batch can't be
+    // reconciled afterwards, so its selling plan would orphan (and the product
+    // would stay pre-orderable). This also covers the auto-delete on shipment load.
+    await deactivatePreorderForDeletedBatch(orderId);
     await prisma.portalMessage.deleteMany({ where: { orderId } });
     await prisma.supplierOrder.delete({ where: { id: orderId } });
     if (!existing) return jsonResponse({ ok: true });

@@ -33,6 +33,20 @@ const SYSTEM_ACTOR = { id: "system-reconciler", name: "System (pre-order reconci
 const numeric = (v: unknown) => String(v ?? "").replace(/\D/g, "");
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+// Turn OFF a batch's pre-order before its restock row is DELETED. A deleted
+// SupplierOrder can't be found by the product reconciler afterwards, so its
+// selling plan would orphan (this is how batch #854 orphaned). Call this BEFORE
+// deleting the row: it removes the plan + restores DENY + clears the registry.
+// Best-effort + a no-op when the batch has no pre-order plan.
+export async function deactivatePreorderForDeletedBatch(supplierOrderId: number): Promise<void> {
+  try {
+    const { permissions } = await getPreorderPermissionContext();
+    await deactivatePreorderSellingPlan({ supplierOrderId, actor: SYSTEM_ACTOR, permissions });
+  } catch (e) {
+    console.warn("[preorder] deactivate-on-delete failed for batch", supplierOrderId, e instanceof Error ? e.message : e);
+  }
+}
+
 export type ReconcilePlanAction = { batchId: number; action: "activate" | "deactivate" | "none"; reason: string };
 export type ReconcileResult = {
   ok: boolean;
