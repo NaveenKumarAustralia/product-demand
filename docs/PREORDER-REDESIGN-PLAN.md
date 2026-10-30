@@ -128,15 +128,18 @@ Move pre-order logic out of `portal._index.tsx`; unit-test the reconciler + elig
 
 ---
 
-## 7. Open decisions (need your call before/early in the build)
+## 7. Decisions
 
-1. **Inventory transfers vs. simple "incoming" adjust.** Full Transfer/Shipment objects give receive-webhooks + dates (cleanest), but add scopes (`read/write_inventory_transfers`, `read/write_inventory_shipments`). OK to request those on re-auth?
-2. **`write_orders` re-auth** — needed for reliable holds/tags. OK, and who authorises it?
-3. **Deposits / payment timing** — do you want any pre-order deposit or "charge on fulfillment" (now supported), or full charge at checkout as today?
-4. **Reconcile cadence** — every 15 min vs hourly (self-heal speed vs API load).
-5. **Phase order** — Phase 1 (reconciler) first as written, or pull Phase 3 (splitting + emails) earlier if those hurt most right now?
-6. **AU/USA** — confirm each market maps to its own Shopify location for the transfer destination (USA fallback-to-AU behaviour stays?).
+**Decided (Oct 2026):**
+- ✅ **Scopes + re-auth approved** — we will request `write_orders` (reliable holds/tags) and `read/write_inventory_transfers` + `read/write_inventory_shipments` (native incoming stock) and re-authorise the app.
+- ✅ **Payment timing: full charge at checkout** (as today) — no deposit / charge-on-fulfillment for now.
+- ✅ **Emails:** plan orders use Shopify's **native** order-confirmation email (carries the dispatch date) — no Klaviyo for those. Klaviyo's role shrinks to the **express/no-plan capture email** and **back-in-stock** (sender for the capture email can move off Klaviyo later; not urgent). Note: a selling plan can't be attached to an order after checkout, so express orders can't be retro-made native — hence the separate capture email.
+
+**Still open:**
+- **Reconcile cadence** — every 15 min vs hourly (self-heal speed vs API load). *Leaning 15–30 min.*
+- **Phase order** — Phase 1 (reconciler) first as written (recommended), or pull Phase 3 (splitting + emails) earlier if those hurt most right now. A specific actively-burning split/email bug can be hotfixed in parallel without reordering.
+- **AU/USA** — confirm each market maps to its own Shopify location for the transfer destination (USA fallback-to-AU behaviour stays?).
 
 ---
 
-*Next step: answer §7 (especially #1–#3, which gate the native pieces), then start Phase 1 — it delivers the biggest reliability win and is safe for the 3 live pre-orders.*
+*Next step: confirm phase order, then start Phase 1 — biggest reliability win, safe for the 3 live pre-orders.*
