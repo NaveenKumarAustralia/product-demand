@@ -48,7 +48,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   try {
     const result = await processShopifyOrderCreated(shop, { id: orderId });
-    return Response.json({ ok: true, orderId, result, note: "Reprocessed — captured/held/tagged as needed (idempotent)." }, { headers: { "Cache-Control": "no-store" } });
+    // ALWAYS re-hold too: processShopifyOrderCreated only places the hold when it
+    // captures something NEW, so an order that was already reserved but never held
+    // (the real failure mode) wouldn't get held by the capture path alone. The
+    // re-hold works off the reservation ledger, so it fixes that case.
+    const rehold = await reholdUnheldPreorderOrders({ orderId });
+    return Response.json({ ok: true, orderId, result, rehold, note: "Reprocessed + re-held off the reservation ledger (idempotent)." }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return Response.json({ ok: false, orderId, error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
