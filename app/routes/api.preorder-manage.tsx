@@ -1,4 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
+import prisma from "../db.server";
+import { reconcilePreorderForProduct } from "../preorder/preorder-reconcile.server";
 import {
   PreorderEligibilityError,
   PreorderPermissionError,
@@ -96,14 +98,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // dispatch date, enable, and go live on Shopify in a single manage action.
     // If activation fails, roll the enable back so a row can never show "live"
     // without an actual Shopify selling plan behind it.
+    // Enable: set the DB state (enabled + dispatch date), then let the RECONCILER
+    // converge Shopify (it's the single writer — it activates the now-live batch).
+    // If the activation fails, roll the enable back so a row can never show "live"
+    // without a real selling plan behind it.
     if (operation === "row-enable") {
       const shipDate = parseOptionalDate(payload.shipDate);
       const setting = await setPreorderBatchEnabled({ supplierOrderId, enabled: true, shipDate, actor, permissions });
-      try {
-        await activatePreorderSellingPlan({ supplierOrderId, actor, permissions });
-      } catch (error) {
-        await setPreorderBatchEnabled({ supplierOrderId, enabled: false, actor, permissions }).catch(() => undefined);
-        throw error;
+      const order = await prisma.supplierOrder.findUnique({ where: { id: supplierOrderId }, select: { shop: true, productId: true } });
+      if (order?.shop && order.productId) {
+        const rec = await reconcilePreorderForProduct(order.shop, order.productId);
+        const activateError = rec.errors.find((e) => e.batchId === supplierOrderId && e.op === "activate");
+        if (activateError) {
+          await setPreorderBatchEnabled({ supplierOrderId, enabled: false, actor, permissions }).catch(() => undefined);
+          await reconcilePreorderForProduct(order.shop, order.productId).catch(() => undefined);
+          return jsonError(activateError.error || "Could not activate pre-order on Shopify.", 400);
+        }
       }
       return Response.json({
         ok: true,
@@ -111,11 +121,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
     }
 
-    // One-click "turn off" for the per-row control: remove the Shopify selling
-    // plan first (so a pause can never leave a live purchase option), then pause.
+    // Turn off: set the DB state to disabled, then let the RECONCILER converge
+    // Shopify (it deletes the now-not-live plan + restores DENY). The hourly
+    // sweep is the backstop if the immediate reconcile hits a transient error.
     if (operation === "row-disable") {
-      await deactivatePreorderSellingPlan({ supplierOrderId, actor, permissions });
       await setPreorderBatchEnabled({ supplierOrderId, enabled: false, actor, permissions });
+      const order = await prisma.supplierOrder.findUnique({ where: { id: supplierOrderId }, select: { shop: true, productId: true } });
+      if (order?.shop && order.productId) await reconcilePreorderForProduct(order.shop, order.productId).catch(() => undefined);
       return Response.json({ ok: true, state: { enabled: false, activated: false, shipDate: null } });
     }
 
