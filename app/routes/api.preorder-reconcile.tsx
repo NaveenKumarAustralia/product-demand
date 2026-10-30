@@ -1,7 +1,7 @@
 import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { requirePreorderPortalUser } from "../preorder/preorder-portal-auth.server";
-import { reconcilePreorderForProduct } from "../preorder/preorder-reconcile.server";
+import { reconcilePreorderForProduct, reconcileAllPreorderProducts, getReconcileSweepMode, setReconcileSweepMode, type SweepMode } from "../preorder/preorder-reconcile.server";
 
 // Admin: manually run the pre-order reconciler for ONE product. Dry-run by
 // default (shows what it WOULD do); add &apply=1 to execute. This is the manual
@@ -13,11 +13,26 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (actor.admin !== true) return Response.json({ ok: false, error: "Admin only." }, { status: 403 });
 
   const url = new URL(request.url);
+  const apply = url.searchParams.get("apply") === "1" || url.searchParams.get("apply") === "true";
+
+  // Set the scheduled sweep's mode: ?setMode=observe|apply|off
+  const setMode = (url.searchParams.get("setMode") ?? "").trim();
+  if (setMode) {
+    const m = await setReconcileSweepMode(setMode as SweepMode, actor.name);
+    return Response.json({ ok: true, sweepMode: m, note: `Scheduled sweep mode set to "${m}".` }, { headers: { "Cache-Control": "no-store" } });
+  }
+
+  // Run the whole-shop sweep now: ?action=sweep (dry-run unless &apply=1)
+  if ((url.searchParams.get("action") ?? "") === "sweep") {
+    const summary = await reconcileAllPreorderProducts({ dryRun: !apply });
+    const mode = await getReconcileSweepMode();
+    return Response.json({ ok: summary.errors.length === 0, scheduledMode: mode, ...summary }, { headers: { "Cache-Control": "no-store" } });
+  }
+
   let productId = (url.searchParams.get("productId") ?? "").trim();
   const title = (url.searchParams.get("title") ?? "").trim();
   const handle = (url.searchParams.get("handle") ?? "").trim();
-  if (!productId && !title && !handle) return Response.json({ ok: false, error: "Pass ?productId=<numeric or gid>, ?handle=<handle>, or ?title=<product title>." }, { status: 400 });
-  const apply = url.searchParams.get("apply") === "1" || url.searchParams.get("apply") === "true";
+  if (!productId && !title && !handle) return Response.json({ ok: false, error: "Pass ?productId / ?handle / ?title (one product), or ?action=sweep (all), or ?setMode=observe|apply|off." }, { status: 400 });
 
   const session = await prisma.session.findFirst({
     where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true, accessToken: true },

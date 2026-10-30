@@ -4,7 +4,7 @@ import { getPreorderLocationSettings, locationForMarket } from "./preorder-locat
 import { getPreorderPermissionContext } from "./preorder-permissions.server";
 import { activatePreorderSellingPlan, deactivatePreorderSellingPlan } from "./preorder-selling-plan.service.server";
 import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
-import { reconcilePreorderInventoryPolicyForVariants } from "./preorder-inventory-policy.server";
+import { reconcilePreorderInventoryPolicyForVariants, removeClosedPreorderSellingPlans } from "./preorder-inventory-policy.server";
 
 // ─── The pre-order reconciler (Phase 1) ─────────────────────────────────────────
 //
@@ -114,4 +114,125 @@ export async function reconcilePreorderForProduct(
   }
 
   return { ...base, ok: base.errors.length === 0 };
+}
+
+// ─── Scheduled sweep (opt-in, observe-first) ─────────────────────────────────────
+//
+// Safety model:
+//   • "off"     — scheduler does nothing.
+//   • "observe" — (DEFAULT) runs the reconciler in DRY-RUN across all pre-order
+//                 products and only LOGS what it WOULD change. Zero writes to
+//                 Shopify. Use this to confirm it only ever touches genuinely
+//                 out-of-sync state before letting it act.
+//   • "apply"   — actually converges. Still safe by construction (idempotent,
+//                 desired-state-driven: a live batch is never deactivated), but
+//                 only turn this on after the observe logs look right.
+// Flip the mode with setReconcileSweepMode() (exposed via /api/preorder-reconcile).
+const SWEEP_MODE_KEY = "preorder-reconcile-sweep-mode-v1";
+export type SweepMode = "off" | "observe" | "apply";
+
+export async function getReconcileSweepMode(): Promise<SweepMode> {
+  const s = await prisma.portalSetting.findUnique({ where: { key: SWEEP_MODE_KEY }, select: { value: true } }).catch(() => null);
+  const raw = s?.value && typeof s.value === "object" && "mode" in (s.value as Record<string, unknown>) ? (s.value as Record<string, unknown>).mode : s?.value;
+  const mode = String(raw ?? "").trim();
+  return mode === "off" || mode === "apply" ? mode : "observe"; // default observe
+}
+export async function setReconcileSweepMode(mode: SweepMode, actorName: string): Promise<SweepMode> {
+  const clean: SweepMode = mode === "off" || mode === "apply" ? mode : "observe";
+  await prisma.portalSetting.upsert({
+    where: { key: SWEEP_MODE_KEY },
+    create: { key: SWEEP_MODE_KEY, value: { mode: clean, updatedBy: actorName, updatedAt: new Date().toISOString() } },
+    update: { value: { mode: clean, updatedBy: actorName, updatedAt: new Date().toISOString() } },
+  });
+  return clean;
+}
+
+export type SweepSummary = {
+  mode: SweepMode; dryRun: boolean; productsChecked: number; wouldChange: number;
+  activated: number; deactivated: number; danglingRemoved: number;
+  actions: Array<{ productId: string; action: string; batchId: number; reason: string }>;
+  errors: Array<{ productId?: string; op: string; error: string }>;
+};
+
+// Reconcile EVERY product that currently has a pre-order footprint (an enabled
+// batch, or a registered selling plan). dryRun reports intended actions only.
+export async function reconcileAllPreorderProducts(opts: { dryRun?: boolean; shop?: string } = {}): Promise<SweepSummary> {
+  const mode = await getReconcileSweepMode();
+  const dryRun = opts.dryRun ?? mode !== "apply";
+  const summary: SweepSummary = { mode, dryRun, productsChecked: 0, wouldChange: 0, activated: 0, deactivated: 0, danglingRemoved: 0, actions: [], errors: [] };
+
+  const shop = opts.shop ?? (await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true } }))?.shop;
+  if (!shop) { summary.errors.push({ op: "input", error: "no shop" }); return summary; }
+
+  const [registry, enabledSettings] = await Promise.all([
+    getPreorderSellingPlanRegistryEntries(shop),
+    prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true } }),
+  ]);
+  const footprintIds = Array.from(new Set([...registry.map((r) => r.supplierOrderId), ...enabledSettings.map((s) => s.supplierOrderId)]));
+  const orders = footprintIds.length
+    ? await prisma.supplierOrder.findMany({ where: { id: { in: footprintIds }, shop }, select: { id: true, productId: true } })
+    : [];
+  const existingIds = new Set(orders.map((o) => o.id));
+  const productNums = Array.from(new Set(orders.map((o) => numeric(o.productId)).filter(Boolean)));
+
+  // Reconcile each product (throttled to be gentle on Shopify).
+  for (const pnum of productNums) {
+    try {
+      const r = await reconcilePreorderForProduct(shop, pnum, { dryRun });
+      summary.productsChecked += 1;
+      for (const b of r.batches) {
+        if (b.action === "none") continue;
+        summary.wouldChange += 1;
+        summary.actions.push({ productId: pnum, action: b.action, batchId: b.batchId, reason: b.reason });
+      }
+      summary.activated += r.activated;
+      summary.deactivated += r.deactivated;
+      for (const e of r.errors) summary.errors.push({ productId: pnum, op: e.op, error: e.error });
+    } catch (e) {
+      summary.errors.push({ productId: pnum, op: "reconcile", error: errMsg(e) });
+    }
+    await new Promise((res) => setTimeout(res, 150));
+  }
+
+  // Dangling: a registered plan whose batch no longer exists at all. These can't
+  // map to a product, so handle them directly (apply mode only — delete the
+  // orphaned plan group + clear the registry entry).
+  const danglingIds = registry.filter((r) => !existingIds.has(r.supplierOrderId)).map((r) => r.supplierOrderId);
+  if (danglingIds.length) {
+    summary.wouldChange += danglingIds.length;
+    for (const id of danglingIds) summary.actions.push({ productId: "(deleted batch)", action: "remove-dangling-plan", batchId: id, reason: "registered plan with no batch" });
+    if (!dryRun) {
+      await removeClosedPreorderSellingPlans(danglingIds).then(() => { summary.danglingRemoved = danglingIds.length; }).catch((e) => summary.errors.push({ op: "dangling", error: errMsg(e) }));
+    }
+  }
+
+  return summary;
+}
+
+// Boot the sweep scheduler once per process. First pass ~90s after boot, then
+// hourly. Reads the mode each run (off → skip, observe → dry-run+log, apply →
+// converge). Safe to start always; it does nothing until mode is "observe"/"apply".
+export function startPreorderReconcileSweepScheduler() {
+  const g = globalThis as unknown as { __kePreorderReconcileSweepStarted?: boolean };
+  if (g.__kePreorderReconcileSweepStarted) return;
+  g.__kePreorderReconcileSweepStarted = true;
+  const run = () => {
+    void (async () => {
+      try {
+        const mode = await getReconcileSweepMode();
+        if (mode === "off") return;
+        const r = await reconcileAllPreorderProducts({});
+        if (r.wouldChange || r.errors.length) {
+          console.log(`[preorder sweep] mode=${r.mode} dryRun=${r.dryRun} checked=${r.productsChecked} wouldChange=${r.wouldChange} activated=${r.activated} deactivated=${r.deactivated} dangling=${r.danglingRemoved} errors=${r.errors.length}`);
+          if (r.actions.length) console.log("[preorder sweep] actions:", JSON.stringify(r.actions.slice(0, 50)));
+          if (r.errors.length) console.log("[preorder sweep] errors:", JSON.stringify(r.errors.slice(0, 20)));
+        }
+      } catch (e) {
+        console.warn("[preorder sweep] cycle failed:", errMsg(e));
+      }
+    })();
+  };
+  setTimeout(run, 90_000);
+  setInterval(run, 60 * 60 * 1000);
+  console.log("[preorder sweep] scheduler started (hourly; mode defaults to observe)");
 }

@@ -8,6 +8,7 @@ import { addDocumentResponseHeaders } from "./shopify.server";
 import { startPreorderReleaseScheduler } from "./preorder/preorder-release.server";
 import { startPreorderPlanReconcileScheduler } from "./preorder/preorder-selling-plan.service.server";
 import { startMissedPreorderCaptureScheduler } from "./preorder/preorder-missed-capture.server";
+import { startPreorderReconcileSweepScheduler } from "./preorder/preorder-reconcile.server";
 
 // Start the pre-order auto-release timer once when the server boots (releases
 // Shopify holds + tags orders for Pick Pack when a batch's stock lands).
@@ -18,6 +19,10 @@ startPreorderPlanReconcileScheduler();
 // Every few hours: capture missed pre-orders (bought via Shop Pay / quick-add
 // with no selling plan) into the pre-order pipeline so they don't slip through.
 startMissedPreorderCaptureScheduler();
+// Hourly pre-order reconcile sweep. Converges every pre-order product's Shopify
+// state to the DB. Defaults to "observe" (dry-run + log only) until flipped to
+// "apply" from /api/preorder-reconcile — so it can't change anything unverified.
+startPreorderReconcileSweepScheduler();
 
 export const streamTimeout = 5000;
 
