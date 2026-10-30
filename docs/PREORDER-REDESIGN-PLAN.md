@@ -136,6 +136,11 @@ Move pre-order logic out of `portal._index.tsx`; unit-test the reconciler + elig
 - ✅ **Payment timing: full charge at checkout** (as today) — no deposit / charge-on-fulfillment for now.
 - ✅ **Emails:** plan orders use Shopify's **native** order-confirmation email (carries the dispatch date) — no Klaviyo for those. Klaviyo's role shrinks to the **express/no-plan capture email** and **back-in-stock** (sender for the capture email can move off Klaviyo later; not urgent). Note: a selling plan can't be attached to an order after checkout, so express orders can't be retro-made native — hence the separate capture email.
 
+**Phase 2 prerequisites (discovered during build):**
+- **Scopes added** to shopify.app.toml (`read/write_inventory_transfers`, `read/write_inventory_shipments`) — but they only take effect after the **app config is deployed to Shopify AND the merchant re-authorises** (open the app from Shopify admin → accept new scopes). Until then any transfer call returns access-denied, so Phase 2 code can't run/test.
+- **Confirmed API:** `inventoryTransferCreateAsReadyToShip` (input: originLocationId, destinationLocationId, lineItems[{inventoryItemId, quantity}], dateCreated, referenceName, + idempotencyKey) creates the incoming; shipment receive mutations move incoming→on-hand.
+- **DESIGN DECISION NEEDED — transfer origin:** a Shopify transfer moves stock **between two Shopify locations**, so it needs an *origin*. For supplier-incoming we'd create a dedicated **"Factory / Incoming" Shopify location** to transfer *from* into the market location. Confirm that's acceptable (it's the standard way to represent supplier-incoming as native Shopify incoming).
+
 **Still open:**
 - ~~Reconcile cadence~~ — **Decided: no scheduled sweep.** Reconciler runs on events only; manual "Reconcile now" is the backstop.
 - **Phase order** — Phase 1 (reconciler) first as written (recommended), or pull Phase 3 (splitting + emails) earlier if those hurt most right now. A specific actively-burning split/email bug can be hotfixed in parallel without reordering.
