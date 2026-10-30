@@ -78,11 +78,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   const start = Date.now();
-  const BUDGET_MS = 22000;
+  const BUDGET_MS = 24000;
+  const CONCURRENCY = 4;
   let removed = 0; let groupOnly = 0;
   const failed: Array<{ batchId: number; product: string; error: string }> = [];
-  for (const e of orphanEntries) {
-    if (Date.now() - start > BUDGET_MS) break;
+  let next = 0;
+  async function processOne(e: typeof orphanEntries[number]) {
     const o = orderById.get(e.supplierOrderId);
     const overlapsKeep = Boolean(o?.productId && keepProductIds.has(numeric(o.productId)));
     try {
@@ -91,8 +92,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         await deactivatePreorderSellingPlan({ supplierOrderId: e.supplierOrderId, actor, permissions });
       } else {
         // Group-only (deleted batch, or product shares variants with a live keep).
-        await deleteSellingPlanGroupOnly(shop, token, e.sellingPlanGroupId);
-        await removePreorderSellingPlanRegistryEntry(shop, e.supplierOrderId);
+        await deleteSellingPlanGroupOnly(shop!, token!, e.sellingPlanGroupId);
+        await removePreorderSellingPlanRegistryEntry(shop!, e.supplierOrderId);
         groupOnly += 1;
       }
       removed += 1;
@@ -100,6 +101,16 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       failed.push({ batchId: e.supplierOrderId, product: o?.productTitle ?? "(deleted)", error: err instanceof Error ? err.message : String(err) });
     }
   }
+  // Run a few deactivations at a time (each is several Shopify calls) to clear
+  // the backlog in fewer refreshes, while honouring the time budget.
+  async function worker() {
+    while (Date.now() - start <= BUDGET_MS) {
+      const i = next++;
+      if (i >= orphanEntries.length) return;
+      await processOne(orphanEntries[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
   const after = await getPreorderSellingPlanRegistryEntries(shop);
   const remaining = Math.max(0, after.length - keepCount);
