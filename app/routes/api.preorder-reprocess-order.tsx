@@ -147,6 +147,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return Response.json({ ok: true, debug: "variant", orderId, variantIds, count: rows.length, reservations: rows }, { headers: { "Cache-Control": "no-store" } });
   }
 
+  // Inventory breakdown (read-only) for the order's variant(s) at every location:
+  // available vs on_hand vs committed vs incoming — to see whether on_hand reads
+  // positive while available is negative (the premature-release cause).
+  if (url.searchParams.get("debug") === "stock") {
+    const mine = await prisma.preorderReservation.findMany({ where: { shopifyOrderId: orderId }, select: { variantId: true } });
+    const variantIds = Array.from(new Set(mine.map((m) => m.variantId)));
+    const out = [];
+    for (const vid of variantIds) {
+      const res = await fetch(`https://${shop}/admin/api/2025-10/graphql.json`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": session.accessToken },
+        body: JSON.stringify({ query: `#graphql
+          query Stock($id: ID!) { productVariant(id: $id) { id title inventoryItem { inventoryLevels(first: 20) { nodes { location { id name } quantities(names: ["available","on_hand","committed","incoming","reserved"]) { name quantity } } } } } }`,
+          variables: { id: vid.startsWith("gid://") ? vid : `gid://shopify/ProductVariant/${vid.replace(/\D/g, "")}` } }),
+      });
+      const j = await res.json().catch(() => ({})) as { data?: { productVariant?: { title?: string; inventoryItem?: { inventoryLevels?: { nodes?: Array<{ location?: { id?: string; name?: string }; quantities?: Array<{ name?: string; quantity?: number }> }> } } } } };
+      const pv = j.data?.productVariant;
+      out.push({ variantId: vid, title: pv?.title, levels: (pv?.inventoryItem?.inventoryLevels?.nodes ?? []).map((n) => ({ location: n.location?.name, locationId: n.location?.id, quantities: Object.fromEntries((n.quantities ?? []).map((q) => [q.name, q.quantity])) })) });
+    }
+    return Response.json({ ok: true, debug: "stock", orderId, variants: out }, { headers: { "Cache-Control": "no-store" } });
+  }
+
   try {
     const result = await processShopifyOrderCreated(shop, { id: orderId });
     // ALWAYS re-hold too: processShopifyOrderCreated only places the hold when it
