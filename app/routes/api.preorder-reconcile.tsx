@@ -13,14 +13,31 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (actor.admin !== true) return Response.json({ ok: false, error: "Admin only." }, { status: 403 });
 
   const url = new URL(request.url);
-  const productId = (url.searchParams.get("productId") ?? "").trim();
-  if (!productId) return Response.json({ ok: false, error: "Pass ?productId=<numeric or gid>." }, { status: 400 });
+  let productId = (url.searchParams.get("productId") ?? "").trim();
+  const title = (url.searchParams.get("title") ?? "").trim();
+  const handle = (url.searchParams.get("handle") ?? "").trim();
+  if (!productId && !title && !handle) return Response.json({ ok: false, error: "Pass ?productId=<numeric or gid>, ?handle=<handle>, or ?title=<product title>." }, { status: 400 });
   const apply = url.searchParams.get("apply") === "1" || url.searchParams.get("apply") === "true";
 
   const session = await prisma.session.findFirst({
-    where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true },
+    where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true, accessToken: true },
   });
-  if (!session?.shop) return Response.json({ ok: false, error: "No Shopify session." }, { status: 500 });
+  if (!session?.shop || !session.accessToken) return Response.json({ ok: false, error: "No Shopify session." }, { status: 500 });
+
+  // Resolve a title/handle to the numeric product id so the URL is pasteable.
+  if (!productId && (title || handle)) {
+    const q = handle ? `handle:${handle}` : `title:${title}`;
+    const res = await fetch(`https://${session.shop}/admin/api/2025-10/graphql.json`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": session.accessToken },
+      body: JSON.stringify({ query: `#graphql
+        query ReconcileResolve($q: String!) { products(first: 1, query: $q) { nodes { id title } } }`, variables: { q } }),
+    });
+    const json = await res.json().catch(() => ({})) as { data?: { products?: { nodes?: Array<{ id?: string; title?: string }> } } };
+    const node = json.data?.products?.nodes?.[0];
+    if (!node?.id) return Response.json({ ok: false, error: `No product matching "${title || handle}".` }, { status: 404 });
+    productId = node.id;
+  }
 
   const result = await reconcilePreorderForProduct(session.shop, productId, { dryRun: !apply });
   return Response.json(
