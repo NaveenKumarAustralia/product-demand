@@ -46,6 +46,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     orderId = String(node.id).replace(/\D/g, "");
   }
 
+  // Debug (no changes): dump the order's lines so we can see why capture skips a
+  // line — whether variant.id is present, what selling plan (if any) it carries,
+  // quantity, and fulfillment-order status.
+  if (url.searchParams.get("debug") === "1") {
+    const res = await fetch(`https://${shop}/admin/api/2025-10/graphql.json`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": session.accessToken },
+      body: JSON.stringify({ query: `#graphql
+        query ReprocessDebug($id: ID!) {
+          order(id: $id) {
+            id name displayFulfillmentStatus
+            shippingAddress { countryCodeV2 } billingAddress { countryCodeV2 }
+            lineItems(first: 50) { nodes { id title quantity currentQuantity sku variant { id title } sellingPlan { name } } }
+            fulfillmentOrders(first: 25) { nodes { id status } }
+          }
+        }`, variables: { id: `gid://shopify/Order/${orderId}` } }),
+    });
+    const json = await res.json().catch(() => ({}));
+    return Response.json({ ok: true, debug: true, orderId, order: (json as { data?: { order?: unknown } }).data?.order ?? null }, { headers: { "Cache-Control": "no-store" } });
+  }
+
   try {
     const result = await processShopifyOrderCreated(shop, { id: orderId });
     // ALWAYS re-hold too: processShopifyOrderCreated only places the hold when it
