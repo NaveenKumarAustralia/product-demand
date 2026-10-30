@@ -50,7 +50,8 @@ Pre-order keeps ~7 pieces of state in sync between the **portal DB** and **Shopi
 - Selling plan group present iff a live batch exists; deleted otherwise.
 - Variant `inventoryPolicy`: **CONTINUE** while `incoming − committed > 0` (capacity left), **DENY** when it hits 0 (**this is the quantity cap** — custom, but now driven by Shopify's own committed count, not our ledger).
 - Pre-order tag/metafields set iff live.
-- Idempotent; runs on every relevant event **and** on a schedule (self-healing). Replaces all the scattered one-off syncs (`denyClosedPreorderOrderVariants`, `removeClosedPreorderSellingPlans`, etc.).
+- Idempotent; runs on **every relevant event**. **No automatic background sweep** (by decision — nothing runs on its own). The only backstop is a **manual "Reconcile now"** on the health page. Replaces all the scattered one-off syncs (`denyClosedPreorderOrderVariants`, `removeClosedPreorderSellingPlans`, etc.).
+  - *Trade-off accepted:* without a sweep, a genuinely dropped webhook won't self-correct — but the health page will **show** the drift so it's caught, and "Reconcile now" fixes it on demand.
 
 ### 3.4 Express/no-plan capture + holds, as durable jobs (kept from v1)
 
@@ -123,7 +124,7 @@ Move pre-order logic out of `portal._index.tsx`; unit-test the reconciler + elig
 3. **Shopify's numbers are the source of truth** for capacity (incoming/committed), not a custom ledger.
 4. **No silent side-effects**: every hold/tag/email is a job with a visible outcome — no `.catch(() => undefined)` on customer-impacting actions.
 5. **Validate before promising**: can't enable a batch the storefront can't serve.
-6. **Self-healing**: the scheduled reconcile means a missed path self-corrects, never becomes a permanent orphan.
+6. **Every event path calls the reconciler** (no bespoke partial syncs). No automatic sweep by decision; the health page surfaces any drift and "Reconcile now" fixes it manually.
 7. **Express is a first-class path**, not an afterthought: the capture job is part of the core flow.
 
 ---
@@ -136,7 +137,7 @@ Move pre-order logic out of `portal._index.tsx`; unit-test the reconciler + elig
 - ✅ **Emails:** plan orders use Shopify's **native** order-confirmation email (carries the dispatch date) — no Klaviyo for those. Klaviyo's role shrinks to the **express/no-plan capture email** and **back-in-stock** (sender for the capture email can move off Klaviyo later; not urgent). Note: a selling plan can't be attached to an order after checkout, so express orders can't be retro-made native — hence the separate capture email.
 
 **Still open:**
-- **Reconcile cadence** — every 15 min vs hourly (self-heal speed vs API load). *Leaning 15–30 min.*
+- ~~Reconcile cadence~~ — **Decided: no scheduled sweep.** Reconciler runs on events only; manual "Reconcile now" is the backstop.
 - **Phase order** — Phase 1 (reconciler) first as written (recommended), or pull Phase 3 (splitting + emails) earlier if those hurt most right now. A specific actively-burning split/email bug can be hotfixed in parallel without reordering.
 - **AU/USA** — confirm each market maps to its own Shopify location for the transfer destination (USA fallback-to-AU behaviour stays?).
 
