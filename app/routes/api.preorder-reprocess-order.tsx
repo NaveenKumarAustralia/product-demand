@@ -33,8 +33,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }
 
   // Pull back pre-orders released prematurely (no genuine stock) and re-hold them.
+  // With ?orderId= it only acts on that one order; otherwise the whole shop.
   if ((url.searchParams.get("action") ?? "") === "rehold-premature") {
-    const r = await reholdPrematurelyReleased();
+    const oid = (url.searchParams.get("orderId") ?? "").replace(/\D/g, "");
+    const r = await reholdPrematurelyReleased(oid ? { orderId: oid } : {});
     return Response.json({ ok: r.errors === 0, action: "rehold-premature", ...r }, { headers: { "Cache-Control": "no-store" } });
   }
 

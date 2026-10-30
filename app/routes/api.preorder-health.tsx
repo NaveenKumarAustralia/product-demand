@@ -1,8 +1,6 @@
 import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { requirePreorderPortalUser } from "../preorder/preorder-portal-auth.server";
-import { getOfflineToken, getAvailableAtLocation } from "../preorder/preorder-fulfillment.server";
-import { getPreorderLocationSettings, locationForMarket } from "../preorder/preorder-locations.server";
 
 // Admin "Pre-order Health" page. Shows, at a glance, every pre-order order and
 // its real state (HELD / RELEASED-ready-to-pick / RELEASED-but-no-stock /
@@ -10,7 +8,6 @@ import { getPreorderLocationSettings, locationForMarket } from "../preorder/preo
 // via the Fix buttons, which call /api/preorder-reprocess-order actions.
 const esc = (s: unknown) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
 const num = (s: unknown) => String(s ?? "").replace(/\D/g, "");
-const groupKey = (r: { supplierOrderId: number; variantId: string; market: string }) => `${r.supplierOrderId}::${r.variantId}::${r.market}`;
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const actor = await requirePreorderPortalUser(request);
@@ -39,32 +36,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     byOrder.set(r.shopifyOrderId, o);
   }
 
-  // For RELEASED-but-unfulfilled orders, compute genuine spare to flag "no stock".
-  const stillHeld = reservations.filter((r) => !r.readyAt && !r.releasedAt && !r.fulfilledAt);
-  const heldByGroup = new Map<string, number>();
-  for (const r of stillHeld) heldByGroup.set(groupKey(r), (heldByGroup.get(groupKey(r)) ?? 0) + r.quantity);
-  const token = shop ? await getOfflineToken(shop) : null;
-  if (token) {
-    const locations = await getPreorderLocationSettings();
-    const spareCache = new Map<string, number>();
-    const releasedRows = reservations.filter((r) => r.readyAt && !r.releasedAt && !r.fulfilledAt);
-    for (const r of releasedRows) {
-      const locationId = locationForMarket(locations, r.market as "AU" | "USA");
-      if (!locationId) continue;
-      const key = `${num(r.variantId)}::${locationId}`;
-      let spare = spareCache.get(key);
-      if (spare === undefined) {
-        try {
-          const [onHand, committed] = await Promise.all([
-            getAvailableAtLocation(shop, token, r.variantId, locationId, "on_hand"),
-            getAvailableAtLocation(shop, token, r.variantId, locationId, "committed"),
-          ]);
-          spare = onHand - committed + (heldByGroup.get(groupKey(r)) ?? 0);
-        } catch { spare = 1; }
-        spareCache.set(key, spare);
-      }
-      if (spare <= 0) { const o = byOrder.get(r.shopifyOrderId); if (o) o.stuck = true; }
-    }
+  // "Needs attention" = released-but-unpicked whose BATCH hasn't been received yet
+  // (status != "closed"). Those were let go before the stock landed and should be
+  // back on hold. (A released order whose batch IS received is legitimately ready
+  // to pick, so it's NOT flagged.)
+  const releasedUnpicked = reservations.filter((r) => r.readyAt && !r.releasedAt && !r.fulfilledAt);
+  const stuckBatchIds = Array.from(new Set(releasedUnpicked.map((r) => r.supplierOrderId).filter((n): n is number => Number.isFinite(n))));
+  const batchStatus = new Map<number, string>(
+    stuckBatchIds.length ? (await prisma.supplierOrder.findMany({ where: { id: { in: stuckBatchIds } }, select: { id: true, status: true } })).map((o) => [o.id, o.status] as [number, string]) : [],
+  );
+  for (const r of releasedUnpicked) {
+    const st = batchStatus.get(r.supplierOrderId);
+    if (st && st !== "closed") { const o = byOrder.get(r.shopifyOrderId); if (o) o.stuck = true; }
   }
 
   const orders = Array.from(byOrder.values());
@@ -78,11 +61,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   }).catch(() => []);
 
   const fmt = (d: Date | null) => d ? new Date(d).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
-  const row = (o: OrderAgg, tag: string) => `<tr>
+  const row = (o: OrderAgg, tag: string, btn: "hold" | "none" = "none") => `<tr>
     <td><b>${esc(o.name)}</b></td><td>${esc(o.sizes.join(", "))}</td><td>${esc(o.market)}</td>
     <td>${Array.from(o.batches).map((b) => `#${b}`).join(", ")}</td><td>${fmt(o.reservedAt)}</td>
     <td>${tag}</td>
-    <td><button onclick="fix('${esc(o.orderId)}', this)">Reprocess</button></td></tr>`;
+    <td>${btn === "hold" ? `<button onclick="hold('${esc(o.orderId)}', this)">Hold now</button>` : ""}</td></tr>`;
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Pre-order Health</title>
@@ -106,18 +89,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   <div class="cards">
     <div class="card"><div class="n">${heldOrders.length}</div><div class="l">Held (awaiting stock)</div></div>
     <div class="card"><div class="n">${releasedOk.length}</div><div class="l">Released · ready to pick</div></div>
-    <div class="card ${stuck.length ? "bad" : ""}"><div class="n">${stuck.length}</div><div class="l">Released · NO stock</div></div>
+    <div class="card ${stuck.length ? "bad" : ""}"><div class="n">${stuck.length}</div><div class="l">Released early · needs hold</div></div>
     <div class="card ${failLogs.length ? "bad" : ""}"><div class="n">${failLogs.length}</div><div class="l">Allocation failures (30d)</div></div>
   </div>
   <div class="bar">
-    <button onclick="act('rehold-premature', this)">Pull back released-but-no-stock &amp; hold</button>
+    <button onclick="act('rehold-premature', this)">Hold back early-released pre-orders</button>
     <button class="sec" onclick="act('rehold-all', this)">Re-hold any unheld</button>
     <button class="sec" onclick="location.reload()">Refresh</button>
   </div>
   <div id="msg"></div>
 
-  <h2 style="color:#991b1b">⚠ Released but no stock — needs attention (${stuck.length})</h2>
-  ${stuck.length ? `<table><tr><th>Order</th><th>Sizes</th><th>Market</th><th>Batch</th><th>Reserved</th><th>State</th><th></th></tr>${stuck.map((o) => row(o, '<span class="tag t-stuck">released · no stock</span>')).join("")}</table>` : '<div class="empty">None — nothing stuck. 🎉</div>'}
+  <h2 style="color:#991b1b">⚠ Released before stock arrived — needs attention (${stuck.length})</h2>
+  ${stuck.length ? `<table><tr><th>Order</th><th>Sizes</th><th>Market</th><th>Batch</th><th>Reserved</th><th>State</th><th></th></tr>${stuck.map((o) => row(o, '<span class="tag t-stuck">released · batch not received</span>', "hold")).join("")}</table>` : '<div class="empty">None — nothing stuck. 🎉</div>'}
 
   <h2>Held — waiting for stock (${heldOrders.length})</h2>
   ${heldOrders.length ? `<table><tr><th>Order</th><th>Sizes</th><th>Market</th><th>Batch</th><th>Reserved</th><th>State</th><th></th></tr>${heldOrders.slice(0, 200).map((o) => row(o, '<span class="tag t-held">held</span>')).join("")}</table>` : '<div class="empty">None.</div>'}
@@ -129,9 +112,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   ${failLogs.length ? `<table><tr><th>Order</th><th>Reason</th><th>When</th><th></th></tr>${failLogs.map((f) => `<tr><td><b>${esc(f.entityName || f.entityId)}</b></td><td>${esc(f.toValue)}</td><td>${fmt(f.createdAt)}</td><td><button onclick="fix('${esc(num(f.entityId))}', this)">Reprocess</button></td></tr>`).join("")}</table>` : '<div class="empty">None in the last 30 days.</div>'}
 
   <script>
-    async function call(u, btn){ const t=btn?btn.textContent:''; if(btn){btn.disabled=true;btn.textContent='Working…';} try{ const r=await fetch(u,{credentials:'same-origin'}); const j=await r.json(); document.getElementById('msg').innerHTML='<div class="card" style="margin-bottom:14px">'+JSON.stringify(j)+'</div>'; setTimeout(()=>location.reload(), 1200);}catch(e){ document.getElementById('msg').textContent=String(e);} finally{ if(btn){btn.disabled=false;btn.textContent=t;} } }
+    async function call(u, btn){ const t=btn?btn.textContent:''; if(btn){btn.disabled=true;btn.textContent='Working…';} const m=document.getElementById('msg'); try{ const r=await fetch(u,{credentials:'same-origin'}); const j=await r.json(); const n=(j.reheld??j.held??j.reservations??0); m.innerHTML='<div class="card" style="margin-bottom:14px;background:#f0fdf4;border-color:#bbf7d0;color:#166534">✓ Done — '+(typeof n==='number'?n+' order(s) updated':'applied')+'. Reloading…</div>'; setTimeout(()=>location.reload(), 1200);}catch(e){ m.innerHTML='<div class="card" style="margin-bottom:14px;background:#fef2f2;border-color:#fecaca;color:#991b1b">Error: '+String(e)+'</div>';} finally{ if(btn){btn.disabled=false;btn.textContent=t;} } }
     function act(a, btn){ call('/api/preorder-reprocess-order?action='+a, btn); }
     function fix(id, btn){ call('/api/preorder-reprocess-order?orderId='+encodeURIComponent(id), btn); }
+    function hold(id, btn){ call('/api/preorder-reprocess-order?action=rehold-premature&orderId='+encodeURIComponent(id), btn); }
   </script>
   </body></html>`;
 

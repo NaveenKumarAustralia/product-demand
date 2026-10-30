@@ -119,8 +119,20 @@ export async function releaseArrivedPreorders(): Promise<{ releasedOrders: numbe
   });
   if (!pending.length) return { releasedOrders: 0, errors: 0, skippedNoScope: false };
 
+  // CORE RULE: a pre-order only releases once its BATCH has been RECEIVED
+  // (SupplierOrder.status "closed" — set when staff load the shipment). While the
+  // batch is still open / in-shipment it stays HELD, even if stray on-hand units
+  // appear. This is what stops the premature releases that left pre-orders unheld.
+  const batchIds = Array.from(new Set(pending.map((r) => r.supplierOrderId).filter((n): n is number => Number.isFinite(n))));
+  const batchStatus = new Map(
+    (await prisma.supplierOrder.findMany({ where: { id: { in: batchIds } }, select: { id: true, status: true } })).map((o) => [o.id, o.status]),
+  );
+  // A missing batch (deleted) is treated as received so its orders aren't stuck forever.
+  const receivable = pending.filter((r) => (batchStatus.get(r.supplierOrderId) ?? "closed") === "closed");
+  if (!receivable.length) return { releasedOrders: 0, errors: 0, skippedNoScope: false };
+
   const byShop = new Map<string, typeof pending>();
-  for (const row of pending) {
+  for (const row of receivable) {
     const list = byShop.get(row.shop) ?? [];
     list.push(row);
     byShop.set(row.shop, list);
@@ -219,73 +231,51 @@ export async function releaseArrivedPreorders(): Promise<{ releasedOrders: numbe
   return { releasedOrders, errors, skippedNoScope };
 }
 
-// Pull back pre-orders that were released PREMATURELY (by the old on_hand-only
-// budget) and never actually shipped: if the size has no genuine shippable spare
-// now (spare = on_hand − committed + still-held units ≤ 0), clear readyAt and
-// re-apply the hold so it stops sitting in the picking app as a normal order.
-// A released order that DOES have real stock (spare > 0) is left to ship.
-const groupKey = (r: { supplierOrderId: number; variantId: string; market: string }) => `${r.supplierOrderId}::${r.variantId}::${r.market}`;
+// Pull back pre-orders released while their BATCH is still in-shipment (not yet
+// received): clear readyAt and re-apply the hold so they stop sitting in the
+// picking app. A released order whose batch IS received is left to ship.
 export async function reholdPrematurelyReleased(opts: { orderId?: string } = {}): Promise<{ reheld: number; groups: number; errors: number; skippedNoScope: boolean }> {
+  // Released-but-unpicked pre-orders whose BATCH has NOT been received yet
+  // (status != "closed") were let go prematurely — pull them back and re-hold.
   const released = await prisma.preorderReservation.findMany({
     where: { status: "reserved", readyAt: { not: null }, releasedAt: null, fulfilledAt: null, ...(opts.orderId ? { shopifyOrderId: opts.orderId } : {}) },
-    select: { id: true, shop: true, shopifyOrderId: true, supplierOrderId: true, variantId: true, market: true, reservedAt: true },
+    select: { shop: true, shopifyOrderId: true, supplierOrderId: true },
   });
   if (!released.length) return { reheld: 0, groups: 0, errors: 0, skippedNoScope: false };
-  const heldRows = await prisma.preorderReservation.findMany({
-    where: { status: "reserved", readyAt: null, releasedAt: null, fulfilledAt: null },
-    select: { supplierOrderId: true, variantId: true, market: true, quantity: true },
-  });
-  const heldByGroup = new Map<string, number>();
-  for (const r of heldRows) heldByGroup.set(groupKey(r), (heldByGroup.get(groupKey(r)) ?? 0) + r.quantity);
-
-  let reheld = 0; let errors = 0; let skippedNoScope = false; let groupsChecked = 0;
-  const byShop = new Map<string, typeof released>();
-  for (const r of released) { const list = byShop.get(r.shop) ?? []; list.push(r); byShop.set(r.shop, list); }
-
-  for (const [shop, rows] of byShop) {
-    const token = await getOfflineToken(shop);
+  const batchIds = Array.from(new Set(released.map((r) => r.supplierOrderId).filter((n): n is number => Number.isFinite(n))));
+  const batchStatus = new Map(
+    (await prisma.supplierOrder.findMany({ where: { id: { in: batchIds } }, select: { id: true, status: true } })).map((o) => [o.id, o.status]),
+  );
+  // Orders to re-hold: any whose batch is still open (not received). A deleted
+  // batch (missing) is treated as received, so we leave those alone.
+  const toRehold = new Map<string, string>(); // `${shop}::${orderId}` -> shop
+  const orderIdByKey = new Map<string, string>();
+  for (const r of released) {
+    const st = batchStatus.get(r.supplierOrderId);
+    if (st && st !== "closed") { const k = `${r.shop}::${r.shopifyOrderId}`; toRehold.set(k, r.shop); orderIdByKey.set(k, r.shopifyOrderId); }
+  }
+  let reheld = 0; let errors = 0; let skippedNoScope = false;
+  const tokenByShop = new Map<string, string | null>();
+  for (const [k, shop] of toRehold) {
+    const orderId = orderIdByKey.get(k)!;
+    if (!tokenByShop.has(shop)) tokenByShop.set(shop, await getOfflineToken(shop));
+    const token = tokenByShop.get(shop);
     if (!token) { skippedNoScope = true; continue; }
-    const locations = await getPreorderLocationSettings();
-    // Group the released rows, decide per group whether there's real spare.
-    const groups = new Map<string, { variantId: string; market: string; orderIds: Set<string> }>();
-    for (const r of rows) {
-      const g = groups.get(groupKey(r)) ?? { variantId: r.variantId, market: r.market, orderIds: new Set<string>() };
-      g.orderIds.add(r.shopifyOrderId);
-      groups.set(groupKey(r), g);
-    }
-    for (const [key, g] of groups) {
-      groupsChecked += 1;
-      const locationId = locationForMarket(locations, g.market as PreorderMarket);
-      if (!locationId) continue;
-      let spare = -1;
-      try {
-        const [onHand, committed] = await Promise.all([
-          getAvailableAtLocation(shop, token, g.variantId, locationId, "on_hand"),
-          getAvailableAtLocation(shop, token, g.variantId, locationId, "committed"),
-        ]);
-        spare = onHand - committed + (heldByGroup.get(key) ?? 0);
-      } catch { errors += 1; continue; }
-      if (spare > 0) continue; // genuine stock exists → leave these released to ship
-      // No real stock → re-hold each released order in this group.
-      for (const orderId of g.orderIds) {
-        try {
-          await prisma.preorderReservation.updateMany({ where: { shop, shopifyOrderId: orderId, status: "reserved", fulfilledAt: null }, data: { readyAt: null } });
-          const { wholeOrderHeld } = await holdAllReservedPreorderLines(shop, token, orderId);
-          await removeOrderTags(shop, token, orderId, [`pre-order-ready-batch-${g.variantId}`]).catch(() => undefined);
-          await removeOrderTags(shop, token, orderId, Array.from(new Set(rows.map((r) => `pre-order-ready-batch-${r.supplierOrderId}`)))).catch(() => undefined);
-          if (wholeOrderHeld) await addOrderTags(shop, token, orderId, ["pre-order-hold"]);
-          reheld += 1;
-          console.log(`[preorder re-hold premature] ${shop} order ${orderId}: pulled back (no genuine stock; spare=${spare}).`);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (/access denied|not approved|scope/i.test(message)) skippedNoScope = true;
-          console.warn(`[preorder re-hold premature] ${shop} order ${orderId} failed:`, message);
-          errors += 1;
-        }
-      }
+    try {
+      await prisma.preorderReservation.updateMany({ where: { shop, shopifyOrderId: orderId, status: "reserved", fulfilledAt: null }, data: { readyAt: null } });
+      const { wholeOrderHeld } = await holdAllReservedPreorderLines(shop, token, orderId);
+      await removeOrderTags(shop, token, orderId, batchIds.map((b) => `pre-order-ready-batch-${b}`)).catch(() => undefined);
+      if (wholeOrderHeld) await addOrderTags(shop, token, orderId, ["pre-order-hold"]);
+      reheld += 1;
+      console.log(`[preorder re-hold premature] ${shop} order ${orderId}: pulled back (batch not received yet).`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/access denied|not approved|scope/i.test(message)) skippedNoScope = true;
+      console.warn(`[preorder re-hold premature] ${shop} order ${orderId} failed:`, message);
+      errors += 1;
     }
   }
-  return { reheld, groups: groupsChecked, errors, skippedNoScope };
+  return { reheld, groups: toRehold.size, errors, skippedNoScope };
 }
 
 // Run the release check on a timer (the app server is long-lived on Railway).
@@ -296,9 +286,17 @@ export function startPreorderReleaseScheduler() {
   if (g.__kePreorderReleaseStarted) return;
   g.__kePreorderReleaseStarted = true;
   const run = () => {
+    // 1) Release pre-orders whose batch has been RECEIVED (status closed).
+    // 2) Re-hold pre-orders released while their batch is still in-shipment.
+    // These act on disjoint sets (received vs not-received), so they never fight.
     releaseArrivedPreorders()
       .then((r) => { if (r.releasedOrders || r.errors) console.log("[preorder release] cycle:", r); })
-      .catch((error) => console.warn("[preorder release] cycle failed:", error instanceof Error ? error.message : error));
+      .catch((error) => console.warn("[preorder release] cycle failed:", error instanceof Error ? error.message : error))
+      .finally(() => {
+        reholdPrematurelyReleased()
+          .then((r) => { if (r.reheld || r.errors) console.log("[preorder re-hold premature] cycle:", r); })
+          .catch((error) => console.warn("[preorder re-hold premature] cycle failed:", error instanceof Error ? error.message : error));
+      });
   };
   setTimeout(run, 30_000);
   setInterval(run, 10 * 60 * 1000);
