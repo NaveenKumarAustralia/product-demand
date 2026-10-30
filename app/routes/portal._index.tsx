@@ -16,7 +16,7 @@ import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server
 import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
 import { marketFromDestination, calculatePreorderCapacity } from "../preorder/preorder-rules.server";
 import { releaseArrivedPreorders } from "../preorder/preorder-release.server";
-import { denyClosedPreorderOrderVariants } from "../preorder/preorder-inventory-policy.server";
+import { denyClosedPreorderOrderVariants, removeClosedPreorderSellingPlans } from "../preorder/preorder-inventory-policy.server";
 import { unauthenticated } from "../shopify.server";
 import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
 
@@ -2101,8 +2101,11 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         if (closedIds.length) {
           await prisma.supplierOrder.updateMany({ where: { id: { in: closedIds } }, data: { status: "closed" } });
           // Shipment loaded → pre-order for these batches is done → revert their
-          // variants to DENY in Shopify (unless still live in another open batch).
+          // variants to DENY in Shopify (unless still live in another open batch)
+          // AND delete their Shopify selling plan group so the product is no longer
+          // pre-orderable on the storefront (stops the orphan build-up).
           denyClosedPreorderOrderVariants(closedIds).catch((e) => console.warn("[preorder on-load DENY] failed:", e instanceof Error ? e.message : e));
+          removeClosedPreorderSellingPlans(closedIds).catch((e) => console.warn("[preorder on-load plan remove] failed:", e instanceof Error ? e.message : e));
         }
       } catch (e) {
         console.warn("[restock auto-close] failed:", e);

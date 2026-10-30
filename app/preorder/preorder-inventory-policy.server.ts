@@ -1,6 +1,6 @@
 import prisma from "../db.server";
 import { calculatePreorderCapacity } from "./preorder-rules.server";
-import { getPreorderSellingPlanRegistryEntries } from "./preorder-selling-plan-registry.server";
+import { getPreorderSellingPlanRegistryEntries, removePreorderSellingPlanRegistryEntry } from "./preorder-selling-plan-registry.server";
 import { getOfflineToken } from "./preorder-fulfillment.server";
 
 // Keeps a pre-order variant's Shopify inventory policy in lock-step with the
@@ -378,6 +378,46 @@ export async function denyClosedPreorderOrderVariants(orderIds: number[]): Promi
     if (gids.length) {
       await setVariantsInventoryPolicy(session.shop, token, String(o.productId), gids, "DENY")
         .catch((e) => console.warn("[preorder on-load DENY] failed:", e instanceof Error ? e.message : e));
+    }
+  }
+}
+
+// When a shipment loads and CLOSES a pre-order's supplier order, the pre-order is
+// done — so DELETE its Shopify selling plan group (otherwise the product keeps
+// its pre-order selling plan and still looks pre-orderable/oversellable on the
+// storefront, which is how 90+ orphans piled up). Each batch has its OWN plan
+// group, so deleting a closed batch's group never affects another batch still
+// live on the same product. Best-effort + idempotent (a missing group is fine).
+export async function removeClosedPreorderSellingPlans(orderIds: number[]): Promise<void> {
+  const ids = orderIds.filter((n) => Number.isInteger(n));
+  if (!ids.length) return;
+  const session = await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true } });
+  if (!session?.shop) return;
+  const token = await getOfflineToken(session.shop);
+  if (!token) return;
+  const registry = await getPreorderSellingPlanRegistryEntries(session.shop);
+  const byOrder = new Map(registry.map((r) => [r.supplierOrderId, r]));
+  for (const id of ids) {
+    const entry = byOrder.get(id);
+    if (!entry) continue; // no plan registered for this batch
+    try {
+      const res = await fetch(`https://${session.shop}/admin/api/${API_VERSION}/graphql.json`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": token },
+        body: JSON.stringify({
+          query: `#graphql
+            mutation KEPreorderPlanCloseOnLoad($id: ID!) {
+              sellingPlanGroupDelete(id: $id) { deletedSellingPlanGroupId userErrors { message } }
+            }`,
+          variables: { id: entry.sellingPlanGroupId },
+        }),
+      });
+      const json = await res.json() as { data?: { sellingPlanGroupDelete?: { userErrors?: Array<{ message?: string }> } }; errors?: Array<{ message?: string }> };
+      const errs = [...(json.errors ?? []), ...(json.data?.sellingPlanGroupDelete?.userErrors ?? [])].map((e) => e.message).filter(Boolean);
+      if (errs.length && !errs.some((m) => /not.*exist|not found|invalid id/i.test(String(m)))) throw new Error(errs.join("; "));
+      await removePreorderSellingPlanRegistryEntry(session.shop, id);
+    } catch (e) {
+      console.warn("[preorder on-load plan remove] failed for batch", id, e instanceof Error ? e.message : e);
     }
   }
 }
