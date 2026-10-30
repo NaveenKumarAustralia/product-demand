@@ -16,8 +16,7 @@ import { loadPreorderDashboardData } from "../preorder/preorder-dashboard.server
 import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
 import { marketFromDestination, calculatePreorderCapacity } from "../preorder/preorder-rules.server";
 import { releaseArrivedPreorders } from "../preorder/preorder-release.server";
-import { denyClosedPreorderOrderVariants, removeClosedPreorderSellingPlans } from "../preorder/preorder-inventory-policy.server";
-import { deactivatePreorderForDeletedBatch } from "../preorder/preorder-reconcile.server";
+import { deactivatePreorderForDeletedBatch, reconcilePreorderForProduct } from "../preorder/preorder-reconcile.server";
 import { unauthenticated } from "../shopify.server";
 import { download as dbxDownload, thumbnail as dbxThumbnail, fileKind as dbxFileKind, sharedLink as dbxSharedLink } from "../dropbox.server";
 
@@ -2101,12 +2100,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const closedIds = closing.map((o) => o.id);
         if (closedIds.length) {
           await prisma.supplierOrder.updateMany({ where: { id: { in: closedIds } }, data: { status: "closed" } });
-          // Shipment loaded → pre-order for these batches is done → revert their
-          // variants to DENY in Shopify (unless still live in another open batch)
-          // AND delete their Shopify selling plan group so the product is no longer
-          // pre-orderable on the storefront (stops the orphan build-up).
-          denyClosedPreorderOrderVariants(closedIds).catch((e) => console.warn("[preorder on-load DENY] failed:", e instanceof Error ? e.message : e));
-          removeClosedPreorderSellingPlans(closedIds).catch((e) => console.warn("[preorder on-load plan remove] failed:", e instanceof Error ? e.message : e));
+          // Shipment loaded → these batches are no longer live → run the single-
+          // writer reconciler for each affected product. It deletes the closed
+          // batch's selling plan + restores DENY, while leaving any OTHER live
+          // batch on the same product intact (overlap-safe). The hourly sweep is
+          // the backstop. Fire-and-forget so the load response stays fast.
+          const closedOrders = await prisma.supplierOrder.findMany({ where: { id: { in: closedIds } }, select: { productId: true } });
+          const closedProductNums = Array.from(new Set(closedOrders.map((o) => String(o.productId ?? "").replace(/\D/g, "")).filter(Boolean)));
+          for (const pnum of closedProductNums) {
+            void reconcilePreorderForProduct(session.shop, pnum).catch((e) => console.warn("[preorder on-load reconcile] failed:", e instanceof Error ? e.message : e));
+          }
         }
       } catch (e) {
         console.warn("[restock auto-close] failed:", e);

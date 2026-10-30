@@ -108,12 +108,24 @@ export async function reconcilePreorderForProduct(
 
   if (dryRun) return { ...base, ok: true };
 
+  // If ANY batch on this product is still live, deactivating a different (closed)
+  // batch must NOT touch the shared variants/metafields/tag the live batch needs
+  // — only remove that batch's own stale plan group. Full deactivate (which also
+  // restores DENY + clears metafields/tag) is only safe when nothing is live.
+  const productHasLiveBatch = mine.some((o) => liveState(o).live);
+
   // Deactivate stale plans first, then activate the live ones (so a product that
   // is both closing one batch and opening another ends in the right state).
   for (const p of plan) {
     if (p.action !== "deactivate") continue;
-    try { await deactivatePreorderSellingPlan({ supplierOrderId: p.batchId, actor: SYSTEM_ACTOR, permissions }); base.deactivated += 1; }
-    catch (e) { base.errors.push({ batchId: p.batchId, op: "deactivate", error: errMsg(e) }); }
+    try {
+      if (productHasLiveBatch) {
+        await removeClosedPreorderSellingPlans([p.batchId]); // group-only: leave shared variant state alone
+      } else {
+        await deactivatePreorderSellingPlan({ supplierOrderId: p.batchId, actor: SYSTEM_ACTOR, permissions }); // full: plan + DENY + metafields + tag
+      }
+      base.deactivated += 1;
+    } catch (e) { base.errors.push({ batchId: p.batchId, op: "deactivate", error: errMsg(e) }); }
   }
   for (const p of plan) {
     if (p.action !== "activate") continue;
