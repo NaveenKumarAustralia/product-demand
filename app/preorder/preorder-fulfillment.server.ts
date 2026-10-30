@@ -58,7 +58,7 @@ function locationGid(value: string | null) {
 //     pre-order RELEASE: when a batch lands, Shopify commits the new units to the
 //     held pre-order orders, so "available" drops to 0 even though the physical
 //     unit exists FOR that order — on-hand is the correct "has stock arrived" signal.
-export async function getAvailableAtLocation(shop: string, token: string, variantId: string, locationId: string | null, quantityName: "available" | "on_hand" = "available"): Promise<number> {
+export async function getAvailableAtLocation(shop: string, token: string, variantId: string, locationId: string | null, quantityName: "available" | "on_hand" | "committed" = "available"): Promise<number> {
   const loc = locationGid(locationId);
   if (!loc) return 0;
   const data = await graphql<{

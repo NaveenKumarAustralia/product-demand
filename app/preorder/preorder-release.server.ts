@@ -135,41 +135,48 @@ export async function releaseArrivedPreorders(): Promise<{ releasedOrders: numbe
     if (!token) { skippedNoScope = true; continue; }
     const locations = await getPreorderLocationSettings();
 
-    // Units ALREADY released for this group but not yet picked/fulfilled — those
-    // physical units are already promised, so subtract them from the location's
-    // available before handing spare units to more orders (no double-release).
-    const promised = await prisma.preorderReservation.findMany({
-      where: { shop, status: "reserved", readyAt: { not: null }, fulfilledAt: null },
-      select: { supplierOrderId: true, variantId: true, market: true, quantity: true },
-    });
-    const promisedByGroup = new Map<string, number>();
-    for (const p of promised) promisedByGroup.set(groupKey(p), (promisedByGroup.get(groupKey(p)) ?? 0) + p.quantity);
+    // Held (still-awaiting) pre-order units per group — the candidates we might
+    // release. They count in Shopify "committed", so we add them back when sizing
+    // the shippable spare (otherwise the batch's own backlog hides its own stock).
+    const heldUnitsByGroup = new Map<string, number>();
+    for (const r of rows) heldUnitsByGroup.set(groupKey(r), (heldUnitsByGroup.get(groupKey(r)) ?? 0) + r.quantity);
 
-    // Spare-unit budget per (batch, variant, market): physical ON-HAND stock minus
-    // the already-promised units. We use ON-HAND (not "available"): when a batch
-    // lands, Shopify commits the new units to these very held pre-order orders, so
-    // "available" reads 0 even though the physical unit exists for the order — which
-    // used to leave a size unreleased when only 1 unit landed (e.g. Katie Dress S).
+    // Shippable spare per (batch, variant, market):
+    //     spare = on_hand − committed + heldPreorderUnits
+    // on_hand is physical units; committed is EVERY paid-unfulfilled unit (regular
+    // orders + released-not-yet-picked pre-orders + these held pre-orders). So
+    // on_hand − committed is the genuine surplus after everything that will ship,
+    // and adding back the held pre-orders gives exactly the physical units free to
+    // assign to them. This fixes BOTH failure modes:
+    //   • over-release: an OVERSOLD variant (e.g. on_hand 5, committed 10 → -5)
+    //     no longer looks like "5 spare" and releases pre-orders with no real stock;
+    //   • under-release: a unit that lands for a held order (on_hand 1, committed 1,
+    //     held 1 → 1) now correctly releases it (plain "available" netted to 0).
     const groups = new Map<string, { variantId: string; market: string }>();
     for (const r of rows) if (!groups.has(groupKey(r))) groups.set(groupKey(r), { variantId: r.variantId, market: r.market });
-    const stockCache = new Map<string, number>();
+    const stockCache = new Map<string, { onHand: number; committed: number }>();
     const budgetByGroup = new Map<string, number>();
     for (const [key, g] of groups) {
       const locationId = locationForMarket(locations, g.market as PreorderMarket);
       if (!locationId) continue; // market not live → no budget (0)
       const stockKey = `${g.variantId}::${locationId}`;
-      let available = stockCache.get(stockKey);
-      if (available === undefined) {
+      let qty = stockCache.get(stockKey);
+      if (qty === undefined) {
         try {
-          available = await getAvailableAtLocation(shop, token, g.variantId, locationId, "on_hand");
+          const [onHand, committed] = await Promise.all([
+            getAvailableAtLocation(shop, token, g.variantId, locationId, "on_hand"),
+            getAvailableAtLocation(shop, token, g.variantId, locationId, "committed"),
+          ]);
+          qty = { onHand, committed };
         } catch (error) {
           console.warn(`[preorder release] stock check failed (${shop} ${g.variantId}):`, error instanceof Error ? error.message : error);
           errors += 1;
-          available = 0;
+          qty = { onHand: 0, committed: 0 };
         }
-        stockCache.set(stockKey, available);
+        stockCache.set(stockKey, qty);
       }
-      budgetByGroup.set(key, Math.max(0, available - (promisedByGroup.get(key) ?? 0)));
+      const spare = qty.onHand - qty.committed + (heldUnitsByGroup.get(key) ?? 0);
+      budgetByGroup.set(key, Math.max(0, spare));
     }
     if (![...budgetByGroup.values()].some((v) => v > 0)) continue; // no spare units anywhere
 
