@@ -3,6 +3,7 @@ import prisma from "../db.server";
 import { requirePreorderPortalUser } from "../preorder/preorder-portal-auth.server";
 import { processShopifyOrderCreated } from "../preorder/preorder-shopify-order.server";
 import { reholdUnheldPreorderOrders, getAvailableAtLocation } from "../preorder/preorder-fulfillment.server";
+import { reholdPrematurelyReleased } from "../preorder/preorder-release.server";
 import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
 import { getPreorderLocationSettings, locationForMarket } from "../preorder/preorder-locations.server";
 import { calculatePreorderCapacity, isPreorderEligibleStatus, marketFromDestination } from "../preorder/preorder-rules.server";
@@ -29,6 +30,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if ((url.searchParams.get("action") ?? "") === "rehold-all") {
     const r = await reholdUnheldPreorderOrders();
     return Response.json({ ok: r.errors === 0, action: "rehold-all", ...r }, { headers: { "Cache-Control": "no-store" } });
+  }
+
+  // Pull back pre-orders released prematurely (no genuine stock) and re-hold them.
+  if ((url.searchParams.get("action") ?? "") === "rehold-premature") {
+    const r = await reholdPrematurelyReleased();
+    return Response.json({ ok: r.errors === 0, action: "rehold-premature", ...r }, { headers: { "Cache-Control": "no-store" } });
   }
 
   let orderId = (url.searchParams.get("orderId") ?? "").replace(/\D/g, "");
