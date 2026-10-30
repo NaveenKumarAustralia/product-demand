@@ -118,7 +118,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }).catch(() => []);
     // Any reservations that DO exist for this order (any status), to rule in/out.
     const anyRes = await prisma.preorderReservation.findMany({
-      where: { shopifyOrderId: orderId }, select: { shopifyLineItemId: true, variantId: true, supplierOrderId: true, status: true, quantity: true },
+      where: { shopifyOrderId: orderId }, select: { shopifyLineItemId: true, variantId: true, supplierOrderId: true, status: true, quantity: true, reservedAt: true, readyAt: true, releasedAt: true, fulfilledAt: true },
     }).catch(() => []);
     return Response.json({ ok: true, debug: "capture", orderId, market, liveBatchIds: liveIds, lines: lineTrace, allocationFailures: failLogs, reservationsAnyStatus: anyRes }, { headers: { "Cache-Control": "no-store" } });
   }
