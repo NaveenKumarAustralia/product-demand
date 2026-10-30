@@ -2,7 +2,10 @@ import type { LoaderFunctionArgs } from "react-router";
 import prisma from "../db.server";
 import { requirePreorderPortalUser } from "../preorder/preorder-portal-auth.server";
 import { processShopifyOrderCreated } from "../preorder/preorder-shopify-order.server";
-import { reholdUnheldPreorderOrders } from "../preorder/preorder-fulfillment.server";
+import { reholdUnheldPreorderOrders, getAvailableAtLocation } from "../preorder/preorder-fulfillment.server";
+import { getPreorderSellingPlanRegistryEntries } from "../preorder/preorder-selling-plan-registry.server";
+import { getPreorderLocationSettings, locationForMarket } from "../preorder/preorder-locations.server";
+import { calculatePreorderCapacity, isPreorderEligibleStatus, marketFromDestination } from "../preorder/preorder-rules.server";
 
 // Admin: fix a pre-order that didn't get held/captured. Re-runs the FULL order
 // pipeline (capture any live pre-order line → reserve → hold → tag → email) for
@@ -65,6 +68,49 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     });
     const json = await res.json().catch(() => ({}));
     return Response.json({ ok: true, debug: true, orderId, order: (json as { data?: { order?: unknown } }).data?.order ?? null }, { headers: { "Cache-Control": "no-store" } });
+  }
+
+  // Capture trace (read-only): replay the capture decision for the order's lines
+  // and report exactly where/why it stops — no reservation is created.
+  if (url.searchParams.get("debug") === "capture") {
+    const num = (s: unknown) => String(s ?? "").replace(/\D/g, "");
+    const res = await fetch(`https://${shop}/admin/api/2025-10/graphql.json`, {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": session.accessToken },
+      body: JSON.stringify({ query: `#graphql
+        query CapTrace($id: ID!) { order(id: $id) { name shippingAddress { countryCodeV2 } billingAddress { countryCodeV2 }
+          lineItems(first: 50) { nodes { id quantity variant { id } sellingPlan { name } } } } }`, variables: { id: `gid://shopify/Order/${orderId}` } }),
+    });
+    const oj = await res.json().catch(() => ({})) as { data?: { order?: { shippingAddress?: { countryCodeV2?: string }; billingAddress?: { countryCodeV2?: string }; lineItems?: { nodes?: Array<{ id: string; quantity: number; variant?: { id?: string }; sellingPlan?: { name?: string } }> } } } };
+    const order = oj.data?.order;
+    const country = String(order?.shippingAddress?.countryCodeV2 || order?.billingAddress?.countryCodeV2 || "").toUpperCase();
+    const market = country === "US" ? "USA" : "AU";
+    const [registry, enabledSettings, locations] = await Promise.all([
+      getPreorderSellingPlanRegistryEntries(shop),
+      prisma.preorderBatchSetting.findMany({ where: { enabled: true }, select: { supplierOrderId: true, safetyBufferPercent: true, safetyBufferQty: true } }),
+      getPreorderLocationSettings(),
+    ]);
+    const activated = new Set(registry.map((r) => r.supplierOrderId));
+    const liveIds = enabledSettings.filter((s) => activated.has(s.supplierOrderId)).map((s) => s.supplierOrderId);
+    const settingBy = new Map(enabledSettings.map((s) => [s.supplierOrderId, s]));
+    const batches = liveIds.length ? await prisma.supplierOrder.findMany({ where: { id: { in: liveIds }, status: "open" }, select: { id: true, destination: true, supplierStatus: true, lines: { select: { variantId: true, qtyOrdered: true, qtyReceived: true } } } }) : [];
+    const reserved = await prisma.preorderReservation.groupBy({ by: ["supplierOrderId", "variantId"], where: { supplierOrderId: { in: liveIds }, status: "reserved" }, _sum: { quantity: true } });
+    const resBy = new Map(reserved.map((r) => [`${r.supplierOrderId}:${num(r.variantId)}`, r._sum.quantity ?? 0]));
+    const token = session.accessToken;
+    const lineTrace = [];
+    for (const l of order?.lineItems?.nodes ?? []) {
+      const vnum = num(l.variant?.id);
+      const hits = batches.filter((b) => b.lines.some((ln) => num(ln.variantId) === vnum)).map((b) => ({ batchId: b.id, destination: b.destination, market: marketFromDestination(b.destination), status: b.supplierStatus, eligible: isPreorderEligibleStatus(b.supplierStatus) }));
+      let available: number | null = null; let capacity: unknown = null; let locId: string | null = null;
+      const hit = hits.find((h) => h.market === market) ?? hits[0];
+      if (hit) {
+        locId = locationForMarket(locations, hit.market as "AU" | "USA");
+        if (locId) { try { available = await getAvailableAtLocation(shop, token, l.variant?.id ?? "", locId); } catch (e) { available = -999; } }
+        const b = batches.find((x) => x.id === hit.batchId)!; const bl = b.lines.find((ln) => num(ln.variantId) === vnum)!; const st = settingBy.get(hit.batchId);
+        capacity = calculatePreorderCapacity({ confirmedIncomingQty: Math.max(0, (bl.qtyOrdered ?? 0) - (bl.qtyReceived ?? 0)), reservedQty: resBy.get(`${hit.batchId}:${vnum}`) ?? 0, safetyBufferPercent: st?.safetyBufferPercent ?? 0, safetyBufferQty: st?.safetyBufferQty ?? null });
+      }
+      lineTrace.push({ variantId: l.variant?.id ?? null, vnum, hasPlan: Boolean(l.sellingPlan?.name), qty: l.quantity, hitCount: hits.length, hits, chosenMarket: market, locationId: locId, available, oosGatePass: available != null && available <= 0, capacity });
+    }
+    return Response.json({ ok: true, debug: "capture", orderId, market, liveBatchIds: liveIds, lines: lineTrace }, { headers: { "Cache-Control": "no-store" } });
   }
 
   try {
