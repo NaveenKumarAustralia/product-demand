@@ -110,7 +110,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }
       lineTrace.push({ variantId: l.variant?.id ?? null, vnum, hasPlan: Boolean(l.sellingPlan?.name), qty: l.quantity, hitCount: hits.length, hits, chosenMarket: market, locationId: locId, available, oosGatePass: available != null && available <= 0, capacity });
     }
-    return Response.json({ ok: true, debug: "capture", orderId, market, liveBatchIds: liveIds, lines: lineTrace }, { headers: { "Cache-Control": "no-store" } });
+    // Any recorded allocation failures for this order (reserve threw at webhook
+    // time or during reprocess) — the reason string is the ground truth.
+    const failLogs = await prisma.activityLog.findMany({
+      where: { action: "preorder_allocation_failed", entityId: orderId }, orderBy: { createdAt: "desc" }, take: 5,
+      select: { field: true, toValue: true, createdAt: true },
+    }).catch(() => []);
+    // Any reservations that DO exist for this order (any status), to rule in/out.
+    const anyRes = await prisma.preorderReservation.findMany({
+      where: { shopifyOrderId: orderId }, select: { shopifyLineItemId: true, variantId: true, supplierOrderId: true, status: true, quantity: true },
+    }).catch(() => []);
+    return Response.json({ ok: true, debug: "capture", orderId, market, liveBatchIds: liveIds, lines: lineTrace, allocationFailures: failLogs, reservationsAnyStatus: anyRes }, { headers: { "Cache-Control": "no-store" } });
   }
 
   try {
