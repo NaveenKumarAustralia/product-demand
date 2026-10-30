@@ -123,6 +123,30 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return Response.json({ ok: true, debug: "capture", orderId, market, liveBatchIds: liveIds, lines: lineTrace, allocationFailures: failLogs, reservationsAnyStatus: anyRes }, { headers: { "Cache-Control": "no-store" } });
   }
 
+  // List EVERY reservation for the same variant(s) as this order, sorted by
+  // reservedAt, so we can see the real release order (is the oldest released
+  // first, or not?). Read-only.
+  if (url.searchParams.get("debug") === "variant") {
+    const mine = await prisma.preorderReservation.findMany({ where: { shopifyOrderId: orderId }, select: { variantId: true, supplierOrderId: true } });
+    const variantIds = Array.from(new Set(mine.map((m) => m.variantId)));
+    if (!variantIds.length) return Response.json({ ok: true, debug: "variant", orderId, note: "No reservation for this order.", variantIds: [] });
+    const num = (s: unknown) => String(s ?? "").replace(/\D/g, "");
+    const want = new Set(variantIds.map(num));
+    // Pull all reservations and filter by numeric variant (ids may be stored gid/numeric).
+    const all = await prisma.preorderReservation.findMany({
+      where: { supplierOrderId: { in: Array.from(new Set(mine.map((m) => m.supplierOrderId))) } },
+      select: { shopifyOrderId: true, shopifyOrderName: true, variantId: true, supplierOrderId: true, status: true, quantity: true, reservedAt: true, readyAt: true, releasedAt: true, fulfilledAt: true },
+      orderBy: { reservedAt: "asc" },
+    });
+    const rows = all.filter((r) => want.has(num(r.variantId))).map((r) => ({
+      order: r.shopifyOrderName || r.shopifyOrderId, isThisOrder: r.shopifyOrderId === orderId,
+      batch: r.supplierOrderId, status: r.status, qty: r.quantity,
+      reservedAt: r.reservedAt, readyAt: r.readyAt, releasedAt: r.releasedAt, fulfilledAt: r.fulfilledAt,
+      released: Boolean(r.readyAt),
+    }));
+    return Response.json({ ok: true, debug: "variant", orderId, variantIds, count: rows.length, reservations: rows }, { headers: { "Cache-Control": "no-store" } });
+  }
+
   try {
     const result = await processShopifyOrderCreated(shop, { id: orderId });
     // ALWAYS re-hold too: processShopifyOrderCreated only places the hold when it
