@@ -478,3 +478,65 @@ export async function removeOrderTags(shop: string, token: string, orderIdNumeri
   const errs = result.tagsRemove?.userErrors;
   if (errs?.length) throw new PreorderFulfillmentError(errs.map((e) => e.message || "tagsRemove error").join("; "));
 }
+
+// ─── Re-hold backstop (durable hold) ─────────────────────────────────────────────
+// The real-time hold runs once off the reservation ledger when the order webhook
+// fires; if that single call hiccups, the order is RESERVED but never held, and
+// the missed-capture scheduler skips already-reserved lines — so it would stay a
+// normal unfulfilled order and hit the picking app. This backstop re-applies the
+// hold for EVERY order that still has an active (reserved, not released/fulfilled)
+// pre-order reservation. holdAllReservedPreorderLines is idempotent (an already-
+// correct order is a no-op; a fulfilled/shipped order has no OPEN fulfilment order
+// to hold), so this is safe to run on a timer and on demand.
+export async function reholdUnheldPreorderOrders(opts: { orderId?: string } = {}): Promise<{ orders: number; held: number; errors: number; skippedNoScope: boolean }> {
+  const active = await prisma.preorderReservation.findMany({
+    where: { status: "reserved", readyAt: null, releasedAt: null, fulfilledAt: null, ...(opts.orderId ? { shopifyOrderId: opts.orderId } : {}) },
+    select: { shop: true, shopifyOrderId: true },
+  });
+  const seen = new Set<string>();
+  const list: Array<{ shop: string; orderId: string }> = [];
+  for (const r of active) {
+    if (!r.shopifyOrderId) continue;
+    const key = `${r.shop}::${r.shopifyOrderId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    list.push({ shop: r.shop, orderId: r.shopifyOrderId });
+  }
+  let orders = 0; let held = 0; let errors = 0; let skippedNoScope = false;
+  const tokenByShop = new Map<string, string | null>();
+  for (const { shop, orderId } of list) {
+    if (!tokenByShop.has(shop)) tokenByShop.set(shop, await getOfflineToken(shop));
+    const token = tokenByShop.get(shop);
+    if (!token) { skippedNoScope = true; continue; }
+    orders += 1;
+    try {
+      const { wholeOrderHeld, lineCount } = await holdAllReservedPreorderLines(shop, token, orderId);
+      if (lineCount > 0) {
+        if (wholeOrderHeld) await addOrderTags(shop, token, orderId, ["pre-order-hold"]);
+        held += 1;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/access denied|not approved|scope/i.test(message)) skippedNoScope = true;
+      console.warn(`[preorder re-hold] ${shop} order ${orderId} failed:`, message);
+      errors += 1;
+    }
+  }
+  return { orders, held, errors, skippedNoScope };
+}
+
+// Timer: catch any reserved-but-unheld pre-order within ~15 min. First pass 45s
+// after boot. Guarded to start once per process.
+export function startPreorderReholdScheduler() {
+  const g = globalThis as unknown as { __kePreorderReholdStarted?: boolean };
+  if (g.__kePreorderReholdStarted) return;
+  g.__kePreorderReholdStarted = true;
+  const run = () => {
+    reholdUnheldPreorderOrders()
+      .then((r) => { if (r.orders || r.errors) console.log("[preorder re-hold] cycle:", r); })
+      .catch((error) => console.warn("[preorder re-hold] cycle failed:", error instanceof Error ? error.message : error));
+  };
+  setTimeout(run, 45_000);
+  setInterval(run, 15 * 60 * 1000);
+  console.log("[preorder re-hold] scheduler started (every 15 min)");
+}

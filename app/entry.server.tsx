@@ -9,6 +9,7 @@ import { startPreorderReleaseScheduler } from "./preorder/preorder-release.serve
 import { startPreorderPlanReconcileScheduler } from "./preorder/preorder-selling-plan.service.server";
 import { startMissedPreorderCaptureScheduler } from "./preorder/preorder-missed-capture.server";
 import { startPreorderReconcileSweepScheduler } from "./preorder/preorder-reconcile.server";
+import { startPreorderReholdScheduler } from "./preorder/preorder-fulfillment.server";
 
 // Start the pre-order auto-release timer once when the server boots (releases
 // Shopify holds + tags orders for Pick Pack when a batch's stock lands).
@@ -23,6 +24,10 @@ startMissedPreorderCaptureScheduler();
 // state to the DB. Defaults to "observe" (dry-run + log only) until flipped to
 // "apply" from /api/preorder-reconcile — so it can't change anything unverified.
 startPreorderReconcileSweepScheduler();
+// Every 15 min: re-apply the fulfilment hold to any pre-order order that is
+// reserved but somehow not held (so a hold that hiccupped never leaves a
+// pre-order sitting as a normal unfulfilled order in the picking app).
+startPreorderReholdScheduler();
 
 export const streamTimeout = 5000;
 
