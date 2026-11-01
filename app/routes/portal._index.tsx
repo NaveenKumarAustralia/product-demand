@@ -28147,7 +28147,7 @@ function PackingListsOverview({
         <table style={{ ...s.table, width: "100%" }}>
           <thead>
             <tr style={s.headerRow}>
-              {["Invoice", "Boxes", "Total qty", "Estimated arrival", "Shipping", "Status", "Actions"].map((heading) => (
+              {["Invoice", "Boxes", "Total qty", "Estimated arrival", "Shipping", "Status", "Date loaded", "Actions"].map((heading) => (
                 <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Boxes" || heading === "Actions" ? "center" : "left" }}>
                   <span style={s.thContent}>{heading}</span>
                 </th>
@@ -28191,6 +28191,14 @@ function PackingListsOverview({
                     style={cellStyle}
                     onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List", entityId: String(list.id), field: "Status", entityName: list.invoiceNumber || `Packing list #${list.id}` } })); }}
                   >{labelForPackingStatus(list.status)}</td>
+                  <td style={cellStyle}>
+                    {list.masterInventoryLoadedAt ? (
+                      <span>
+                        {formatPortalDate(list.masterInventoryLoadedAt)}
+                        {list.loadedBy ? <span style={{ display: "block", fontSize: 11, color: "#64748b" }}>{list.loadedBy}</span> : null}
+                      </span>
+                    ) : "—"}
+                  </td>
                   <td style={{ ...cellStyle, textAlign: "center" }}>
                     <div style={s.packingListActions} onClick={(event) => event.stopPropagation()}>
                       <fetcher.Form method="post">
@@ -28210,7 +28218,7 @@ function PackingListsOverview({
               );
             }) : (
               <tr style={s.row}>
-                <td colSpan={6} style={{ ...s.td, textAlign: "center", padding: 40 }}>
+                <td colSpan={8} style={{ ...s.td, textAlign: "center", padding: 40 }}>
                   {showHidden ? "No hidden packing lists." : "No packing lists yet."}
                 </td>
               </tr>
