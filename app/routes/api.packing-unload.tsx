@@ -185,10 +185,28 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }, null, 2), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
   }
 
-  // APPLY: subtract the exact deltas we pushed, at the HQ location.
-  let adjusted = 0;
-  const errors: string[] = [];
-  if (matched.length) {
+  // APPLY: reverse PER LINE — one inventoryAdjustQuantities call per packing
+  // line, mirroring exactly how the load applied it. This matters because:
+  //   • Shopify caps a single call at 250 changes (we had 382), and
+  //   • the same variant can appear on two lines (e.g. Pilot Pants Peacock M/L
+  //     on lines 3468 + 3469) — one call can't list a variant/location twice,
+  //     but two separate per-line calls subtract 6 then 28 just as the load
+  //     added 6 then 28.
+  // Each line's loaded flag is cleared the instant ITS call succeeds, so a
+  // retry simply skips the lines already done and resumes at the first failure.
+  const byLine = new Map<number, Plan[]>();
+  for (const p of matched) {
+    const arr = byLine.get(p.line) ?? [];
+    arr.push(p);
+    byLine.set(p.line, arr);
+  }
+
+  let revertedSizes = 0;
+  let revertedUnits = 0;
+  let linesCleared = 0;
+  const lineErrors: Array<{ line: number; productTitle: string; message: string }> = [];
+
+  for (const [lineId, items] of byLine) {
     const json = await graphql<any>(shop, token, `
       mutation UnloadInventory($input: InventoryAdjustQuantitiesInput!) {
         inventoryAdjustQuantities(input: $input) {
@@ -200,44 +218,51 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       input: {
         name: "available",
         reason: "correction",
-        changes: matched.map((p) => ({ delta: -p.qty, inventoryItemId: p.inventoryItemId, locationId })),
+        changes: items.map((p) => ({ delta: -p.qty, inventoryItemId: p.inventoryItemId, locationId })),
       },
     });
     const userErrors = json?.data?.inventoryAdjustQuantities?.userErrors ?? [];
-    if (userErrors.length || !json?.data?.inventoryAdjustQuantities?.inventoryAdjustmentGroup) {
-      errors.push(...(userErrors.map((e: { message?: string }) => e.message || "Shopify userError")));
-      if (!userErrors.length) errors.push("Shopify returned no adjustment group (nothing was changed).");
-      return new Response(JSON.stringify({ mode: "apply", ok: false, errors, note: "Shopify rejected the adjustment — NO flags were cleared, nothing changed. Safe to retry." }, null, 2), { status: 502, headers: { "Content-Type": "application/json" } });
+    const group = json?.data?.inventoryAdjustQuantities?.inventoryAdjustmentGroup;
+    if (userErrors.length || !group) {
+      lineErrors.push({ line: lineId, productTitle: items[0]?.productTitle ?? "", message: userErrors.map((e: { message?: string }) => e.message || "userError").join("; ") || "Shopify returned no adjustment group" });
+      continue; // leave this line's flag set so a retry resumes here
     }
-    adjusted = matched.length;
+    // Success for this line → clear its flag so it won't be re-subtracted.
+    await prisma.packingListLine.update({ where: { id: lineId }, data: { shopifyLoadedQtys: {} } });
+    revertedSizes += items.length;
+    revertedUnits += items.reduce((s, p) => s + p.qty, 0);
+    linesCleared += 1;
   }
 
-  // Clear the loaded-qty flags on the affected lines, and the master stamp.
-  const affectedLineIds = Array.from(new Set(matched.map((p) => p.line)));
-  for (const lineId of affectedLineIds) {
-    await prisma.packingListLine.update({ where: { id: lineId }, data: { shopifyLoadedQtys: {} } });
+  // Clear the master "loaded" stamp only when EVERY line was reverted.
+  const fullyDone = lineErrors.length === 0;
+  if (fullyDone) {
+    await prisma.packingList.update({ where: { id: packingId }, data: { masterInventoryLoadedAt: null, loadedBy: null } });
   }
-  await prisma.packingList.update({ where: { id: packingId }, data: { masterInventoryLoadedAt: null, loadedBy: null } });
 
   try {
     await prisma.activityLog.create({
       data: {
         userName: actor.name ?? "Unknown", action: "Unloaded from Shopify", entity: "Packing List",
         entityId: String(packingId), entityName: packingList.invoiceNumber || packingList.title || `#${packingId}`,
-        field: "Reverted accidental inventory load", toValue: `${adjusted} size(s), ${totalUnits} unit(s) subtracted`,
+        field: "Reverted accidental inventory load", toValue: `${revertedSizes} size(s), ${revertedUnits} unit(s) subtracted${fullyDone ? "" : ` (${lineErrors.length} line(s) failed)`}`,
       },
     });
   } catch { /* logging is best-effort */ }
 
   return new Response(JSON.stringify({
     mode: "apply",
-    ok: true,
-    reverted: { sizes: adjusted, totalUnits, linesCleared: affectedLineIds.length },
+    ok: fullyDone,
+    reverted: { sizes: revertedSizes, totalUnits: revertedUnits, linesCleared },
+    failedLines: lineErrors.length ? lineErrors : undefined,
+    retryHint: lineErrors.length ? "Some lines failed — already-reverted lines are cleared, so just open the same &apply=1 URL again to finish the rest." : undefined,
     unmatchedSizes: unmatched.length ? unmatched : undefined,
     warnings: {
       costPushedLines: costPushedLines.length ? costPushedLines : undefined,
       closedLinkedOrders: closedLinked.length ? closedLinked : undefined,
-      note: "Stock subtracted and loaded flags cleared for THIS list only. COST (WAC) was not restored and any closed orders were not reopened — tell me if you need those too.",
+      note: fullyDone
+        ? "Stock subtracted and loaded flags cleared for THIS list only. COST (WAC) was not restored and any closed orders were not reopened — tell me if you need those too."
+        : "PARTIAL — see failedLines. The lines that succeeded are done and won't be touched again; re-run the same URL to finish.",
     },
-  }, null, 2), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+  }, null, 2), { status: fullyDone ? 200 : 207, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 };
