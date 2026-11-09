@@ -23,6 +23,13 @@ const norm = (s: unknown) => String(s ?? "").trim().toLowerCase();
 // so we can surface the relevant entries first.
 const STATUS_HINTS = ["draft", "active", "archiv", "unpublish", "publish", "status", "hidden"];
 
+// A tag or collection that marks a product as discounted / on a promotion. This
+// is what a "put the sale into draft" action actually targets — NOT the literal
+// word "sale" only. Matches "Sale", "Clearance", "BFCM", "Cyber", "Black Friday",
+// any "NN%" (e.g. "10% Off", "BFCM26 10%") and "% off", WITHOUT catching
+// unrelated words like "Off-Shoulder".
+const PROMO_RE = /(sale|clearance|discount|promo|bfcm|cyber|black\s*friday|\d+\s*%|%\s*off)/i;
+
 const QUERY = `
   query ProductStatusHistory($q: String!, $events: Int!) {
     products(first: 10, query: $q) {
@@ -89,8 +96,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const collections: Array<{ id?: string; title?: string; handle?: string }> = p.collections?.nodes ?? [];
     const variants: Array<{ price?: string; compareAtPrice?: string }> = p.variants?.nodes ?? [];
     const onSale = variants.some((v) => v.compareAtPrice && Number(v.compareAtPrice) > Number(v.price ?? 0)); // has a compare-at price > price
-    const saleCollections = collections.filter((c) => norm(c.title).includes("sale") || norm(c.handle).includes("sale")).map((c) => c.title);
-    const saleTags = (Array.isArray(p.tags) ? p.tags : []).filter((t: string) => norm(t).includes("sale"));
+    const saleCollections = collections.filter((c) => PROMO_RE.test(String(c.title ?? "")) || PROMO_RE.test(String(c.handle ?? ""))).map((c) => c.title);
+    const saleTags = (Array.isArray(p.tags) ? p.tags : []).filter((t: string) => PROMO_RE.test(String(t)));
     return {
       id: p.id,
       title: p.title,
