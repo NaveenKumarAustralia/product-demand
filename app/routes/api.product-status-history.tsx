@@ -31,9 +31,13 @@ const QUERY = `
         title
         handle
         status
+        productType
+        tags
         createdAt
         updatedAt
         publishedAt
+        collections(first: 25) { nodes { id title handle } }
+        variants(first: 5) { nodes { price compareAtPrice } }
         events(first: $events, sortKey: CREATED_AT, reverse: true) {
           nodes {
             id
@@ -81,11 +85,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     const events: EventNode[] = p.events?.nodes ?? [];
     // Flag the events that look like a status / visibility change.
     const statusEvents = events.filter((e) => STATUS_HINTS.some((h) => norm(e.message).includes(h) || norm(e.action).includes(h)));
+    // "Why would a Sale bulk-draft catch this?" signals:
+    const collections: Array<{ id?: string; title?: string; handle?: string }> = p.collections?.nodes ?? [];
+    const variants: Array<{ price?: string; compareAtPrice?: string }> = p.variants?.nodes ?? [];
+    const onSale = variants.some((v) => v.compareAtPrice && Number(v.compareAtPrice) > Number(v.price ?? 0)); // has a compare-at price > price
+    const saleCollections = collections.filter((c) => norm(c.title).includes("sale") || norm(c.handle).includes("sale")).map((c) => c.title);
+    const saleTags = (Array.isArray(p.tags) ? p.tags : []).filter((t: string) => norm(t).includes("sale"));
     return {
       id: p.id,
       title: p.title,
       handle: p.handle,
       currentStatus: p.status,
+      productType: p.productType || "(none)",
+      // Why a "Sale" bulk action could include this product even if productType isn't "Sale":
+      whyCaughtInSale: {
+        onSale, // a variant has a compare-at (discount) price — automated "Sale" collections include these
+        inSaleCollection: saleCollections.length > 0,
+        saleCollections,
+        saleTags,
+      },
+      tags: p.tags,
+      collections: collections.map((c) => c.title),
       createdAt: p.createdAt,
       updatedAt: p.updatedAt,
       publishedAt: p.publishedAt, // null once unpublished / draft
@@ -101,7 +121,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     searchedFor: idParam || qParam,
     found: report.length,
     howToRead:
-      "statusChangeEvents = the entries that mention status/draft/publish. 'who' is Shopify's own message — it names the staff member who did it, or the app (an app-driven change reads like 'App Name changed…'). If a status change is NOT listed, Shopify didn't log one for this product in the window (try ?events=100).",
+      "statusChangeEvents = entries mentioning status/draft/publish; 'who' names the staff member (or app) that did it. whyCaughtInSale explains how a 'Sale' bulk-draft could include a product whose productType isn't 'Sale': onSale=true means a variant has a compare-at (discount) price, so an AUTOMATED 'Sale' collection would include it; inSaleCollection/saleCollections = it's in a collection named 'Sale'; saleTags = it carries a 'Sale' tag. If all of those are empty and productType isn't Sale, the product was almost certainly swept up by a selection error (e.g. 'select all' without the filter applied).",
     products: report,
   });
 };
