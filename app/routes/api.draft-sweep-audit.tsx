@@ -24,12 +24,13 @@ const norm = (s: unknown) => String(s ?? "").trim().toLowerCase();
 // unrelated words like "Off-Shoulder".
 const PROMO_RE = /(sale|clearance|discount|promo|bfcm|cyber|black\s*friday|\d+\s*%|%\s*off)/i;
 
-const DEFAULT_FROM = "2026-11-09T00:00:00Z";
-const DEFAULT_TO = "2026-11-09T01:00:00Z";
+// Default window = the last 5 days (newest-first scan below), so the bare URL
+// covers recent drafting without needing explicit ?from/?to.
+const DEFAULT_WINDOW_DAYS = 5;
 
 const EVENTS_QUERY = `
   query DraftSweepEvents($q: String!, $after: String) {
-    events(first: 250, after: $after, query: $q, sortKey: CREATED_AT, reverse: false) {
+    events(first: 250, after: $after, query: $q, sortKey: CREATED_AT, reverse: true) {
       pageInfo { hasNextPage endCursor }
       nodes { id createdAt message ... on BasicEvent { action subjectType subjectId } }
     }
@@ -64,8 +65,11 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   if (actor.admin !== true) return json({ error: "Admin only." }, 403);
 
   const url = new URL(request.url);
-  const from = (url.searchParams.get("from") || DEFAULT_FROM).trim();
-  const to = (url.searchParams.get("to") || DEFAULT_TO).trim();
+  const nowMs = Date.now();
+  const defFrom = new Date(nowMs - DEFAULT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const defTo = new Date(nowMs).toISOString();
+  const from = (url.searchParams.get("from") || defFrom).trim();
+  const to = (url.searchParams.get("to") || defTo).trim();
 
   const shop = (await prisma.session.findFirst({ where: { isOnline: false, accessToken: { not: "" } }, orderBy: { expires: "desc" }, select: { shop: true } }))?.shop ?? "";
   const token = shop ? await getOfflineToken(shop) : null;
@@ -75,10 +79,15 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   // 1) Walk the product event log in the window; keep "status → draft" events.
   const q = `subject_type:PRODUCT AND created_at:>=${from} AND created_at:<=${to}`;
   const drafted = new Map<string, { at: string; who: string }>(); // productId -> first draft event
+  // Newest-first scan (reverse: true). A wide window can hold many events, so
+  // the cap is generous; `truncated` tells us if we stopped before the window's
+  // oldest edge (so a nil result there isn't mistaken for "nothing drafted").
+  const MAX_PAGES = 160; // 160 * 250 = up to 40k events
   let after: string | null = null;
   let pages = 0;
   let scannedEvents = 0;
-  while (pages < 40) {
+  let truncated = false;
+  while (pages < MAX_PAGES) {
     const r: any = await gql(EVENTS_QUERY, { q, after });
     if (r?.errors?.length) return json({ error: "Shopify error (events)", detail: r.errors.map((e: any) => e.message).join("; ") }, 502);
     const conn = r?.data?.events;
@@ -91,6 +100,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       if (!/changed product status from .* to draft/i.test(msg)) continue;
       const pid = String(n?.subjectId ?? "");
       if (!pid) continue;
+      // Newest-first, so the first time we see a product is its MOST RECENT
+      // draft event — the one we care about for "when was it last drafted".
       if (!drafted.has(pid)) {
         const who = msg.split(/ changed product status/i)[0].trim() || "Unknown";
         drafted.set(pid, { at: String(n?.createdAt ?? ""), who });
@@ -98,12 +109,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     }
     pages++;
     if (!conn?.pageInfo?.hasNextPage) break;
+    if (pages >= MAX_PAGES) { truncated = true; break; }
     after = conn.pageInfo.endCursor;
   }
 
   const productIds = [...drafted.keys()];
   if (!productIds.length) {
-    return json({ mode: "draft-sweep-audit", window: { from, to }, scannedEvents, totalDrafted: 0, note: "No product was set to draft in this window. Adjust ?from / ?to (UTC)." });
+    return json({ mode: "draft-sweep-audit", window: { from, to }, scannedEvents, truncated, totalDrafted: 0, note: truncated ? "Hit the event-scan cap before reaching the whole window — narrow ?from/?to (UTC) and re-run." : "No product was set to draft in this window. Adjust ?from / ?to (UTC)." });
   }
 
   // 2) Fetch each drafted product's type/tags/collections/compare-at, in chunks.
@@ -145,6 +157,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     mode: "draft-sweep-audit",
     window: { from, to },
     scannedEvents,
+    truncated,
     totalDrafted: rows.length,
     counts: { promo: promo.length, nonPromo: nonPromo.length, nonPromoStillDraft: nonPromoStillDraft.length },
     howToRead:
