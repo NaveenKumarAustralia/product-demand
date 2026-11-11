@@ -18160,6 +18160,31 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   // shown in the quick-preview popup.
   const [hoverGroupId, setHoverGroupId] = useState<string | null>(null);
   const [previewGroupId, setPreviewGroupId] = useState<string | null>(null);
+  // ⋯ actions menu + hide-confirm for the group tile (keeps destructive actions
+  // out of the click-to-open path), and a shared "Undo" toast after any hide.
+  const [menuGroupId, setMenuGroupId] = useState<string | null>(null);
+  const [confirmGroupId, setConfirmGroupId] = useState<string | null>(null);
+  const [undoHide, setUndoHide] = useState<{ kind: "group" | "sheet"; id: string; name: string } | null>(null);
+  const undoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showUndo = (kind: "group" | "sheet", id: string, name: string) => {
+    setUndoHide({ kind, id, name });
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = setTimeout(() => setUndoHide(null), 6000);
+  };
+  const doUndoHide = () => {
+    if (!undoHide) return;
+    if (undoHide.kind === "group") unhideGroup(undoHide.id);
+    else handleUnhide(Number(undoHide.id));
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    setUndoHide(null);
+  };
+  // Close the group ⋯ menu on any outside click.
+  useEffect(() => {
+    if (!menuGroupId) return;
+    const close = () => setMenuGroupId(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [menuGroupId]);
   const setGroupCover = (groupId: string, collectionId: number | null) => {
     saveGroups(groups.map((g) => g.id === groupId ? { ...g, coverCollectionId: collectionId ?? undefined } : g));
     setCoverPickerGroupId(null);
@@ -18559,7 +18584,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         const orderedTokens = [...savedValid, ...defaultOrder.filter((t) => !savedValid.includes(t))];
         const kidGroupById = new Map(kidGroups.map((g) => [g.id, g] as const));
         const colById = new Map(directCols.map((c) => [c.id, c] as const));
-        const tileActionBtn: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 5, background: "#fff", color: "#111827", border: "none", borderRadius: 7, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" };
+        const menuItemBtn: React.CSSProperties = { display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", border: "none", background: "none", fontSize: 12.5, fontWeight: 600, color: "#111827", padding: "7px 9px", borderRadius: 7, cursor: "pointer" };
         const groupTile = (g: CollectionGroup) => {
           const childCount = childGroups(g.id).length;
           const colCount = totalCollectionsIn(g.id);
@@ -18573,7 +18598,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           return (
             <div
               key={g.id}
-              onClick={() => { if (!dragToken && !justDraggedRef.current) openGroupNav(g.id); }}
+              onClick={() => { if (menuGroupId === g.id || confirmGroupId === g.id) return; if (!dragToken && !justDraggedRef.current) openGroupNav(g.id); }}
               onMouseEnter={() => setHoverGroupId(g.id)}
               onMouseLeave={() => setHoverGroupId((cur) => cur === g.id ? null : cur)}
               onDragOver={dp.onDragOver}
@@ -18594,19 +18619,21 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                   style={{ position: "absolute", top: 8, left: 44, zIndex: 5, width: 24, height: 24, borderRadius: 6, border: "1px solid rgba(0,0,0,0.15)", background: selected ? "#0d9488" : "rgba(255,255,255,0.92)", color: "#fff", display: "grid", placeItems: "center", cursor: "pointer", fontWeight: 900, fontSize: 15, boxShadow: "0 1px 4px rgba(0,0,0,0.2)" }}
                 >{selected ? "✓" : ""}</button>
                 {/* Preview what's inside */}
-                <button type="button" title="Preview what's inside" onClick={(e) => { e.stopPropagation(); setPreviewGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 8, zIndex: 4, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 7, padding: "4px 9px", fontSize: 13, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>👁</button>
+                <button type="button" title="Preview what's inside" onClick={(e) => { e.stopPropagation(); setPreviewGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 40, zIndex: 4, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 7, padding: "4px 9px", fontSize: 13, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>👁</button>
+                {/* ⋯ actions menu — keeps Change cover + Hide OUT of the click-to-open area. */}
+                <button type="button" title="More actions" onClick={(e) => { e.stopPropagation(); setMenuGroupId((cur) => cur === g.id ? null : g.id); }} style={{ position: "absolute", top: 8, right: 8, zIndex: 6, width: 26, height: 26, borderRadius: 7, border: "none", background: "rgba(17,24,39,0.82)", color: "#fff", fontSize: 16, fontWeight: 900, lineHeight: 1, cursor: "pointer", display: "grid", placeItems: "center", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>⋯</button>
+                {menuGroupId === g.id && (
+                  <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: 38, right: 8, zIndex: 12, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.22)", padding: 5, minWidth: 162 }}>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); setMenuGroupId(null); setPreviewGroupId(g.id); }} style={menuItemBtn}>👁 Preview inside</button>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); setMenuGroupId(null); setCoverPickerGroupId(g.id); }} style={menuItemBtn}>🖼 Change cover</button>
+                    <div style={{ height: 1, background: "#eef0f2", margin: "4px 2px" }} />
+                    <button type="button" onClick={(e) => { e.stopPropagation(); setMenuGroupId(null); setConfirmGroupId(g.id); }} style={{ ...menuItemBtn, color: "#b91c1c" }}>🙈 Hide group…</button>
+                  </div>
+                )}
                 {cover ? (
                   <img src={`/portal/thumbnail/collection/${cover.id}?v=${new Date(cover.updatedAt).getTime()}`} alt={g.name} draggable={false} style={{ ...s.productStyleImage, filter: "brightness(0.9)", pointerEvents: "none" }} loading="lazy" decoding="async" />
                 ) : (
                   <div style={s.productStyleImageEmpty}>Group</div>
-                )}
-                {/* Hover: change the group's cover (picker also has reset-to-auto).
-                    Scrim is below the corner controls; a plain click still opens. */}
-                {ghover && (
-                  <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "rgba(0,0,0,0.28)", zIndex: 1 }}>
-                    <button type="button" onClick={(e) => { e.stopPropagation(); setCoverPickerGroupId(g.id); }} style={tileActionBtn} title="Change the cover image for this group">🖼 Change cover</button>
-                    <button type="button" onClick={(e) => { e.stopPropagation(); hideGroup(g.id); }} style={tileActionBtn} title="Hide this group (it keeps all its sheets — unhide it from ‘Show hidden’)">🙈 Hide group</button>
-                  </div>
                 )}
                 {/* Bottom bar: what it is + how many. */}
                 <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 10px", background: "linear-gradient(to top, rgba(15,118,110,0.92), rgba(15,118,110,0.45))", color: "#fff", fontSize: 11, fontWeight: 800, letterSpacing: 0.4, pointerEvents: "none", zIndex: 2 }}>
@@ -18618,6 +18645,17 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               <div style={{ padding: "8px 4px 2px" }}>
                 <div style={{ fontWeight: 800, fontSize: 14, color: "#111827", textAlign: "center" }}>{g.name}</div>
               </div>
+              {/* Hide confirm — deliberate, and recoverable via the Undo toast. */}
+              {confirmGroupId === g.id && (
+                <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", inset: 0, background: "rgba(17,24,39,0.72)", zIndex: 20, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 12, borderRadius: 8, textAlign: "center" }}>
+                  <div style={{ color: "#fff", fontSize: 13, fontWeight: 700 }}>Hide “{g.name}”?</div>
+                  <div style={{ color: "#e5e7eb", fontSize: 11, marginTop: -3 }}>Keeps all its sheets · unhide anytime</div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); hideGroup(g.id); setConfirmGroupId(null); showUndo("group", g.id, g.name); }} style={{ padding: "7px 16px", borderRadius: 7, border: "none", background: "#6b7280", color: "#fff", fontSize: 13, fontWeight: 800, cursor: "pointer" }}>Hide</button>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); setConfirmGroupId(null); }} style={{ padding: "7px 16px", borderRadius: 7, border: "1px solid rgba(255,255,255,0.3)", background: "transparent", color: "#fff", fontSize: 13, cursor: "pointer" }}>Cancel</button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         };
@@ -18631,7 +18669,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               isDragOver={dragOverToken === token && dragToken !== token}
               onOpen={() => openCollection(c.id)}
               onRename={(name) => handleRename(c.id, name)}
-              onDelete={() => handleHide(c.id)}
+              onDelete={() => { handleHide(c.id); showUndo("sheet", String(c.id), c.name || "sheet"); }}
               onUnhide={c.hidden ? () => handleUnhide(c.id) : undefined}
               hidden={Boolean(c.hidden)}
               actionVerb="Hide"
@@ -18672,6 +18710,13 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 </div>
               )}
             </div>
+            {/* Undo toast after a hide (group or sheet) — makes an accidental hide costless. */}
+            {undoHide && (
+              <div style={{ position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", zIndex: 1000, background: "#111827", color: "#fff", borderRadius: 10, boxShadow: "0 8px 30px rgba(0,0,0,0.35)", padding: "10px 14px", display: "flex", alignItems: "center", gap: 12, fontSize: 13, fontWeight: 700 }}>
+                <span>Hidden “{undoHide.name}”.</span>
+                <button type="button" onClick={doUndoHide} style={{ background: "#f6e3da", color: "#8f3a1c", border: "none", borderRadius: 7, padding: "5px 12px", fontWeight: 800, cursor: "pointer", fontSize: 12.5 }}>Undo</button>
+              </div>
+            )}
           </div>
         );
       })()}
@@ -19033,13 +19078,20 @@ function CollectionCard({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(collection.name);
   const [coverPickerOpen, setCoverPickerOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   useEffect(() => { setDraft(collection.name); }, [collection.name]);
-  const imgActionBtn: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 5, background: "#fff", color: "#111827", border: "none", borderRadius: 7, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" };
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = () => setMenuOpen(false);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [menuOpen]);
+  const menuItemBtn: React.CSSProperties = { display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", border: "none", background: "none", fontSize: 12.5, fontWeight: 600, color: "#111827", padding: "7px 9px", borderRadius: 7, cursor: "pointer" };
 
   return (
     <div
       style={{ ...s.productStyleCard, ...(isDragging ? s.productStyleCardDragging : {}), ...(isDragOver ? s.productStyleCardDropTarget : {}), ...(hidden ? { opacity: 0.45 } : {}), ...(selected ? { outline: "3px solid #0d9488", outlineOffset: -1 } : {}), cursor: "pointer" }}
-      onClick={() => { if (!editing) onOpen(); }}
+      onClick={() => { if (editing || menuOpen || confirmDelete) return; onOpen(); }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onDragOver={onDragOver}
@@ -19075,13 +19127,29 @@ function CollectionCard({
           style={{ position: "absolute", top: 8, right: 8, padding: "4px 10px", borderRadius: 7, border: "none", background: "#0d9488", color: "#fff", cursor: "pointer", fontSize: 11, fontWeight: 700, lineHeight: 1, zIndex: 3, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" }}
         >Unhide</button>
       )}
-      {!hidden && (hover || confirmDelete) && (
+      {/* ⋯ actions menu — cover + hide live here, OFF the click-to-open face. */}
+      {!hidden && (
         <button
           type="button"
-          title={`${actionVerb} ${noun}`}
-          onClick={(e) => { e.stopPropagation(); setConfirmDelete(true); }}
-          style={{ position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: "50%", border: "none", background: actionVerb === "Delete" ? "#ef4444" : "#6b7280", color: "#fff", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 700, lineHeight: 1, padding: 0, zIndex: 2, boxShadow: "0 2px 6px rgba(0,0,0,0.18)" }}
-        >×</button>
+          title="More actions"
+          onClick={(e) => { e.stopPropagation(); setMenuOpen((o) => !o); }}
+          style={{ position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: 7, border: "none", background: "rgba(17,24,39,0.82)", color: "#fff", cursor: "pointer", display: "grid", placeItems: "center", fontSize: 16, fontWeight: 900, lineHeight: 1, padding: 0, zIndex: 6, boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}
+        >⋯</button>
+      )}
+      {!hidden && menuOpen && (
+        <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: 38, right: 8, zIndex: 12, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.22)", padding: 5, minWidth: 160 }}>
+          <button type="button" onClick={(e) => { e.stopPropagation(); setMenuOpen(false); setEditing(true); }} style={menuItemBtn}>✏️ Rename</button>
+          {collection.hasThumbnail ? (
+            <>
+              <button type="button" onClick={(e) => { e.stopPropagation(); setMenuOpen(false); setCoverPickerOpen(true); }} style={menuItemBtn}>🖼 Replace cover</button>
+              {onClearCover && <button type="button" onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onClearCover(); }} style={menuItemBtn}>🗑 Remove cover</button>}
+            </>
+          ) : (
+            <button type="button" onClick={(e) => { e.stopPropagation(); setMenuOpen(false); setCoverPickerOpen(true); }} style={menuItemBtn}>＋ Add cover image</button>
+          )}
+          <div style={{ height: 1, background: "#eef0f2", margin: "4px 2px" }} />
+          <button type="button" onClick={(e) => { e.stopPropagation(); setMenuOpen(false); setConfirmDelete(true); }} style={{ ...menuItemBtn, color: "#b91c1c" }}>🙈 {actionVerb} {noun}…</button>
+        </div>
       )}
       {confirmDelete && (
         <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 10, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, borderRadius: 8 }} onClick={(e) => e.stopPropagation()}>
@@ -19104,20 +19172,10 @@ function CollectionCard({
         ) : (
           <div style={s.productStyleImageEmpty}>No image yet</div>
         )}
-        {/* Hover: replace / delete / add the cover image. Scrim sits BELOW the
-            corner controls (drag handle / checkbox / delete) and lets a plain
-            click on it still open the card. */}
-        {hover && (
-          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "rgba(0,0,0,0.28)", zIndex: 1 }}>
-            {collection.hasThumbnail ? (
-              <>
-                <button type="button" onClick={(e) => { e.stopPropagation(); setCoverPickerOpen(true); }} style={imgActionBtn} title="Replace the cover image">↻ Replace</button>
-                {onClearCover && <button type="button" onClick={(e) => { e.stopPropagation(); onClearCover(); }} style={{ ...imgActionBtn, color: "#b91c1c" }} title="Remove the cover image">🗑 Delete</button>}
-              </>
-            ) : (
-              <button type="button" onClick={(e) => { e.stopPropagation(); setCoverPickerOpen(true); }} style={imgActionBtn} title="Add a cover image">＋ Add image</button>
-            )}
-          </div>
+        {/* A faint hover scrim (cover + hide actions moved into the ⋯ menu, so a
+            plain click only ever opens the sheet). */}
+        {hover && !menuOpen && (
+          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.12)", zIndex: 1, pointerEvents: "none" }} />
         )}
         {/* Bottom bar over the image: what it is + how many. */}
         <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 10px", background: "linear-gradient(to top, rgba(17,24,39,0.85), rgba(17,24,39,0.45))", color: "#fff", fontSize: 11, fontWeight: 800, letterSpacing: 0.4, pointerEvents: "none", zIndex: 2 }}>
@@ -28147,7 +28205,7 @@ function PackingListsOverview({
         <table style={{ ...s.table, width: "100%" }}>
           <thead>
             <tr style={s.headerRow}>
-              {["Invoice", "Boxes", "Total qty", "Estimated arrival", "Shipping", "Status", "Actions"].map((heading) => (
+              {["Invoice", "Boxes", "Total qty", "Estimated arrival", "Shipping", "Status", "Date loaded", "Actions"].map((heading) => (
                 <th key={heading} style={{ ...s.th, textAlign: heading === "Total qty" || heading === "Boxes" || heading === "Actions" ? "center" : "left" }}>
                   <span style={s.thContent}>{heading}</span>
                 </th>
@@ -28191,6 +28249,14 @@ function PackingListsOverview({
                     style={cellStyle}
                     onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); document.dispatchEvent(new CustomEvent("show-cell-history", { detail: { x: e.clientX, y: e.clientY, entity: "Packing List", entityId: String(list.id), field: "Status", entityName: list.invoiceNumber || `Packing list #${list.id}` } })); }}
                   >{labelForPackingStatus(list.status)}</td>
+                  <td style={cellStyle}>
+                    {list.masterInventoryLoadedAt ? (
+                      <span>
+                        {formatPortalDate(list.masterInventoryLoadedAt)}
+                        {list.loadedBy ? <span style={{ display: "block", fontSize: 11, color: "#64748b" }}>{list.loadedBy}</span> : null}
+                      </span>
+                    ) : "—"}
+                  </td>
                   <td style={{ ...cellStyle, textAlign: "center" }}>
                     <div style={s.packingListActions} onClick={(event) => event.stopPropagation()}>
                       <fetcher.Form method="post">
@@ -28210,7 +28276,7 @@ function PackingListsOverview({
               );
             }) : (
               <tr style={s.row}>
-                <td colSpan={6} style={{ ...s.td, textAlign: "center", padding: 40 }}>
+                <td colSpan={8} style={{ ...s.td, textAlign: "center", padding: 40 }}>
                   {showHidden ? "No hidden packing lists." : "No packing lists yet."}
                 </td>
               </tr>
