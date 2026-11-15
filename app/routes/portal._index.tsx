@@ -28362,7 +28362,6 @@ function PackingListDetail({
   const columnWidthsFetcher = useFetcher();
   const [packingColumnWidths, setPackingColumnWidths] = useState<Record<string, number>>(savedPackingColumnWidths);
   const [skipWords, setSkipWords] = useState("");
-  const [packingListSearch, setPackingListSearch] = useState("");
   const [statusValue, setStatusValue] = useState(packingList.status ?? "still_packing");
   useEffect(() => setStatusValue(packingList.status ?? "still_packing"), [packingList.status]);
   const [combineView, setCombineView] = useState(false);
@@ -28403,7 +28402,7 @@ function PackingListDetail({
   ];
   const packingWidthFor = (columnId: string) => packingColumnWidths[columnId] ?? defaultPackingColumnWidth(columnId);
   const packingTableWidth = packingColumns.reduce((sum, column) => sum + packingWidthFor(column.id), 48);
-  const normalizedPackingListSearch = (packingListSearch || headerSearch).trim().toLowerCase();
+  const normalizedPackingListSearch = headerSearch.trim().toLowerCase();
   const visiblePackingLines = normalizedPackingListSearch
     ? packingList.lines.filter((line) => packingLineMatchesSearch(line, normalizedPackingListSearch))
     : packingList.lines;
@@ -28647,7 +28646,7 @@ function PackingListDetail({
             >
               <input type="hidden" name="intent" value="load_packing_inventory" />
               <input type="hidden" name="packingId" value={packingList.id} />
-              <label style={s.packingToolbarLabel}>
+              <label style={{ ...s.packingToolbarLabel, color: "#b91c1c" }}>
                 <span>Skip words</span>
                 <input
                   name="skipWords"
@@ -28719,23 +28718,8 @@ function PackingListDetail({
         </div>
       </div>
 
-      <div style={s.packingSearchBar}>
-        <label style={s.packingToolbarLabel}>
-          <span>Search packing list</span>
-          <input
-            value={packingListSearch}
-            onChange={(event) => setPackingListSearch(event.currentTarget.value)}
-            placeholder="Search title, SKU, box, quantity..."
-            style={{ ...s.packingInput, ...s.packingSearchInput }}
-          />
-        </label>
-        {packingListSearch ? (
-          <button type="button" style={s.smallButton} onClick={() => setPackingListSearch("")}>Clear</button>
-        ) : null}
-        <span style={s.searchCount}>
-          {visiblePackingLines.length} of {packingList.lines.length} rows
-        </span>
-      </div>
+      {/* Row filtering is driven by the page's top search box (headerSearch);
+          the separate "Search packing list" bar was removed as redundant. */}
 
       {/* Table + Add row footer share a tight flex column so the
           packingDetailInner grid gap (10px) doesn't sit between
@@ -35535,7 +35519,7 @@ const s: Record<string, React.CSSProperties> = {
   },
   packingBackButton: {},
   invoiceInput: { width: 240 },
-  skipWordsInput: { width: 250 },
+  skipWordsInput: { width: 250, border: "1px solid #ef4444", color: "#b91c1c", background: "#fef2f2" },
   packingTotalPill: {
     border: "1px solid #d1d5db",
     borderRadius: 8,
