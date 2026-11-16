@@ -11498,6 +11498,7 @@ async function createShopifyProductFromRow(
     compareAtPrice?: string;
     sku?: string;
     barcode?: string;
+    inventoryPolicy?: string;
     inventoryItem?: {
       cost?: string;
       tracked?: boolean;
@@ -11505,6 +11506,13 @@ async function createShopifyProductFromRow(
       countryCodeOfOrigin?: string;
     };
   };
+  // Brand-new products must have "continue selling when out of stock" UNCHECKED
+  // (inventoryPolicy DENY) so a duplicated/created product can never oversell on
+  // day one. Only forced on CREATE — on UPDATE (opts.productId set) we leave the
+  // policy alone so the pre-order system, which deliberately flips a live batch's
+  // variants to CONTINUE, isn't overwritten by a portal re-push. See
+  // preorder-inventory-policy.server.ts / the CONTINUE ghost-oversell issue.
+  const denyPolicy: Partial<Variant> = opts.productId ? {} : { inventoryPolicy: "DENY" };
   const buildInventoryItem = () => {
     const ii: Record<string, unknown> = { tracked: true };
     if (cost) ii.cost = cost;
@@ -11524,6 +11532,7 @@ async function createShopifyProductFromRow(
         ...(compareAt ? { compareAtPrice: compareAt } : {}),
         ...(baseSku ? { sku: baseSku } : {}),
         ...(baseBarcode ? { barcode: baseBarcode } : {}),
+        ...denyPolicy,
         inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
       }]
     : variantRows.length
@@ -11536,6 +11545,7 @@ async function createShopifyProductFromRow(
           ...(compareAt ? { compareAtPrice: compareAt } : {}),
           ...(sku ? { sku } : {}),
           ...(barcode ? { barcode } : {}),
+          ...denyPolicy,
           inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
         };
       })
@@ -11545,6 +11555,7 @@ async function createShopifyProductFromRow(
         ...(compareAt ? { compareAtPrice: compareAt } : {}),
         ...(baseSku ? { sku: baseSku } : {}),
         ...(baseBarcode ? { barcode: baseBarcode } : {}),
+        ...denyPolicy,
         inventoryItem: buildInventoryItem() as Variant["inventoryItem"],
       }];
 
