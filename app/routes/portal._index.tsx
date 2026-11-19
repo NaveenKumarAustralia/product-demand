@@ -23670,6 +23670,9 @@ function CollectionImageManagerModal({
     e.dataTransfer.effectAllowed = "move";
   };
   const onDragOver = (idx: number) => (e: React.DragEvent<HTMLDivElement>) => {
+    // Only react to an internal tile reorder; let a file drag fall through to the
+    // container's drop handler (no reorder highlight on the tiles).
+    if (dragIdx === null) return;
     e.preventDefault();
     if (dragOverIdx !== idx) setDragOverIdx(idx);
   };
@@ -23684,6 +23687,32 @@ function CollectionImageManagerModal({
     onCommit(next);
   };
   const onDragEnd = () => { setDragIdx(null); setDragOverIdx(null); };
+  // Drag a file in from the desktop (or another app) and drop it anywhere on the
+  // gallery to upload it — same as clicking the + tile. Distinguished from the
+  // internal reorder drag (which carries no files) by the "Files" dnd type, and
+  // ignored while a reorder is in progress (dragIdx set) or the row is locked.
+  const [fileDragOver, setFileDragOver] = useState(false);
+  const hasDraggedFiles = (e: React.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
+  const onFileDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (locked || busy || dragIdx !== null || !hasDraggedFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    if (!fileDragOver) setFileDragOver(true);
+  };
+  const onFileDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    // Only clear when the pointer actually leaves the drop surface, not when it
+    // crosses onto a child element (relatedTarget still inside currentTarget).
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setFileDragOver(false);
+  };
+  const onFileDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (locked || dragIdx !== null) return;
+    const files = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/"));
+    setFileDragOver(false);
+    if (!files.length) return;
+    e.preventDefault();
+    void onAddFiles(files);
+  };
   const removeAt = (idx: number) => {
     onCommit(images.filter((_, i) => i !== idx));
   };
@@ -23718,7 +23747,7 @@ function CollectionImageManagerModal({
             <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
               {locked
                 ? `${images.length} item${images.length === 1 ? "" : "s"} — view only while this product is locked.`
-                : `${images.length} item${images.length === 1 ? "" : "s"} — images & videos. Drag to reorder. Position number = media order in Shopify. Duplicates skipped.`}
+                : `${images.length} item${images.length === 1 ? "" : "s"} — images & videos. Drag tiles to reorder, or drop files in to add. Position number = media order in Shopify. Duplicates skipped.`}
             </div>
             {locked && (
               <div style={{ fontSize: 12, color: unlocking ? "#0d9488" : "#b45309", fontWeight: 700, marginTop: 4 }}>
@@ -23740,7 +23769,20 @@ function CollectionImageManagerModal({
             <button type="button" onClick={onClose} style={{ background: "#f3f4f6", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 13, cursor: "pointer", fontWeight: 600 }}>Done</button>
           </div>
         </div>
-        <div style={{ padding: 18, overflowY: "auto", flex: 1 }}>
+        <div
+          style={{ padding: 18, overflowY: "auto", flex: 1, position: "relative" }}
+          onDragOver={onFileDragOver}
+          onDragLeave={onFileDragLeave}
+          onDrop={onFileDrop}
+        >
+          {fileDragOver && !locked && (
+            <div style={{
+              position: "absolute", inset: 8, zIndex: 5, borderRadius: 10,
+              border: "2px dashed #0d9488", background: "rgba(13,148,136,0.08)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              color: "#0f766e", fontWeight: 700, fontSize: 15, pointerEvents: "none",
+            }}>Drop images or videos to add</div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
             {images.map((entry, idx) => {
               // Lazy-load the FULL-quality image from CollectionImage
@@ -23820,17 +23862,22 @@ function CollectionImageManagerModal({
                 disabled={busy}
                 style={{
                   borderRadius: 8, border: "2px dashed #d1d5db", background: busy ? "#f3f4f6" : "transparent",
-                  color: "#6b7280", fontSize: 28, cursor: busy ? "wait" : "pointer",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  aspectRatio: "3 / 4",
+                  color: "#6b7280", cursor: busy ? "wait" : "pointer",
+                  display: "flex", flexDirection: "column", gap: 4, alignItems: "center", justifyContent: "center",
+                  aspectRatio: "3 / 4", padding: 10, textAlign: "center",
                 }}
-                title="Add images or videos"
-              >{busy ? "…" : "+"}</button>
+                title="Click to upload, or drag & drop images/videos anywhere here"
+              >{busy ? <span style={{ fontSize: 28 }}>…</span> : (
+                <>
+                  <span style={{ fontSize: 28, lineHeight: 1 }}>+</span>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>Click or drop</span>
+                </>
+              )}</button>
             )}
           </div>
           {images.length === 0 && (
             <div style={{ marginTop: 14, padding: 14, background: "#f9fafb", border: "1px solid #e5e7eb", borderRadius: 8, fontSize: 13, color: "#6b7280", textAlign: "center" }}>
-              {locked ? "No media." : "No media yet. Click + to add images or a video (up to 100 MB), paste, or pick from Dropbox / Product Information below."}
+              {locked ? "No media." : "No media yet. Click +, drag & drop a file here, or paste (up to 100 MB), or pick from Dropbox / Product Information below."}
             </div>
           )}
 
