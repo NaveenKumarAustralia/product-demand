@@ -4946,8 +4946,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               for (const o of orders) linkedIds.add(o.id);
             }
             for (const oid of linkedIds) {
+              // Capture the order's OWN previous status first, so a production cut
+              // is CREATED only on a genuine On Order → On Production transition —
+              // the same rule the restock page uses (see reconcileProductionCutRecord
+              // call under update_status). This makes the collection page record
+              // cuts in Production Cuts exactly like the existing-product restock page.
+              const prevOrder = await prisma.supplierOrder.findUnique({ where: { id: oid }, select: { supplierStatus: true } }).catch(() => null);
+              const prevOrderStatus = prevOrder?.supplierStatus ?? null;
               await prisma.supplierOrder.update({ where: { id: oid }, data: { supplierStatus: statusNow } }).catch(() => {});
               await reconcileOrderFabricConsumption(oid);
+              const isOnOrderToOnProduction = statusNow === "on_production" && (prevOrderStatus === "on_order" || !prevOrderStatus);
+              await reconcileProductionCutRecord(oid, currentUser?.name ?? null, { allowCreate: isOnOrderToOnProduction });
             }
           }
         }
