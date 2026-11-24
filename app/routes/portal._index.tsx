@@ -24045,6 +24045,81 @@ function DropboxImagePicker({
   );
 }
 
+// Usable <img>/<video> source for an entry: inline thumb if present, else the
+// by-key stream. Empty when the entry has neither (shouldn't happen, but guards
+// against an empty-src broken image).
+function entryDisplaySrc(e: CollectionImageEntry): string {
+  return e.thumb || (e.key ? `/portal/collection-image/${e.key}` : "");
+}
+
+// Row picture preview with graceful fallback. The first image can fail to load
+// — a key-only entry whose CollectionImage row is unreachable (404), or a
+// stale/remote thumb URL that no longer resolves — and the browser would then
+// show a permanent broken-"?" placeholder. Instead, on an error we advance to
+// the NEXT loadable image in the set (so the row still shows a real picture),
+// and only fall back to a clean "No preview" tile if every source fails.
+function RowImagePreview({ images }: { images: CollectionImageEntry[] }) {
+  const [badIdx, setBadIdx] = useState<Set<number>>(() => new Set());
+  // Reset the failed-set whenever the cell's images actually change.
+  const idsKey = images.map((e) => e.key || (e.thumb ? e.thumb.slice(0, 40) : "")).join("|");
+  useEffect(() => { setBadIdx(new Set()); }, [idsKey]);
+
+  // First entry that isn't known-bad and has a usable source.
+  let idx = 0;
+  while (idx < images.length && (badIdx.has(idx) || !entryDisplaySrc(images[idx]))) idx++;
+  const entry = idx < images.length ? images[idx] : null;
+  const markBad = () => setBadIdx((prev) => { const n = new Set(prev); n.add(idx); return n; });
+
+  if (!entry) {
+    return (
+      <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5, color: "#9ca3af", background: "#f3f4f6" }}>
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></svg>
+        <span style={{ fontSize: 10.5, fontWeight: 600 }}>No preview</span>
+      </div>
+    );
+  }
+
+  if (entryIsVideo(entry)) {
+    return (
+      <div style={{ width: "100%", height: "100%", position: "relative", background: "#0b0b0b" }}>
+        {entry.thumb ? (
+          <img src={entry.thumb} alt="" loading="lazy" decoding="async" onError={markBad} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+        ) : (
+          <video src={collectionMediaSrc(entry)} muted playsInline preload="metadata" onError={markBad} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+        )}
+        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+          <span style={{ width: 38, height: 38, borderRadius: "50%", background: "rgba(0,0,0,0.55)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>▶</span>
+        </div>
+      </div>
+    );
+  }
+  return <img src={entryDisplaySrc(entry)} alt="" loading="lazy" decoding="async" onError={markBad} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />;
+}
+
+// A single image in the manager modal. Prefers the full-quality by-key stream,
+// falls back to the inline thumb if that fails, then to a neutral placeholder —
+// so a dead key or stale URL never shows a broken-"?" tile.
+function ModalImage({ entry, alt }: { entry: CollectionImageEntry; alt: string }) {
+  const sources = useMemo(() => {
+    const out: string[] = [];
+    if (entry.key) out.push(`/portal/collection-image/${entry.key}`);
+    if (entry.thumb && !out.includes(entry.thumb)) out.push(entry.thumb);
+    return out;
+  }, [entry.key, entry.thumb]);
+  const [srcIdx, setSrcIdx] = useState(0);
+  const srcKey = sources.join("|");
+  useEffect(() => { setSrcIdx(0); }, [srcKey]);
+  if (srcIdx >= sources.length) {
+    return (
+      <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5, color: "#9ca3af", background: "#f3f4f6" }}>
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></svg>
+        <span style={{ fontSize: 11, fontWeight: 600 }}>No preview</span>
+      </div>
+    );
+  }
+  return <img src={sources[srcIdx]} alt={alt} loading="lazy" decoding="async" onError={() => setSrcIdx((i) => i + 1)} style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />;
+}
+
 function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, rowName, onPickStyleName, singleImage = false, locked = false, unlocking = false, onLocked, onUnlock }: { value: string; onCommit: (next: string) => void; productInfo?: ProductInfo; collectionId?: number; rowName?: string; onPickStyleName?: (styleName: string) => void; singleImage?: boolean; locked?: boolean; unlocking?: boolean; onLocked?: () => void; onUnlock?: () => void }) {
   const images = useMemo(() => parseMultiImageValue(value), [value]);
   const [open, setOpen] = useState(false);
@@ -24167,20 +24242,7 @@ function CollectionMultiImageCell({ value, onCommit, productInfo, collectionId, 
       >
         {images.length > 0 ? (
           <>
-            {entryIsVideo(images[0]) ? (
-              <div style={{ width: "100%", height: "100%", position: "relative", background: "#0b0b0b" }}>
-                {images[0].thumb ? (
-                  <img src={images[0].thumb} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
-                ) : (
-                  <video src={collectionMediaSrc(images[0])} muted playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
-                )}
-                <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-                  <span style={{ width: 38, height: 38, borderRadius: "50%", background: "rgba(0,0,0,0.55)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>▶</span>
-                </div>
-              </div>
-            ) : (
-              <img src={images[0].thumb || (images[0].key ? `/portal/collection-image/${images[0].key}` : "")} alt="" loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", display: "block", background: "#f9fafb" }} />
-            )}
+            <RowImagePreview images={images} />
             {images.length > 1 && (
               <span style={{
                 position: "absolute", bottom: 6, right: 6,
@@ -24482,12 +24544,6 @@ function CollectionImageManagerModal({
           )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16 }}>
             {images.map((entry, idx) => {
-              // Lazy-load the FULL-quality image from CollectionImage
-              // via its key. While loading we keep the small thumb
-              // visible so the modal doesn't flash. When there's no
-              // key (legacy single-string entry or Shopify CDN URL),
-              // use the thumb URL directly.
-              const fullSrc = entry.key ? `/portal/collection-image/${entry.key}` : entry.thumb;
               return (
               <div key={`${idx}-${entry.thumb.slice(0, 24)}`} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <div
@@ -24510,7 +24566,7 @@ function CollectionImageManagerModal({
                 {entryIsVideo(entry) ? (
                   <video src={collectionMediaSrc(entry)} poster={entry.thumb || undefined} controls playsInline preload="metadata" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#0b0b0b" }} />
                 ) : (
-                  <img src={fullSrc} alt={`pos ${idx + 1}`} loading="lazy" decoding="async" style={{ width: "100%", height: "100%", objectFit: "contain", background: "#f9fafb" }} />
+                  <ModalImage entry={entry} alt={`pos ${idx + 1}`} />
                 )}
                 <span style={{
                   position: "absolute", top: 6, left: 6,
