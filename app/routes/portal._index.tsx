@@ -21199,6 +21199,38 @@ function CollectionSpreadsheetPage({
     );
   };
 
+  // Shopify-style manual sort: take the selected rows (keeping their relative
+  // order) and move them together to the top, the bottom, or a 1-based position.
+  // Operates on the full rows array (like Shopify collection sort); the moved
+  // rows stay selected at their new spot so you can nudge them again.
+  const reorderSelectedRows = (target: "top" | "bottom" | number) => {
+    if (!selectedRowIdxs.size) return;
+    const sel = Array.from(selectedRowIdxs).filter((i) => i >= 0 && i < rows.length).sort((a, b) => a - b);
+    if (!sel.length) return;
+    const selSet = new Set(sel);
+    const picked = sel.map((i) => rows[i]);
+    const rest = rows.filter((_, i) => !selSet.has(i));
+    let insertAt: number;
+    if (target === "top") insertAt = 0;
+    else if (target === "bottom") insertAt = rest.length;
+    else insertAt = Math.max(0, Math.min(rest.length, Math.round(target) - 1)); // 1-based → index
+    const next = [...rest.slice(0, insertAt), ...picked, ...rest.slice(insertAt)];
+    const prev = rows;
+    setRows(next);
+    const movedIdxs = new Set<number>();
+    for (let i = 0; i < picked.length; i++) movedIdxs.add(insertAt + i);
+    setSelectedRowIdxs(movedIdxs);
+    persistRows(next, prev, "Undo reorder rows");
+  };
+  const moveSelectedToPosition = () => {
+    const total = rows.length;
+    const raw = window.prompt(`Move the ${selectedRowIdxs.size} selected row(s) to which position? (1 = top, ${total} = bottom)`, "1");
+    if (raw == null) return;
+    const pos = Number(raw.trim());
+    if (!Number.isFinite(pos) || pos < 1) return;
+    reorderSelectedRows(pos);
+  };
+
   // Shopify push (single row or batch). On success, we patch local
   // state with the returned product IDs so the row visibly flips to
   // "linked" without waiting for a full reload.
@@ -21582,6 +21614,13 @@ function CollectionSpreadsheetPage({
                 <option key={c.id} value={c.id} style={{ color: "#111827", background: "#fff" }}>{c.name}</option>
               ))}
             </select>
+          )}
+          {selectedRowIdxs.size > 0 && (
+            <div style={{ display: "inline-flex", alignItems: "center", border: "1px solid #cbd5e1", borderRadius: 6, overflow: "hidden" }} title="Reorder the selected rows (like Shopify's manual collection sort)">
+              <button type="button" onClick={() => reorderSelectedRows("top")} style={{ fontSize: 12, fontWeight: 700, padding: "6px 10px", border: "none", borderRight: "1px solid #e2e8f0", background: "#fff", color: "#334155", cursor: "pointer" }} title="Move selected rows to the top">⤒ Top</button>
+              <button type="button" onClick={moveSelectedToPosition} style={{ fontSize: 12, fontWeight: 700, padding: "6px 10px", border: "none", borderRight: "1px solid #e2e8f0", background: "#fff", color: "#334155", cursor: "pointer" }} title="Move selected rows to a specific position">↕ Position…</button>
+              <button type="button" onClick={() => reorderSelectedRows("bottom")} style={{ fontSize: 12, fontWeight: 700, padding: "6px 10px", border: "none", background: "#fff", color: "#334155", cursor: "pointer" }} title="Move selected rows to the bottom">⤓ Bottom</button>
+            </div>
           )}
           {selectedRowIdxs.size > 0 && (
             <button
