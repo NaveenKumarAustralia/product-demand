@@ -262,6 +262,10 @@ export async function createReplyMessage({
     return { replyIds: [created.id] };
   }
 
+  // One shared timestamp for every per-recipient copy of this reply, so readers
+  // that collapse copies by (parent, author, body, createdAt) — e.g. the
+  // collection hub — don't show the reply once per recipient.
+  const createdAt = new Date();
   const rows = Array.from(recipientsByUserId.values()).map((user) => ({
     userId: user.id,
     userName: user.name,
@@ -273,6 +277,7 @@ export async function createReplyMessage({
     fromName,
     productTitle: parent.productTitle,
     body: body.trim(),
+    createdAt,
   }));
   const created = await prisma.$transaction(rows.map((data) => prisma.portalMessage.create({ data, select: { id: true } })));
   return { replyIds: created.map((r) => r.id) };

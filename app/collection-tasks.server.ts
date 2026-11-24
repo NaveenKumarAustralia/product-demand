@@ -24,6 +24,7 @@ export type CollectionTask = {
   due: string | null; // YYYY-MM-DD
   done: boolean;
   doneAt: string | null;
+  imageKey: string | null; // optional attached image (CollectionImage key)
   createdBy: string | null;
   createdAt: string;
 };
@@ -58,6 +59,7 @@ export function normalizeCollectionTasks(value: unknown): CollectionTask[] {
       due,
       done: t.done === true,
       doneAt: t.doneAt ? String(t.doneAt) : null,
+      imageKey: t.imageKey ? String(t.imageKey) : null,
       createdBy: t.createdBy ? String(t.createdBy) : null,
       createdAt: t.createdAt ? String(t.createdAt) : new Date().toISOString(),
     });

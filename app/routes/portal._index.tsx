@@ -3282,11 +3282,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const assignee = assigneeId ? users.find((u) => u.id === assigneeId) : null;
       const dueRaw = String(form.get("due") ?? "").trim();
       const due = /^\d{4}-\d{2}-\d{2}$/.test(dueRaw) ? dueRaw : null;
+      const imageKey = String(form.get("imageKey") ?? "").trim() || null;
       const task: CollectionTask = {
         id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
         scopeType, scopeId, scopeName, text,
         assigneeId: assignee?.id ?? null, assigneeName: assignee?.name ?? null,
-        due, done: false, doneAt: null, createdBy: currentUser.name, createdAt: new Date().toISOString(),
+        due, done: false, doneAt: null, imageKey, createdBy: currentUser.name, createdAt: new Date().toISOString(),
       };
       await writeAllCollectionTasks([...tasks, task]);
       if (assignee) await bellForAssignee(assignee.id, assignee.name, text);
@@ -3313,6 +3314,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const next: CollectionTask = { ...prev };
     if (form.has("text")) { const v = String(form.get("text") ?? "").trim(); if (v) next.text = v; }
     if (form.has("due")) { const v = String(form.get("due") ?? "").trim(); next.due = /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null; }
+    if (form.has("imageKey")) { const v = String(form.get("imageKey") ?? "").trim(); next.imageKey = v || null; }
     let newlyAssigned: { id: string; name: string } | null = null;
     if (form.has("assigneeId")) {
       const aId = String(form.get("assigneeId") ?? "").trim() || null;
@@ -3357,6 +3359,44 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await prisma.$transaction(rows.map((r) => prisma.portalMessage.create({ data: {
       userId: r.userId, userName: r.userName, readAt: r.readAt,
       orderId, entityType, entityKey, field: COLLECTION_HUB_NOTE_FIELD,
+      fromName: currentUser.name, productTitle: scopeName, body, createdAt,
+    } })));
+    return jsonResponse({ ok: true });
+  }
+
+  // ─── Collection TASK comments (a reply thread under one task) ───────────────
+  if (intent === "collection_task_comment_add" || intent === "collection_task_comment_delete") {
+    if (!currentUser) return null;
+    const scopeType = String(form.get("scopeType") ?? "") === "group" ? "group" : "collection";
+    const scopeId = String(form.get("scopeId") ?? "").trim();
+    const taskId = String(form.get("taskId") ?? "").trim();
+    if (!scopeId || !taskId) return jsonResponse({ ok: false });
+    const entityType = "collection_task";
+    const entityKey = `${scopeType}:${scopeId}`;
+    const orderId = scopeType === "collection" ? (Number(scopeId) || 0) : 0;
+    const field = `task:${taskId}`;
+
+    if (intent === "collection_task_comment_delete") {
+      const messageId = Number(form.get("messageId"));
+      const msg = messageId ? await prisma.portalMessage.findUnique({ where: { id: messageId } }) : null;
+      if (!msg) return jsonResponse({ ok: false });
+      if ((msg.fromName ?? "").trim().toLowerCase() !== currentUser.name.trim().toLowerCase()) return jsonResponse({ ok: false });
+      await prisma.portalMessage.deleteMany({ where: { entityType, orderId, entityKey, field, fromName: msg.fromName, body: msg.body } });
+      return jsonResponse({ ok: true });
+    }
+
+    const body = String(form.get("body") ?? "").trim();
+    if (!body) return jsonResponse({ ok: false });
+    const scopeName = String(form.get("scopeName") ?? "").trim() || null;
+    const createdAt = new Date();
+    const tagged = taggedUsersFromText(body, users).filter((u) => u.id !== currentUser.id);
+    const rows: Array<{ userId: string; userName: string; readAt: Date | null }> = [
+      { userId: currentUser.id, userName: currentUser.name, readAt: createdAt },
+      ...tagged.map((u) => ({ userId: u.id, userName: u.name, readAt: null as Date | null })),
+    ];
+    await prisma.$transaction(rows.map((r) => prisma.portalMessage.create({ data: {
+      userId: r.userId, userName: r.userName, readAt: r.readAt,
+      orderId, entityType, entityKey, field,
       fromName: currentUser.name, productTitle: scopeName, body, createdAt,
     } })));
     return jsonResponse({ ok: true });
@@ -14941,8 +14981,98 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
 // Opens off ?hub=<group|collection>:<id> (&hubtab=, &hubname=). Tasks are a
 // checklist (assignee + due + tick); Notes is a flat group/sheet-level comment
 // thread that rides the same unread bell via @mentions.
-type HubTask = { id: string; text: string; assigneeId: string | null; assigneeName: string | null; due: string | null; done: boolean; doneAt: string | null; createdBy: string | null; createdAt: string };
-type HubComment = { id: number; body: string; fromName: string | null; createdAt: string; editedAt: string | null };
+type HubTask = { id: string; text: string; assigneeId: string | null; assigneeName: string | null; due: string | null; done: boolean; doneAt: string | null; imageKey: string | null; createdBy: string | null; createdAt: string };
+type HubComment = { id: number; body: string; fromName: string | null; createdAt: string; editedAt: string | null; parentMessageId: number | null };
+type HubTaskComment = { id: number; body: string; fromName: string | null; createdAt: string; editedAt: string | null };
+
+// Render a message body that may contain inline image tokens "[img:<key>]"
+// (uploaded via /api/hub-image-upload) alongside @-mentions.
+function renderHubBody(body: string): React.ReactNode {
+  const parts = body.split(/(\[img:[A-Za-z0-9_-]+\])/g);
+  return parts.map((p, i) => {
+    const m = p.match(/^\[img:([A-Za-z0-9_-]+)\]$/);
+    if (m) return <img key={i} src={`/portal/collection-image/${m[1]}`} alt="attachment" loading="lazy" decoding="async" style={{ display: "block", marginTop: 6, maxWidth: "100%", maxHeight: 240, borderRadius: 8, border: "1px solid #e5e7eb" }} />;
+    return p ? <Fragment key={i}>{renderBodyWithMentions(p)}</Fragment> : null;
+  });
+}
+
+// Shared composer for hub notes / replies / task comments: a textarea with
+// @-mention autocomplete and an image attach (click, drag-drop, or paste).
+function HubComposer({ placeholder, users, onSubmit, uploadImage, submitting = false }: {
+  placeholder: string;
+  users: PortalUser[];
+  onSubmit: (body: string, imageKey: string | null) => void;
+  uploadImage: (file: File) => Promise<string | null>;
+  submitting?: boolean;
+}) {
+  const [draft, setDraft] = useState("");
+  const [imgKey, setImgKey] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const tag = currentTagQuery(draft);
+  const suggestions = tag == null ? [] : users.filter((u) => u.active !== false && u.name.toLowerCase().includes(tag)).slice(0, 6);
+  const pickMention = (name: string) => { setDraft((d) => insertStaffTag(d, name)); window.setTimeout(() => taRef.current?.focus(), 0); };
+  const doUpload = async (f: File | null | undefined) => {
+    if (!f || !f.type.startsWith("image/")) return;
+    setBusy(true);
+    const k = await uploadImage(f).catch(() => null);
+    setBusy(false);
+    if (k) setImgKey(k);
+  };
+  const submit = () => {
+    const b = draft.trim();
+    if (!b && !imgKey) return;
+    onSubmit(b, imgKey);
+    setDraft(""); setImgKey(null);
+  };
+  const T = { teal: "#0d9488", line: "#e5e7eb", panel2: "#f7f9fb", faint: "#94a3b8", ink: "#111827" };
+  return (
+    <div style={{ position: "relative" }}
+      onDragOver={(e) => { if (Array.from(e.dataTransfer?.types ?? []).includes("Files")) { e.preventDefault(); setDragOver(true); } }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false); }}
+      onDrop={(e) => { const f = e.dataTransfer?.files?.[0]; if (f && f.type.startsWith("image/")) { e.preventDefault(); setDragOver(false); void doUpload(f); } }}
+    >
+      {suggestions.length > 0 && (
+        <div style={{ position: "absolute", bottom: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: `1px solid ${T.line}`, borderRadius: 10, boxShadow: "0 -8px 24px rgba(0,0,0,0.14)", padding: 4, zIndex: 10, maxHeight: 180, overflow: "auto" }}>
+          {suggestions.map((u) => (
+            <button key={u.id} type="button" onMouseDown={(e) => { e.preventDefault(); pickMention(u.name); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", background: "none", border: "none", borderRadius: 6, padding: "6px 8px", cursor: "pointer", fontSize: 13, color: T.ink }}>
+              <ThreadAvatar name={u.name} size={20} /><span style={{ fontWeight: 600 }}>{u.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {imgKey && (
+        <div style={{ position: "relative", display: "inline-block", marginBottom: 6 }}>
+          <img src={`/portal/collection-image/${imgKey}`} alt="attachment" style={{ maxHeight: 64, maxWidth: 120, borderRadius: 6, border: `1px solid ${T.line}`, display: "block" }} />
+          <button type="button" onClick={() => setImgKey(null)} title="Remove image" style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 999, border: "none", background: "#dc2626", color: "#fff", fontSize: 11, cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 8, border: dragOver ? `2px dashed ${T.teal}` : "none", borderRadius: 12, padding: dragOver ? 2 : 0 }}>
+        <button type="button" onClick={() => fileRef.current?.click()} disabled={busy} title="Attach an image (or drag / paste)"
+          style={{ border: `1px solid ${T.line}`, background: "#fff", color: busy ? T.faint : "#0f766e", borderRadius: 10, width: 38, height: 42, cursor: busy ? "wait" : "pointer", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>
+          {busy ? "…" : <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><rect x="3" y="4.5" width="18" height="15" rx="2.5" stroke="currentColor" strokeWidth="2"/><circle cx="8.5" cy="10" r="1.8" fill="currentColor"/><path d="M4 17l5-5 4 4 2-2 5 5" stroke="currentColor" strokeWidth="2" strokeLinejoin="round"/></svg>}
+        </button>
+        <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { void doUpload(e.target.files?.[0]); e.target.value = ""; }} />
+        <textarea
+          ref={taRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={placeholder}
+          rows={1}
+          onPaste={(e) => { const f = Array.from(e.clipboardData.files).find((x) => x.type.startsWith("image/")); if (f) { e.preventDefault(); void doUpload(f); } }}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && suggestions.length === 0) { e.preventDefault(); submit(); } }}
+          style={{ flex: 1, minWidth: 0, resize: "none", border: `1px solid ${T.line}`, background: T.panel2, color: T.ink, borderRadius: 12, padding: "10px 12px", fontSize: 13.5, lineHeight: 1.4, fontFamily: "inherit", maxHeight: 120 }}
+        />
+        <button type="button" onClick={submit} disabled={submitting || (!draft.trim() && !imgKey)} title="Send"
+          style={{ border: "none", background: T.teal, color: "#fff", cursor: (draft.trim() || imgKey) ? "pointer" : "default", width: 42, height: 42, borderRadius: 12, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", opacity: (draft.trim() || imgKey) && !submitting ? 1 : 0.45 }}>
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none"><path d="M4 12l16-8-6 16-3-6-7-2z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" fill="currentColor" fillOpacity="0.15" /></svg>
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function hubDueInfo(due: string | null): { label: string; color: string; bg: string; over: boolean } {
   if (!due) return { label: "Set date", color: "#9ca3af", bg: "transparent", over: false };
@@ -14962,9 +15092,9 @@ function CollectionHubDrawer({ users, currentUser }: { users: PortalUser[]; curr
   const hub = searchParams.get("hub");
   const tab = searchParams.get("hubtab") === "notes" ? "notes" : "tasks";
   const hubName = searchParams.get("hubname") ?? "";
-  const dataFetcher = useFetcher<{ tasks: HubTask[]; comments: HubComment[] }>();
+  const dataFetcher = useFetcher<{ tasks: HubTask[]; comments: HubComment[]; taskComments: Record<string, HubTaskComment[]> }>();
   const taskFetcher = useFetcher();
-  const noteFetcher = useFetcher();
+  const postFetcher = useFetcher(); // notes / replies / task comments
 
   const parts = hub ? hub.split(":") : [];
   const scopeType: "group" | "collection" = parts[0] === "group" ? "group" : "collection";
@@ -14973,28 +15103,44 @@ function CollectionHubDrawer({ users, currentUser }: { users: PortalUser[]; curr
   const [newText, setNewText] = useState("");
   const [newAssignee, setNewAssignee] = useState("");
   const [newDue, setNewDue] = useState("");
-  const [noteDraft, setNoteDraft] = useState("");
+  const [newImg, setNewImg] = useState<string | null>(null);
+  const [replyOpenId, setReplyOpenId] = useState<number | null>(null);
+  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const newTaskImgRef = useRef<HTMLInputElement>(null);
 
-  const reload = () => {
+  const reload = (markRead = false) => {
     if (!hub) return;
-    dataFetcher.load(`/api/collection-tasks?scopeType=${scopeType}&scopeId=${encodeURIComponent(scopeId)}${tab === "notes" ? "&markNotesRead=1" : ""}`);
+    dataFetcher.load(`/api/collection-tasks?scopeType=${scopeType}&scopeId=${encodeURIComponent(scopeId)}${markRead ? "&markNotesRead=1" : ""}`);
   };
   useEffect(() => {
     if (!hub) return;
-    setNewText(""); setNewAssignee(""); setNewDue(""); setNoteDraft("");
-    reload();
+    setNewText(""); setNewAssignee(""); setNewDue(""); setNewImg(null); setReplyOpenId(null); setExpandedTaskId(null);
+    reload(true); // clear this hub's unread bell on open
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hub, tab]);
   useEffect(() => { if (taskFetcher.state === "idle" && taskFetcher.data) reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskFetcher.state, taskFetcher.data]);
-  useEffect(() => { if (noteFetcher.state === "idle" && noteFetcher.data) { setNoteDraft(""); reload(); }
+  useEffect(() => { if (postFetcher.state === "idle" && postFetcher.data) { setReplyOpenId(null); reload(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [noteFetcher.state, noteFetcher.data]);
+  }, [postFetcher.state, postFetcher.data]);
+
+  // Upload an image for a note/comment; returns its key to embed as [img:key].
+  const uploadImage = async (file: File): Promise<string | null> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (scopeType === "collection") fd.append("collectionId", scopeId);
+    const res = await fetch("/api/hub-image-upload", { method: "POST", body: fd });
+    const j = await res.json().catch(() => null);
+    return j && j.ok ? (j.key as string) : null;
+  };
 
   if (!hub || typeof document === "undefined") return null;
   const tasks = dataFetcher.data?.tasks ?? [];
   const comments = dataFetcher.data?.comments ?? [];
+  const taskCommentsMap = dataFetcher.data?.taskComments ?? {};
+  const topNotes = comments.filter((c) => c.parentMessageId == null);
+  const repliesByParent = (pid: number) => comments.filter((c) => c.parentMessageId === pid);
   const activeUsers = users.filter((u) => u.active !== false);
   const openCount = tasks.filter((t) => !t.done).length;
   const doneCount = tasks.length - openCount;
@@ -15004,18 +15150,25 @@ function CollectionHubDrawer({ users, currentUser }: { users: PortalUser[]; curr
   const setTab = (t: "notes" | "tasks") => { const n = new URLSearchParams(searchParams); n.set("hubtab", t); setSearchParams(n, { replace: true }); };
   const scopeFields = { scopeType, scopeId, scopeName: hubName };
   const submitTask = (fields: Record<string, string>) => taskFetcher.submit({ ...scopeFields, ...fields }, { method: "post", action: "/portal" });
+  const withImg = (body: string, imageKey: string | null) => body + (imageKey ? `${body ? "\n" : ""}[img:${imageKey}]` : "");
 
   const addTask = () => {
     const text = newText.trim();
-    if (!text) return;
-    submitTask({ intent: "collection_task_add", text, assigneeId: newAssignee, due: newDue });
-    setNewText(""); setNewAssignee(""); setNewDue("");
+    if (!text && !newImg) return;
+    submitTask({ intent: "collection_task_add", text: text || "(image)", assigneeId: newAssignee, due: newDue, imageKey: newImg ?? "" });
+    setNewText(""); setNewAssignee(""); setNewDue(""); setNewImg(null);
   };
-  const postNote = () => {
-    const body = noteDraft.trim();
-    if (!body) return;
-    noteFetcher.submit({ ...scopeFields, intent: "collection_hub_note_add", body }, { method: "post", action: "/portal" });
+  const postNote = (body: string, imageKey: string | null) => {
+    postFetcher.submit({ ...scopeFields, intent: "collection_hub_note_add", body: withImg(body, imageKey) }, { method: "post", action: "/portal" });
   };
+  const postReply = (parentId: number, body: string, imageKey: string | null) => {
+    postFetcher.submit({ intent: "create_thread_reply", parentMessageId: String(parentId), body: withImg(body, imageKey) }, { method: "post", action: "/portal" });
+  };
+  const postTaskComment = (taskId: string, body: string, imageKey: string | null) => {
+    postFetcher.submit({ ...scopeFields, intent: "collection_task_comment_add", taskId, body: withImg(body, imageKey) }, { method: "post", action: "/portal" });
+  };
+  const deleteNote = (messageId: number) => { if (window.confirm("Delete this note?")) postFetcher.submit({ ...scopeFields, intent: "collection_hub_note_delete", messageId: String(messageId) }, { method: "post", action: "/portal" }); };
+  const deleteTaskComment = (taskId: string, messageId: number) => { if (window.confirm("Delete this comment?")) postFetcher.submit({ ...scopeFields, intent: "collection_task_comment_delete", taskId, messageId: String(messageId) }, { method: "post", action: "/portal" }); };
 
   const C = { teal: "#0d9488", tealDk: "#0f766e", tealWash: "#e7f5f3", ink: "#111827", soft: "#475569", faint: "#94a3b8", line: "#e5e7eb", lineSoft: "#f1f3f5", panel2: "#f7f9fb", red: "#dc2626" };
   const selStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: C.soft, border: `1px solid ${C.line}`, borderRadius: 7, padding: "3px 6px", background: "#fff", cursor: "pointer", fontFamily: "inherit" };
@@ -15058,32 +15211,62 @@ function CollectionHubDrawer({ users, currentUser }: { users: PortalUser[]; curr
               )}
               {tasks.map((t) => {
                 const di = hubDueInfo(t.due);
+                const tc = taskCommentsMap[t.id] ?? [];
+                const expanded = expandedTaskId === t.id;
                 return (
-                  <div key={t.id} style={{ display: "flex", gap: 11, padding: "10px 2px", borderTop: `1px solid ${C.lineSoft}`, alignItems: "flex-start" }}>
-                    <button type="button" onClick={() => submitTask({ intent: "collection_task_toggle", taskId: t.id, done: t.done ? "0" : "1" })}
-                      title={t.done ? "Mark not done" : "Mark done"}
-                      style={{ marginTop: 1, width: 20, height: 20, borderRadius: 6, border: `2px solid ${t.done ? C.teal : C.faint}`, background: t.done ? C.teal : "transparent", cursor: "pointer", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
-                      {t.done && <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M5 12.5l4 4 10-10" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" /></svg>}
-                    </button>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13.5, color: t.done ? C.faint : C.ink, textDecoration: t.done ? "line-through" : "none", lineHeight: 1.4, overflowWrap: "anywhere" }}>{t.text}</div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
-                          {t.assigneeName ? <ThreadAvatar name={t.assigneeName} size={18} /> : null}
-                          <select value={t.assigneeId ?? ""} onChange={(e) => submitTask({ intent: "collection_task_update", taskId: t.id, assigneeId: e.target.value })} style={selStyle} title="Assign to">
-                            <option value="">Unassigned</option>
-                            {activeUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
-                          </select>
-                        </span>
-                        <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: di.color, background: di.bg, borderRadius: 999, padding: "2px 4px 2px 8px", border: t.due ? "none" : `1px dashed ${C.line}` }} title="Due date">
-                          {di.label}
-                          <input type="date" value={t.due ?? ""} onChange={(e) => submitTask({ intent: "collection_task_update", taskId: t.id, due: e.target.value })}
-                            style={{ width: 16, border: "none", background: "transparent", color: "transparent", cursor: "pointer", padding: 0 }} />
-                        </label>
-                        <button type="button" onClick={() => { if (window.confirm("Delete this task?")) submitTask({ intent: "collection_task_delete", taskId: t.id }); }}
-                          style={{ marginLeft: "auto", border: "none", background: "transparent", color: C.faint, cursor: "pointer", fontSize: 11, padding: 0 }} title="Delete task">✕</button>
+                  <div key={t.id} style={{ borderTop: `1px solid ${C.lineSoft}`, padding: "10px 2px" }}>
+                    <div style={{ display: "flex", gap: 11, alignItems: "flex-start" }}>
+                      <button type="button" onClick={() => submitTask({ intent: "collection_task_toggle", taskId: t.id, done: t.done ? "0" : "1" })}
+                        title={t.done ? "Mark not done" : "Mark done"}
+                        style={{ marginTop: 1, width: 20, height: 20, borderRadius: 6, border: `2px solid ${t.done ? C.teal : C.faint}`, background: t.done ? C.teal : "transparent", cursor: "pointer", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
+                        {t.done && <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M5 12.5l4 4 10-10" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                      </button>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13.5, color: t.done ? C.faint : C.ink, textDecoration: t.done ? "line-through" : "none", lineHeight: 1.4, overflowWrap: "anywhere" }}>{t.text}</div>
+                        {t.imageKey && <img src={`/portal/collection-image/${t.imageKey}`} alt="task attachment" loading="lazy" style={{ display: "block", marginTop: 6, maxWidth: "100%", maxHeight: 180, borderRadius: 8, border: `1px solid ${C.line}` }} />}
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                            {t.assigneeName ? <ThreadAvatar name={t.assigneeName} size={18} /> : null}
+                            <select value={t.assigneeId ?? ""} onChange={(e) => submitTask({ intent: "collection_task_update", taskId: t.id, assigneeId: e.target.value })} style={selStyle} title="Assign to">
+                              <option value="">Unassigned</option>
+                              {activeUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                            </select>
+                          </span>
+                          <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: di.color, background: di.bg, borderRadius: 999, padding: "2px 4px 2px 8px", border: t.due ? "none" : `1px dashed ${C.line}` }} title="Due date">
+                            {di.label}
+                            <input type="date" value={t.due ?? ""} onChange={(e) => submitTask({ intent: "collection_task_update", taskId: t.id, due: e.target.value })}
+                              style={{ width: 16, border: "none", background: "transparent", color: "transparent", cursor: "pointer", padding: 0 }} />
+                          </label>
+                          <button type="button" onClick={() => setExpandedTaskId(expanded ? null : t.id)} title="Comments on this task"
+                            style={{ border: "none", background: "transparent", color: tc.length ? C.tealDk : C.faint, cursor: "pointer", fontSize: 11, fontWeight: 600, padding: 0, display: "inline-flex", alignItems: "center", gap: 3 }}>
+                            💬 {tc.length || "Reply"}
+                          </button>
+                          <button type="button" onClick={() => { if (window.confirm("Delete this task?")) submitTask({ intent: "collection_task_delete", taskId: t.id }); }}
+                            style={{ marginLeft: "auto", border: "none", background: "transparent", color: C.faint, cursor: "pointer", fontSize: 11, padding: 0 }} title="Delete task">✕</button>
+                        </div>
                       </div>
                     </div>
+                    {expanded && (
+                      <div style={{ marginLeft: 31, marginTop: 8, paddingLeft: 10, borderLeft: `2px solid ${C.lineSoft}` }}>
+                        {tc.map((c) => {
+                          const cmine = (c.fromName || "").trim().toLowerCase() === meName;
+                          return (
+                            <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10 }}>
+                              <ThreadAvatar name={c.fromName || "?"} size={22} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                                  <span style={{ fontWeight: 700, fontSize: 12, color: C.ink }}>{c.fromName || "Someone"}</span>
+                                  <span style={{ fontSize: 10, color: C.faint }}>{clockStamp(c.createdAt)}</span>
+                                  {cmine && <button type="button" onClick={() => deleteTaskComment(t.id, c.id)} style={{ marginLeft: "auto", border: "none", background: "transparent", color: C.faint, cursor: "pointer", fontSize: 10, padding: 0 }}>Delete</button>}
+                                </div>
+                                <div style={{ fontSize: 13, color: C.ink, marginTop: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.4 }}>{renderHubBody(c.body)}</div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        <HubComposer placeholder="Reply on this task…  @ to tag" users={users} uploadImage={uploadImage} submitting={postFetcher.state !== "idle"} onSubmit={(b, k) => postTaskComment(t.id, b, k)} />
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -15094,50 +15277,77 @@ function CollectionHubDrawer({ users, currentUser }: { users: PortalUser[]; curr
               <textarea value={newText} onChange={(e) => setNewText(e.target.value)} placeholder="Add a task…" rows={1}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addTask(); } }}
                 style={{ width: "100%", resize: "none", border: `1px solid ${C.line}`, background: C.panel2, color: C.ink, borderRadius: 10, padding: "9px 11px", fontSize: 13.5, fontFamily: "inherit", boxSizing: "border-box" }} />
+              {newImg && (
+                <div style={{ position: "relative", display: "inline-block", marginTop: 8 }}>
+                  <img src={`/portal/collection-image/${newImg}`} alt="attachment" style={{ maxHeight: 64, maxWidth: 120, borderRadius: 6, border: `1px solid ${C.line}`, display: "block" }} />
+                  <button type="button" onClick={() => setNewImg(null)} style={{ position: "absolute", top: -6, right: -6, width: 18, height: 18, borderRadius: 999, border: "none", background: "#dc2626", color: "#fff", fontSize: 11, cursor: "pointer", lineHeight: 1 }}>×</button>
+                </div>
+              )}
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                <button type="button" onClick={() => newTaskImgRef.current?.click()} title="Attach an image" style={{ ...selStyle, fontSize: 12.5, padding: "6px 9px", color: "#0f766e" }}>🖼</button>
+                <input ref={newTaskImgRef} type="file" accept="image/*" hidden onChange={async (e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f && f.type.startsWith("image/")) { const k = await uploadImage(f).catch(() => null); if (k) setNewImg(k); } }} />
                 <select value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)} style={{ ...selStyle, fontSize: 12.5, padding: "6px 8px" }} title="Assign to">
                   <option value="">Unassigned</option>
                   {activeUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
                 </select>
                 <input type="date" value={newDue} onChange={(e) => setNewDue(e.target.value)} title="Due date" style={{ ...selStyle, fontSize: 12.5, padding: "6px 8px" }} />
-                <button type="button" onClick={addTask} disabled={!newText.trim()} style={{ marginLeft: "auto", border: "none", background: newText.trim() ? C.teal : C.faint, color: "#fff", borderRadius: 9, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: newText.trim() ? "pointer" : "default" }}>Add</button>
+                <button type="button" onClick={addTask} disabled={!newText.trim() && !newImg} style={{ marginLeft: "auto", border: "none", background: (newText.trim() || newImg) ? C.teal : C.faint, color: "#fff", borderRadius: 9, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: (newText.trim() || newImg) ? "pointer" : "default" }}>Add</button>
               </div>
             </div>
           </>
         ) : (
           <>
-            <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
               {dataFetcher.state !== "idle" && comments.length === 0 && <div style={{ color: C.faint, fontSize: 13, textAlign: "center", padding: 20 }}>Loading…</div>}
-              {comments.map((m) => {
+              {topNotes.map((m) => {
                 const author = m.fromName || "Someone";
                 const mine = author.trim().toLowerCase() === meName;
+                const replies = repliesByParent(m.id);
                 return (
-                  <div key={m.id} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                    <ThreadAvatar name={author} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}>
-                        <span style={{ fontWeight: 700, fontSize: 13, color: C.ink }}>{author}</span>
-                        <span style={{ fontSize: 10.5, color: C.faint }} title={relativeTime(m.createdAt)}>{clockStamp(m.createdAt)}</span>
-                        {mine && <button type="button" onClick={() => { if (window.confirm("Delete this note?")) noteFetcher.submit({ ...scopeFields, intent: "collection_hub_note_delete", messageId: String(m.id) }, { method: "post", action: "/portal" }); }} style={{ marginLeft: "auto", border: "none", background: "transparent", color: C.faint, cursor: "pointer", fontSize: 11, padding: 0 }} title="Delete">Delete</button>}
+                  <div key={m.id}>
+                    <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                      <ThreadAvatar name={author} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}>
+                          <span style={{ fontWeight: 700, fontSize: 13, color: C.ink }}>{author}</span>
+                          <span style={{ fontSize: 10.5, color: C.faint }} title={relativeTime(m.createdAt)}>{clockStamp(m.createdAt)}</span>
+                          {mine && <button type="button" onClick={() => deleteNote(m.id)} style={{ marginLeft: "auto", border: "none", background: "transparent", color: C.faint, cursor: "pointer", fontSize: 11, padding: 0 }} title="Delete">Delete</button>}
+                        </div>
+                        <div style={{ fontSize: 13.5, color: C.ink, marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.45 }}>{renderHubBody(m.body)}</div>
+                        <button type="button" onClick={() => setReplyOpenId(replyOpenId === m.id ? null : m.id)} style={{ border: "none", background: "transparent", color: C.tealDk, cursor: "pointer", fontSize: 11, fontWeight: 600, padding: 0, marginTop: 4 }}>{replyOpenId === m.id ? "Cancel" : "Reply"}</button>
                       </div>
-                      <div style={{ fontSize: 13.5, color: C.ink, marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.45 }}>{renderBodyWithMentions(m.body)}</div>
                     </div>
+                    {(replies.length > 0 || replyOpenId === m.id) && (
+                      <div style={{ marginLeft: 38, marginTop: 8, paddingLeft: 10, borderLeft: `2px solid ${C.lineSoft}`, display: "flex", flexDirection: "column", gap: 10 }}>
+                        {replies.map((r) => {
+                          const rmine = (r.fromName || "").trim().toLowerCase() === meName;
+                          return (
+                            <div key={r.id} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                              <ThreadAvatar name={r.fromName || "?"} size={22} />
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                                  <span style={{ fontWeight: 700, fontSize: 12, color: C.ink }}>{r.fromName || "Someone"}</span>
+                                  <span style={{ fontSize: 10, color: C.faint }}>{clockStamp(r.createdAt)}</span>
+                                  {rmine && <button type="button" onClick={() => deleteNote(r.id)} style={{ marginLeft: "auto", border: "none", background: "transparent", color: C.faint, cursor: "pointer", fontSize: 10, padding: 0 }}>Delete</button>}
+                                </div>
+                                <div style={{ fontSize: 13, color: C.ink, marginTop: 1, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.4 }}>{renderHubBody(r.body)}</div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                        {replyOpenId === m.id && (
+                          <HubComposer placeholder="Reply…  @ to tag" users={users} uploadImage={uploadImage} submitting={postFetcher.state !== "idle"} onSubmit={(b, k) => postReply(m.id, b, k)} />
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
-              {comments.length === 0 && dataFetcher.state === "idle" && <div style={{ color: C.faint, fontSize: 13, textAlign: "center", padding: "10px 0" }}>No notes yet. Write one below — @mention someone to notify them.</div>}
+              {topNotes.length === 0 && dataFetcher.state === "idle" && <div style={{ color: C.faint, fontSize: 13, textAlign: "center", padding: "10px 0" }}>No notes yet. Write one below — @mention someone to notify, or attach an image.</div>}
             </div>
             <div style={{ borderTop: `1px solid ${C.line}`, padding: "10px 14px 12px", background: "#fff" }}>
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
-                <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} placeholder="Write a note…  type @ to tag someone" rows={1}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); postNote(); } }}
-                  style={{ flex: 1, minWidth: 0, resize: "none", border: `1px solid ${C.line}`, background: C.panel2, color: C.ink, borderRadius: 12, padding: "10px 12px", fontSize: 13.5, lineHeight: 1.4, fontFamily: "inherit", maxHeight: 120 }} />
-                <button type="button" onClick={postNote} disabled={!noteDraft.trim()} title="Post note"
-                  style={{ border: "none", background: C.teal, color: "#fff", cursor: noteDraft.trim() ? "pointer" : "default", width: 42, height: 42, borderRadius: 12, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", opacity: noteDraft.trim() ? 1 : 0.45 }}>
-                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none"><path d="M4 12l16-8-6 16-3-6-7-2z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" fill="currentColor" fillOpacity="0.15" /></svg>
-                </button>
-              </div>
-              <div style={{ fontSize: 10.5, color: C.faint, marginTop: 6 }}>Enter to post · @mention to notify via the bell</div>
+              <HubComposer placeholder="Write a note…  @ to tag · 🖼 to attach" users={users} uploadImage={uploadImage} submitting={postFetcher.state !== "idle"} onSubmit={(b, k) => postNote(b, k)} />
+              <div style={{ fontSize: 10.5, color: C.faint, marginTop: 6 }}>Enter to post · @mention notifies via the bell · drag, paste or 🖼 to add an image</div>
             </div>
           </>
         )}
