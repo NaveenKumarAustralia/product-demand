@@ -19572,10 +19572,63 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
         // line, bigger text, terracotta buttons.
         const onlySheets = selectedGroupIds.size === 0;
         const canSheet = selectedIds.size >= 2 && onlySheets;
+        // Shopify-style tile sort: the ordered tokens of the container currently
+        // being viewed (top level or the open group), newest saved order first.
+        const containerOrderedTokens = (): string[] => {
+          const containerId = openGroup ? openGroup.id : null;
+          const kidGroups = childGroups(containerId);
+          const directCols = containerId === null
+            ? visibleCollections.filter((c) => !groupedIds.has(c.id))
+            : visibleCollections.filter((c) => (groupById.get(containerId)?.collectionIds ?? []).includes(c.id));
+          const defaultOrder = [...kidGroups.map((g) => `g:${g.id}`), ...directCols.map((c) => `c:${c.id}`)];
+          const savedValid = tileOrder.filter((t) => defaultOrder.includes(t));
+          return [...savedValid, ...defaultOrder.filter((t) => !savedValid.includes(t))];
+        };
+        // Move the selected tiles (groups + sheets) together to the top, bottom,
+        // or a 1-based position WITHIN the current container — like Shopify's
+        // manual collection sort. Rewrites only this container's slice of the
+        // global tile order, leaving other containers untouched.
+        const moveSelectedTiles = (target: "top" | "bottom" | number) => {
+          const ordered = containerOrderedTokens();
+          const selSet = new Set<string>([
+            ...Array.from(selectedGroupIds, (id) => `g:${id}`),
+            ...Array.from(selectedIds, (id) => `c:${id}`),
+          ].filter((t) => ordered.includes(t)));
+          if (!selSet.size) return;
+          const picked = ordered.filter((t) => selSet.has(t));
+          const rest = ordered.filter((t) => !selSet.has(t));
+          let insertAt: number;
+          if (target === "top") insertAt = 0;
+          else if (target === "bottom") insertAt = rest.length;
+          else insertAt = Math.max(0, Math.min(rest.length, Math.round(target) - 1));
+          const newContainerOrder = [...rest.slice(0, insertAt), ...picked, ...rest.slice(insertAt)];
+          const global = [...tileOrder];
+          const containerSet = new Set(ordered);
+          const firstIdx = global.findIndex((t) => containerSet.has(t));
+          const filtered = global.filter((t) => !containerSet.has(t));
+          const at = firstIdx < 0 ? filtered.length : Math.min(firstIdx, filtered.length);
+          saveTileOrder([...filtered.slice(0, at), ...newContainerOrder, ...filtered.slice(at)]);
+        };
+        const moveSelectedTilesToPosition = () => {
+          const total = containerOrderedTokens().length;
+          const raw = window.prompt(`Move the ${selectedCount} selected tile(s) to which position? (1 = first, ${total} = last)`, "1");
+          if (raw == null) return;
+          const pos = Number(raw.trim());
+          if (!Number.isFinite(pos) || pos < 1) return;
+          moveSelectedTiles(pos);
+        };
+        const canSortTiles = !searchQ && !showHidden;
         const selBtn: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 8, borderRadius: 9, padding: "9px 15px", fontSize: 15, fontWeight: 700, border: "1px solid transparent" };
         const selectionBar = selectedCount > 0 ? (
           <div style={{ margin: "0 14px 14px", padding: "11px 16px", background: "#fff", color: "#241a15", borderTop: "3px solid #c0562f", borderRadius: "0 0 12px 12px", boxShadow: "0 14px 26px rgba(60,30,15,0.16)", display: "flex", alignItems: "center", gap: 12, fontSize: 15, fontWeight: 700, flexWrap: "wrap" }}>
             <span style={{ fontWeight: 800 }}>{selectedCount} selected</span>
+            {canSortTiles && (
+              <div style={{ display: "inline-flex", alignItems: "center", border: "1px solid #e4b5a1", borderRadius: 9, overflow: "hidden" }} title="Reorder the selected tiles (like Shopify's manual collection sort)">
+                <button type="button" onClick={() => moveSelectedTiles("top")} style={{ fontSize: 14, fontWeight: 700, padding: "9px 13px", border: "none", borderRight: "1px solid #f0d6cb", background: "#fff", color: "#8f3a1c", cursor: "pointer" }} title="Move selected tiles to the front">⤒ Top</button>
+                <button type="button" onClick={moveSelectedTilesToPosition} style={{ fontSize: 14, fontWeight: 700, padding: "9px 13px", border: "none", borderRight: "1px solid #f0d6cb", background: "#fff", color: "#8f3a1c", cursor: "pointer" }} title="Move selected tiles to a specific position">↕ Position…</button>
+                <button type="button" onClick={() => moveSelectedTiles("bottom")} style={{ fontSize: 14, fontWeight: 700, padding: "9px 13px", border: "none", background: "#fff", color: "#8f3a1c", cursor: "pointer" }} title="Move selected tiles to the end">⤓ Bottom</button>
+              </div>
+            )}
             <button type="button" onClick={groupSelected} disabled={selectedCount < 2} style={{ ...selBtn, background: "#c0562f", color: "#fff", borderColor: "#c0562f", cursor: selectedCount < 2 ? "default" : "pointer", opacity: selectedCount < 2 ? 0.5 : 1 }} title="Put the selected sheets and groups inside one new group"><span style={{ fontSize: 16 }}>📁</span> Combine into group</button>
             <button type="button" onClick={combineIntoCollection} disabled={!canSheet} style={{ ...selBtn, background: "#f6e3da", color: "#8f3a1c", borderColor: "#e4b5a1", cursor: canSheet ? "pointer" : "default", opacity: canSheet ? 1 : 0.5 }} title={onlySheets ? "Merge all rows into one sheet and delete the rest" : "Only sheets can be merged into one sheet"}><span style={{ fontSize: 16 }}>📄</span> Combine into one sheet</button>
             {groups.length > 0 && (
