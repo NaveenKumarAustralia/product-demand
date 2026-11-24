@@ -19299,8 +19299,17 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 <button type="button" title="Preview what's inside" onClick={(e) => { e.stopPropagation(); setPreviewGroupId(g.id); }} style={{ position: "absolute", top: 8, right: 40, zIndex: 4, background: "rgba(17,24,39,0.82)", color: "#fff", border: "none", borderRadius: 7, padding: "4px 9px", fontSize: 13, cursor: "pointer", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>👁</button>
                 {/* ⋯ actions menu — keeps Change cover + Hide OUT of the click-to-open area. */}
                 <button type="button" title="More actions" onClick={(e) => { e.stopPropagation(); setMenuGroupId((cur) => cur === g.id ? null : g.id); }} style={{ position: "absolute", top: 8, right: 8, zIndex: 6, width: 26, height: 26, borderRadius: 7, border: "none", background: "rgba(17,24,39,0.82)", color: "#fff", fontSize: 16, fontWeight: 900, lineHeight: 1, cursor: "pointer", display: "grid", placeItems: "center", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>⋯</button>
+                {(taskCounts[`group:${g.id}`] ?? 0) > 0 && (
+                  <span title="Open tasks" style={{ position: "absolute", top: 3, right: 3, zIndex: 7, background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.3)", pointerEvents: "none" }}>{taskCounts[`group:${g.id}`]}</span>
+                )}
                 {menuGroupId === g.id && (
                   <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: 38, right: 8, zIndex: 12, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.22)", padding: 5, minWidth: 162 }}>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); setMenuGroupId(null); openHub("group", g.id, g.name); }} style={menuItemBtn}>
+                      ✓ Tasks · Notes
+                      {(taskCounts[`group:${g.id}`] ?? 0) > 0 && (
+                        <span style={{ marginLeft: "auto", background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 800 }}>{taskCounts[`group:${g.id}`]}</span>
+                      )}
+                    </button>
                     <button type="button" onClick={(e) => { e.stopPropagation(); setMenuGroupId(null); setPreviewGroupId(g.id); }} style={menuItemBtn}>👁 Preview inside</button>
                     <button type="button" onClick={(e) => { e.stopPropagation(); setMenuGroupId(null); setCoverPickerGroupId(g.id); }} style={menuItemBtn}>🖼 Change cover</button>
                     <div style={{ height: 1, background: "#eef0f2", margin: "4px 2px" }} />
@@ -19321,19 +19330,6 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               </div>
               <div style={{ padding: "8px 4px 2px" }}>
                 <div style={{ fontWeight: 800, fontSize: 14, color: "#111827", textAlign: "center" }}>{g.name}</div>
-                <div style={{ display: "flex", justifyContent: "center", marginTop: 5 }}>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); openHub("group", g.id, g.name); }}
-                    title="Tasks & notes for this group"
-                    style={{ display: "inline-flex", alignItems: "center", gap: 5, border: "1px solid #e5e7eb", background: "#fff", color: "#0f766e", fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "3px 10px", cursor: "pointer" }}
-                  >
-                    ✓ Tasks · Notes
-                    {(taskCounts[`group:${g.id}`] ?? 0) > 0 && (
-                      <span style={{ background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{taskCounts[`group:${g.id}`]}</span>
-                    )}
-                  </button>
-                </div>
               </div>
               {/* Hide confirm — deliberate, and recoverable via the Undo toast. */}
               {confirmGroupId === g.id && (
@@ -19833,8 +19829,19 @@ function CollectionCard({
           style={{ position: "absolute", top: 8, right: 8, width: 26, height: 26, borderRadius: 7, border: "none", background: "rgba(17,24,39,0.82)", color: "#fff", cursor: "pointer", display: "grid", placeItems: "center", fontSize: 16, fontWeight: 900, lineHeight: 1, padding: 0, zIndex: 6, boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}
         >⋯</button>
       )}
+      {!hidden && onOpenHub && taskCount > 0 && (
+        <span title="Open tasks" style={{ position: "absolute", top: 3, right: 3, zIndex: 7, background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.3)", pointerEvents: "none" }}>{taskCount}</span>
+      )}
       {!hidden && menuOpen && (
         <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: 38, right: 8, zIndex: 12, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.22)", padding: 5, minWidth: 160 }}>
+          {onOpenHub && (
+            <button type="button" onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onOpenHub(); }} style={menuItemBtn}>
+              ✓ Tasks · Notes
+              {taskCount > 0 && (
+                <span style={{ marginLeft: "auto", background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 800 }}>{taskCount}</span>
+              )}
+            </button>
+          )}
           <button type="button" onClick={(e) => { e.stopPropagation(); setMenuOpen(false); setEditing(true); }} style={menuItemBtn}>✏️ Rename</button>
           {collection.hasThumbnail ? (
             <>
@@ -19905,21 +19912,6 @@ function CollectionCard({
             onClick={(e) => { e.stopPropagation(); setEditing(true); }}
             title="Click to rename"
           >{collection.name || "Untitled"}</span>
-        )}
-        {onOpenHub && (
-          <div style={{ display: "flex", justifyContent: "center", marginTop: 6, width: "100%" }} onClick={(e) => e.stopPropagation()}>
-            <button
-              type="button"
-              onClick={(e) => { e.stopPropagation(); onOpenHub(); }}
-              title="Tasks & notes for this sheet"
-              style={{ display: "inline-flex", alignItems: "center", gap: 5, border: "1px solid #e5e7eb", background: "#fff", color: "#0f766e", fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "3px 10px", cursor: "pointer" }}
-            >
-              ✓ Tasks · Notes
-              {taskCount > 0 && (
-                <span style={{ background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{taskCount}</span>
-              )}
-            </button>
-          </div>
         )}
         {onSetFabricStatus && (
           <div style={{ marginTop: 10, width: "100%" }} onClick={(e) => e.stopPropagation()}>
