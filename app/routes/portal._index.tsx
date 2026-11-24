@@ -3248,6 +3248,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true });
   }
 
+  if (intent === "toggle_thread_resolved") {
+    // Mark a whole thread "handled" (or un-handle it). Stored in one settings
+    // map keyed by the thread string — no schema change, no per-thread rows.
+    const threadKey = String(form.get("threadKey") ?? "").trim();
+    if (!threadKey || !currentUser) return null;
+    const KEY = "portal-threads-resolved-v1";
+    const setting = await prisma.portalSetting.findUnique({ where: { key: KEY }, select: { value: true } });
+    const map: Record<string, { by: string; at: string }> =
+      (setting?.value && typeof setting.value === "object" && !Array.isArray(setting.value))
+        ? { ...(setting.value as Record<string, { by: string; at: string }>) } : {};
+    let resolved: boolean;
+    if (map[threadKey]) { delete map[threadKey]; resolved = false; }
+    else { map[threadKey] = { by: currentUser.name, at: new Date().toISOString() }; resolved = true; }
+    await prisma.portalSetting.upsert({ where: { key: KEY }, create: { key: KEY, value: map }, update: { value: map } });
+    return jsonResponse({ ok: true, resolved, resolvedBy: currentUser.name });
+  }
+
   if (intent === "create_thread_reply") {
     // Reply to a message — pings the parent's author + every other
     // participant in the thread + anyone explicitly @-tagged.
@@ -14257,10 +14274,13 @@ type ThreadMessage = {
   userName: string;
   body: string;
   fromName: string | null;
+  productTitle?: string | null;
   parentMessageId: number | null;
   editedAt: string | null;
   readAt: string | null;
   createdAt: string;
+  seenBy?: string[];
+  unreadForMe?: boolean;
 };
 // Avatar circle — first letter of the name in a colored chip. The
 // colour is derived deterministically from the name so the same user
@@ -14301,13 +14321,41 @@ function messageStamp(iso: string): string {
   if (Number.isNaN(d.getTime())) return "";
   return `${formatPortalDate(d)} · ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
+// Just the clock, e.g. "14:32" — used under each chat bubble.
+function clockStamp(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+// "Today" / "Yesterday" / a dd/mm/yy date — the label on a day separator.
+function dayLabel(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOf(new Date()) - startOf(d)) / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+}
+function sameDay(a: string, b: string): boolean {
+  const da = new Date(a), db = new Date(b);
+  return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth() && da.getDate() === db.getDate();
+}
+// "Seen by Jani" / "Seen by Jani & Girish" / "Seen by 3 people".
+function seenLabel(names: string[]): string {
+  if (!names.length) return "";
+  if (names.length === 1) return `Seen by ${names[0]}`;
+  if (names.length === 2) return `Seen by ${names[0]} & ${names[1]}`;
+  return `Seen by ${names.length} people`;
+}
 
 function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser: PortalUser | null }) {
   const replyRef = useRef<HTMLTextAreaElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const threadKey = searchParams.get("thread");
   const rowParam = searchParams.get("row");
-  const threadFetcher = useFetcher<{ messages: ThreadMessage[] }>();
+  const threadFetcher = useFetcher<{ messages: ThreadMessage[]; resolved?: boolean; resolvedBy?: string | null; resolvedAt?: string | null }>();
+  const resolveFetcher = useFetcher<{ ok?: boolean; resolved?: boolean; resolvedBy?: string }>();
   const replyFetcher = useFetcher();
   const editFetcher = useFetcher();
   const deleteFetcher = useFetcher();
@@ -14323,6 +14371,10 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
   const [originalDraft, setOriginalDraft] = useState("");
   const [pendingDelete, setPendingDelete] = useState(false);
   const originalFetcher = useFetcher<{ ok?: boolean }>();
+  // Which thread the last resolve-toggle was for, so a stale resolve result
+  // doesn't bleed onto a different thread after switching.
+  const [resolveFor, setResolveFor] = useState<string | null>(null);
+  const convoRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!threadKey) return;
@@ -14331,6 +14383,7 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
     setOpenMenuId(null);
     setOptimisticReplies([]);
     setEditingOriginal(false);
+    setResolveFor(null);
     threadFetcher.load(`/api/portal-thread?thread=${encodeURIComponent(threadKey)}&markRead=1`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadKey]);
@@ -14387,6 +14440,12 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [deleteFetcher.state, deleteFetcher.data]);
+  // Jump to the newest message whenever the thread (re)loads or a reply lands.
+  useEffect(() => {
+    const el = convoRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadKey, threadFetcher.data?.messages?.length, optimisticReplies.length]);
 
   if (!threadKey) return null;
   const messages = threadFetcher.data?.messages ?? [];
@@ -14399,13 +14458,55 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
 
   const topLevel = messages.find((m) => m.parentMessageId === null) ?? messages[0];
   const field = topLevel?.field ?? threadKey.split(":").pop() ?? "";
-  const fieldLabel = formatFieldLabel(field).toUpperCase();
   // Real replies first, then any optimistic-still-pending ones so they
   // appear at the bottom of the conversation.
   const displayedReplies: ThreadMessage[] = [
     ...messages.filter((m) => m.parentMessageId !== null),
     ...optimisticReplies,
   ];
+  // Header context: the product/sheet this thread hangs off, plus the field.
+  const productTitle = (topLevel?.productTitle || "").trim();
+  const headerTitle = productTitle || formatFieldLabel(field);
+
+  // Resolved ("handled") state. Prefer a fresh toggle result for THIS thread,
+  // else what the thread load returned.
+  const resolved = (resolveFor === threadKey && typeof resolveFetcher.data?.resolved === "boolean")
+    ? resolveFetcher.data.resolved
+    : Boolean(threadFetcher.data?.resolved);
+  const resolvedBy = (resolveFor === threadKey ? resolveFetcher.data?.resolvedBy : null) ?? threadFetcher.data?.resolvedBy ?? null;
+  const resolvedAt = threadFetcher.data?.resolvedAt ?? null;
+  const toggleResolved = () => {
+    if (!threadKey) return;
+    setResolveFor(threadKey);
+    resolveFetcher.submit({ intent: "toggle_thread_resolved", threadKey }, { method: "post", action: "/portal" });
+  };
+
+  // "Will notify" preview: a reply pings everyone who's posted in the thread
+  // (minus me) plus anyone explicitly @-tagged in the draft. We also surface
+  // @names that match NO user, so a silent mis-tag is caught before sending.
+  const meName = (currentUser?.name ?? "").trim().toLowerCase();
+  const matchUser = (token: string): PortalUser | undefined => {
+    const t = token.toLowerCase();
+    return users.find((u) => u.active !== false && (
+      u.name.toLowerCase() === t || u.name.toLowerCase().split(/\s+/)[0] === t || u.name.toLowerCase().replace(/\s+/g, "") === t
+    ));
+  };
+  const draftTokens = Array.from(replyDraft.matchAll(/@([a-z0-9._-]+)/gi), (m) => m[1]);
+  const typingTag = currentTagQuery(replyDraft); // the token currently being typed (ignore in warnings)
+  const notifyNames = new Set<string>();
+  // thread participants (everyone who authored a message here)
+  for (const m of messages) {
+    const name = (m.fromName || m.userName || "").trim();
+    if (name && name.toLowerCase() !== meName) notifyNames.add(name);
+  }
+  const unknownTags: string[] = [];
+  for (const tok of draftTokens) {
+    const hit = matchUser(tok);
+    if (hit) { if (hit.name.trim().toLowerCase() !== meName) notifyNames.add(hit.name); }
+    else if (typingTag == null || tok.toLowerCase() !== typingTag) { if (!unknownTags.includes(tok)) unknownTags.push(tok); }
+  }
+  const notifyList = Array.from(notifyNames);
+
   // @-mention autocomplete for the reply box (same behaviour as the note cells).
   const replyTag = currentTagQuery(replyDraft);
   const mentionSuggestions = replyTag == null ? [] : users
@@ -14464,6 +14565,106 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
 
   if (typeof document === "undefined") return null;
   const currentName = currentUser?.name ?? "You";
+  const meKey = currentName.trim().toLowerCase();
+  const C = { teal: "#0d9488", tealDk: "#0f766e", tealWash: "#e7f5f3", ink: "#111827", soft: "#475569", faint: "#94a3b8", line: "#e5e7eb", lineSoft: "#f1f3f5", panel2: "#f7f9fb", amber: "#b45309", amberWash: "#fef3e2", red: "#dc2626" };
+
+  // One ordered conversation: the original cell note first, then every reply.
+  // (No sticky/pinned note — it flows as the first message.)
+  const originalMsg = messages.find((m) => m.parentMessageId === null) ?? null;
+  const orderedItems: Array<{ m: ThreadMessage; original: boolean }> = [];
+  if (originalMsg) orderedItems.push({ m: originalMsg, original: true });
+  for (const r of displayedReplies) orderedItems.push({ m: r, original: false });
+  const firstUnreadId = orderedItems.find(({ m }) => m.unreadForMe)?.m.id ?? null;
+
+  const linkBtn = (color: string): React.CSSProperties => ({ background: "transparent", border: "none", color, cursor: "pointer", padding: 0, fontSize: 11, fontWeight: 600 });
+
+  const renderMessage = (m: ThreadMessage, original: boolean) => {
+    const author = m.fromName || m.userName;
+    const isMe = author.trim().toLowerCase() === meKey;
+    const isAuthor = !!currentUser && isMe;
+    const isPending = m.id < 0;
+    const editingThis = original ? editingOriginal : editingId === m.id;
+
+    // Inline edit form (full width, not a bubble).
+    if (editingThis) {
+      const draft = original ? originalDraft : editDraft;
+      const setDraft = original ? setOriginalDraft : setEditDraft;
+      const saving = original && originalFetcher.state !== "idle";
+      const onSave = original
+        ? () => originalFetcher.submit({ intent: "update_thread_original", threadKey, body: originalDraft }, { method: "post", action: "/portal" })
+        : submitEdit;
+      const onCancel = original ? () => setEditingOriginal(false) : () => setEditingId(null);
+      return (
+        <div key={`edit-${original ? "o" : "r"}-${m.id}`} style={{ margin: "4px 0" }}>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={original ? 3 : 2}
+            autoFocus
+            style={{ width: "100%", border: `1px solid ${C.line}`, borderRadius: 8, padding: 9, fontSize: 13.5, fontFamily: "inherit", boxSizing: "border-box" }}
+          />
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <button type="button" onClick={onSave} disabled={saving} style={{ background: C.teal, color: "#fff", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{saving ? "Saving…" : "Save"}</button>
+            <button type="button" onClick={onCancel} style={{ background: "transparent", color: C.soft, border: `1px solid ${C.line}`, borderRadius: 6, padding: "6px 14px", fontSize: 12.5, cursor: "pointer" }}>Cancel</button>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div key={`${original ? "o" : "r"}-${m.id}`} style={{ display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start", marginTop: 10 }}>
+        <div style={{ display: "flex", gap: 9, alignItems: "flex-end", flexDirection: isMe ? "row-reverse" : "row", maxWidth: "90%" }}>
+          {!isMe && <ThreadAvatar name={author} />}
+          <div style={{ minWidth: 0, display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
+            {!isMe && (
+              <div style={{ display: "flex", alignItems: "center", gap: 7, margin: "0 4px 3px" }}>
+                <span style={{ fontWeight: 700, fontSize: 12.5, color: C.ink }}>{author}</span>
+                {original && <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: ".06em", textTransform: "uppercase", color: C.amber, background: C.amberWash, padding: "1px 6px", borderRadius: 999 }}>Note</span>}
+                <span style={{ fontSize: 10.5, color: C.faint }} title={relativeTime(m.createdAt)}>{clockStamp(m.createdAt)}</span>
+              </div>
+            )}
+            <div style={{
+              padding: "9px 12px", borderRadius: 14, fontSize: 13.5, lineHeight: 1.45,
+              whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxWidth: "100%",
+              ...(isMe
+                ? { background: C.teal, color: "#fff", borderBottomRightRadius: 5 }
+                : { background: original ? "#fff" : "#f1f4f7", color: C.ink, borderBottomLeftRadius: 5, border: original ? `1px solid ${C.line}` : "none" }),
+            }}>
+              {renderBodyWithMentions(m.body)}
+            </div>
+            <div style={{ fontSize: 10, color: C.faint, margin: "3px 5px 0", display: "flex", gap: 6, alignItems: "center", justifyContent: isMe ? "flex-end" : "flex-start", flexWrap: "wrap" }}>
+              {isMe && <span>{clockStamp(m.createdAt)}</span>}
+              {m.editedAt && <span>edited</span>}
+              {original && <span>original note</span>}
+              {isMe && !isPending && m.seenBy && m.seenBy.length > 0 && (
+                <span style={{ color: C.tealDk, fontWeight: 600 }}>✓✓ {seenLabel(m.seenBy)}</span>
+              )}
+              {isMe && !isPending && (!m.seenBy || m.seenBy.length === 0) && !original && <span>Sent</span>}
+            </div>
+            {isAuthor && !isPending && (
+              <div style={{ display: "flex", gap: 10, margin: "2px 5px 0", justifyContent: isMe ? "flex-end" : "flex-start" }}>
+                <button type="button" style={linkBtn(C.soft)} title="Edit"
+                  onClick={() => { if (original) { setOriginalDraft(m.body); setEditingOriginal(true); } else { startEdit(m); } }}
+                >Edit</button>
+                <button type="button" style={linkBtn(C.red)} title="Delete"
+                  onClick={() => {
+                    if (original) {
+                      if (!window.confirm("Delete this note? This will clear the cell text and remove all replies.")) return;
+                      const t = threadKey; close();
+                      if (t) originalFetcher.submit({ intent: "update_thread_original", threadKey: t, body: "" }, { method: "post", action: "/portal" });
+                    } else {
+                      deleteMessage(m.id);
+                    }
+                  }}
+                >Delete</button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return createPortal(
     <>
       {/* Click-outside backdrop. Transparent — the user can still
@@ -14473,238 +14674,145 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
         onClick={close}
       />
       <div style={{
-        position: "fixed",
-        top: 0,
-        right: 0,
-        bottom: 0,
-        width: 400,
-        maxWidth: "100vw",
+        position: "fixed", top: 0, right: 0, bottom: 0,
+        width: 424, maxWidth: "100vw",
         background: "#fff",
-        boxShadow: "-10px 0 30px rgba(0,0,0,0.12)",
+        boxShadow: "-10px 0 34px rgba(15,23,42,0.16)",
         zIndex: 1400,
-        display: "flex",
-        flexDirection: "column",
+        display: "flex", flexDirection: "column",
       }}>
-        {/* Field-name header */}
-        <div style={{ padding: "18px 20px 0", display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
-          <div style={{ fontWeight: 800, fontSize: 14, letterSpacing: "0.06em", color: "#111827" }}>{fieldLabel}</div>
-          <button
-            type="button"
-            onClick={close}
-            style={{ background: "transparent", border: "none", fontSize: 22, color: "#9ca3af", cursor: "pointer", lineHeight: 1, padding: 0 }}
-            title="Close"
-            aria-label="Close thread panel"
-          >×</button>
-        </div>
-        {/* Row context + original note */}
-        <div style={{ padding: "10px 20px 14px", borderBottom: "1px solid #f3f4f6" }}>
-          {rowParam && <div style={{ color: "#0d9488", fontWeight: 700, fontSize: 13 }}>Row {rowParam}</div>}
-          {topLevel && (() => {
-            const author = topLevel.fromName || topLevel.userName;
-            const canEdit = !!currentUser && author.trim().toLowerCase() === currentUser.name.trim().toLowerCase();
-            if (editingOriginal) {
-              return (
-                <div style={{ marginTop: 4 }}>
-                  <textarea
-                    value={originalDraft}
-                    onChange={(e) => setOriginalDraft(e.target.value)}
-                    rows={3}
-                    autoFocus
-                    style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: 8, fontSize: 15, fontWeight: 600, fontFamily: "inherit", boxSizing: "border-box" }}
-                  />
-                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        originalFetcher.submit(
-                          { intent: "update_thread_original", threadKey, body: originalDraft },
-                          { method: "post", action: "/portal" },
-                        );
-                      }}
-                      disabled={originalFetcher.state !== "idle"}
-                      style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}
-                    >{originalFetcher.state !== "idle" ? "Saving…" : "Save"}</button>
-                    <button
-                      type="button"
-                      onClick={() => setEditingOriginal(false)}
-                      style={{ background: "transparent", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 5, padding: "6px 14px", fontSize: 13, cursor: "pointer" }}
-                    >Cancel</button>
-                  </div>
-                </div>
-              );
-            }
-            return (
-              <>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "#111827", marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-                  {topLevel.body}
-                </div>
-                <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 5 }}>
-                  {topLevel.fromName ? `${topLevel.fromName} · ` : ""}{messageStamp(topLevel.createdAt)}{topLevel.editedAt ? " · edited" : ""}
-                </div>
-                {canEdit && (
-                  <div style={{ display: "flex", gap: 12, marginTop: 6 }}>
-                    <button
-                      type="button"
-                      onClick={() => { setOriginalDraft(topLevel.body); setEditingOriginal(true); }}
-                      style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, fontSize: 11 }}
-                      title="Edit the original note"
-                    >Edit</button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!window.confirm("Delete this note? This will clear the cell text and remove all replies.")) return;
-                        // Close instantly — the user perceives delete
-                        // as immediate. The action runs in the
-                        // background and the loader revalidation
-                        // updates the cell text shortly after.
-                        const t = threadKey;
-                        close();
-                        if (t) {
-                          originalFetcher.submit(
-                            { intent: "update_thread_original", threadKey: t, body: "" },
-                            { method: "post", action: "/portal" },
-                          );
-                        }
-                      }}
-                      style={{ background: "transparent", border: "none", color: "#dc2626", cursor: "pointer", padding: 0, fontSize: 11 }}
-                      title="Clear the note and close this thread"
-                    >Delete</button>
-                  </div>
-                )}
-              </>
-            );
-          })()}
-          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
-            {displayedReplies.length === 0 ? "No comments yet" : `${displayedReplies.length} comment${displayedReplies.length === 1 ? "" : "s"}`}
-          </div>
-        </div>
-        {/* Comments list (replies only — original shown above) */}
-        <div style={{ flex: 1, overflowY: "auto", padding: "12px 20px", display: "flex", flexDirection: "column", gap: 14 }}>
-          {threadFetcher.state !== "idle" && messages.length === 0 && (
-            <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: 20 }}>Loading…</div>
-          )}
-          {displayedReplies.map((m) => {
-            const author = m.fromName || m.userName;
-            // Author-only edit/delete — match by name (the fromName
-            // we store at write time is the user's display name).
-            // Optimistic local rows have id < 0 so we hide actions
-            // until the server-side row arrives.
-            const isAuthor = !!currentUser && author.trim().toLowerCase() === currentUser.name.trim().toLowerCase();
-            const isPending = m.id < 0;
-            return (
-              <div key={m.id} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                <ThreadAvatar name={author} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                    <div>
-                      <span style={{ fontWeight: 700, fontSize: 13, color: "#111827" }}>{author}</span>
-                      <span style={{ fontSize: 11, color: "#9ca3af", marginLeft: 6 }} title={relativeTime(m.createdAt)}>{messageStamp(m.createdAt)}{m.editedAt && " · edited"}</span>
-                    </div>
-                    {isAuthor && !isPending && editingId !== m.id && (
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <button
-                          type="button"
-                          onClick={() => startEdit(m)}
-                          style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", padding: 0, fontSize: 11 }}
-                          title="Edit this message"
-                        >Edit</button>
-                        <button
-                          type="button"
-                          onClick={() => deleteMessage(m.id)}
-                          style={{ background: "transparent", border: "none", color: "#dc2626", cursor: "pointer", padding: 0, fontSize: 11 }}
-                          title="Delete this message"
-                        >Delete</button>
-                      </div>
-                    )}
-                  </div>
-                  {editingId === m.id ? (
-                    <div style={{ marginTop: 4 }}>
-                      <textarea
-                        value={editDraft}
-                        onChange={(e) => setEditDraft(e.target.value)}
-                        rows={2}
-                        style={{ width: "100%", border: "1px solid #d1d5db", borderRadius: 6, padding: 8, fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }}
-                      />
-                      <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                        <button type="button" onClick={submitEdit} style={{ background: "#0d9488", color: "#fff", border: "none", borderRadius: 5, padding: "5px 12px", fontSize: 12, cursor: "pointer" }}>Save</button>
-                        <button type="button" onClick={() => setEditingId(null)} style={{ background: "transparent", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 5, padding: "5px 12px", fontSize: 12, cursor: "pointer" }}>Cancel</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ fontSize: 13, color: "#111827", marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-                      {renderBodyWithMentions(m.body)}
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-          {displayedReplies.length === 0 && threadFetcher.state === "idle" && (
-            <div style={{ color: "#9ca3af", fontSize: 13, textAlign: "center", padding: "10px 0" }}>No replies yet. Type below to start a conversation.</div>
-          )}
-        </div>
-        {/* Reply input */}
-        <div style={{ borderTop: "1px solid #e5e7eb", padding: "12px 20px" }}>
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-            <ThreadAvatar name={currentName} size={32} />
-            <div style={{ flex: 1, border: "1px solid #d1d5db", borderRadius: 8, padding: 8, position: "relative" }}>
-              {mentionSuggestions.length > 0 && (
-                <div style={{ position: "absolute", bottom: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 8, boxShadow: "0 -8px 24px rgba(0,0,0,0.14)", padding: 4, zIndex: 10, maxHeight: 200, overflow: "auto" }}>
-                  {mentionSuggestions.map((u) => (
-                    <button
-                      key={u.id}
-                      type="button"
-                      onMouseDown={(e) => { e.preventDefault(); pickMention(u.name); }}
-                      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", background: "none", border: "none", borderRadius: 6, padding: "7px 8px", cursor: "pointer", fontSize: 13, color: "#111827" }}
-                    >
-                      <ThreadAvatar name={u.name} size={22} />
-                      <span style={{ fontWeight: 600 }}>{u.name}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-              <textarea
-                ref={replyRef}
-                value={replyDraft}
-                onChange={(e) => setReplyDraft(e.target.value)}
-                placeholder="Write a reply..."
-                rows={2}
-                onKeyDown={(e) => {
-                  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitReply();
-                }}
-                style={{ width: "100%", border: "none", outline: "none", resize: "none", padding: 0, fontSize: 13, fontFamily: "inherit", background: "transparent" }}
-              />
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
-                <button
-                  type="button"
-                  onClick={() => setReplyDraft((d) => d + "@")}
-                  title="Mention someone"
-                  style={{ background: "transparent", border: "none", color: "#6b7280", cursor: "pointer", fontSize: 16, padding: 4 }}
-                >@</button>
-                <button
-                  type="button"
-                  onClick={submitReply}
-                  disabled={!replyDraft.trim() || replyFetcher.state !== "idle"}
-                  style={{
-                    background: replyDraft.trim() ? "#0d9488" : "#9ca3af",
-                    color: "#fff",
-                    border: "none",
-                    borderRadius: 5,
-                    padding: "6px 16px",
-                    fontSize: 13,
-                    fontWeight: 600,
-                    cursor: replyDraft.trim() ? "pointer" : "not-allowed",
-                  }}
-                >
-                  {replyFetcher.state !== "idle" ? "Sending…" : "Send"}
-                </button>
+        {/* ── Context-rich header ── */}
+        <div style={{ padding: "13px 16px 12px", borderBottom: `1px solid ${C.line}` }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 10.5, letterSpacing: "0.09em", textTransform: "uppercase", color: C.tealDk, fontWeight: 700 }}>{formatFieldLabel(field)}</div>
+              <div style={{ fontWeight: 700, fontSize: 16, color: C.ink, lineHeight: 1.2, marginTop: 2, overflowWrap: "anywhere" }}>{headerTitle}</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 }}>
+                {rowParam && <span style={{ fontSize: 11, fontWeight: 600, color: C.soft, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 999, padding: "3px 9px" }}><span style={{ color: C.faint }}>Row</span> {rowParam}</span>}
+                {productTitle && productTitle !== headerTitle && <span style={{ fontSize: 11, fontWeight: 600, color: C.soft, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 999, padding: "3px 9px" }}>{productTitle}</span>}
+                <span style={{ fontSize: 11, fontWeight: 600, color: C.soft, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 999, padding: "3px 9px" }}>{displayedReplies.length === 0 ? "No replies yet" : `${displayedReplies.length} ${displayedReplies.length === 1 ? "reply" : "replies"}`}</span>
               </div>
             </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+              <button
+                type="button"
+                onClick={toggleResolved}
+                title={resolved ? "Mark this thread not handled" : "Mark this thread handled"}
+                style={{
+                  border: `1px solid ${C.teal}`, borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 700,
+                  cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5, whiteSpace: "nowrap",
+                  ...(resolved ? { background: C.teal, color: "#fff" } : { background: "transparent", color: C.tealDk }),
+                }}
+              >✓ {resolved ? "Resolved" : "Resolve"}</button>
+              <button type="button" onClick={close} title="Close" aria-label="Close thread panel"
+                style={{ background: "transparent", border: `1px solid ${C.line}`, width: 30, height: 30, borderRadius: 8, fontSize: 18, color: C.soft, cursor: "pointer", lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+              >×</button>
+            </div>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, color: "#9ca3af", fontSize: 11 }}>
-            <span style={{ background: "#f3f4f6", borderRadius: 12, padding: "3px 8px" }}>@</span>
-            <span>Type @ to mention someone. They'll get notified.</span>
+          {resolved && (
+            <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 10, padding: "7px 11px", borderRadius: 9, background: C.tealWash, color: C.tealDk, fontSize: 12, fontWeight: 600 }}>
+              ✓ Resolved{resolvedBy ? ` by ${resolvedBy}` : ""}{resolvedAt ? ` · ${formatPortalDate(new Date(resolvedAt))}` : ""}
+            </div>
+          )}
+        </div>
+
+        {/* ── Conversation ── */}
+        <div ref={convoRef} style={{ flex: 1, overflowY: "auto", padding: "8px 16px 10px", display: "flex", flexDirection: "column" }}>
+          {threadFetcher.state !== "idle" && messages.length === 0 && (
+            <div style={{ color: C.faint, fontSize: 13, textAlign: "center", padding: 20 }}>Loading…</div>
+          )}
+          {(() => {
+            const out: React.ReactNode[] = [];
+            let lastDay: string | null = null;
+            let newShown = false;
+            for (const { m, original } of orderedItems) {
+              if (!lastDay || !sameDay(lastDay, m.createdAt)) {
+                out.push(
+                  <div key={`day-${m.id}-${original ? "o" : "r"}`} style={{ display: "flex", alignItems: "center", gap: 10, margin: "12px 2px 2px" }}>
+                    <div style={{ flex: 1, height: 1, background: C.line }} />
+                    <span style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: C.faint }}>{dayLabel(m.createdAt)}</span>
+                    <div style={{ flex: 1, height: 1, background: C.line }} />
+                  </div>,
+                );
+                lastDay = m.createdAt;
+              }
+              if (!newShown && firstUnreadId != null && m.id === firstUnreadId) {
+                out.push(
+                  <div key={`new-${m.id}`} style={{ display: "flex", alignItems: "center", gap: 10, margin: "10px 2px 2px" }}>
+                    <div style={{ flex: 1, height: 1, background: "rgba(220,38,38,0.35)" }} />
+                    <span style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: ".06em", textTransform: "uppercase", color: C.red }}>New</span>
+                    <div style={{ flex: 1, height: 1, background: "rgba(220,38,38,0.35)" }} />
+                  </div>,
+                );
+                newShown = true;
+              }
+              out.push(renderMessage(m, original));
+            }
+            return out;
+          })()}
+          {orderedItems.length === 0 && threadFetcher.state === "idle" && (
+            <div style={{ color: C.faint, fontSize: 13, textAlign: "center", padding: "16px 0" }}>No messages yet. Write below to start the conversation.</div>
+          )}
+        </div>
+
+        {/* ── Composer ── */}
+        <div style={{ borderTop: `1px solid ${C.line}`, padding: "10px 14px 12px", position: "relative" }}>
+          {/* Will-notify preview + mis-tag warning */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 8, minHeight: 20 }}>
+            {(notifyList.length > 0 || unknownTags.length > 0) ? (
+              <>
+                <span style={{ fontSize: 11, color: C.faint, fontWeight: 600 }}>🔔 Will notify</span>
+                {notifyList.map((n) => (
+                  <span key={n} style={{ fontSize: 11, fontWeight: 600, background: C.tealWash, color: C.tealDk, borderRadius: 999, padding: "2px 9px" }}>{n}</span>
+                ))}
+                {unknownTags.map((t) => (
+                  <span key={t} style={{ fontSize: 11, fontWeight: 600, color: C.amber }}>⚠ “@{t}” matches no one</span>
+                ))}
+              </>
+            ) : (
+              <span style={{ fontSize: 11, color: C.faint, fontStyle: "italic" }}>Thread members get a bell · type @ to notify someone else</span>
+            )}
           </div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 8, position: "relative" }}>
+            {mentionSuggestions.length > 0 && (
+              <div style={{ position: "absolute", bottom: "calc(100% + 6px)", left: 0, right: 50, background: "#fff", border: `1px solid ${C.line}`, borderRadius: 10, boxShadow: "0 -8px 24px rgba(0,0,0,0.14)", padding: 4, zIndex: 10, maxHeight: 200, overflow: "auto" }}>
+                {mentionSuggestions.map((u) => (
+                  <button key={u.id} type="button" onMouseDown={(e) => { e.preventDefault(); pickMention(u.name); }}
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", background: "none", border: "none", borderRadius: 6, padding: "7px 8px", cursor: "pointer", fontSize: 13, color: C.ink }}
+                  >
+                    <ThreadAvatar name={u.name} size={22} />
+                    <span style={{ fontWeight: 600 }}>{u.name}</span>
+                    {u.role && <span style={{ marginLeft: "auto", fontSize: 11, color: C.faint }}>{u.role}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+            <textarea
+              ref={replyRef}
+              value={replyDraft}
+              onChange={(e) => setReplyDraft(e.target.value)}
+              placeholder="Reply…  type @ to tag someone"
+              rows={1}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  if (mentionSuggestions.length > 0) { pickMention(mentionSuggestions[0].name); return; }
+                  submitReply();
+                }
+              }}
+              style={{ flex: 1, minWidth: 0, resize: "none", border: `1px solid ${C.line}`, background: C.panel2, color: C.ink, borderRadius: 12, padding: "10px 12px", fontSize: 13.5, lineHeight: 1.4, fontFamily: "inherit", maxHeight: 120 }}
+            />
+            <button
+              type="button"
+              onClick={submitReply}
+              disabled={!replyDraft.trim() || replyFetcher.state !== "idle"}
+              title="Send reply"
+              style={{ border: "none", background: C.teal, color: "#fff", cursor: replyDraft.trim() ? "pointer" : "default", width: 42, height: 42, borderRadius: 12, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", opacity: replyDraft.trim() && replyFetcher.state === "idle" ? 1 : 0.45 }}
+            >
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12l16-8-6 16-3-6-7-2z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" fill="currentColor" fillOpacity="0.15" /></svg>
+            </button>
+          </div>
+          <div style={{ fontSize: 10.5, color: C.faint, marginTop: 6 }}>Enter to send · Shift+Enter for a new line</div>
         </div>
       </div>
     </>,
