@@ -2996,6 +2996,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const until = String(form.get("until") ?? "").trim();
     const q = String(form.get("q") ?? "").trim().toLowerCase();
     const typeFilter = String(form.get("type") ?? "").trim();
+    const tagFilter = String(form.get("tag") ?? "").trim();
     const hideSale = String(form.get("hideSale") ?? "") === "1";
     const pageNum = Math.max(1, parseInt(String(form.get("page") ?? "1"), 10) || 1);
     const refresh = String(form.get("refresh") ?? "") === "1";
@@ -3050,8 +3051,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     // Distinct product types across the whole catalogue (for the filter dropdown),
     // computed before the type filter so the list stays stable.
     const productTypes = Array.from(new Set(enriched.map((p) => p.productType).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    // Per-product tags (for the tag filter) kept off `enriched`/the slice so the
+    // payload stays lean; filtering uses this map instead.
+    const tagsById = new Map(stockProducts.map((p) => [p.id, (p.tags ?? []).map((t) => t.trim()).filter(Boolean)]));
+    const isNoiseTag = (t: string) => { const s = t.toLowerCase(); return s === "pre-order" || s.startsWith("pre-order: ") || s.startsWith("pre-order ships "); };
+    // Distinct tags across the whole catalogue (drop pre-order plumbing tags).
+    const productTags = Array.from(new Set(Array.from(tagsById.values()).flat().filter((t) => !isNoiseTag(t)))).sort((a, b) => a.localeCompare(b));
     let filtered = q ? enriched.filter((p) => p.title.toLowerCase().includes(q)) : enriched;
     if (typeFilter) filtered = filtered.filter((p) => p.productType === typeFilter);
+    if (tagFilter) filtered = filtered.filter((p) => (tagsById.get(p.id) ?? []).includes(tagFilter));
     // Hide Sale products (never reordered): product type is exactly "Sale", or any
     // tag contains "sale". Filtered out entirely so ranking + pagination exclude them.
     if (hideSale) {
@@ -3117,7 +3125,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         onOrder: { entries, bySize },
       };
     });
-    return jsonResponse({ ok: true, products: slice, productTypes, page: clampedPage, pageCount, totalProducts, pageSize, lookbackDays, salesAvailable: soldByProduct !== null });
+    return jsonResponse({ ok: true, products: slice, productTypes, productTags, page: clampedPage, pageCount, totalProducts, pageSize, lookbackDays, salesAvailable: soldByProduct !== null });
   }
 
   if (intent === "create_restock_order_from_portal") {
@@ -34853,7 +34861,7 @@ function UsaStockPanel({ orders, shopDomain, search = "" }: { orders: Order[]; s
 type ReorderOnOrderEntry = { orderId: number; label: string; supplierStatus: string | null; priority: string | null; destination: string | null; supplier: string | null; preorderEnabled: boolean; preorderActivated: boolean; preorderShipDate: string | null; bySize: Record<string, number>; total: number };
 type ReorderOverviewProduct = { id: string; title: string; productType?: string; vendor?: string; imageUrl: string | null; shop: string; sizes: Array<{ size: string; stock: number; unitsSold: number }>; totalStock: number; totalSold: number; effectiveDays?: number; weeksCover: number | null; firstSoldDate?: string | null; daysSource?: "sold" | "release" | "window"; onOrder?: { entries: ReorderOnOrderEntry[]; bySize: Record<string, number> } };
 function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = false }: { search?: string; restockSettings: RestockSettings; canManagePreorder?: boolean }) {
-  const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
+  const overviewFetcher = useFetcher<{ ok?: boolean; products?: ReorderOverviewProduct[]; productTypes?: string[]; productTags?: string[]; page?: number; pageCount?: number; totalProducts?: number; pageSize?: number; lookbackDays?: number; salesAvailable?: boolean }>();
   const pushFetcher = useFetcher<{ success?: boolean; orderId?: number } & Record<string, unknown>>();
 
   const [lookback, setLookback] = useState("90");
@@ -34862,6 +34870,7 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
   const [growth, setGrowth] = useState("0");   // % more (or less) than the baseline period
   const [debouncedQ, setDebouncedQ] = useState("");   // debounced copy of the header search
   const [typeFilter, setTypeFilter] = useState("");
+  const [tagFilter, setTagFilter] = useState("");
   const [hideSale, setHideSale] = useState(true);     // hide Sale products (never reordered)
   const [page, setPage] = useState(1);
   // Sell-until is SHARED across the page by default: editing any product's date
@@ -34963,12 +34972,12 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
   };
 
   useEffect(() => { const t = setTimeout(() => setDebouncedQ(search.trim()), 200); return () => clearTimeout(t); }, [search]);
-  useEffect(() => { setPage(1); }, [debouncedQ, since, until, typeFilter, hideSale]);
+  useEffect(() => { setPage(1); }, [debouncedQ, since, until, typeFilter, tagFilter, hideSale]);
 
   const submitOverview = (opts?: { refresh?: boolean }) => {
     if (!since || !until) return;
     overviewFetcher.submit(
-      { intent: "reorder_overview", since, until, q: debouncedQ, type: typeFilter, hideSale: hideSale ? "1" : "", page: String(page), ...(opts?.refresh ? { refresh: "1" } : {}) },
+      { intent: "reorder_overview", since, until, q: debouncedQ, type: typeFilter, tag: tagFilter, hideSale: hideSale ? "1" : "", page: String(page), ...(opts?.refresh ? { refresh: "1" } : {}) },
       { method: "post" },
     );
   };
@@ -34976,10 +34985,13 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
     if (!since || !until) return;
     submitOverview();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [since, until, debouncedQ, typeFilter, hideSale, page]);
+  }, [since, until, debouncedQ, typeFilter, tagFilter, hideSale, page]);
   const typeOptionsRef = useRef<string[]>([]);
   if ((overviewFetcher.data?.productTypes?.length ?? 0) > 0) typeOptionsRef.current = overviewFetcher.data!.productTypes!;
   const productTypeOptions = typeOptionsRef.current;
+  const tagOptionsRef = useRef<string[]>([]);
+  if ((overviewFetcher.data?.productTags?.length ?? 0) > 0) tagOptionsRef.current = overviewFetcher.data!.productTags!;
+  const productTagOptions = tagOptionsRef.current;
 
   // Pinned products keep their own date (overrides[id].until); everyone else
   // follows the shared date (which falls back to the default until first edited).
@@ -35245,6 +35257,13 @@ function ReorderPlannerPage({ search = "", restockSettings, canManagePreorder = 
             <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} style={{ ...compact, width: 160 }}>
               <option value="">All types</option>
               {productTypeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </label>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <span style={inlineLabel}>Tag</span>
+            <select value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} style={{ ...compact, width: 160 }}>
+              <option value="">All tags</option>
+              {productTagOptions.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
           </label>
           <button
