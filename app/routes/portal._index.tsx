@@ -6559,6 +6559,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const sheets = await loadManualFabricSheetsForAction();
     const sheet = sheets.find((item) => item.gid === gid);
     if (!sheet?.rows[rowIndex]) return null;
+    // Periodic restore point of the pre-edit text (throttled; images stripped).
+    await backupFabricSheets(sheets, currentUser?.name ?? null, "autosave");
     while (sheet.rows[rowIndex].length <= colIndex) sheet.rows[rowIndex].push("");
     sheet.rows[rowIndex][colIndex] = value;
     // Editing the Notes column fans @mentions out as portal messages, same as
@@ -6587,6 +6589,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const sheets = await loadManualFabricSheetsForAction();
     const sheet = sheets.find((item) => item.gid === gid);
     if (!sheet?.rows[rowIndex]) return null;
+    await backupFabricSheets(sheets, currentUser?.name ?? null, "before-column-change", { force: true });
     let idx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h.trim()) || /^type$/i.test(h.trim()));
     if (idx < 0) {
       if (!value) return null; // nothing to store, don't add an empty column
@@ -6612,6 +6615,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const sheets = await loadManualFabricSheetsForAction();
     const sheet = sheets.find((item) => item.gid === gid);
     if (!sheet?.rows[rowIndex]) return null;
+    await backupFabricSheets(sheets, currentUser?.name ?? null, "autosave");
     let idx = sheet.headers.findIndex((h) => /^notes?$/i.test(h.trim()));
     if (idx < 0) {
       if (!value.trim()) return null; // don't add an empty column
@@ -6671,6 +6675,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const targetSheet = sheets.find((item) => item.gid === targetGid);
     if (!sourceSheet || !Number.isInteger(rowIndex) || rowIndex < 0) return null;
     if (intent === "move_fabric_row" && (!targetSheet || targetSheet.gid === sourceSheet.gid || isHiddenFabricSheet(targetSheet.name))) return null;
+    // Restore point before a row is deleted / moved / duplicated.
+    await backupFabricSheets(sheets, currentUser?.name ?? null, intent === "delete_fabric_row" ? "before-delete" : intent === "move_fabric_row" ? "before-move" : "before-duplicate", { force: true });
 
     // Thread identity: a duplicate must NOT inherit the original's key (it
     // would share its note thread); a move keeps it so the thread follows.
@@ -6736,6 +6742,46 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     sheet.rows.push(Array.from({ length: sheet.headers.length }, () => ""));
     await saveManualFabricSheets(sheets);
     return null;
+    });
+  }
+
+  // Fabric restore history: list recent text snapshots.
+  if (intent === "list_fabric_backups") {
+    try {
+      await ensureFabricBackupTable();
+      const rows = await prisma.$queryRawUnsafe<Array<{ id: number; savedBy: string | null; reason: string | null; createdAt: Date }>>(
+        `SELECT "id", "savedBy", "reason", "createdAt" FROM "FabricSheetsBackup" ORDER BY "id" DESC LIMIT 60`,
+      );
+      return jsonResponse({ ok: true, backups: rows.map((r) => ({ id: Number(r.id), savedBy: r.savedBy, reason: r.reason, createdAt: r.createdAt })) });
+    } catch (e) {
+      console.warn("[list_fabric_backups]", e);
+      return jsonResponse({ ok: false, backups: [] });
+    }
+  }
+
+  // Restore the fabric TEXT from a snapshot, overlaying it onto the current sheets
+  // (preserves current images, re-adds deleted rows). The current text is
+  // snapshotted first so a restore is itself undoable.
+  if (intent === "restore_fabric_backup") {
+    const backupId = Number(form.get("backupId"));
+    if (!backupId) return jsonResponse({ ok: false, error: "bad_request" });
+    return withFabricSheetsLock(async () => {
+      try {
+        await ensureFabricBackupTable();
+        const got = await prisma.$queryRawUnsafe<Array<{ data: unknown }>>(
+          `SELECT "data" FROM "FabricSheetsBackup" WHERE "id" = $1 LIMIT 1`, backupId,
+        );
+        if (!got.length) return jsonResponse({ ok: false, error: "snapshot_not_found" });
+        const snapshot = normalizeManualFabricSheets(got[0].data);
+        const current = await loadManualFabricSheetsForAction();
+        await backupFabricSheets(current, currentUser?.name ?? null, "before-restore", { force: true });
+        const restored = overlayFabricTextOntoCurrent(snapshot, current);
+        await saveManualFabricSheets(restored);
+        return jsonResponse({ ok: true });
+      } catch (e) {
+        console.warn("[restore_fabric_backup]", e);
+        return jsonResponse({ ok: false, error: "restore_failed" });
+      }
     });
   }
 
@@ -7012,6 +7058,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   // needs the (heavy) fabric-page loader to re-run. Rapid fabric editing was a
   // prime trigger for the cascading "Load failed".
   if (intent === "update_fabric_cell" || intent === "upload_fabric_image") return false;
+  if (intent === "list_fabric_backups" || intent === "restore_fabric_backup") return false;
   // Product Information style image: the tile updates optimistically (local
   // setProductInfo). The product-info blob is large, so re-running the loader
   // just to see the image you already applied would re-download all of it and
@@ -9462,6 +9509,102 @@ function conservativeMergeCollectionRows(theirs: CollRow[], mine: CollRow[]): Co
     const k = String(mrow.__rowKey ?? "");
     if (k && used.has(k)) continue;
     result.push(mrow);
+  }
+  return result;
+}
+
+// ─── Fabric sheets: text snapshots + overlay restore ────────────────────────
+// The fabric blob can be ~35MB (inline swatch images), so snapshotting it whole
+// on every edit is out. Instead we snapshot only the TEXT (dates, names, notes,
+// quantities — the stuff that goes missing) with image cells stripped, which is
+// tiny. Restore overlays that text back onto the CURRENT sheets by column NAME
+// (robust to column shifts) and row key, preserving the current images and
+// re-adding any rows deleted since. Fabric cell writes are already race-safe
+// (per-cell + withFabricSheetsLock); this is the recover-from-a-wipe net.
+const FABRIC_BACKUP_THROTTLE_MS = 150000; // ~2.5 min between ordinary autosave snapshots
+let lastFabricBackupAt = 0;
+let fabricBackupTableReady = false;
+
+function isImageCellValue(v: string): boolean {
+  const t = (v ?? "").trim();
+  if (!t) return false;
+  return /^data:/i.test(t) || /^blob:/i.test(t) || /^(?:https?:\/\/|\/)\S+\.(?:png|jpe?g|webp|gif|avif)(?:\?\S*)?$/i.test(t);
+}
+function stripFabricImagesForBackup(sheets: FabricStockSheet[]): FabricStockSheet[] {
+  return sheets.map((s) => ({ ...s, rows: s.rows.map((row) => row.map((cell) => (isImageCellValue(cell) ? "" : cell))) }));
+}
+async function ensureFabricBackupTable() {
+  if (fabricBackupTableReady) return;
+  await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "FabricSheetsBackup" (
+    "id" SERIAL PRIMARY KEY,
+    "data" JSONB NOT NULL,
+    "savedBy" TEXT,
+    "reason" TEXT,
+    "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  fabricBackupTableReady = true;
+}
+// Snapshot the current fabric text. Pass the already-loaded `sheets` to avoid a
+// re-read. Ordinary saves are throttled; structural ops pass force:true.
+async function backupFabricSheets(sheets: FabricStockSheet[], savedBy: string | null, reason: string, opts: { force?: boolean } = {}) {
+  try {
+    const now = Date.now();
+    if (!opts.force && now - lastFabricBackupAt < FABRIC_BACKUP_THROTTLE_MS) return;
+    if (!sheets.length) return;
+    await ensureFabricBackupTable();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "FabricSheetsBackup" ("data", "savedBy", "reason") VALUES ($1::jsonb, $2, $3)`,
+      JSON.stringify(stripFabricImagesForBackup(sheets)), savedBy, reason,
+    );
+    lastFabricBackupAt = now;
+    if (Math.random() < 0.2) {
+      await prisma.$executeRawUnsafe(`DELETE FROM "FabricSheetsBackup" WHERE "id" NOT IN (SELECT "id" FROM "FabricSheetsBackup" ORDER BY "id" DESC LIMIT 60)`);
+      await prisma.$executeRawUnsafe(`DELETE FROM "FabricSheetsBackup" WHERE "createdAt" < NOW() - INTERVAL '150 days'`);
+    }
+  } catch (e) {
+    console.warn("[backupFabricSheets]", e);
+  }
+}
+// Overlay a text snapshot back onto the current sheets. Matches sheets by gid,
+// rows by __rowKey (else by index), columns by header NAME. Restores the
+// snapshot's text values, never overwrites a current image cell, and re-adds
+// rows that were deleted since the snapshot. "Restore to that version" semantics.
+function overlayFabricTextOntoCurrent(snapshot: FabricStockSheet[], current: FabricStockSheet[]): FabricStockSheet[] {
+  const result = current.map((s) => ({ ...s, headers: [...s.headers], rows: s.rows.map((r) => [...r]) }));
+  const resByGid = new Map(result.map((s) => [s.gid, s]));
+  for (const snap of snapshot) {
+    const cur = resByGid.get(snap.gid);
+    if (!cur) continue; // whole sheet gone — don't recreate
+    const keyIdxCur = cur.headers.findIndex((h) => h.trim() === FABRIC_ROW_KEY_HEADER);
+    const keyIdxSnap = snap.headers.findIndex((h) => h.trim() === FABRIC_ROW_KEY_HEADER);
+    const curByKey = new Map<string, string[]>();
+    if (keyIdxCur >= 0) for (const r of cur.rows) { const k = (r[keyIdxCur] ?? "").trim(); if (k) curByKey.set(k, r); }
+    const curHeaderIdx = new Map<string, number>();
+    cur.headers.forEach((h, i) => curHeaderIdx.set(h.trim().toLowerCase(), i));
+    snap.rows.forEach((srow, sIdx) => {
+      const key = keyIdxSnap >= 0 ? (srow[keyIdxSnap] ?? "").trim() : "";
+      let crow = key ? curByKey.get(key) : undefined;
+      if (!crow && !key && cur.rows[sIdx]) crow = cur.rows[sIdx];
+      if (!crow) {
+        // Row deleted since the snapshot → re-add it, mapped into current columns.
+        const newRow = new Array(cur.headers.length).fill("");
+        snap.headers.forEach((h, ci) => {
+          const ti = curHeaderIdx.get(h.trim().toLowerCase());
+          if (ti != null) newRow[ti] = srow[ci] ?? "";
+        });
+        cur.rows.push(newRow);
+        return;
+      }
+      snap.headers.forEach((h, ci) => {
+        const name = h.trim().toLowerCase();
+        if (name === FABRIC_ROW_KEY_HEADER.toLowerCase()) return;
+        const ti = curHeaderIdx.get(name);
+        if (ti == null) return;
+        while (crow!.length <= ti) crow!.push("");
+        if (isImageCellValue(crow![ti] ?? "")) return; // preserve current image
+        crow![ti] = srow[ci] ?? "";
+      });
+    });
   }
   return result;
 }
@@ -26242,6 +26385,14 @@ function CombinedFabricStockPanel({
   nameSearch: string;
 }) {
   const fetcher = useFetcher();
+  // Fabric restore history (recover text that was wiped — dates, names, notes).
+  type FabBackup = { id: number; savedBy: string | null; reason: string | null; createdAt: string };
+  const backupsFetcher = useFetcher<{ ok?: boolean; backups?: FabBackup[] }>();
+  const restoreFetcher = useFetcher<{ ok?: boolean }>();
+  const [showHistory, setShowHistory] = useState(false);
+  useEffect(() => {
+    if (restoreFetcher.state === "idle" && restoreFetcher.data?.ok) window.location.reload();
+  }, [restoreFetcher.state, restoreFetcher.data]);
   // 💬 counts for the fabric note threads, keyed
   // "fabric_row:0:<rowKey>:notes" — same shape as the other pages.
   const threadCountsFetcher = useFetcher<{ counts: Array<{ key: string; total: number; unread: number }> }>();
@@ -26496,6 +26647,49 @@ function CombinedFabricStockPanel({
               Clear filter
             </button>
           )}
+          <div style={{ position: "relative" }}>
+            <button
+              type="button"
+              style={s.secondaryButton}
+              onClick={() => { const open = !showHistory; setShowHistory(open); if (open) backupsFetcher.submit({ intent: "list_fabric_backups" }, { method: "post" }); }}
+              title="Restore earlier saved text (dates, names, notes, quantities) in case something was changed or wiped"
+            >🕑 History</button>
+            {showHistory && (
+              <>
+                <div onClick={() => setShowHistory(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+                <div style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 41, width: 360, maxHeight: 440, overflowY: "auto", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 14px 40px rgba(0,0,0,0.2)", padding: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#111827", marginBottom: 2 }}>Saved text versions</div>
+                  <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>Restore puts the fabric <strong>text</strong> (dates, names, notes, quantities) back to an earlier version and re-adds any deleted rows. Your current images are kept. The current text is saved first, so a restore is undoable.</div>
+                  {backupsFetcher.state !== "idle" && !backupsFetcher.data && (
+                    <div style={{ fontSize: 12, color: "#6b7280", padding: "8px 2px" }}>Loading…</div>
+                  )}
+                  {backupsFetcher.data?.ok && (backupsFetcher.data.backups?.length ?? 0) === 0 && (
+                    <div style={{ fontSize: 12, color: "#6b7280", padding: "8px 2px" }}>No earlier versions yet — they'll appear here after the next edits.</div>
+                  )}
+                  {(backupsFetcher.data?.backups ?? []).map((b) => {
+                    const when = new Date(b.createdAt);
+                    const label = `${when.toLocaleDateString(undefined, { day: "numeric", month: "short" })}, ${when.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+                    const reasonLabel = b.reason === "before-delete" ? "before a row delete" : b.reason === "before-move" ? "before a row move" : b.reason === "before-duplicate" ? "before a duplicate" : b.reason === "before-column-change" ? "before a column change" : b.reason === "before-restore" ? "before a restore" : "auto-saved";
+                    const busy = restoreFetcher.state !== "idle";
+                    return (
+                      <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 6px", borderTop: "1px solid #f1f5f9" }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#111827" }}>{label}</div>
+                          <div style={{ fontSize: 11, color: "#6b7280" }}>{reasonLabel}{b.savedBy ? ` · ${b.savedBy}` : ""}</div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => { if (window.confirm(`Restore fabric text to the version from ${label}?\n\nText (dates, names, notes, quantities) goes back to this version and deleted rows are re-added. Current images are kept, and this is undoable.`)) restoreFetcher.submit({ intent: "restore_fabric_backup", backupId: String(b.id) }, { method: "post" }); }}
+                          style={{ fontSize: 11.5, fontWeight: 700, padding: "5px 10px", borderRadius: 6, border: "1px solid #0d9488", background: busy ? "#f1f5f9" : "#0d9488", color: busy ? "#94a3b8" : "#fff", cursor: busy ? "wait" : "pointer", flexShrink: 0 }}
+                        >Restore</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
         </div>
         <div style={s.fabricToolbarMeta}>
           <span><strong>{filteredRows.length}</strong> rows</span>
