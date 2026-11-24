@@ -19300,7 +19300,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 {/* ⋯ actions menu — keeps Change cover + Hide OUT of the click-to-open area. */}
                 <button type="button" title="More actions" onClick={(e) => { e.stopPropagation(); setMenuGroupId((cur) => cur === g.id ? null : g.id); }} style={{ position: "absolute", top: 8, right: 8, zIndex: 6, width: 26, height: 26, borderRadius: 7, border: "none", background: "rgba(17,24,39,0.82)", color: "#fff", fontSize: 16, fontWeight: 900, lineHeight: 1, cursor: "pointer", display: "grid", placeItems: "center", boxShadow: "0 2px 6px rgba(0,0,0,0.25)" }}>⋯</button>
                 {(taskCounts[`group:${g.id}`] ?? 0) > 0 && (
-                  <span title="Open tasks" style={{ position: "absolute", top: 3, right: 3, zIndex: 7, background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.3)", pointerEvents: "none" }}>{taskCounts[`group:${g.id}`]}</span>
+                  <span title={`${taskCounts[`group:${g.id}`]} open task${taskCounts[`group:${g.id}`] !== 1 ? "s" : ""} — open the ⋯ menu`} style={{ position: "absolute", top: 4, right: 4, zIndex: 7, width: 17, height: 17, borderRadius: 999, background: "#0d9488", border: "1.5px solid #fff", display: "inline-flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 4px rgba(0,0,0,0.35)", pointerEvents: "none" }}>
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></svg>
+                  </span>
                 )}
                 {menuGroupId === g.id && (
                   <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: 38, right: 8, zIndex: 12, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.22)", padding: 5, minWidth: 162 }}>
@@ -19830,7 +19832,9 @@ function CollectionCard({
         >⋯</button>
       )}
       {!hidden && onOpenHub && taskCount > 0 && (
-        <span title="Open tasks" style={{ position: "absolute", top: 3, right: 3, zIndex: 7, background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 3px rgba(0,0,0,0.3)", pointerEvents: "none" }}>{taskCount}</span>
+        <span title={`${taskCount} open task${taskCount !== 1 ? "s" : ""} — open the ⋯ menu`} style={{ position: "absolute", top: 4, right: 4, zIndex: 7, width: 17, height: 17, borderRadius: 999, background: "#0d9488", border: "1.5px solid #fff", display: "inline-flex", alignItems: "center", justifyContent: "center", boxShadow: "0 1px 4px rgba(0,0,0,0.35)", pointerEvents: "none" }}>
+          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></svg>
+        </span>
       )}
       {!hidden && menuOpen && (
         <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: 38, right: 8, zIndex: 12, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.22)", padding: 5, minWidth: 160 }}>
