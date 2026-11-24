@@ -19149,6 +19149,9 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const toggleSelectGroup = (id: string) => setSelectedGroupIds((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   const clearSelection = () => { setSelectedIds(new Set()); setSelectedGroupIds(new Set()); };
   const selectedCount = selectedIds.size + selectedGroupIds.size;
+  // Position typed into the floating "move to" bar.
+  const [tileMovePos, setTileMovePos] = useState("");
+  useEffect(() => { if (selectedCount === 0) setTileMovePos(""); }, [selectedCount]);
   const newGroupId = () => `g_${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
   // Create a group from the selected sheets AND/OR groups, nested inside the
   // container currently being viewed (parentId = the open group, or top level).
@@ -19609,26 +19612,42 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
           const at = firstIdx < 0 ? filtered.length : Math.min(firstIdx, filtered.length);
           saveTileOrder([...filtered.slice(0, at), ...newContainerOrder, ...filtered.slice(at)]);
         };
-        const moveSelectedTilesToPosition = () => {
-          const total = containerOrderedTokens().length;
-          const raw = window.prompt(`Move the ${selectedCount} selected tile(s) to which position? (1 = first, ${total} = last)`, "1");
-          if (raw == null) return;
-          const pos = Number(raw.trim());
+        const commitTileMovePos = () => {
+          const pos = Number(tileMovePos.trim());
           if (!Number.isFinite(pos) || pos < 1) return;
           moveSelectedTiles(pos);
+          setTileMovePos("");
         };
         const canSortTiles = !searchQ && !showHidden;
+        // Floating bottom-centre "move to" bar — appears as soon as tiles are
+        // selected, so the sort controls are always within reach.
+        const floatBtn: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.16)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 13px", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" };
+        const tileMoveBar = (canSortTiles && selectedCount > 0) ? (
+          <div style={{ position: "fixed", left: "50%", bottom: "max(20px, env(safe-area-inset-bottom, 0px))", transform: "translateX(-50%)", zIndex: 60, display: "flex", alignItems: "center", gap: 10, background: "#241a15", color: "#fff", borderRadius: 14, padding: "10px 14px", boxShadow: "0 16px 44px rgba(20,10,5,0.4)", maxWidth: "calc(100vw - 24px)", flexWrap: "wrap", justifyContent: "center" }}>
+            <span style={{ fontSize: 14, fontWeight: 800, opacity: 0.92 }}>{selectedCount} selected</span>
+            <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.2)" }} />
+            <button type="button" onClick={() => moveSelectedTiles("top")} style={floatBtn} title="Move selected tiles to the front">⤒ Move to top</button>
+            <button type="button" onClick={() => moveSelectedTiles("bottom")} style={floatBtn} title="Move selected tiles to the end">⤓ Move to bottom</button>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.1)", borderRadius: 9, padding: "4px 5px 4px 10px" }}>
+              <span style={{ fontSize: 13, fontWeight: 700 }}>Move to position</span>
+              <input
+                type="number"
+                min={1}
+                value={tileMovePos}
+                onChange={(e) => setTileMovePos(e.currentTarget.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitTileMovePos(); } }}
+                placeholder="#"
+                style={{ width: 58, padding: "7px 8px", borderRadius: 7, border: "none", fontSize: 14, fontWeight: 700, textAlign: "center", outline: "none" }}
+              />
+              <button type="button" onClick={commitTileMovePos} disabled={!tileMovePos.trim()} style={{ ...floatBtn, background: tileMovePos.trim() ? "#c0562f" : "rgba(255,255,255,0.12)", cursor: tileMovePos.trim() ? "pointer" : "default" }}>Go</button>
+            </div>
+            <button type="button" onClick={clearSelection} style={{ ...floatBtn, background: "transparent", opacity: 0.75 }} title="Clear selection">✕</button>
+          </div>
+        ) : null;
         const selBtn: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 8, borderRadius: 9, padding: "9px 15px", fontSize: 15, fontWeight: 700, border: "1px solid transparent" };
         const selectionBar = selectedCount > 0 ? (
           <div style={{ margin: "0 14px 14px", padding: "11px 16px", background: "#fff", color: "#241a15", borderTop: "3px solid #c0562f", borderRadius: "0 0 12px 12px", boxShadow: "0 14px 26px rgba(60,30,15,0.16)", display: "flex", alignItems: "center", gap: 12, fontSize: 15, fontWeight: 700, flexWrap: "wrap" }}>
             <span style={{ fontWeight: 800 }}>{selectedCount} selected</span>
-            {canSortTiles && (
-              <div style={{ display: "inline-flex", alignItems: "center", border: "1px solid #e4b5a1", borderRadius: 9, overflow: "hidden" }} title="Reorder the selected tiles (like Shopify's manual collection sort)">
-                <button type="button" onClick={() => moveSelectedTiles("top")} style={{ fontSize: 14, fontWeight: 700, padding: "9px 13px", border: "none", borderRight: "1px solid #f0d6cb", background: "#fff", color: "#8f3a1c", cursor: "pointer" }} title="Move selected tiles to the front">⤒ Top</button>
-                <button type="button" onClick={moveSelectedTilesToPosition} style={{ fontSize: 14, fontWeight: 700, padding: "9px 13px", border: "none", borderRight: "1px solid #f0d6cb", background: "#fff", color: "#8f3a1c", cursor: "pointer" }} title="Move selected tiles to a specific position">↕ Position…</button>
-                <button type="button" onClick={() => moveSelectedTiles("bottom")} style={{ fontSize: 14, fontWeight: 700, padding: "9px 13px", border: "none", background: "#fff", color: "#8f3a1c", cursor: "pointer" }} title="Move selected tiles to the end">⤓ Bottom</button>
-              </div>
-            )}
             <button type="button" onClick={groupSelected} disabled={selectedCount < 2} style={{ ...selBtn, background: "#c0562f", color: "#fff", borderColor: "#c0562f", cursor: selectedCount < 2 ? "default" : "pointer", opacity: selectedCount < 2 ? 0.5 : 1 }} title="Put the selected sheets and groups inside one new group"><span style={{ fontSize: 16 }}>📁</span> Combine into group</button>
             <button type="button" onClick={combineIntoCollection} disabled={!canSheet} style={{ ...selBtn, background: "#f6e3da", color: "#8f3a1c", borderColor: "#e4b5a1", cursor: canSheet ? "pointer" : "default", opacity: canSheet ? 1 : 0.5 }} title={onlySheets ? "Merge all rows into one sheet and delete the rest" : "Only sheets can be merged into one sheet"}><span style={{ fontSize: 16 }}>📄</span> Combine into one sheet</button>
             {groups.length > 0 && (
@@ -19856,6 +19875,7 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
                 <button type="button" onClick={doUndoHide} style={{ background: "#f6e3da", color: "#8f3a1c", border: "none", borderRadius: 7, padding: "5px 12px", fontWeight: 800, cursor: "pointer", fontSize: 12.5 }}>Undo</button>
               </div>
             )}
+            {tileMoveBar}
           </div>
         );
       })()}
