@@ -20646,6 +20646,9 @@ function CollectionSpreadsheetPage({
   const moveFetcher = useFetcher<{ ok?: boolean; moved?: number; targetId?: number; deletedSource?: boolean; error?: string }>();
   const sendShootFetcher = useFetcher<{ ok?: boolean; shootId?: number; added?: number; error?: string }>();
   const [selectedRowIdxs, setSelectedRowIdxs] = useState<Set<number>>(new Set());
+  // Position typed into the floating row "move to" bar.
+  const [rowMovePos, setRowMovePos] = useState("");
+  useEffect(() => { if (selectedRowIdxs.size === 0) setRowMovePos(""); }, [selectedRowIdxs]);
   const otherCollections = allCollections.filter((c) => c.id !== listItem.id);
   const [columns, setColumns] = useState<CollectionColumnDef[]>(DEFAULT_COLLECTION_COLUMNS);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
@@ -21438,14 +21441,13 @@ function CollectionSpreadsheetPage({
     setSelectedRowIdxs(movedIdxs);
     persistRows(next, prev, "Undo reorder rows");
   };
-  const moveSelectedToPosition = () => {
-    const total = rows.length;
-    const raw = window.prompt(`Move the ${selectedRowIdxs.size} selected row(s) to which position? (1 = top, ${total} = bottom)`, "1");
-    if (raw == null) return;
-    const pos = Number(raw.trim());
+  const commitRowMovePos = () => {
+    const pos = Number(rowMovePos.trim());
     if (!Number.isFinite(pos) || pos < 1) return;
     reorderSelectedRows(pos);
+    setRowMovePos("");
   };
+  const rowFloatBtn: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.16)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 13px", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" };
 
   // Shopify push (single row or batch). On success, we patch local
   // state with the returned product IDs so the row visibly flips to
@@ -21832,13 +21834,6 @@ function CollectionSpreadsheetPage({
             </select>
           )}
           {selectedRowIdxs.size > 0 && (
-            <div style={{ display: "inline-flex", alignItems: "center", border: "1px solid #cbd5e1", borderRadius: 6, overflow: "hidden" }} title="Reorder the selected rows (like Shopify's manual collection sort)">
-              <button type="button" onClick={() => reorderSelectedRows("top")} style={{ fontSize: 12, fontWeight: 700, padding: "6px 10px", border: "none", borderRight: "1px solid #e2e8f0", background: "#fff", color: "#334155", cursor: "pointer" }} title="Move selected rows to the top">⤒ Top</button>
-              <button type="button" onClick={moveSelectedToPosition} style={{ fontSize: 12, fontWeight: 700, padding: "6px 10px", border: "none", borderRight: "1px solid #e2e8f0", background: "#fff", color: "#334155", cursor: "pointer" }} title="Move selected rows to a specific position">↕ Position…</button>
-              <button type="button" onClick={() => reorderSelectedRows("bottom")} style={{ fontSize: 12, fontWeight: 700, padding: "6px 10px", border: "none", background: "#fff", color: "#334155", cursor: "pointer" }} title="Move selected rows to the bottom">⤓ Bottom</button>
-            </div>
-          )}
-          {selectedRowIdxs.size > 0 && (
             <button
               type="button"
               onClick={removeSelectedRows}
@@ -21912,6 +21907,29 @@ function CollectionSpreadsheetPage({
           </button>
         </div>
       </div>
+      {/* Floating bottom-centre "move to" bar for selected rows (Shopify-style). */}
+      {selectedRowIdxs.size > 0 && (
+        <div style={{ position: "fixed", left: "50%", bottom: "max(20px, env(safe-area-inset-bottom, 0px))", transform: "translateX(-50%)", zIndex: 60, display: "flex", alignItems: "center", gap: 10, background: "#1f2937", color: "#fff", borderRadius: 14, padding: "10px 14px", boxShadow: "0 16px 44px rgba(0,0,0,0.42)", maxWidth: "calc(100vw - 24px)", flexWrap: "wrap", justifyContent: "center" }}>
+          <span style={{ fontSize: 14, fontWeight: 800, opacity: 0.92 }}>{selectedRowIdxs.size} selected</span>
+          <div style={{ width: 1, height: 22, background: "rgba(255,255,255,0.2)" }} />
+          <button type="button" onClick={() => reorderSelectedRows("top")} style={rowFloatBtn} title="Move selected rows to the top">⤒ Move to top</button>
+          <button type="button" onClick={() => reorderSelectedRows("bottom")} style={rowFloatBtn} title="Move selected rows to the bottom">⤓ Move to bottom</button>
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.1)", borderRadius: 9, padding: "4px 5px 4px 10px" }}>
+            <span style={{ fontSize: 13, fontWeight: 700 }}>Move to position</span>
+            <input
+              type="number"
+              min={1}
+              value={rowMovePos}
+              onChange={(e) => setRowMovePos(e.currentTarget.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitRowMovePos(); } }}
+              placeholder="#"
+              style={{ width: 58, padding: "7px 8px", borderRadius: 7, border: "none", fontSize: 14, fontWeight: 700, textAlign: "center", outline: "none" }}
+            />
+            <button type="button" onClick={commitRowMovePos} disabled={!rowMovePos.trim()} style={{ ...rowFloatBtn, background: rowMovePos.trim() ? "#0d9488" : "rgba(255,255,255,0.12)", cursor: rowMovePos.trim() ? "pointer" : "default" }}>Go</button>
+          </div>
+          <button type="button" onClick={() => setSelectedRowIdxs(new Set())} style={{ ...rowFloatBtn, background: "transparent", opacity: 0.75 }} title="Clear selection">✕</button>
+        </div>
+      )}
       {pushStatus && (
         <div style={{
           margin: "0 0 0 4px",
