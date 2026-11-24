@@ -4818,7 +4818,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   if (intent === "update_collection") {
     const id = Number(form.get("collectionId"));
     if (!id) return null;
-    const data: Record<string, unknown> = { updatedAt: new Date() };
+    const newUpdatedAt = new Date();
+    const data: Record<string, unknown> = { updatedAt: newUpdatedAt };
     let incomingRows: Array<Record<string, string>> | null = null;
     if (form.has("rows")) {
       try {
@@ -4850,22 +4851,44 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const name = String(form.get("name") ?? "").trim();
       if (name) data.name = name;
     }
-    // Mention sync: fetch existing rows, diff each row's notes
-    // fields, and trigger syncEntityNoteMessages only when the text
-    // genuinely changed. Avoids re-notifying users on unrelated
-    // column edits.
+    // Rows save: serialize per collection, SNAPSHOT the previous rows (restore
+    // safety net), and MERGE instead of blind-overwriting when the saver's
+    // baseline is behind the stored copy — so a concurrent / stale save can't
+    // wipe another person's edit. Then run the mention / status / JJ sync on the
+    // rows that actually changed.
     if (incomingRows) {
-      try {
-        const existing = await prisma.collection.findUnique({ where: { id }, select: { rows: true } });
-        const previousByKey = new Map<string, Record<string, string>>();
-        if (Array.isArray(existing?.rows)) {
-          for (const r of existing.rows as Array<Record<string, string>>) {
-            const k = r?.__rowKey;
-            if (k) previousByKey.set(String(k), r);
-          }
+      const incoming = incomingRows;
+      const merged = await withCollectionLock(id, async () => {
+        const existing = await prisma.collection.findUnique({ where: { id }, select: { rows: true, updatedAt: true } });
+        const storedRows = normalizeCollectionRows(existing?.rows);
+        const storedVersion = existing?.updatedAt ?? null;
+        const baseRaw = String(form.get("baseUpdatedAt") ?? "").trim();
+        const baseDate = baseRaw ? new Date(baseRaw) : null;
+        const concurrent = Boolean(baseDate && storedVersion && !Number.isNaN(baseDate.getTime()) && baseDate.getTime() !== new Date(storedVersion).getTime());
+        let finalRows: CollRow[] = incoming;
+        if (concurrent) {
+          const baseRows = await findCollectionRowsBackupByVersion(id, baseDate as Date);
+          finalRows = baseRows
+            ? threeWayMergeCollectionRows(baseRows, storedRows, incoming)
+            : conservativeMergeCollectionRows(storedRows, incoming);
         }
+        // Snapshot what we're about to replace (also the merge base for the next
+        // concurrent save).
+        await backupCollectionRows(id, storedRows, storedVersion, currentUser?.name ?? null, concurrent ? "autosave-merged" : "autosave");
+        data.rows = finalRows;
+        data.updatedAt = newUpdatedAt;
+        await prisma.collection.update({ where: { id }, data });
+        // Only a merge that actually pulled in someone else's change needs the
+        // client to resync; a no-op self-merge (rapid overlapping saves) doesn't.
+        const mergedInOtherEdits = concurrent && collRowsDiffer(finalRows, incoming);
+        return { finalRows, previousByKey: collRowsByKey(storedRows), merged: mergedInOtherEdits };
+      });
+      // Mention sync: diff each row's notes fields and notify only on a genuine
+      // change. Plus the two-way JJ (SKU/Barcode) and status→order sync.
+      try {
+        const previousByKey = merged.previousByKey;
         const noteFields: Array<"factoryNotes" | "notes" | "loadingNotes"> = ["factoryNotes", "notes", "loadingNotes"];
-        for (const row of incomingRows) {
+        for (const row of merged.finalRows) {
           const key = String(row.__rowKey ?? "");
           if (!key) continue;
           const prev = previousByKey.get(key) ?? {};
@@ -4893,10 +4916,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             const barNow = (row.barcode ?? "").trim();
             const skuPrev = (prev.sku ?? "").trim();
             const barPrev = (prev.barcode ?? "").trim();
-            const data: Record<string, unknown> = {};
-            if (skuNow !== skuPrev && !skuNow.includes("\n")) data.skuBase = skuNow || null;
-            if (barNow !== barPrev && !barNow.includes("\n")) data.barcodeBase = barNow || null;
-            if (Object.keys(data).length) await prisma.supplierOrder.update({ where: { id: jjOid }, data }).catch(() => {});
+            const orderData: Record<string, unknown> = {};
+            if (skuNow !== skuPrev && !skuNow.includes("\n")) orderData.skuBase = skuNow || null;
+            if (barNow !== barPrev && !barNow.includes("\n")) orderData.barcodeBase = barNow || null;
+            if (Object.keys(orderData).length) await prisma.supplierOrder.update({ where: { id: jjOid }, data: orderData }).catch(() => {});
           }
           // Collection status → linked supplier order(s): mirror the row's STATUS
           // onto its order (JJ order, or a seeded restock order matched by product
@@ -4923,9 +4946,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       } catch (e) {
         console.warn("[collection mention sync] failed:", e);
       }
+      return jsonResponse({ ok: true, updatedAt: newUpdatedAt, merged: merged.merged });
     }
     await prisma.collection.update({ where: { id }, data });
-    return null;
+    return jsonResponse({ ok: true, updatedAt: newUpdatedAt });
   }
 
   // Delete specific collection rows SERVER-SIDE by __rowKey (and index for any
@@ -4942,17 +4966,66 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const keySet = new Set(keys.map((k) => String(k)).filter(Boolean));
     const idxSet = new Set(indices.filter((n) => Number.isInteger(n)));
     if (!keySet.size && !idxSet.size) return jsonResponse({ ok: false, error: "nothing_to_delete" });
-    const collection = await prisma.collection.findUnique({ where: { id }, select: { rows: true } }).catch(() => null);
-    if (!collection) return jsonResponse({ ok: false, error: "not_found" });
-    const rows = normalizeCollectionRows(collection.rows);
-    const next = rows.filter((r, i) => {
-      const k = String(r?.__rowKey ?? "");
-      if (k && keySet.has(k)) return false;       // matched by stable key
-      if (!k && idxSet.has(i)) return false;       // keyless row → match by index
-      return true;
+    return withCollectionLock(id, async () => {
+      const collection = await prisma.collection.findUnique({ where: { id }, select: { rows: true, updatedAt: true } }).catch(() => null);
+      if (!collection) return jsonResponse({ ok: false, error: "not_found" });
+      const rows = normalizeCollectionRows(collection.rows);
+      const next = rows.filter((r, i) => {
+        const k = String(r?.__rowKey ?? "");
+        if (k && keySet.has(k)) return false;       // matched by stable key
+        if (!k && idxSet.has(i)) return false;       // keyless row → match by index
+        return true;
+      });
+      // Snapshot before an intentional delete so it's still recoverable.
+      await backupCollectionRows(id, rows, collection.updatedAt ?? null, currentUser?.name ?? null, "pre-delete");
+      const nextVersion = new Date();
+      await prisma.collection.update({ where: { id }, data: { rows: next as unknown as object, updatedAt: nextVersion } });
+      return jsonResponse({ ok: true, deleted: rows.length - next.length, remaining: next.length, updatedAt: nextVersion });
     });
-    await prisma.collection.update({ where: { id }, data: { rows: next as unknown as object, updatedAt: new Date() } });
-    return jsonResponse({ ok: true, deleted: rows.length - next.length, remaining: next.length });
+  }
+
+  // List the recent row snapshots for a collection (the restore history).
+  if (intent === "list_collection_row_backups") {
+    const id = Number(form.get("collectionId"));
+    if (!id) return jsonResponse({ ok: false, backups: [] });
+    try {
+      await ensureCollectionBackupTable();
+      const rows = await prisma.$queryRawUnsafe<Array<{ id: number; rowCount: number; savedBy: string | null; reason: string | null; createdAt: Date }>>(
+        `SELECT "id", "rowCount", "savedBy", "reason", "createdAt" FROM "CollectionRowsBackup" WHERE "collectionId" = $1 ORDER BY "id" DESC LIMIT 60`,
+        id,
+      );
+      return jsonResponse({ ok: true, backups: rows.map((r) => ({ id: Number(r.id), rowCount: Number(r.rowCount), savedBy: r.savedBy, reason: r.reason, createdAt: r.createdAt })) });
+    } catch (e) {
+      console.warn("[list_collection_row_backups]", e);
+      return jsonResponse({ ok: false, backups: [] });
+    }
+  }
+
+  // Restore a collection's rows from a snapshot. The CURRENT rows are snapshotted
+  // first (reason "pre-restore"), so a restore is itself undoable.
+  if (intent === "restore_collection_row_backup") {
+    const id = Number(form.get("collectionId"));
+    const backupId = Number(form.get("backupId"));
+    if (!id || !backupId) return jsonResponse({ ok: false, error: "bad_request" });
+    return withCollectionLock(id, async () => {
+      try {
+        await ensureCollectionBackupTable();
+        const got = await prisma.$queryRawUnsafe<Array<{ rows: unknown }>>(
+          `SELECT "rows" FROM "CollectionRowsBackup" WHERE "id" = $1 AND "collectionId" = $2 LIMIT 1`,
+          backupId, id,
+        );
+        if (!got.length) return jsonResponse({ ok: false, error: "snapshot_not_found" });
+        const restoreRows = normalizeCollectionRows(got[0].rows);
+        const current = await prisma.collection.findUnique({ where: { id }, select: { rows: true, updatedAt: true } }).catch(() => null);
+        if (current) await backupCollectionRows(id, normalizeCollectionRows(current.rows), current.updatedAt ?? null, currentUser?.name ?? null, "pre-restore");
+        const nextVersion = new Date();
+        await prisma.collection.update({ where: { id }, data: { rows: restoreRows as unknown as object, updatedAt: nextVersion } });
+        return jsonResponse({ ok: true, rowCount: restoreRows.length, updatedAt: nextVersion });
+      } catch (e) {
+        console.warn("[restore_collection_row_backup]", e);
+        return jsonResponse({ ok: false, error: "restore_failed" });
+      }
+    });
   }
 
   // ─── Collections — import Dropbox image(s) into a row's picture gallery.
@@ -6967,6 +7040,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (intent === "vb_update_item" && !formData?.has("name") && !formData?.has("thumbnail")) return false;
   if (intent === "update_collection" || intent === "rename_collection" || intent === "reorder_collections") return false;
   if (intent === "delete_collection_rows") return false;
+  if (intent === "list_collection_row_backups" || intent === "restore_collection_row_backup") return false;
   if (intent === "set_collection_fabric_status" || intent === "set_collection_order_status" || intent === "set_collection_fabric_link" || intent === "set_collection_release_date") return false;
   if (intent === "set_collection_groups") return false;
   if (intent === "set_collection_tile_order") return false;
@@ -9210,6 +9284,185 @@ function withFabricSheetsLock<T>(fn: () => Promise<T>): Promise<T> {
   // Keep the chain alive whether fn resolves or rejects, so one failed write
   // never wedges every subsequent write.
   fabricWriteQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+// ─── Collection rows: backups + no-clobber merge ────────────────────────────
+// A collection save overwrites the WHOLE rows array with the saver's in-memory
+// copy. Two people editing the same collection — or one stale/left-open tab —
+// could overwrite each other, wiping a value nobody deleted on purpose. To make
+// sure nothing is ever lost without someone intentionally removing it:
+//   1. Every save first SNAPSHOTS the previous rows (restore safety net, and the
+//      base for a future merge).
+//   2. Saves to one collection are SERIALIZED (read-modify-write can't race).
+//   3. If the saver's baseline version is behind the stored version (someone
+//      else wrote in between), we 3-way MERGE instead of overwriting — the other
+//      person's edits are kept, and a cell is only cleared / a row only removed
+//      when the saver's OWN change did it.
+type CollRow = Record<string, string>;
+
+const collectionWriteQueues = new Map<number, Promise<unknown>>();
+function withCollectionLock<T>(id: number, fn: () => Promise<T>): Promise<T> {
+  const prev = collectionWriteQueues.get(id) ?? Promise.resolve();
+  const result = prev.then(() => fn());
+  collectionWriteQueues.set(id, result.then(() => undefined, () => undefined));
+  return result;
+}
+
+let collectionBackupTableReady = false;
+async function ensureCollectionBackupTable() {
+  if (collectionBackupTableReady) return;
+  await prisma.$executeRawUnsafe(`CREATE TABLE IF NOT EXISTS "CollectionRowsBackup" (
+    "id" SERIAL PRIMARY KEY,
+    "collectionId" INTEGER NOT NULL,
+    "version" TIMESTAMPTZ,
+    "rows" JSONB NOT NULL,
+    "rowCount" INTEGER NOT NULL DEFAULT 0,
+    "savedBy" TEXT,
+    "reason" TEXT,
+    "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS "CollectionRowsBackup_cid_idx" ON "CollectionRowsBackup" ("collectionId", "id")`);
+  collectionBackupTableReady = true;
+}
+
+// Snapshot a collection's rows. `version` is the collection.updatedAt these rows
+// belonged to (used to find this exact snapshot later as a merge base). Cheap
+// jsonb insert; pruning runs only occasionally so the save path stays fast.
+async function backupCollectionRows(collectionId: number, rows: CollRow[], version: Date | null, savedBy: string | null, reason: string) {
+  try {
+    await ensureCollectionBackupTable();
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "CollectionRowsBackup" ("collectionId", "version", "rows", "rowCount", "savedBy", "reason") VALUES ($1, $2, $3::jsonb, $4, $5, $6)`,
+      collectionId, version, JSON.stringify(Array.isArray(rows) ? rows : []), Array.isArray(rows) ? rows.length : 0, savedBy, reason,
+    );
+    if (Math.random() < 0.12) {
+      // Keep the newest 100 snapshots per collection; drop anything over 180 days.
+      await prisma.$executeRawUnsafe(
+        `DELETE FROM "CollectionRowsBackup" WHERE "collectionId" = $1 AND "id" NOT IN (SELECT "id" FROM "CollectionRowsBackup" WHERE "collectionId" = $1 ORDER BY "id" DESC LIMIT 100)`,
+        collectionId,
+      );
+      await prisma.$executeRawUnsafe(`DELETE FROM "CollectionRowsBackup" WHERE "createdAt" < NOW() - INTERVAL '180 days'`);
+    }
+  } catch (e) {
+    console.warn("[backupCollectionRows]", e);
+  }
+}
+
+// Find the exact snapshot the saver started from (by its version timestamp).
+async function findCollectionRowsBackupByVersion(collectionId: number, version: Date): Promise<CollRow[] | null> {
+  try {
+    await ensureCollectionBackupTable();
+    const got = await prisma.$queryRawUnsafe<Array<{ rows: unknown }>>(
+      `SELECT "rows" FROM "CollectionRowsBackup" WHERE "collectionId" = $1 AND "version" = $2 ORDER BY "id" DESC LIMIT 1`,
+      collectionId, version,
+    );
+    if (!got.length) return null;
+    return normalizeCollectionRows(got[0].rows);
+  } catch {
+    return null;
+  }
+}
+
+function collRowsByKey(rows: CollRow[]): Map<string, CollRow> {
+  const m = new Map<string, CollRow>();
+  for (const r of rows) { const k = r?.__rowKey; if (k) m.set(String(k), r); }
+  return m;
+}
+function collRowChanged(a: CollRow | undefined, b: CollRow | undefined): boolean {
+  const keys = new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})]);
+  for (const k of keys) { if (k === "__rowKey") continue; if ((a?.[k] ?? "") !== (b?.[k] ?? "")) return true; }
+  return false;
+}
+// Per-cell 3-way merge: base = saver's baseline, theirs = current stored, mine =
+// incoming. Take mine where I changed it, theirs where I didn't, and on a true
+// conflict never drop a filled value for a blank.
+function mergeCollCells(base: CollRow | undefined, theirs: CollRow, mine: CollRow): CollRow {
+  const out: CollRow = {};
+  const keys = new Set([...Object.keys(base ?? {}), ...Object.keys(theirs), ...Object.keys(mine)]);
+  for (const k of keys) {
+    if (k === "__rowKey") continue;
+    const b = base?.[k] ?? "";
+    const t = theirs[k] ?? "";
+    const m = mine[k] ?? "";
+    if (m === b) { out[k] = t; continue; }        // I didn't change it → take theirs
+    if (t === b) { out[k] = m; continue; }         // only I changed it → take mine
+    out[k] = (m.trim() === "" && t.trim() !== "") ? t : m;  // conflict: keep a value over a blank
+  }
+  out.__rowKey = String(mine.__rowKey ?? theirs.__rowKey ?? "");
+  return out;
+}
+// 3-way merge of whole rows arrays. Preserves row order from `mine`, keeps rows
+// the other person added, and only honors a deletion when the row was untouched
+// by anyone else since the saver's baseline.
+function threeWayMergeCollectionRows(base: CollRow[], theirs: CollRow[], mine: CollRow[]): CollRow[] {
+  const baseByKey = collRowsByKey(base);
+  const theirsByKey = collRowsByKey(theirs);
+  const result: CollRow[] = [];
+  const used = new Set<string>();
+  for (const mrow of mine) {
+    const k = String(mrow.__rowKey ?? "");
+    if (!k) { result.push(mrow); continue; }
+    used.add(k);
+    const trow = theirsByKey.get(k);
+    if (!trow) { result.push(mrow); continue; }    // not in theirs → keep my row
+    result.push(mergeCollCells(baseByKey.get(k), trow, mrow));
+  }
+  for (const trow of theirs) {
+    const k = String(trow.__rowKey ?? "");
+    if (!k || used.has(k)) continue;
+    const brow = baseByKey.get(k);
+    if (!brow) { result.push(trow); continue; }           // they added it → keep
+    if (collRowChanged(brow, trow)) result.push(trow);     // I removed it but they edited it → keep theirs
+    // else: I deleted it and no one else touched it → honor the deletion (drop)
+  }
+  return result;
+}
+// Fallback when the baseline snapshot is gone (pruned/very old): never wipe. Keep
+// every stored row, fill/replace only with NON-EMPTY incoming values, and add
+// incoming's new rows. A stale clear/delete is skipped rather than risk losing
+// newer data — the user can redo it from a current view.
+// True when two rows arrays differ in a meaningful way (by __rowKey, ignoring
+// cell key order and empty-vs-missing). Used to tell a real cross-user merge
+// (client must resync) from a no-op self-merge (rapid overlapping saves by one
+// person, where the merged result already equals what they sent).
+function collRowsDiffer(a: CollRow[], b: CollRow[]): boolean {
+  const sig = (rows: CollRow[]) => {
+    const byKey = collRowsByKey(rows);
+    const keys = Array.from(byKey.keys()).sort();
+    const body = keys.map((k) => {
+      const r = byKey.get(k) as CollRow;
+      const cells = Object.keys(r).filter((c) => c !== "__rowKey" && (r[c] ?? "") !== "").sort().map((c) => `${c}=${r[c]}`).join("|");
+      return `${k}#${cells}`;
+    }).join("§");
+    const keyless = rows.filter((r) => !r.__rowKey).length;
+    return `${body}::${keyless}`;
+  };
+  return sig(a) !== sig(b);
+}
+function conservativeMergeCollectionRows(theirs: CollRow[], mine: CollRow[]): CollRow[] {
+  const mineByKey = collRowsByKey(mine);
+  const result: CollRow[] = [];
+  const used = new Set<string>();
+  for (const trow of theirs) {
+    const k = String(trow.__rowKey ?? "");
+    if (!k) { result.push(trow); continue; }
+    used.add(k);
+    const mrow = mineByKey.get(k);
+    if (!mrow) { result.push(trow); continue; }
+    const out: CollRow = { ...trow };
+    for (const key of Object.keys(mrow)) {
+      if (key === "__rowKey") continue;
+      const mv = mrow[key] ?? "";
+      if (mv.trim() !== "") out[key] = mv;
+    }
+    result.push(out);
+  }
+  for (const mrow of mine) {
+    const k = String(mrow.__rowKey ?? "");
+    if (k && used.has(k)) continue;
+    result.push(mrow);
+  }
   return result;
 }
 
@@ -20074,6 +20327,11 @@ function CollectionSpreadsheetPage({
   }, [listItem.id]);
   const fetcher = useFetcher();
   const loadFetcher = useFetcher<{ collection: CollectionFullType | null; migrating?: boolean; remaining?: number }>();
+  // Row-snapshot history (restore earlier saved versions of this sheet).
+  type RowBackup = { id: number; rowCount: number; savedBy: string | null; reason: string | null; createdAt: string };
+  const backupsFetcher = useFetcher<{ ok?: boolean; backups?: RowBackup[] }>();
+  const restoreFetcher = useFetcher<{ ok?: boolean; updatedAt?: string; rowCount?: number }>();
+  const [showHistory, setShowHistory] = useState(false);
   // While a heavy collection's images are being migrated out (chunked), this
   // holds how many images are left so the page can show progress.
   const [migratingRemaining, setMigratingRemaining] = useState<number | null>(null);
@@ -20175,6 +20433,11 @@ function CollectionSpreadsheetPage({
   const otherCollections = allCollections.filter((c) => c.id !== listItem.id);
   const [columns, setColumns] = useState<CollectionColumnDef[]>(DEFAULT_COLLECTION_COLUMNS);
   const [rows, setRows] = useState<Record<string, string>[]>([]);
+  // The collection version (updatedAt) this client last synced. Sent with every
+  // rows save so the server can detect a concurrent/stale save and MERGE rather
+  // than overwrite. Advanced from each save's response. A ref (not state) so it's
+  // always current inside save closures and never triggers a re-render.
+  const baseVersionRef = useRef<string | null>(null);
   const [sheetSearchParams, setSheetSearchParams] = useSearchParams();
   // Jump to the Photo Shoot page from the sheet toolbar (standalone button — the
   // Collections side is already reachable via the "← Collections" back button).
@@ -20360,6 +20623,8 @@ function CollectionSpreadsheetPage({
       setRows(loadedRows.length === 0
         ? Array.from({ length: 10 }, () => ({ __rowKey: `r_${Math.random().toString(36).slice(2, 9)}` } as Record<string, string>))
         : loadedRows);
+      // Seed the concurrency baseline to the version we just loaded.
+      if ((col as { updatedAt?: string }).updatedAt) baseVersionRef.current = new Date((col as { updatedAt?: string }).updatedAt as string).toISOString();
       setMigratingRemaining(null);
       setLoaded(true);
     }
@@ -20367,6 +20632,30 @@ function CollectionSpreadsheetPage({
     if (d?.shipDetail) setFreshShipDetail(d.shipDetail);
     if (d?.restockStatus) setFreshRestockStatus(d.restockStatus);
   }, [loadFetcher.data, listItem.id]);
+  // Advance the concurrency baseline whenever a save returns the new version, so
+  // this client's NEXT save is diffed against what it just wrote (not an old
+  // version), keeping the common case on the fast no-merge path.
+  useEffect(() => {
+    const d = fetcher.data as { updatedAt?: string; merged?: boolean } | undefined;
+    if (!d?.updatedAt) return;
+    if (d.merged) {
+      // Another person's edit was merged in server-side. Pull the merged rows so
+      // local state matches before the next save (otherwise it could re-clobber
+      // the merged-in change). The reload reseeds the baseline too.
+      loadFetcher.submit({ intent: "get_collection_full", collectionId: String(listItem.id) }, { method: "post" });
+    } else {
+      baseVersionRef.current = new Date(d.updatedAt).toISOString();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetcher.data]);
+  // After a restore, reload the sheet's rows from the server.
+  useEffect(() => {
+    if (restoreFetcher.state === "idle" && restoreFetcher.data?.ok) {
+      setShowHistory(false);
+      loadFetcher.submit({ intent: "get_collection_full", collectionId: String(listItem.id) }, { method: "post" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restoreFetcher.state, restoreFetcher.data]);
   // Effective maps: fresh (from get_collection_full) when available, else props.
   const effShipDetail = freshShipDetail ?? shipmentDetailByProductId;
   const effRestockStatus = freshRestockStatus ?? restockStatusByProductId;
@@ -20678,7 +20967,7 @@ function CollectionSpreadsheetPage({
   const persistRows = (next: Record<string, string>[], previous: Record<string, string>[], label: string) => {
     pushUndo({ label, rows: previous });
     fetcher.submit(
-      { intent: "update_collection", collectionId: String(listItem.id), rows: JSON.stringify(next) },
+      { intent: "update_collection", collectionId: String(listItem.id), rows: JSON.stringify(next), ...(baseVersionRef.current ? { baseUpdatedAt: baseVersionRef.current } : {}) },
       { method: "post" },
     );
   };
@@ -21224,6 +21513,49 @@ function CollectionSpreadsheetPage({
           {!hidePhotoShootToggle && (
             <button type="button" onClick={goToPhotoShoot} style={{ padding: "8px 20px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #cbd5e1", background: "#fff", color: "#475569", cursor: "pointer" }}>Photo Shoot</button>
           )}
+          <div style={{ position: "relative" }}>
+            <button
+              type="button"
+              onClick={() => { const open = !showHistory; setShowHistory(open); if (open) backupsFetcher.submit({ intent: "list_collection_row_backups", collectionId: String(listItem.id) }, { method: "post" }); }}
+              title="View and restore earlier saved versions of this sheet (in case something was changed or wiped)"
+              style={{ padding: "8px 14px", fontSize: 13, fontWeight: 700, borderRadius: 8, border: "1px solid #cbd5e1", background: showHistory ? "#eef2ff" : "#fff", color: "#475569", cursor: "pointer" }}
+            >🕑 History</button>
+            {showHistory && (
+              <>
+                <div onClick={() => setShowHistory(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+                <div style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 41, width: 340, maxHeight: 420, overflowY: "auto", background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, boxShadow: "0 14px 40px rgba(0,0,0,0.2)", padding: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#111827", marginBottom: 2 }}>Saved versions</div>
+                  <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>Every save is snapshotted. Restore puts this sheet back to an earlier version — the current one is snapshotted first, so a restore is itself undoable.</div>
+                  {backupsFetcher.state !== "idle" && !backupsFetcher.data && (
+                    <div style={{ fontSize: 12, color: "#6b7280", padding: "8px 2px" }}>Loading…</div>
+                  )}
+                  {backupsFetcher.data?.ok && (backupsFetcher.data.backups?.length ?? 0) === 0 && (
+                    <div style={{ fontSize: 12, color: "#6b7280", padding: "8px 2px" }}>No earlier versions yet — they'll appear here after the next few saves.</div>
+                  )}
+                  {(backupsFetcher.data?.backups ?? []).map((b) => {
+                    const when = new Date(b.createdAt);
+                    const label = `${when.toLocaleDateString(undefined, { day: "numeric", month: "short" })}, ${when.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+                    const reasonLabel = b.reason === "pre-delete" ? "before a delete" : b.reason === "pre-restore" ? "before a restore" : b.reason === "autosave-merged" ? "auto-merged" : "auto-saved";
+                    const busy = restoreFetcher.state !== "idle";
+                    return (
+                      <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 6px", borderTop: "1px solid #f1f5f9" }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#111827" }}>{label}</div>
+                          <div style={{ fontSize: 11, color: "#6b7280" }}>{b.rowCount} row{b.rowCount === 1 ? "" : "s"} · {reasonLabel}{b.savedBy ? ` · ${b.savedBy}` : ""}</div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => { if (window.confirm(`Restore this sheet to the version from ${label}?\n\n${b.rowCount} row(s). The current version is saved first, so you can undo this.`)) restoreFetcher.submit({ intent: "restore_collection_row_backup", collectionId: String(listItem.id), backupId: String(b.id) }, { method: "post" }); }}
+                          style={{ fontSize: 11.5, fontWeight: 700, padding: "5px 10px", borderRadius: 6, border: "1px solid #0d9488", background: busy ? "#f1f5f9" : "#0d9488", color: busy ? "#94a3b8" : "#fff", cursor: busy ? "wait" : "pointer", flexShrink: 0 }}
+                        >Restore</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
           {filterControls}
         </div>
         <div style={s.productInfoActions}>
