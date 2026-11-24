@@ -5,7 +5,12 @@ import type { ActionFunctionArgs, LoaderFunctionArgs, ShouldRevalidateFunction }
 import { isRouteErrorResponse, useActionData, useFetcher, useLoaderData, useRouteError, useSearchParams, useSubmit } from "react-router";
 import prisma from "../db.server";
 import { fabricStockSheets as initialFabricStockSheets, type FabricStockSheet } from "../fabric-stock-data";
-import { syncOrderNoteMessages, syncEntityNoteMessages, syncSampleIterationMessages, createReplyMessage, editPortalMessage, deletePortalMessage } from "../portal-messages.server";
+import { syncOrderNoteMessages, syncEntityNoteMessages, syncSampleIterationMessages, createReplyMessage, editPortalMessage, deletePortalMessage, taggedUsersFromText } from "../portal-messages.server";
+import {
+  readAllCollectionTasks, writeAllCollectionTasks, openTaskCountsByScope,
+  COLLECTION_HUB_NOTE_FIELD, GROUP_NOTE_ENTITY, SHEET_NOTE_ENTITY,
+  type CollectionTask, type CollectionScopeType,
+} from "../collection-tasks.server";
 import { randomUUID } from "node:crypto";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { PreordersDashboard } from "../portal-preorders";
@@ -1193,6 +1198,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const collectionGroups = isCollectionsPage ? normalizeCollectionGroups(wrap(COLLECTION_GROUPS_KEY)?.value) : [];
   // Unified drag order for the Collections tile grid (groups + collections).
   const collectionTileOrder = isCollectionsPage ? normalizeTileOrder(wrap(COLLECTION_TILE_ORDER_KEY)?.value) : [];
+  // Open-task counts per group/sheet (for the tile task badges). One cheap read.
+  const collectionTaskCounts = isCollectionsPage ? openTaskCountsByScope(await readAllCollectionTasks()) : {};
 
   // Whole-site search (admin only) — searches every data source, including
   // pages hidden from the nav.
@@ -1364,6 +1371,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     globalSearch,
     collectionGroups,
     collectionTileOrder,
+    collectionTaskCounts,
     jjInboxCollectionId,
     jjTabs: normalizeJJTabs(wrap(JJ_TABS_KEY)?.value),
     fabricStockIndex,
@@ -3245,6 +3253,112 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       },
       data: { readAt: new Date() },
     });
+    return jsonResponse({ ok: true });
+  }
+
+  // ─── Collection TASKS (checklist on a whole group or sheet) ─────────────────
+  if (intent === "collection_task_add" || intent === "collection_task_update" || intent === "collection_task_toggle" || intent === "collection_task_delete") {
+    if (!currentUser) return null;
+    const scopeType: CollectionScopeType = String(form.get("scopeType") ?? "") === "group" ? "group" : "collection";
+    const scopeId = String(form.get("scopeId") ?? "").trim();
+    const scopeName = String(form.get("scopeName") ?? "").trim() || null;
+    const tasks = await readAllCollectionTasks();
+
+    // Assigning a task pings the assignee via the same unread bell as notes.
+    const bellForAssignee = async (assigneeId: string, assigneeName: string, text: string) => {
+      if (!assigneeId || assigneeId === currentUser.id) return;
+      await prisma.portalMessage.create({ data: {
+        userId: assigneeId, userName: assigneeName,
+        orderId: scopeType === "collection" ? (Number(scopeId) || 0) : 0,
+        entityType: "collection_task", entityKey: `${scopeType}:${scopeId}`, field: "task",
+        fromName: currentUser.name, productTitle: scopeName, body: `Task: ${text}`,
+      }});
+    };
+
+    if (intent === "collection_task_add") {
+      const text = String(form.get("text") ?? "").trim();
+      if (!text || !scopeId) return jsonResponse({ ok: false });
+      const assigneeId = String(form.get("assigneeId") ?? "").trim() || null;
+      const assignee = assigneeId ? users.find((u) => u.id === assigneeId) : null;
+      const dueRaw = String(form.get("due") ?? "").trim();
+      const due = /^\d{4}-\d{2}-\d{2}$/.test(dueRaw) ? dueRaw : null;
+      const task: CollectionTask = {
+        id: `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+        scopeType, scopeId, scopeName, text,
+        assigneeId: assignee?.id ?? null, assigneeName: assignee?.name ?? null,
+        due, done: false, doneAt: null, createdBy: currentUser.name, createdAt: new Date().toISOString(),
+      };
+      await writeAllCollectionTasks([...tasks, task]);
+      if (assignee) await bellForAssignee(assignee.id, assignee.name, text);
+      return jsonResponse({ ok: true, task });
+    }
+
+    const taskId = String(form.get("taskId") ?? "").trim();
+    const idx = tasks.findIndex((t) => t.id === taskId);
+    if (idx < 0) return jsonResponse({ ok: false });
+
+    if (intent === "collection_task_delete") {
+      tasks.splice(idx, 1);
+      await writeAllCollectionTasks(tasks);
+      return jsonResponse({ ok: true });
+    }
+    if (intent === "collection_task_toggle") {
+      const done = String(form.get("done") ?? "") === "1";
+      tasks[idx] = { ...tasks[idx], done, doneAt: done ? new Date().toISOString() : null };
+      await writeAllCollectionTasks(tasks);
+      return jsonResponse({ ok: true });
+    }
+    // update — text / assignee / due (only the fields present in the form)
+    const prev = tasks[idx];
+    const next: CollectionTask = { ...prev };
+    if (form.has("text")) { const v = String(form.get("text") ?? "").trim(); if (v) next.text = v; }
+    if (form.has("due")) { const v = String(form.get("due") ?? "").trim(); next.due = /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null; }
+    let newlyAssigned: { id: string; name: string } | null = null;
+    if (form.has("assigneeId")) {
+      const aId = String(form.get("assigneeId") ?? "").trim() || null;
+      const a = aId ? users.find((u) => u.id === aId) : null;
+      next.assigneeId = a?.id ?? null; next.assigneeName = a?.name ?? null;
+      if (a && a.id !== prev.assigneeId) newlyAssigned = { id: a.id, name: a.name };
+    }
+    tasks[idx] = next;
+    await writeAllCollectionTasks(tasks);
+    if (newlyAssigned) await bellForAssignee(newlyAssigned.id, newlyAssigned.name, next.text);
+    return jsonResponse({ ok: true, task: next });
+  }
+
+  // ─── Collection HUB NOTES (group/sheet-level comments, flat) ────────────────
+  if (intent === "collection_hub_note_add" || intent === "collection_hub_note_delete") {
+    if (!currentUser) return null;
+    const scopeType = String(form.get("scopeType") ?? "") === "group" ? "group" : "collection";
+    const scopeId = String(form.get("scopeId") ?? "").trim();
+    if (!scopeId) return jsonResponse({ ok: false });
+    const entityType = scopeType === "group" ? GROUP_NOTE_ENTITY : SHEET_NOTE_ENTITY;
+    const orderId = scopeType === "collection" ? (Number(scopeId) || 0) : 0;
+    const entityKey = scopeType === "group" ? scopeId : null;
+
+    if (intent === "collection_hub_note_delete") {
+      const messageId = Number(form.get("messageId"));
+      const msg = messageId ? await prisma.portalMessage.findUnique({ where: { id: messageId } }) : null;
+      if (!msg) return jsonResponse({ ok: false });
+      if ((msg.fromName ?? "").trim().toLowerCase() !== currentUser.name.trim().toLowerCase()) return jsonResponse({ ok: false });
+      await prisma.portalMessage.deleteMany({ where: { entityType, orderId, entityKey, field: COLLECTION_HUB_NOTE_FIELD, fromName: msg.fromName, body: msg.body } });
+      return jsonResponse({ ok: true });
+    }
+
+    const body = String(form.get("body") ?? "").trim();
+    if (!body) return jsonResponse({ ok: false });
+    const scopeName = String(form.get("scopeName") ?? "").trim() || null;
+    const createdAt = new Date();
+    const tagged = taggedUsersFromText(body, users).filter((u) => u.id !== currentUser.id);
+    const rows: Array<{ userId: string; userName: string; readAt: Date | null }> = [
+      { userId: currentUser.id, userName: currentUser.name, readAt: createdAt },
+      ...tagged.map((u) => ({ userId: u.id, userName: u.name, readAt: null as Date | null })),
+    ];
+    await prisma.$transaction(rows.map((r) => prisma.portalMessage.create({ data: {
+      userId: r.userId, userName: r.userName, readAt: r.readAt,
+      orderId, entityType, entityKey, field: COLLECTION_HUB_NOTE_FIELD,
+      fromName: currentUser.name, productTitle: scopeName, body, createdAt,
+    } })));
     return jsonResponse({ ok: true });
   }
 
@@ -12635,6 +12749,7 @@ export default function PortalDashboard() {
     globalSearch,
     collectionGroups,
     collectionTileOrder,
+    collectionTaskCounts,
     jjInboxCollectionId,
     jjTabs,
     fabricStockIndex,
@@ -13582,6 +13697,7 @@ export default function PortalDashboard() {
               >✨ AI</button>
               <MessagesMenu messages={messages} />
               <ThreadPanel users={users} currentUser={currentUser} />
+              <CollectionHubDrawer users={users} currentUser={currentUser} />
               <div style={s.activeUsers} title="Currently active">
                 <span style={s.activeUsersLabel}>Active</span>
                 {activeUsers.length ? activeUsers.map((user) => (
@@ -13801,6 +13917,7 @@ export default function PortalDashboard() {
                 restockStatusByProductId={collectionRestockStatusByProductId}
                 collectionGroups={collectionGroups}
                 collectionTileOrder={collectionTileOrder}
+                taskCounts={collectionTaskCounts}
                 canSeeProductStatus={Boolean(currentUser?.admin || currentUser?.canSeeProductStatus)}
                 search={collectionSearch}
                 onTotalsChange={setCollectionTotals}
@@ -14820,6 +14937,216 @@ function ThreadPanel({ users, currentUser }: { users: PortalUser[]; currentUser:
   );
 }
 
+// ── Collection "hub": Notes + Tasks for a whole group or sheet ───────────────
+// Opens off ?hub=<group|collection>:<id> (&hubtab=, &hubname=). Tasks are a
+// checklist (assignee + due + tick); Notes is a flat group/sheet-level comment
+// thread that rides the same unread bell via @mentions.
+type HubTask = { id: string; text: string; assigneeId: string | null; assigneeName: string | null; due: string | null; done: boolean; doneAt: string | null; createdBy: string | null; createdAt: string };
+type HubComment = { id: number; body: string; fromName: string | null; createdAt: string; editedAt: string | null };
+
+function hubDueInfo(due: string | null): { label: string; color: string; bg: string; over: boolean } {
+  if (!due) return { label: "Set date", color: "#9ca3af", bg: "transparent", over: false };
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = new Date(due + "T00:00:00");
+  const days = Math.round((d.getTime() - today.getTime()) / 86400000);
+  const fmt = d.toLocaleDateString([], { day: "numeric", month: "short" });
+  if (days < 0) return { label: days === -1 ? "Yesterday" : `${Math.abs(days)}d overdue`, color: "#b91c1c", bg: "#fde9e9", over: true };
+  if (days === 0) return { label: "Today", color: "#b45309", bg: "#fdf0db", over: false };
+  if (days === 1) return { label: "Tomorrow", color: "#b45309", bg: "#fdf0db", over: false };
+  if (days <= 3) return { label: `In ${days}d`, color: "#b45309", bg: "#fdf0db", over: false };
+  return { label: fmt, color: "#475569", bg: "#f1f4f7", over: false };
+}
+
+function CollectionHubDrawer({ users, currentUser }: { users: PortalUser[]; currentUser: PortalUser | null }) {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const hub = searchParams.get("hub");
+  const tab = searchParams.get("hubtab") === "notes" ? "notes" : "tasks";
+  const hubName = searchParams.get("hubname") ?? "";
+  const dataFetcher = useFetcher<{ tasks: HubTask[]; comments: HubComment[] }>();
+  const taskFetcher = useFetcher();
+  const noteFetcher = useFetcher();
+
+  const parts = hub ? hub.split(":") : [];
+  const scopeType: "group" | "collection" = parts[0] === "group" ? "group" : "collection";
+  const scopeId = parts.slice(1).join(":");
+
+  const [newText, setNewText] = useState("");
+  const [newAssignee, setNewAssignee] = useState("");
+  const [newDue, setNewDue] = useState("");
+  const [noteDraft, setNoteDraft] = useState("");
+
+  const reload = () => {
+    if (!hub) return;
+    dataFetcher.load(`/api/collection-tasks?scopeType=${scopeType}&scopeId=${encodeURIComponent(scopeId)}${tab === "notes" ? "&markNotesRead=1" : ""}`);
+  };
+  useEffect(() => {
+    if (!hub) return;
+    setNewText(""); setNewAssignee(""); setNewDue(""); setNoteDraft("");
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hub, tab]);
+  useEffect(() => { if (taskFetcher.state === "idle" && taskFetcher.data) reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskFetcher.state, taskFetcher.data]);
+  useEffect(() => { if (noteFetcher.state === "idle" && noteFetcher.data) { setNoteDraft(""); reload(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [noteFetcher.state, noteFetcher.data]);
+
+  if (!hub || typeof document === "undefined") return null;
+  const tasks = dataFetcher.data?.tasks ?? [];
+  const comments = dataFetcher.data?.comments ?? [];
+  const activeUsers = users.filter((u) => u.active !== false);
+  const openCount = tasks.filter((t) => !t.done).length;
+  const doneCount = tasks.length - openCount;
+  const meName = (currentUser?.name ?? "").trim().toLowerCase();
+
+  const close = () => { const n = new URLSearchParams(searchParams); n.delete("hub"); n.delete("hubtab"); n.delete("hubname"); setSearchParams(n, { replace: true }); };
+  const setTab = (t: "notes" | "tasks") => { const n = new URLSearchParams(searchParams); n.set("hubtab", t); setSearchParams(n, { replace: true }); };
+  const scopeFields = { scopeType, scopeId, scopeName: hubName };
+  const submitTask = (fields: Record<string, string>) => taskFetcher.submit({ ...scopeFields, ...fields }, { method: "post", action: "/portal" });
+
+  const addTask = () => {
+    const text = newText.trim();
+    if (!text) return;
+    submitTask({ intent: "collection_task_add", text, assigneeId: newAssignee, due: newDue });
+    setNewText(""); setNewAssignee(""); setNewDue("");
+  };
+  const postNote = () => {
+    const body = noteDraft.trim();
+    if (!body) return;
+    noteFetcher.submit({ ...scopeFields, intent: "collection_hub_note_add", body }, { method: "post", action: "/portal" });
+  };
+
+  const C = { teal: "#0d9488", tealDk: "#0f766e", tealWash: "#e7f5f3", ink: "#111827", soft: "#475569", faint: "#94a3b8", line: "#e5e7eb", lineSoft: "#f1f3f5", panel2: "#f7f9fb", red: "#dc2626" };
+  const selStyle: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: C.soft, border: `1px solid ${C.line}`, borderRadius: 7, padding: "3px 6px", background: "#fff", cursor: "pointer", fontFamily: "inherit" };
+
+  return createPortal(
+    <>
+      <div style={{ position: "fixed", inset: 0, background: "transparent", zIndex: 1390 }} onClick={close} />
+      <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 424, maxWidth: "100vw", background: "#fff", boxShadow: "-10px 0 34px rgba(15,23,42,0.16)", zIndex: 1400, display: "flex", flexDirection: "column" }}>
+        {/* Header */}
+        <div style={{ padding: "13px 16px 0", borderBottom: `1px solid ${C.line}` }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 10.5, letterSpacing: "0.09em", textTransform: "uppercase", color: C.tealDk, fontWeight: 700 }}>{scopeType === "group" ? "Group" : "Sheet"}</div>
+              <div style={{ fontWeight: 700, fontSize: 16, color: C.ink, lineHeight: 1.2, marginTop: 2, overflowWrap: "anywhere" }}>{hubName || "Collection"}</div>
+            </div>
+            <button type="button" onClick={close} title="Close" style={{ background: "transparent", border: `1px solid ${C.line}`, width: 30, height: 30, borderRadius: 8, fontSize: 18, color: C.soft, cursor: "pointer", lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>×</button>
+          </div>
+          {/* Tabs */}
+          <div style={{ display: "flex", gap: 2, marginTop: 12 }}>
+            {(["tasks", "notes"] as const).map((t) => (
+              <button key={t} type="button" onClick={() => setTab(t)}
+                style={{ border: "none", background: "transparent", font: "inherit", fontSize: 13, fontWeight: 700, color: tab === t ? C.tealDk : C.faint, padding: "8px 12px", cursor: "pointer", borderBottom: `2px solid ${tab === t ? C.teal : "transparent"}`, marginBottom: -1, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                {t === "tasks" ? "Tasks" : "Notes"}
+                {t === "tasks" && openCount > 0 && <span style={{ background: C.teal, color: "#fff", borderRadius: 999, minWidth: 17, height: 17, padding: "0 5px", fontSize: 10.5, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{openCount}</span>}
+                {t === "notes" && comments.length > 0 && <span style={{ color: C.faint, fontSize: 12 }}>{comments.length}</span>}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {tab === "tasks" ? (
+          <>
+            <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
+              {dataFetcher.state !== "idle" && tasks.length === 0 && <div style={{ color: C.faint, fontSize: 13, textAlign: "center", padding: 20 }}>Loading…</div>}
+              {tasks.length > 0 && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                  <div style={{ flex: 1, height: 6, borderRadius: 999, background: C.line, overflow: "hidden" }}><div style={{ height: "100%", width: `${Math.round(doneCount / tasks.length * 100)}%`, background: C.teal, borderRadius: 999 }} /></div>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: C.soft, whiteSpace: "nowrap" }}>{doneCount} of {tasks.length}</span>
+                </div>
+              )}
+              {tasks.map((t) => {
+                const di = hubDueInfo(t.due);
+                return (
+                  <div key={t.id} style={{ display: "flex", gap: 11, padding: "10px 2px", borderTop: `1px solid ${C.lineSoft}`, alignItems: "flex-start" }}>
+                    <button type="button" onClick={() => submitTask({ intent: "collection_task_toggle", taskId: t.id, done: t.done ? "0" : "1" })}
+                      title={t.done ? "Mark not done" : "Mark done"}
+                      style={{ marginTop: 1, width: 20, height: 20, borderRadius: 6, border: `2px solid ${t.done ? C.teal : C.faint}`, background: t.done ? C.teal : "transparent", cursor: "pointer", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
+                      {t.done && <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M5 12.5l4 4 10-10" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                    </button>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13.5, color: t.done ? C.faint : C.ink, textDecoration: t.done ? "line-through" : "none", lineHeight: 1.4, overflowWrap: "anywhere" }}>{t.text}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                          {t.assigneeName ? <ThreadAvatar name={t.assigneeName} size={18} /> : null}
+                          <select value={t.assigneeId ?? ""} onChange={(e) => submitTask({ intent: "collection_task_update", taskId: t.id, assigneeId: e.target.value })} style={selStyle} title="Assign to">
+                            <option value="">Unassigned</option>
+                            {activeUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                          </select>
+                        </span>
+                        <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: di.color, background: di.bg, borderRadius: 999, padding: "2px 4px 2px 8px", border: t.due ? "none" : `1px dashed ${C.line}` }} title="Due date">
+                          {di.label}
+                          <input type="date" value={t.due ?? ""} onChange={(e) => submitTask({ intent: "collection_task_update", taskId: t.id, due: e.target.value })}
+                            style={{ width: 16, border: "none", background: "transparent", color: "transparent", cursor: "pointer", padding: 0 }} />
+                        </label>
+                        <button type="button" onClick={() => { if (window.confirm("Delete this task?")) submitTask({ intent: "collection_task_delete", taskId: t.id }); }}
+                          style={{ marginLeft: "auto", border: "none", background: "transparent", color: C.faint, cursor: "pointer", fontSize: 11, padding: 0 }} title="Delete task">✕</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {tasks.length === 0 && dataFetcher.state === "idle" && <div style={{ color: C.faint, fontSize: 13, textAlign: "center", padding: "10px 0 2px" }}>No tasks yet. Add the first below.</div>}
+            </div>
+            {/* Add task */}
+            <div style={{ borderTop: `1px solid ${C.line}`, padding: "10px 14px 12px", background: "#fff" }}>
+              <textarea value={newText} onChange={(e) => setNewText(e.target.value)} placeholder="Add a task…" rows={1}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); addTask(); } }}
+                style={{ width: "100%", resize: "none", border: `1px solid ${C.line}`, background: C.panel2, color: C.ink, borderRadius: 10, padding: "9px 11px", fontSize: 13.5, fontFamily: "inherit", boxSizing: "border-box" }} />
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                <select value={newAssignee} onChange={(e) => setNewAssignee(e.target.value)} style={{ ...selStyle, fontSize: 12.5, padding: "6px 8px" }} title="Assign to">
+                  <option value="">Unassigned</option>
+                  {activeUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                </select>
+                <input type="date" value={newDue} onChange={(e) => setNewDue(e.target.value)} title="Due date" style={{ ...selStyle, fontSize: 12.5, padding: "6px 8px" }} />
+                <button type="button" onClick={addTask} disabled={!newText.trim()} style={{ marginLeft: "auto", border: "none", background: newText.trim() ? C.teal : C.faint, color: "#fff", borderRadius: 9, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: newText.trim() ? "pointer" : "default" }}>Add</button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+              {dataFetcher.state !== "idle" && comments.length === 0 && <div style={{ color: C.faint, fontSize: 13, textAlign: "center", padding: 20 }}>Loading…</div>}
+              {comments.map((m) => {
+                const author = m.fromName || "Someone";
+                const mine = author.trim().toLowerCase() === meName;
+                return (
+                  <div key={m.id} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                    <ThreadAvatar name={author} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "baseline", gap: 7 }}>
+                        <span style={{ fontWeight: 700, fontSize: 13, color: C.ink }}>{author}</span>
+                        <span style={{ fontSize: 10.5, color: C.faint }} title={relativeTime(m.createdAt)}>{clockStamp(m.createdAt)}</span>
+                        {mine && <button type="button" onClick={() => { if (window.confirm("Delete this note?")) noteFetcher.submit({ ...scopeFields, intent: "collection_hub_note_delete", messageId: String(m.id) }, { method: "post", action: "/portal" }); }} style={{ marginLeft: "auto", border: "none", background: "transparent", color: C.faint, cursor: "pointer", fontSize: 11, padding: 0 }} title="Delete">Delete</button>}
+                      </div>
+                      <div style={{ fontSize: 13.5, color: C.ink, marginTop: 2, whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.45 }}>{renderBodyWithMentions(m.body)}</div>
+                    </div>
+                  </div>
+                );
+              })}
+              {comments.length === 0 && dataFetcher.state === "idle" && <div style={{ color: C.faint, fontSize: 13, textAlign: "center", padding: "10px 0" }}>No notes yet. Write one below — @mention someone to notify them.</div>}
+            </div>
+            <div style={{ borderTop: `1px solid ${C.line}`, padding: "10px 14px 12px", background: "#fff" }}>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+                <textarea value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} placeholder="Write a note…  type @ to tag someone" rows={1}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); postNote(); } }}
+                  style={{ flex: 1, minWidth: 0, resize: "none", border: `1px solid ${C.line}`, background: C.panel2, color: C.ink, borderRadius: 12, padding: "10px 12px", fontSize: 13.5, lineHeight: 1.4, fontFamily: "inherit", maxHeight: 120 }} />
+                <button type="button" onClick={postNote} disabled={!noteDraft.trim()} title="Post note"
+                  style={{ border: "none", background: C.teal, color: "#fff", cursor: noteDraft.trim() ? "pointer" : "default", width: 42, height: 42, borderRadius: 12, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", opacity: noteDraft.trim() ? 1 : 0.45 }}>
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none"><path d="M4 12l16-8-6 16-3-6-7-2z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" fill="currentColor" fillOpacity="0.15" /></svg>
+                </button>
+              </div>
+              <div style={{ fontSize: 10.5, color: C.faint, marginTop: 6 }}>Enter to post · @mention to notify via the bell</div>
+            </div>
+          </>
+        )}
+      </div>
+    </>,
+    document.body,
+  );
+}
+
 // Render a message body with @-mentions highlighted in teal.
 function renderBodyWithMentions(body: string): React.ReactNode {
   const parts = body.split(/(@[a-z0-9._-]+)/gi);
@@ -14911,6 +15238,19 @@ function MessagesMenu({ messages }: { messages: PortalMessageItem[] }) {
   const threadHrefFor = (m: PortalMessageItem) => {
     const entityType = (m as PortalMessageItem & { entityType?: string }).entityType || "supplier_order";
     const entityKey = (m as PortalMessageItem & { entityKey?: string | null }).entityKey ?? "";
+    // A collection task notification opens the Notes+Tasks hub drawer (entityKey
+    // holds "<scopeType>:<scopeId>"), not a cell thread.
+    if (entityType === "collection_task" || entityType === "collection_group" || entityType === "collection_sheet") {
+      // collection_task: entityKey already holds "<scopeType>:<scopeId>".
+      // collection_group note: scope = group:<entityKey>. collection_sheet note: collection:<orderId>.
+      const hubVal = entityType === "collection_task" ? entityKey
+        : entityType === "collection_group" ? `group:${entityKey}`
+        : `collection:${m.orderId}`;
+      const hp = new URLSearchParams({ page: "collections", hub: hubVal, hubtab: entityType === "collection_task" ? "tasks" : "notes" });
+      const pt = (m as PortalMessageItem & { productTitle?: string | null }).productTitle;
+      if (pt) hp.set("hubname", String(pt));
+      return `/portal?${hp.toString()}`;
+    }
     const threadKey = `${entityType}:${m.orderId}:${entityKey}:${m.field}`;
     const page = entityType === "collection_row" ? "collections"
       : entityType === "sample_iteration" ? "samples"
@@ -18075,7 +18415,7 @@ function ButtonSpinner({ size = 14, color = "currentColor" }: { size?: number; c
 // which shipments each size went in and how many. Drives the collection size-cell
 // annotation + the auto "Not / Partly / Fully in shipment" status.
 type CollectionShipDetailMap = Record<string, Record<string, { total: number; parts: Array<{ ship: string; qty: number }> }>>;
-function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, shipmentDetailByProductId = {}, restockStatusByProductId = {}, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], collectionTileOrder = [], canSeeProductStatus = false, search = "", onTotalsChange, onGroupsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; shipmentDetailByProductId?: CollectionShipDetailMap; restockStatusByProductId?: Record<string, string>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; collectionTileOrder?: string[]; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void; onGroupsChange?: (groups: CollectionGroup[]) => void }) {
+function CollectionsPanel({ collections: initialCollections, collectionSettings, restockSettings, productInfo, fabricStockIndex, inrPerAudCachedRate, isAdmin, shopDomain, users, photoShoots, etaByProductId, shipmentByProductId, shipmentDetailByProductId = {}, restockStatusByProductId = {}, collectionKind = "collection", hidePhotoShootToggle = false, costCurrency = "INR", thbPerAudCachedRate = null, collectionGroups = [], collectionTileOrder = [], taskCounts = {}, canSeeProductStatus = false, search = "", onTotalsChange, onGroupsChange }: { collections: CollectionListItem[]; collectionSettings: CollectionSettings; restockSettings: RestockSettings; productInfo: ProductInfo; fabricStockIndex: FabricStockEntry[]; inrPerAudCachedRate: number | null; isAdmin: boolean; shopDomain: string | null; users: PortalUser[]; photoShoots: PhotoShootListItem[]; etaByProductId: Record<string, string>; shipmentByProductId: Record<string, { label: string; partial: boolean }>; shipmentDetailByProductId?: CollectionShipDetailMap; restockStatusByProductId?: Record<string, string>; collectionKind?: string; hidePhotoShootToggle?: boolean; costCurrency?: "INR" | "THB"; thbPerAudCachedRate?: number | null; collectionGroups?: CollectionGroup[]; collectionTileOrder?: string[]; taskCounts?: Record<string, number>; canSeeProductStatus?: boolean; search?: string; onTotalsChange?: (totals: { qty: number; cost: number; aud: number; currency: "INR" | "THB" } | null) => void; onGroupsChange?: (groups: CollectionGroup[]) => void }) {
   const fetcher = useFetcher();
   // Kept: "Import one tab (Google Sheet)" (importFetcher) and "Upload tab
   // (creates collection)" (tabImportFetcher). The bulk-import / recompress /
@@ -18086,6 +18426,14 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
   const [searchParams, setSearchParams] = useSearchParams();
   const collectionIdParam = searchParams.get("collectionId");
   const selectedId = collectionIdParam ? Number(collectionIdParam) : null;
+  // Open the Notes+Tasks hub drawer for a whole group or sheet.
+  const openHub = useCallback((scopeType: "group" | "collection", scopeId: string | number, name?: string, tab: "notes" | "tasks" = "tasks") => {
+    const next = new URLSearchParams(searchParams);
+    next.set("hub", `${scopeType}:${scopeId}`);
+    next.set("hubtab", tab);
+    if (name) next.set("hubname", name); else next.delete("hubname");
+    setSearchParams(next);
+  }, [searchParams, setSearchParams]);
   const [collections, setCollections] = useState<CollectionListItem[]>(initialCollections);
   const [dragId, setDragId] = useState<number | null>(null);
   const [dragOverId, setDragOverId] = useState<number | null>(null);
@@ -18763,6 +19111,19 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               </div>
               <div style={{ padding: "8px 4px 2px" }}>
                 <div style={{ fontWeight: 800, fontSize: 14, color: "#111827", textAlign: "center" }}>{g.name}</div>
+                <div style={{ display: "flex", justifyContent: "center", marginTop: 5 }}>
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); openHub("group", g.id, g.name); }}
+                    title="Tasks & notes for this group"
+                    style={{ display: "inline-flex", alignItems: "center", gap: 5, border: "1px solid #e5e7eb", background: "#fff", color: "#0f766e", fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "3px 10px", cursor: "pointer" }}
+                  >
+                    ✓ Tasks · Notes
+                    {(taskCounts[`group:${g.id}`] ?? 0) > 0 && (
+                      <span style={{ background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{taskCounts[`group:${g.id}`]}</span>
+                    )}
+                  </button>
+                </div>
               </div>
               {/* Hide confirm — deliberate, and recoverable via the Undo toast. */}
               {confirmGroupId === g.id && (
@@ -18804,6 +19165,8 @@ function CollectionsPanel({ collections: initialCollections, collectionSettings,
               selectable={!c.hidden}
               selected={selectedIds.has(c.id)}
               onToggleSelected={() => toggleSelect(c.id)}
+              onOpenHub={() => openHub("collection", c.id, c.name)}
+              taskCount={taskCounts[`collection:${c.id}`] ?? 0}
               {...tileDragProps(token, orderedTokens)}
             />
           );
@@ -19152,6 +19515,8 @@ function CollectionCard({
   selectable = false,
   selected = false,
   onToggleSelected,
+  onOpenHub,
+  taskCount = 0,
 }: {
   collection: CollectionListItem;
   isDragging: boolean;
@@ -19191,6 +19556,9 @@ function CollectionCard({
   selectable?: boolean;
   selected?: boolean;
   onToggleSelected?: () => void;
+  // Opens the Notes + Tasks hub drawer for this sheet; taskCount = open tasks.
+  onOpenHub?: () => void;
+  taskCount?: number;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [hover, setHover] = useState(false);
@@ -19327,6 +19695,21 @@ function CollectionCard({
             onClick={(e) => { e.stopPropagation(); setEditing(true); }}
             title="Click to rename"
           >{collection.name || "Untitled"}</span>
+        )}
+        {onOpenHub && (
+          <div style={{ display: "flex", justifyContent: "center", marginTop: 6, width: "100%" }} onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onOpenHub(); }}
+              title="Tasks & notes for this sheet"
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, border: "1px solid #e5e7eb", background: "#fff", color: "#0f766e", fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "3px 10px", cursor: "pointer" }}
+            >
+              ✓ Tasks · Notes
+              {taskCount > 0 && (
+                <span style={{ background: "#0d9488", color: "#fff", borderRadius: 999, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, display: "inline-flex", alignItems: "center", justifyContent: "center" }}>{taskCount}</span>
+              )}
+            </button>
+          </div>
         )}
         {onSetFabricStatus && (
           <div style={{ marginTop: 10, width: "100%" }} onClick={(e) => e.stopPropagation()}>
