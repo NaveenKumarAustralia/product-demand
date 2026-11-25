@@ -18,7 +18,8 @@
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
     "typecheck": "react-router typegen && tsc --noEmit",
-    "test:preorder": "node --experimental-strip-types --test app/preorder/*.test.ts"
+    "test:preorder": "node --experimental-strip-types --test app/preorder/*.test.ts",
+    "test:mcp": "node --experimental-strip-types --test app/mcp/*.test.ts app/api-auth.server.test.ts"
   },
   "type": "module",
   "engines": {

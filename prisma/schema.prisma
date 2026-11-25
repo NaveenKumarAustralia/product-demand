@@ -390,3 +390,92 @@ model SampleIteration {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
+
+// ─── ChatGPT / MCP integration ──────────────────────────────────────────────
+// OAuth 2.1 clients registered by MCP hosts (ChatGPT) via dynamic registration.
+model McpOAuthClient {
+  id           String   @id
+  name         String
+  redirectUris Json     @default("[]")
+  createdAt    DateTime @default(now())
+  lastUsedAt   DateTime?
+}
+
+// One-time authorization codes (PKCE). Stored hashed; single use; short-lived.
+model McpOAuthCode {
+  codeHash      String    @id
+  clientId      String
+  portalUserId  String
+  redirectUri   String
+  codeChallenge String
+  scope         String
+  resource      String?
+  expiresAt     DateTime
+  usedAt        DateTime?
+  createdAt     DateTime  @default(now())
+}
+
+// Access + refresh tokens. Only SHA-256 hashes are stored. A grant is one
+// connection (one "Connect" in ChatGPT); revoking it kills every token in it.
+model McpOAuthToken {
+  id               Int       @id @default(autoincrement())
+  grantId          String
+  clientId         String
+  portalUserId     String
+  scope            String
+  accessTokenHash  String    @unique
+  refreshTokenHash String    @unique
+  accessExpiresAt  DateTime
+  refreshExpiresAt DateTime
+  rotatedAt        DateTime?
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+  lastUsedAt       DateTime?
+
+  @@index([grantId])
+}
+
+// A previewed business change waiting for approval. confirm_change executes it
+// exactly once (status pending → executing → done/failed), which is also what
+// stops a retried call from creating a second order.
+model McpPendingChange {
+  id           String    @id
+  grantId      String
+  portalUserId String
+  kind         String
+  payload      Json
+  before       Json?
+  summary      String
+  status       String    @default("pending")
+  result       Json?
+  error        String?
+  expiresAt    DateTime
+  createdAt    DateTime  @default(now())
+  executedAt   DateTime?
+
+  @@index([status, expiresAt])
+}
+
+// Detailed audit trail of every MCP write (and refused/failed attempt), with
+// before and after values.
+model McpAuditLog {
+  id           Int      @id @default(autoincrement())
+  createdAt    DateTime @default(now())
+  grantId      String?
+  clientId     String?
+  portalUserId String?
+  actorName    String?
+  tool         String
+  kind         String?
+  changeId     String?
+  entityType   String?
+  entityId     String?
+  outcome      String
+  input        Json?
+  before       Json?
+  after        Json?
+  error        String?
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+}
