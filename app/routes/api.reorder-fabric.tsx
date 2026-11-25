@@ -273,7 +273,21 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     if (pinnedKey && merged.has(pinnedKey)) chosenKey = pinnedKey;
     else if (candidates.length === 1) chosenKey = candidates[0].key;
 
-    return Response.json({ ok: true, candidates, all, chosenKey, pinned: Boolean(pinnedKey && merged.has(pinnedKey)) });
+    // Expose the same consumption used by the reservation calculation.
+    // A selected fabric is not proof that every component fabric is recorded.
+    const selected = chosenKey ? merged.get(chosenKey) : undefined;
+    const explicitMeters = styleId && selected ? selected.styleMetersMap[styleId] : undefined;
+    const averageMeters = styleId ? styleAvg.get(styleId) : undefined;
+    const metersPerPiece = explicitMeters && explicitMeters > 0 ? explicitMeters : averageMeters ?? null;
+    const availableExact = selected ? Math.max(0, selected.inStock - selected.reserved) : null;
+    return Response.json({ ok: true, candidates, all, chosenKey, pinned: Boolean(pinnedKey && merged.has(pinnedKey)),
+      consumption: { styleId, styleName: style?.n ?? null, fabricKey: chosenKey || null,
+        metersPerPiece: selected ? metersPerPiece : null,
+        source: selected && metersPerPiece ? (explicitMeters ? "fabric_style" : "style_average") : null,
+        availableMeters: availableExact,
+        maxPiecesForSelectedFabric: availableExact !== null && metersPerPiece && metersPerPiece > 0 ? Math.floor(availableExact / metersPerPiece) : null,
+        componentCoverage: "single selected fabric only; additional fabrics and lining are not verified"
+      } });
   } catch (e) {
     console.error("[api.reorder-fabric]", e);
     return Response.json({ ok: false, candidates: [], all: [], error: "failed" });
