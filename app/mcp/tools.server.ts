@@ -15,8 +15,9 @@
  */
 import { randomUUID } from "node:crypto";
 import prisma from "../db.server";
+import { createReplyMessage, resolveReplyRecipients } from "../portal-messages.server";
 import type { McpPrincipal } from "./oauth-core";
-import { callPortalIntent, MCP_PORTAL_USER_NAME, readFabric } from "./portal-bridge.server";
+import { callPortalIntent, ensureMcpPortalUser, MCP_PORTAL_USER_ID, MCP_PORTAL_USER_NAME, readFabric } from "./portal-bridge.server";
 import {
   appendNote,
   compactForModel,
@@ -223,7 +224,7 @@ async function audit(entry: {
 
 // ─── Pending changes ────────────────────────────────────────────────────────
 
-type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note" | "delete_order";
+type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note" | "delete_order" | "staff_reply";
 
 async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: unknown, before: unknown, summary: string, entityId: string | null, preview: unknown): Promise<ToolResult> {
   const id = `chg_${randomUUID()}`;
@@ -659,6 +660,31 @@ async function deletableOrderSnapshot(id: number) {
 
 const previewTools: ToolDef[] = [
   {
+    name: "preview_staff_thread_reply",
+    title: "Preview a staff thread reply",
+    description: `Preview a reply to an existing portal message. Shows the exact text and everyone the portal would notify. ${PREVIEW_NOTE}`,
+    inputSchema: {
+      type: "object",
+      properties: { parent_message_id: { type: "integer", minimum: 1 }, message: { type: "string", minLength: 1, maxLength: 2000 } },
+      required: ["parent_message_id", "message"],
+      additionalProperties: false,
+    },
+    scope: "portal:write",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    handler: async (args, ctx) => {
+      const parentMessageId = int(args.parent_message_id, "parent_message_id", { required: true, min: 1 })!;
+      const body = str(args.message, "message", { required: true, max: 2000 })!;
+      const resolved = await resolveReplyRecipients({ parentMessageId, body, fromUserId: MCP_PORTAL_USER_ID });
+      if (!resolved) throw new ToolInputError("Portal message not found");
+      const recipients = [...resolved.recipientsByUserId.values()].map(({ id, name }) => ({ id, name }));
+      if (!recipients.length) throw new ToolInputError("This reply would notify no staff");
+      const summary = `Reply to portal message #${parentMessageId} and notify ${recipients.map(({ name }) => name).join(", ")}.`;
+      const before = { parentBody: resolved.parent.body };
+      return stagePendingChange(ctx, "staff_reply", { parentMessageId, body, recipientIds: recipients.map(({ id }) => id).sort() },
+        before, summary, String(parentMessageId), { parent_message_id: parentMessageId, recipients, message: body });
+    },
+  },
+  {
     name: "preview_delete_production_order",
     title: "Preview deletion of an uncut production order",
     description: "Permanently deletes an open on-order batch through the portal's existing deletion action, only after explicit approval. Blocks cut, shipped, received or preorder-linked batches. " + PREVIEW_NOTE,
@@ -966,6 +992,20 @@ const confirmTools: ToolDef[] = [
         let result: { entityId: string; after: unknown };
         if (change.kind === "create_order") result = await executeCreate(payload);
         else if (change.kind === "amend_quantities") result = await executeAmend(payload as never, before as never);
+        else if (change.kind === "staff_reply") {
+          const { parentMessageId, body, recipientIds } = payload as { parentMessageId: number; body: string; recipientIds: string[] };
+          const parent = await prisma.portalMessage.findUnique({ where: { id: parentMessageId }, select: { body: true } });
+          if (!parent || stableStringify({ parentBody: parent.body }) !== stableStringify(before)) {
+            throw new ToolInputError("Parent message changed since the preview. Preview the reply again.");
+          }
+          await ensureMcpPortalUser();
+          const { replyIds } = await createReplyMessage({
+            parentMessageId, body, fromUserId: MCP_PORTAL_USER_ID, fromName: MCP_PORTAL_USER_NAME,
+            expectedRecipientIds: recipientIds,
+          });
+          if (!replyIds.length) throw new ToolInputError("The portal did not save the reply");
+          result = { entityId: String(parentMessageId), after: { body, reply_ids: replyIds } };
+        }
         else if (change.kind === "delete_order") {
           const orderId = int(payload.orderId, "orderId", { required: true, min: 1 })!;
           const current = await deletableOrderSnapshot(orderId);

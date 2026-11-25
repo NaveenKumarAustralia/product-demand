@@ -69,6 +69,7 @@ ChatGPT client must be checked separately after each server upgrade.
 | Fabric and capacity | Read availability, recorded order consumption and selected-fabric capacity | Existing read tools connected. Full multi-fabric requirements, purchasing, allocation edits and stock writes remain open. |
 | Production and reorder | List orders, read detail and planner, preview create, edit, quantity changes and cancellation | Existing tools connected. |
 | Notes | Preview append, replace or clear notes and factory notes | Append connected. Replace and clear were deployed in PR #21 but absent from the connected client. |
+| Staff communication | Preview an in-portal reply to an existing thread with the exact message and recipients | Added on the integration branch. Explicit approval is required before sending. COPY and LIVE verification pending. |
 | Deletion and restoration | Preview eligible uncut order deletion | Phase 2 carried forward. Restore is not registered. The portal UI's immediate undo uses a partial snapshot and creates a new ID. |
 | Shipments and packing | Read shipment lists and detail | Existing tools connected. Packing-list edits and shipment writes remain open. Shipment quantities can overlap with ordered quantities. |
 | Collections | List and read planning collections | Existing tools connected. Collection and collection order edits remain open. |
