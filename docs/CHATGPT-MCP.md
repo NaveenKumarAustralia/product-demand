@@ -57,3 +57,48 @@ all ChatGPT connections at once:
 Fabric sheet edits, packing lists, collections edits and other portal
 operations. Production lead times are not stored by the portal (the reorder
 planner keeps them in the browser), so they're not readable.
+
+## Capability matrix
+
+Production commit `08c241a` contains PR #21. Tool names in the connected
+ChatGPT client must be checked separately after each server upgrade.
+
+| Module | Supported operations | Verification and gaps |
+| --- | --- | --- |
+| Product Information and measurements | Search products and read recorded style information and fabric overrides | PR #21 deployed. Product Information tool was absent from the connected client. Dedicated measurement and size-chart queries remain open. |
+| Fabric and capacity | Read availability, recorded order consumption and selected-fabric capacity | Existing read tools connected. The integration branch adds order-sheet discovery and an approval-gated tool to record ordered meters. It does not send purchase orders to suppliers. Multi-fabric requirements, allocation edits and stock writes are outside this change. |
+| Production and reorder | List orders, read detail and planner, preview create, edit, quantity changes and cancellation | Existing tools connected. |
+| Notes | Preview append, replace or clear notes and factory notes | Append connected. Replace and clear were deployed in PR #21 but absent from the connected client. |
+| Staff communication | Preview an in-portal reply to an existing thread with the exact message and recipients | Added on the integration branch. Explicit approval is required before sending. COPY and LIVE verification pending. |
+| Deletion and restoration | Preview eligible uncut order deletion | Phase 2 carried forward. Restore is not registered. The portal UI's immediate undo uses a partial snapshot and creates a new ID. |
+| Shipments and packing | Read shipment lists and detail | Existing tools connected. Packing-list edits and shipment writes remain open. Shipment quantities can overlap with ordered quantities. |
+| Collections | List and read planning collections | Existing tools connected. Collection and collection order edits remain open. |
+| Samples and Vision Board | List samples with latest iteration and list both versions of boards with item counts | Implemented in the integration branch. COPY and LIVE validation pending. Full details and writes remain open. |
+| Sales, inventory and demand | Read planner aggregates | Separate reports and inventory writes remain open. |
+| Costing, tracking and activity | Read recorded sample cost, order and shipment status, and recent activity | Full costing, production tracking and reporting workflows remain open. |
+| Growth Engine | Read-only policy | No advertising writes or automation changes are authorized. |
+
+The route audit also surfaced preorder operations, packing inventory loads,
+collection media and tasks, product variant codes, supplier configuration,
+photo shoots, and portal threads. These need operation-specific review before
+registration. Some write paths call Shopify or notification services.
+
+## Test and release
+
+Generate Prisma, then run `npm run typecheck`, `npm run test:mcp`,
+`npm run test:preorder` and `npm run build`. Before write tests in Railway
+`mcp-test`, verify the application's database reference points to its own
+Postgres service and that any external store and notification integrations
+are isolated or disabled. A distinct Railway environment alone is insufficient.
+Use synthetic records to test OAuth, discovery, preview, approval, stale
+previews, duplicate confirmation and persisted results.
+
+Deploy the verified branch to COPY, then merge the tested change to `main`.
+Check the Railway deployment commit and status, the live application's health
+and the authenticated MCP tool list. Test reads via the existing LIVE
+connector. If it reports an older tool list, refresh it through ChatGPT's
+custom connector settings, then verify that the newly registered tools can
+be called. For rollback, select the last successful Railway deployment and
+check compatibility with any database migrations before restoring it.
+
+See [Railway workspace inventory](RAILWAY-INVENTORY.md).

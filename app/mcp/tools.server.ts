@@ -15,8 +15,9 @@
  */
 import { randomUUID } from "node:crypto";
 import prisma from "../db.server";
+import { createReplyMessage, resolveReplyRecipients } from "../portal-messages.server";
 import type { McpPrincipal } from "./oauth-core";
-import { callPortalIntent, MCP_PORTAL_USER_NAME, readFabric } from "./portal-bridge.server";
+import { appendFabricOrderFromMcp, readFabricOrderSheets, readFabricOrderSheetSnapshot, callPortalIntent, ensureMcpPortalUser, MCP_PORTAL_USER_ID, MCP_PORTAL_USER_NAME, readFabric } from "./portal-bridge.server";
 import {
   appendNote,
   compactForModel,
@@ -223,7 +224,7 @@ async function audit(entry: {
 
 // ─── Pending changes ────────────────────────────────────────────────────────
 
-type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note";
+type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note" | "delete_order" | "staff_reply" | "create_fabric_order";
 
 async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: unknown, before: unknown, summary: string, entityId: string | null, preview: unknown): Promise<ToolResult> {
   const id = `chg_${randomUUID()}`;
@@ -248,6 +249,62 @@ async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: u
 // ─── Read tools ─────────────────────────────────────────────────────────────
 
 const readTools: ToolDef[] = [
+  {
+    name: "list_fabric_order_sheets",
+    title: "List fabric order sheets",
+    description: "List the Production Portal fabric order sheets that accept orders in meters.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    scope: "portal:read",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async () => ({ structured: { sheets: await readFabricOrderSheets() } }),
+  },
+  {
+    name: "list_samples",
+    title: "List product samples",
+    description: "Search samples by name and read their latest recorded iteration, including size, fabric, status and factory cost.",
+    inputSchema: { type: "object", properties: { search: { type: "string", maxLength: 200 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, additionalProperties: false },
+    scope: "portal:read",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async (args) => {
+      const search = str(args.search, "search", { max: 200 });
+      const limit = int(args.limit, "limit", { min: 1, max: 50 }) ?? 20;
+      const samples = await prisma.sample.findMany({
+        where: search ? { name: { contains: search, mode: "insensitive" } } : {},
+        orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+        take: limit + 1,
+        select: {
+          id: true, name: true, updatedAt: true,
+          iterations: {
+            orderBy: [{ version: "desc" }, { id: "desc" }],
+            take: 1,
+            select: { id: true, version: true, name: true, fabricType: true, sampleSize: true, buttonType: true, factoryCost: true, status: true },
+          },
+        },
+      });
+      return { structured: { samples: samples.slice(0, limit), truncated: samples.length > limit } };
+    },
+  },
+  {
+    name: "list_vision_boards",
+    title: "List vision boards",
+    description: "Read the names and item counts of saved vision boards. Choose the original or version 2 view.",
+    inputSchema: { type: "object", properties: { version: { type: "integer", enum: [1, 2] }, limit: { type: "integer", minimum: 1, maximum: 50 } }, additionalProperties: false },
+    scope: "portal:read",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async (args) => {
+      const version = int(args.version, "version", { min: 1, max: 2 }) ?? 2;
+      const limit = int(args.limit, "limit", { min: 1, max: 50 }) ?? 20;
+      const query = {
+        orderBy: [{ sortOrder: "asc" as const }, { id: "asc" as const }],
+        take: limit + 1,
+        select: { id: true, name: true, updatedAt: true, _count: { select: { items: true } } },
+      };
+      const boards = version === 1
+        ? await prisma.visionBoard.findMany(query)
+        : await prisma.visionBoardV2.findMany(query);
+      return { structured: { version, boards: boards.slice(0, limit), truncated: boards.length > limit } };
+    },
+  },
   {
     name: "get_product_information",
     title: "Recorded product style information",
@@ -595,7 +652,87 @@ const readTools: ToolDef[] = [
 
 const PREVIEW_NOTE = "Nothing is changed by this tool. It returns a change_id that needs Koku's explicit approval and a confirm_change call.";
 
+async function deletableOrderSnapshot(id: number) {
+  const order = await loadOrder(id);
+  if (!order) throw new ToolInputError("Order not found");
+  if (order.status !== "open" || order.supplierStatus !== "on_order" || order.fabricConsumed || order.packingListId || order.lines.some(l => l.qtyReceived > 0)) {
+    throw new ToolInputError("Only open, uncut, unshipped orders with no received pieces can be deleted through this tool.");
+  }
+  const [batch, reservations, cut] = await Promise.all([
+    prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: id } }),
+    prisma.preorderReservation.count({ where: { supplierOrderId: id } }),
+    prisma.productionCutRecord.findUnique({ where: { supplierOrderId: id } }),
+  ]);
+  if (batch || reservations || cut) throw new ToolInputError("Order has preorder or cutting history; review in portal before deleting.");
+  return presentOrder(order);
+}
+
 const previewTools: ToolDef[] = [
+  {
+    name: "preview_create_fabric_order",
+    title: "Preview recording a fabric order",
+    description: `Record fabric and ordered meters on a selected portal order sheet. This does not send a supplier purchase order. ${PREVIEW_NOTE}`,
+    inputSchema: {
+      type: "object",
+      properties: { sheet_id: { type: "string" }, fabric: { type: "string", minLength: 2, maxLength: 200 }, meters: { type: "number", minimum: 0.001, maximum: 1000000 } },
+      required: ["sheet_id", "fabric", "meters"],
+      additionalProperties: false,
+    },
+    scope: "portal:write",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    handler: async (args, ctx) => {
+      const sheetId = str(args.sheet_id, "sheet_id", { required: true, max: 200 })!;
+      const fabric = str(args.fabric, "fabric", { required: true, max: 200 })!;
+      const meters = args.meters;
+      if (fabric.length < 2 || typeof meters !== "number" || !Number.isFinite(meters) || meters < 0.001 || meters > 1000000) {
+        throw new ToolInputError("Enter a fabric name and a quantity from 0.001 to 1000000 meters");
+      }
+      const current = await readFabricOrderSheetSnapshot(sheetId, fabric);
+      if (!current) throw new ToolInputError("Pick a fabric order sheet from list_fabric_order_sheets");
+      const summary = `Record ${meters} meters of ${fabric} on ${current.name}.`;
+      return stagePendingChange(ctx, "create_fabric_order", { sheetId, fabric, meters, expected: JSON.stringify(current) }, current,
+        summary, sheetId, { sheet: current.name, fabric, meters, existing_matching_quantities: current.matchingQuantities });
+    },
+  },
+  {
+    name: "preview_staff_thread_reply",
+    title: "Preview a staff thread reply",
+    description: `Preview a reply to an existing portal message. Shows the exact text and everyone the portal would notify. ${PREVIEW_NOTE}`,
+    inputSchema: {
+      type: "object",
+      properties: { parent_message_id: { type: "integer", minimum: 1 }, message: { type: "string", minLength: 1, maxLength: 2000 } },
+      required: ["parent_message_id", "message"],
+      additionalProperties: false,
+    },
+    scope: "portal:write",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    handler: async (args, ctx) => {
+      const parentMessageId = int(args.parent_message_id, "parent_message_id", { required: true, min: 1 })!;
+      const body = str(args.message, "message", { required: true, max: 2000 })!;
+      const resolved = await resolveReplyRecipients({ parentMessageId, body, fromUserId: MCP_PORTAL_USER_ID });
+      if (!resolved) throw new ToolInputError("Portal message not found");
+      const recipients = [...resolved.recipientsByUserId.values()].map(({ id, name }) => ({ id, name }));
+      if (!recipients.length) throw new ToolInputError("This reply would notify no staff");
+      const summary = `Reply to portal message #${parentMessageId} and notify ${recipients.map(({ name }) => name).join(", ")}.`;
+      const before = { parentBody: resolved.parent.body };
+      return stagePendingChange(ctx, "staff_reply", { parentMessageId, body, recipientIds: recipients.map(({ id }) => id).sort() },
+        before, summary, String(parentMessageId), { parent_message_id: parentMessageId, recipients, message: body });
+    },
+  },
+  {
+    name: "preview_delete_production_order",
+    title: "Preview deletion of an uncut production order",
+    description: "Permanently deletes an open on-order batch through the portal's existing deletion action, only after explicit approval. Blocks cut, shipped, received or preorder-linked batches. " + PREVIEW_NOTE,
+    inputSchema: { type: "object", properties: { order_id: { type: "integer", minimum: 1 } }, required: ["order_id"], additionalProperties: false },
+    scope: "portal:write",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    handler: async (args, ctx) => {
+      const id = int(args.order_id, "order_id", { required: true, min: 1 })!;
+      const before = await deletableOrderSnapshot(id);
+      const summary = "Permanently delete order #" + id + " " + before.product + " (" + before.total_qty + " pieces), including its attached messages.";
+      return stagePendingChange(ctx, "delete_order", { orderId: id }, before, summary, String(id), { before, after: null, warning: "Deletion removes attached messages; restoration may not preserve every field." });
+    },
+  },
   {
     name: "preview_create_production_order",
     title: "Preview new production order",
@@ -890,6 +1027,33 @@ const confirmTools: ToolDef[] = [
         let result: { entityId: string; after: unknown };
         if (change.kind === "create_order") result = await executeCreate(payload);
         else if (change.kind === "amend_quantities") result = await executeAmend(payload as never, before as never);
+        else if (change.kind === "create_fabric_order") {
+          const { sheetId, fabric, meters, expected } = payload as { sheetId: string; fabric: string; meters: number; expected: string };
+          const after = await appendFabricOrderFromMcp(sheetId, fabric, meters, expected);
+          result = { entityId: sheetId, after };
+        }
+        else if (change.kind === "staff_reply") {
+          const { parentMessageId, body, recipientIds } = payload as { parentMessageId: number; body: string; recipientIds: string[] };
+          const parent = await prisma.portalMessage.findUnique({ where: { id: parentMessageId }, select: { body: true } });
+          if (!parent || stableStringify({ parentBody: parent.body }) !== stableStringify(before)) {
+            throw new ToolInputError("Parent message changed since the preview. Preview the reply again.");
+          }
+          await ensureMcpPortalUser();
+          const { replyIds } = await createReplyMessage({
+            parentMessageId, body, fromUserId: MCP_PORTAL_USER_ID, fromName: MCP_PORTAL_USER_NAME,
+            expectedRecipientIds: recipientIds,
+          });
+          if (!replyIds.length) throw new ToolInputError("The portal did not save the reply");
+          result = { entityId: String(parentMessageId), after: { body, reply_ids: replyIds } };
+        }
+        else if (change.kind === "delete_order") {
+          const orderId = int(payload.orderId, "orderId", { required: true, min: 1 })!;
+          const current = await deletableOrderSnapshot(orderId);
+          if (stableStringify(current) !== stableStringify(before)) throw new ToolInputError("Order changed since preview; preview again.");
+          await callPortalIntent("delete_order", { orderId });
+          if (await loadOrder(orderId)) throw new Error("Order still exists; deletion not verified.");
+          result = { entityId: String(orderId), after: { deleted: true, order_id: orderId } };
+        }
         else if (change.kind === "update_order") result = await executeUpdate(payload as never, before as never);
         else if ((change.kind === "add_note" || change.kind === "replace_note")) result = await executeNote(payload as never, before as never);
         else throw new Error(`Unknown change kind ${change.kind}`);

@@ -10,6 +10,7 @@
  * separately in McpAuditLog.
  */
 import prisma from "../db.server";
+import { internalMcpRequests } from "./internal-request.server";
 import { PORTAL_USERS_KEY } from "../portal-messages.server";
 import { PORTAL_USER_COOKIE } from "../preorder/preorder-portal-auth.server";
 import { action as portalAction } from "../routes/portal._index";
@@ -85,4 +86,27 @@ export async function readFabric(params: { title?: string; pending?: boolean }):
   if (params.pending) url.searchParams.set("pending", "1");
   const res = await reorderFabricLoader({ request: new Request(url), params: {}, context: {} } as Parameters<typeof reorderFabricLoader>[0]);
   return res instanceof Response ? res.json() : res;
+}
+
+async function callFabricOrderAction(intent: string, fields: Record<string, string> = {}) {
+  const request = new Request("http://portal.internal/portal", {
+    method: "POST",
+    body: new URLSearchParams({ intent, ...fields }),
+  });
+  internalMcpRequests.add(request);
+  const response = await portalAction({ request, params: {}, context: {} } as Parameters<typeof portalAction>[0]);
+  if (!(response instanceof Response) || !response.ok) throw new Error("The fabric order action failed");
+  return response.json();
+}
+
+export async function readFabricOrderSheets() {
+  return callFabricOrderAction("mcp_list_fabric_order_sheets");
+}
+
+export async function readFabricOrderSheetSnapshot(gid: string, name: string): Promise<{ name: string; matchingQuantities: string[] } | null> {
+  return callFabricOrderAction("mcp_read_fabric_order_sheet", { gid, name });
+}
+
+export async function appendFabricOrderFromMcp(gid: string, name: string, meters: number, expected: string) {
+  return callFabricOrderAction("mcp_append_fabric_order", { gid, name, meters: String(meters), expected });
 }

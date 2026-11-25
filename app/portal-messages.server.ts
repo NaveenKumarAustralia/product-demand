@@ -177,19 +177,17 @@ export async function syncEntityNoteMessages({
 // posted in the thread + every user @-mentioned in the reply text.
 // Each recipient gets their own PortalMessage row so the bell-unread
 // query stays simple. Returns the IDs of the created replies.
-export async function createReplyMessage({
+export async function resolveReplyRecipients({
   parentMessageId,
   fromUserId,
-  fromName,
   body,
 }: {
   parentMessageId: number;
   fromUserId: string;
-  fromName: string;
   body: string;
-}): Promise<{ replyIds: number[] }> {
+}) {
   const parent = await prisma.portalMessage.findUnique({ where: { id: parentMessageId } });
-  if (!parent) return { replyIds: [] };
+  if (!parent) return null;
 
   const usersSetting = await prisma.portalSetting.findUnique({
     where: { key: PORTAL_USERS_KEY },
@@ -237,6 +235,29 @@ export async function createReplyMessage({
     if (found) recipientsByUserId.set(found.id, found);
   }
   recipientsByUserId.delete(fromUserId);
+
+  return { parent, recipientsByUserId };
+}
+
+export async function createReplyMessage({
+  parentMessageId,
+  fromUserId,
+  fromName,
+  body,
+  expectedRecipientIds,
+}: {
+  parentMessageId: number;
+  fromUserId: string;
+  fromName: string;
+  body: string;
+  expectedRecipientIds?: string[];
+}): Promise<{ replyIds: number[] }> {
+  const resolved = await resolveReplyRecipients({ parentMessageId, fromUserId, body });
+  if (!resolved) return { replyIds: [] };
+  const { parent, recipientsByUserId } = resolved;
+  if (expectedRecipientIds && JSON.stringify([...recipientsByUserId.keys()].sort()) !== JSON.stringify(expectedRecipientIds)) {
+    throw new Error("Thread recipients changed since the preview. Preview the reply again.");
+  }
 
   // No one else to notify? Still record the reply for thread history —
   // create a single row addressed to the sender with readAt = now so
