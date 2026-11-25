@@ -9796,6 +9796,53 @@ async function getManualFabricSheets({
   return legacySheets;
 }
 
+export async function readFabricOrderSheets() {
+  const sheets = await loadManualFabricSheetsForAction();
+  return sheets.flatMap((sheet) => {
+    const columns = fabricOrderColumns(sheet);
+    return columns ? [{ id: sheet.gid, name: sheet.name, kind: sheet.kind }] : [];
+  });
+}
+
+function fabricOrderColumns(sheet: FabricStockSheet) {
+  if (!["order", "wide-order"].includes(sheet.kind) || isHiddenFabricSheet(sheet.name)) return null;
+  const name = sheet.headers.findIndex((h) => /^name$/i.test(h));
+  const meters = sheet.headers.findIndex((h) => /quantity\s*ordered|meters?\s*ordered/i.test(h));
+  return name >= 0 && meters >= 0 ? { name, meters } : null;
+}
+
+function fabricOrderSheetSnapshot(sheet: FabricStockSheet, name: string) {
+  const columns = fabricOrderColumns(sheet);
+  if (!columns) return null;
+  const matchingQuantities = sheet.rows
+    .filter((row) => row[columns.name]?.trim().toLowerCase() === name.toLowerCase())
+    .map((row) => row[columns.meters] ?? "");
+  return { id: sheet.gid, name: sheet.name, kind: sheet.kind, columns, headers: sheet.headers, matchingQuantities };
+}
+
+export async function readFabricOrderSheetSnapshot(gid: string, name: string) {
+  const sheet = (await loadManualFabricSheetsForAction()).find((item) => item.gid === gid);
+  return sheet ? fabricOrderSheetSnapshot(sheet, name) : null;
+}
+
+export async function appendFabricOrderFromMcp(gid: string, name: string, meters: number, expected: string, actor: string) {
+  return withFabricSheetsLock(async () => {
+    const sheets = await loadManualFabricSheetsForAction();
+    const sheet = sheets.find((item) => item.gid === gid);
+    const current = sheet && fabricOrderSheetSnapshot(sheet, name);
+    if (!sheet || !current || JSON.stringify(current) !== expected) {
+      throw new Error("The fabric order sheet changed since the preview. Preview the order again.");
+    }
+    await backupFabricSheets(sheets, actor, "autosave");
+    const row = sheet.headers.map(() => "");
+    row[current.columns.name] = name;
+    row[current.columns.meters] = String(meters);
+    sheet.rows.push(row);
+    await saveManualFabricSheets(sheets);
+    return { sheet_id: gid, sheet: sheet.name, fabric: name, meters };
+  });
+}
+
 async function loadManualFabricSheetsForAction() {
   const [
     manualSheetsSetting,

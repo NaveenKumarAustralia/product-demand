@@ -66,7 +66,7 @@ ChatGPT client must be checked separately after each server upgrade.
 | Module | Supported operations | Verification and gaps |
 | --- | --- | --- |
 | Product Information and measurements | Search products and read recorded style information and fabric overrides | PR #21 deployed. Product Information tool was absent from the connected client. Dedicated measurement and size-chart queries remain open. |
-| Fabric and capacity | Read availability, recorded order consumption and selected-fabric capacity | Existing read tools connected. Full multi-fabric requirements, purchasing, allocation edits and stock writes remain open. |
+| Fabric and capacity | Read availability, recorded order consumption and selected-fabric capacity | Existing read tools connected. The integration branch adds order-sheet discovery and an approval-gated tool to record ordered meters. It does not send purchase orders to suppliers. Multi-fabric requirements, allocation edits and stock writes are outside this change. |
 | Production and reorder | List orders, read detail and planner, preview create, edit, quantity changes and cancellation | Existing tools connected. |
 | Notes | Preview append, replace or clear notes and factory notes | Append connected. Replace and clear were deployed in PR #21 but absent from the connected client. |
 | Staff communication | Preview an in-portal reply to an existing thread with the exact message and recipients | Added on the integration branch. Explicit approval is required before sending. COPY and LIVE verification pending. |

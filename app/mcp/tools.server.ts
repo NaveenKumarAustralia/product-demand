@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import prisma from "../db.server";
 import { createReplyMessage, resolveReplyRecipients } from "../portal-messages.server";
 import type { McpPrincipal } from "./oauth-core";
-import { callPortalIntent, ensureMcpPortalUser, MCP_PORTAL_USER_ID, MCP_PORTAL_USER_NAME, readFabric } from "./portal-bridge.server";
+import { appendFabricOrderFromMcp, readFabricOrderSheets, readFabricOrderSheetSnapshot, callPortalIntent, ensureMcpPortalUser, MCP_PORTAL_USER_ID, MCP_PORTAL_USER_NAME, readFabric } from "./portal-bridge.server";
 import {
   appendNote,
   compactForModel,
@@ -224,7 +224,7 @@ async function audit(entry: {
 
 // ─── Pending changes ────────────────────────────────────────────────────────
 
-type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note" | "delete_order" | "staff_reply";
+type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note" | "delete_order" | "staff_reply" | "create_fabric_order";
 
 async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: unknown, before: unknown, summary: string, entityId: string | null, preview: unknown): Promise<ToolResult> {
   const id = `chg_${randomUUID()}`;
@@ -249,6 +249,15 @@ async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: u
 // ─── Read tools ─────────────────────────────────────────────────────────────
 
 const readTools: ToolDef[] = [
+  {
+    name: "list_fabric_order_sheets",
+    title: "List fabric order sheets",
+    description: "List the Production Portal fabric order sheets that accept orders in meters.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    scope: "portal:read",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async () => ({ structured: { sheets: await readFabricOrderSheets() } }),
+  },
   {
     name: "list_samples",
     title: "List product samples",
@@ -660,6 +669,32 @@ async function deletableOrderSnapshot(id: number) {
 
 const previewTools: ToolDef[] = [
   {
+    name: "preview_create_fabric_order",
+    title: "Preview recording a fabric order",
+    description: `Record fabric and ordered meters on a selected portal order sheet. This does not send a supplier purchase order. ${PREVIEW_NOTE}`,
+    inputSchema: {
+      type: "object",
+      properties: { sheet_id: { type: "string" }, fabric: { type: "string", minLength: 2, maxLength: 200 }, meters: { type: "number", exclusiveMinimum: 0, maximum: 1000000 } },
+      required: ["sheet_id", "fabric", "meters"],
+      additionalProperties: false,
+    },
+    scope: "portal:write",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    handler: async (args, ctx) => {
+      const sheetId = str(args.sheet_id, "sheet_id", { required: true, max: 200 })!;
+      const fabric = str(args.fabric, "fabric", { required: true, max: 200 })!;
+      const meters = args.meters;
+      if (fabric.length < 2 || typeof meters !== "number" || !Number.isFinite(meters) || meters < 0.001 || meters > 1000000) {
+        throw new ToolInputError("Enter a fabric name and a quantity from 0.001 to 1000000 meters");
+      }
+      const current = await readFabricOrderSheetSnapshot(sheetId, fabric);
+      if (!current) throw new ToolInputError("Pick a fabric order sheet from list_fabric_order_sheets");
+      const summary = `Record ${meters} meters of ${fabric} on ${current.name}.`;
+      return stagePendingChange(ctx, "create_fabric_order", { sheetId, fabric, meters, expected: JSON.stringify(current) }, current,
+        summary, sheetId, { sheet: current.name, fabric, meters, existing_matching_quantities: current.matchingQuantities });
+    },
+  },
+  {
     name: "preview_staff_thread_reply",
     title: "Preview a staff thread reply",
     description: `Preview a reply to an existing portal message. Shows the exact text and everyone the portal would notify. ${PREVIEW_NOTE}`,
@@ -992,6 +1027,11 @@ const confirmTools: ToolDef[] = [
         let result: { entityId: string; after: unknown };
         if (change.kind === "create_order") result = await executeCreate(payload);
         else if (change.kind === "amend_quantities") result = await executeAmend(payload as never, before as never);
+        else if (change.kind === "create_fabric_order") {
+          const { sheetId, fabric, meters, expected } = payload as { sheetId: string; fabric: string; meters: number; expected: string };
+          const after = await appendFabricOrderFromMcp(sheetId, fabric, meters, expected, MCP_PORTAL_USER_NAME);
+          result = { entityId: sheetId, after };
+        }
         else if (change.kind === "staff_reply") {
           const { parentMessageId, body, recipientIds } = payload as { parentMessageId: number; body: string; recipientIds: string[] };
           const parent = await prisma.portalMessage.findUnique({ where: { id: parentMessageId }, select: { body: true } });

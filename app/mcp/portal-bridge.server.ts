@@ -86,3 +86,5 @@ export async function readFabric(params: { title?: string; pending?: boolean }):
   const res = await reorderFabricLoader({ request: new Request(url), params: {}, context: {} } as Parameters<typeof reorderFabricLoader>[0]);
   return res instanceof Response ? res.json() : res;
 }
+
+export { appendFabricOrderFromMcp, readFabricOrderSheets, readFabricOrderSheetSnapshot } from "../routes/portal._index";
