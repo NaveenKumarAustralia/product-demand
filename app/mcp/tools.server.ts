@@ -249,6 +249,35 @@ async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: u
 
 const readTools: ToolDef[] = [
   {
+    name: "get_product_information",
+    title: "Recorded product style information",
+    description: "Read the Product Information style record (excluding image data), title overrides and recorded fabric consumption. A style match is not proof of a complete bill of materials; report missing component data.",
+    inputSchema: { type: "object", properties: { product_title: { type: "string", minLength: 2, maxLength: 200 } }, required: ["product_title"], additionalProperties: false },
+    scope: "portal:read",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async (args) => {
+      const title = str(args.product_title, "product_title", { required: true, max: 200 })!;
+      const key = title.toLowerCase();
+      const rows = await prisma.$queryRaw<Array<{ style: unknown; category: unknown; style_override: unknown; fabric_override: unknown }>>`
+        SELECT (s - 'images' - 'image' - 'thumbnail') AS style, cat->'name' AS category,
+          value->'titleStyleOverrides'->${key} AS style_override,
+          value->'titleFabricOverrides'->${key} AS fabric_override
+        FROM "PortalSetting"
+        CROSS JOIN LATERAL jsonb_array_elements(value->'categories') cat
+        CROSS JOIN LATERAL jsonb_array_elements(cat->'styles') s
+        WHERE "PortalSetting".key = 'production-portal-product-info-v2'
+          AND (s->>'id' = value->'titleStyleOverrides'->>${key}
+            OR lower(trim(s->>'name')) = ${key}
+            OR left(${key}, length(trim(s->>'name')) + 1) = lower(trim(s->>'name')) || ' ')
+        ORDER BY (s->>'id' = value->'titleStyleOverrides'->>${key}) DESC NULLS LAST,
+          length(trim(s->>'name')) DESC
+        LIMIT 10`;
+      const fabric = await readFabric({ title });
+      return { structured: compactForModel({ product_title: title, matching_styles: rows,
+        fabric_planner: fabric, warning: "Check exact style match and all component fabrics before committing production." }) };
+    },
+  },
+  {
     name: "get_portal_options",
     title: "Portal options",
     description: "Lists the valid production statuses, priorities, destinations and suppliers used in the Production Portal. Call this before suggesting a status, priority or destination.",
@@ -399,7 +428,7 @@ const readTools: ToolDef[] = [
           sizes: Array.from(bySize.values()),
           open_orders: orders.map(presentOrder),
           shipments: Array.from(new Map(shipmentLines.map((l) => [l.packingList.id, l.packingList])).values()),
-          notes: "on_order/in_production/ready_in_india/in_shipment_orders/other_open_orders (custom statuses such as packed_ready_to_leave or arrived_in_au) are remaining (ordered − received) on open orders; see each order's production_status. in_packing_lists counts shipment lines not yet loaded to Shopify; it can overlap with in_shipment_orders.",
+          notes: "on_order/in_production/ready_in_india/in_shipment_orders/other_open_orders (custom statuses such as packed_ready_to_leave or arrived_in_au) are remaining (ordered − received) on open orders; see each order's production_status. in_packing_lists counts shipment lines not yet loaded to Shopify; it can overlap with ANY open order status, including on_production and ready. Do not sum without verified allocation.",
         },
       };
     },
