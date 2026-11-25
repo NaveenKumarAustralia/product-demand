@@ -223,7 +223,7 @@ async function audit(entry: {
 
 // ─── Pending changes ────────────────────────────────────────────────────────
 
-type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note";
+type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note" | "delete_order";
 
 async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: unknown, before: unknown, summary: string, entityId: string | null, preview: unknown): Promise<ToolResult> {
   const id = `chg_${randomUUID()}`;
@@ -595,7 +595,36 @@ const readTools: ToolDef[] = [
 
 const PREVIEW_NOTE = "Nothing is changed by this tool. It returns a change_id that needs Koku's explicit approval and a confirm_change call.";
 
+async function deletableOrderSnapshot(id: number) {
+  const order = await loadOrder(id);
+  if (!order) throw new ToolInputError("Order not found");
+  if (order.status !== "open" || order.supplierStatus !== "on_order" || order.fabricConsumed || order.packingListId || order.lines.some(l => l.qtyReceived > 0)) {
+    throw new ToolInputError("Only open, uncut, unshipped orders with no received pieces can be deleted through this tool.");
+  }
+  const [batch, reservations, cut] = await Promise.all([
+    prisma.preorderBatchSetting.findUnique({ where: { supplierOrderId: id } }),
+    prisma.preorderReservation.count({ where: { supplierOrderId: id } }),
+    prisma.productionCutRecord.findUnique({ where: { supplierOrderId: id } }),
+  ]);
+  if (batch || reservations || cut) throw new ToolInputError("Order has preorder or cutting history; review in portal before deleting.");
+  return presentOrder(order);
+}
+
 const previewTools: ToolDef[] = [
+  {
+    name: "preview_delete_production_order",
+    title: "Preview deletion of an uncut production order",
+    description: "Permanently deletes an open on-order batch through the portal's existing deletion action, only after explicit approval. Blocks cut, shipped, received or preorder-linked batches. " + PREVIEW_NOTE,
+    inputSchema: { type: "object", properties: { order_id: { type: "integer", minimum: 1 } }, required: ["order_id"], additionalProperties: false },
+    scope: "portal:write",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    handler: async (args, ctx) => {
+      const id = int(args.order_id, "order_id", { required: true, min: 1 })!;
+      const before = await deletableOrderSnapshot(id);
+      const summary = "Permanently delete order #" + id + " " + before.product + " (" + before.total_qty + " pieces), including its attached messages.";
+      return stagePendingChange(ctx, "delete_order", { orderId: id }, before, summary, String(id), { before, after: null, warning: "Deletion removes attached messages; restoration may not preserve every field." });
+    },
+  },
   {
     name: "preview_create_production_order",
     title: "Preview new production order",
@@ -890,6 +919,14 @@ const confirmTools: ToolDef[] = [
         let result: { entityId: string; after: unknown };
         if (change.kind === "create_order") result = await executeCreate(payload);
         else if (change.kind === "amend_quantities") result = await executeAmend(payload as never, before as never);
+        else if (change.kind === "delete_order") {
+          const orderId = int(payload.orderId, "orderId", { required: true, min: 1 })!;
+          const current = await deletableOrderSnapshot(orderId);
+          if (stableStringify(current) !== stableStringify(before)) throw new ToolInputError("Order changed since preview; preview again.");
+          await callPortalIntent("delete_order", { orderId });
+          if (await loadOrder(orderId)) throw new Error("Order still exists; deletion not verified.");
+          result = { entityId: String(orderId), after: { deleted: true, order_id: orderId } };
+        }
         else if (change.kind === "update_order") result = await executeUpdate(payload as never, before as never);
         else if ((change.kind === "add_note" || change.kind === "replace_note")) result = await executeNote(payload as never, before as never);
         else throw new Error(`Unknown change kind ${change.kind}`);
