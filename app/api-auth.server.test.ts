@@ -1,16 +1,22 @@
 // node --test app/api-auth.server.test.ts
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { authorizeApiRequest, describeKeyMismatch } from "./api-auth.server.ts";
 
 const CORS = { "Access-Control-Allow-Origin": "*" };
 const SECRET = "dashboard-shared-secret";
+const APP_SECRET = "shopify-app-secret";
 
-// A Shopify session token is only ever read for its audience claim, so an
-// unsigned JWT with the right payload is enough to exercise that path.
-function sessionToken(aud: string) {
-  const part = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString("base64url");
-  return `${part({ alg: "HS256", typ: "JWT" })}.${part({ aud })}.signature`;
+const part = (obj: unknown) => Buffer.from(JSON.stringify(obj)).toString("base64url");
+const now = () => Math.floor(Date.now() / 1000);
+
+// A real Shopify session token: HS256, signed with the app's client secret.
+function sessionToken(aud: string, opts: { secret?: string; exp?: number; alg?: string; nbf?: number } = {}) {
+  const header = part({ alg: opts.alg ?? "HS256", typ: "JWT" });
+  const payload = part({ aud, exp: opts.exp ?? now() + 60, nbf: opts.nbf ?? now() - 5 });
+  const sig = createHmac("sha256", opts.secret ?? APP_SECRET).update(`${header}.${payload}`).digest("base64url");
+  return `${header}.${payload}.${sig}`;
 }
 
 const request = (headers: Record<string, string>) =>
@@ -19,6 +25,7 @@ const request = (headers: Record<string, string>) =>
 beforeEach(() => {
   process.env.DASHBOARD_API_KEY = SECRET;
   process.env.SHOPIFY_API_KEY = "shopify-client-id";
+  process.env.SHOPIFY_API_SECRET = APP_SECRET;
 });
 
 test("accepts the dashboard's shared secret", () => {
@@ -88,6 +95,39 @@ test("rejects a request with no credentials at all", async () => {
   const res = authorizeApiRequest(request({}), CORS);
   assert.equal(res?.status, 401);
   assert.equal((await res!.json()).error, "Missing token");
+});
+
+test("rejects a forged token with the right audience but no valid signature", async () => {
+  // The hole this closes: the client id is public, so audience alone proves nothing.
+  const forged = `${part({ alg: "HS256", typ: "JWT" })}.${part({ aud: "shopify-client-id", exp: now() + 60 })}.signature`;
+  const res = authorizeApiRequest(request({ Authorization: `Bearer ${forged}` }), CORS);
+  assert.equal(res?.status, 401);
+  assert.equal((await res!.json()).error, "Invalid token signature");
+});
+
+test("rejects a token signed with a different secret", async () => {
+  const token = sessionToken("shopify-client-id", { secret: "attacker-secret" });
+  const res = authorizeApiRequest(request({ Authorization: `Bearer ${token}` }), CORS);
+  assert.equal(res?.status, 401);
+});
+
+test("rejects alg none", async () => {
+  const token = `${part({ alg: "none", typ: "JWT" })}.${part({ aud: "shopify-client-id", exp: now() + 60 })}.`;
+  const res = authorizeApiRequest(request({ Authorization: `Bearer ${token}` }), CORS);
+  assert.equal(res?.status, 401);
+});
+
+test("rejects an expired token", async () => {
+  const token = sessionToken("shopify-client-id", { exp: now() - 600 });
+  const res = authorizeApiRequest(request({ Authorization: `Bearer ${token}` }), CORS);
+  assert.equal(res?.status, 401);
+  assert.equal((await res!.json()).error, "Token expired");
+});
+
+test("an unset SHOPIFY_API_SECRET accepts no session token", async () => {
+  delete process.env.SHOPIFY_API_SECRET;
+  const res = authorizeApiRequest(request({ Authorization: `Bearer ${sessionToken("shopify-client-id")}` }), CORS);
+  assert.equal(res?.status, 401);
 });
 
 test("a malformed bearer token is rejected, not crashed on", async () => {

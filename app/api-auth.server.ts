@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "crypto";
+import { createHash, createHmac, timingSafeEqual } from "crypto";
 
 /**
  * Authorisation for the portal's public API routes.
@@ -18,19 +18,59 @@ import { createHash, timingSafeEqual } from "crypto";
  * it isn't.
  */
 
+/** Allowed clock drift between Shopify and this server, in seconds. */
+const SESSION_TOKEN_LEEWAY_SECONDS = 60;
+
 /**
- * Decode the JWT payload (base64url) and return the parsed object.
- * We don't verify the signature here — the shop domain is passed
- * separately and we use it only to scope our own DB query.
- * The idToken audience check ensures the token was issued for this app.
+ * Verify a Shopify App Bridge session token and return its payload.
+ *
+ * Session tokens are HS256 JWTs signed with the app's client secret
+ * (SHOPIFY_API_SECRET). The audience (client id) is public, so checking it
+ * alone proves nothing: anyone could mint an unsigned token with the right
+ * `aud`. The signature is what proves Shopify issued the token, and `exp` /
+ * `nbf` stop an old token being replayed.
  */
-function decodeJwtPayload(token: string): Record<string, unknown> | null {
+export type SessionTokenResult =
+  | { ok: true; payload: Record<string, unknown> }
+  | { ok: false; error: string };
+
+export function verifyShopifySessionToken(token: string, secret: string, nowSeconds = Math.floor(Date.now() / 1000)): SessionTokenResult {
+  const parts = token.split(".");
+  if (parts.length !== 3) return { ok: false, error: "Invalid token" };
+  const [headerB64, payloadB64, signatureB64] = parts;
+
+  let header: Record<string, unknown>;
+  let payload: Record<string, unknown>;
   try {
-    const [, payloadB64] = token.split(".");
-    return JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf-8"));
+    header = JSON.parse(Buffer.from(headerB64, "base64url").toString("utf-8"));
+    payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf-8"));
   } catch {
-    return null;
+    return { ok: false, error: "Invalid token" };
   }
+  if (!payload || typeof payload !== "object") return { ok: false, error: "Invalid token" };
+  // Only HS256 is ever issued; refusing anything else blocks "alg: none".
+  if (header?.alg !== "HS256") return { ok: false, error: "Invalid token" };
+
+  const expected = createHmac("sha256", secret).update(`${headerB64}.${payloadB64}`).digest();
+  let provided: Buffer;
+  try {
+    provided = Buffer.from(signatureB64, "base64url");
+  } catch {
+    return { ok: false, error: "Invalid token signature" };
+  }
+  if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) {
+    return { ok: false, error: "Invalid token signature" };
+  }
+
+  const exp = Number(payload.exp);
+  if (!Number.isFinite(exp) || nowSeconds > exp + SESSION_TOKEN_LEEWAY_SECONDS) {
+    return { ok: false, error: "Token expired" };
+  }
+  const nbf = Number(payload.nbf);
+  if (Number.isFinite(nbf) && nowSeconds + SESSION_TOKEN_LEEWAY_SECONDS < nbf) {
+    return { ok: false, error: "Token not yet valid" };
+  }
+  return { ok: true, payload };
 }
 
 /**
@@ -127,10 +167,17 @@ export function authorizeApiRequest(request: Request, cors: Record<string, strin
     return Response.json({ error: "Missing token" }, { status: 401, headers: cors });
   }
 
-  const payload = decodeJwtPayload(token);
-  if (!payload) {
-    return Response.json({ error: "Invalid token" }, { status: 401, headers: cors });
+  const secret = process.env.SHOPIFY_API_SECRET;
+  // Same rule as the shared secret: no configured secret must never mean
+  // "accept any token".
+  if (!secret) {
+    return Response.json({ error: "Session token auth not configured" }, { status: 401, headers: cors });
   }
+  const verified = verifyShopifySessionToken(token, secret);
+  if (!verified.ok) {
+    return Response.json({ error: verified.error }, { status: 401, headers: cors });
+  }
+  const payload = verified.payload;
 
   const clientId = process.env.SHOPIFY_API_KEY;
   const aud = payload.aud;

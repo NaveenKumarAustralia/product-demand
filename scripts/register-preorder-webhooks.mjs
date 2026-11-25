@@ -89,6 +89,13 @@ async function ensureWebhooksForShop(shop, accessToken, origin) {
 }
 
 async function main() {
+  // Isolated test copies must not register (or move) the live store's webhooks.
+  // Same rule as app/background-jobs.server.ts.
+  const railwayEnv = process.env.RAILWAY_ENVIRONMENT_NAME;
+  if (process.env.PORTAL_BACKGROUND_JOBS === "off" || (railwayEnv && railwayEnv !== "production")) {
+    console.warn(`[preorder webhooks] not production (${railwayEnv ?? "?"}, PORTAL_BACKGROUND_JOBS=${process.env.PORTAL_BACKGROUND_JOBS ?? "unset"}); registration skipped`);
+    return;
+  }
   const origin = appOrigin();
   if (!origin) {
     console.warn("[preorder webhooks] SHOPIFY_APP_URL missing or invalid; registration skipped");
