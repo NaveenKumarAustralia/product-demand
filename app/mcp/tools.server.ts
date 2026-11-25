@@ -139,34 +139,70 @@ function presentOrder(o: NonNullable<OrderRow>) {
 
 type SearchProduct = { id: string; shop?: string; title: string; imageUrl: string | null; sizes: string[]; variants: Array<{ id: string; title: string; sku: string | null }> };
 
+// Shopify product search is expensive (it shares the live portal's API rate
+// limit) and the portal's helper returns [] when throttled. So: cache results
+// for 5 minutes and retry once after a pause when a search comes back empty.
+const searchCache = new Map<string, { at: number; products: SearchProduct[] }>();
+const SEARCH_TTL_MS = 5 * 60 * 1000;
+
 async function searchProducts(q: string): Promise<SearchProduct[]> {
-  const res = (await callPortalIntent("reorder_search", { q })) as { products?: SearchProduct[] } | null;
-  return res?.products ?? [];
+  const key = q.trim().toLowerCase();
+  const hit = searchCache.get(key);
+  if (hit && Date.now() - hit.at < SEARCH_TTL_MS) return hit.products;
+  let products: SearchProduct[] = [];
+  for (let attempt = 0; attempt < 2 && !products.length; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 2000));
+    const res = (await callPortalIntent("reorder_search", { q })) as { products?: SearchProduct[] } | null;
+    products = res?.products ?? [];
+  }
+  if (products.length) {
+    searchCache.set(key, { at: Date.now(), products });
+    if (searchCache.size > 500) searchCache.delete(searchCache.keys().next().value!);
+  }
+  return products;
 }
 
-/** Resolve a product from a Shopify GID or an exact title. */
+/** Cheap lookup: product id + title from the portal's own orders, no Shopify call. */
+async function productFromOrders(args: Record<string, unknown>): Promise<{ id: string; title: string } | null> {
+  const id = str(args.product_id, "product_id");
+  const title = str(args.product_title, "product_title");
+  const rows = await prisma.supplierOrder.findMany({
+    where: id ? { productId: id } : { productTitle: { equals: title ?? "", mode: "insensitive" } },
+    select: { productId: true, productTitle: true },
+    distinct: ["productId"],
+    take: 3,
+  });
+  return rows.length === 1 ? { id: rows[0].productId, title: rows[0].productTitle } : null;
+}
+
+/** Resolve a product from a Shopify GID or an exact title (needs Shopify for sizes). */
 async function resolveProduct(args: Record<string, unknown>): Promise<SearchProduct> {
   const id = str(args.product_id, "product_id");
   const title = str(args.product_title, "product_title");
   if (!id && !title) throw new ToolInputError("Give product_id or product_title");
   if (id && !id.startsWith("gid://shopify/Product/")) throw new ToolInputError("product_id must look like gid://shopify/Product/123");
-  let query = title;
-  if (!query && id) {
-    const order = await prisma.supplierOrder.findFirst({ where: { productId: id }, select: { productTitle: true }, orderBy: { createdAt: "desc" } });
-    query = order?.productTitle;
-    if (!query) throw new ToolInputError("Product not found in the portal; search it by product_title");
+  const known = await productFromOrders(args);
+  const query = title ?? known?.title;
+  if (!query) throw new ToolInputError("Product not found in the portal; search it by product_title");
+  const wantId = id ?? known?.id;
+  const results = await searchProducts(query);
+  if (wantId) {
+    const exact = results.find((p) => p.id === wantId);
+    if (exact) return exact;
   }
-  const results = await searchProducts(query!);
-  const exact = id
-    ? results.find((p) => p.id === id)
-    : results.filter((p) => p.title.trim().toLowerCase() === query!.trim().toLowerCase());
-  if (Array.isArray(exact)) {
-    if (exact.length === 1) return exact[0];
-    if (exact.length > 1) throw new ToolInputError(`Several products are called "${query}". Use product_id: ${exact.map((p) => p.id).join(", ")}`);
-    throw new ToolInputError(`No exact product "${query}". Closest: ${results.slice(0, 8).map((p) => `${p.title} (${p.id})`).join("; ") || "none"}`);
-  }
-  if (!exact) throw new ToolInputError(`Product ${id} not found in Shopify search for "${query}"`);
-  return exact;
+  const byTitle = results.filter((p) => p.title.trim().toLowerCase() === query.trim().toLowerCase());
+  if (byTitle.length === 1) return byTitle[0];
+  if (byTitle.length > 1) throw new ToolInputError(`Several products are called "${query}". Use product_id: ${byTitle.map((p) => p.id).join(", ")}`);
+  if (!results.length) throw new ToolInputError(`Shopify search for "${query}" returned nothing (Shopify may be busy). Try again in a minute.`);
+  throw new ToolInputError(`No exact product "${query}". Closest: ${results.slice(0, 8).map((p) => `${p.title} (${p.id})`).join("; ")}`);
+}
+
+/** Product id + title without Shopify where possible (falls back to search). */
+async function resolveProductLite(args: Record<string, unknown>): Promise<{ id: string; title: string; sizes: string[] }> {
+  const known = await productFromOrders(args);
+  if (known) return { ...known, sizes: [] };
+  const p = await resolveProduct(args);
+  return { id: p.id, title: p.title, sizes: p.sizes };
 }
 
 async function audit(entry: {
@@ -322,7 +358,7 @@ const readTools: ToolDef[] = [
     scope: "portal:read",
     annotations: { readOnlyHint: true, openWorldHint: false },
     handler: async (args) => {
-      const product = await resolveProduct(args);
+      const product = await resolveProductLite(args);
       const since = dateArg(args.since, "since", isoDaysAgo(90));
       const until = dateArg(args.until, "until", today());
       const [plan, orders, shipmentLines] = await Promise.all([
@@ -614,14 +650,16 @@ const previewTools: ToolDef[] = [
       if (order.status !== "open") throw new ToolInputError(`Order ${id} is closed and can't be amended`);
       if (["in_shipment", "cancelled"].includes(order.supplierStatus)) throw new ToolInputError(`Order ${id} is ${order.supplierStatus}; amend a different order or create a new one`);
       const current = sizesOf(order);
-      let available = Object.keys(current);
-      try {
-        const product = await resolveProduct({ product_id: order.productId });
-        available = Array.from(new Set([...available, ...product.variants.map((v) => v.title)]));
-      } catch { /* fall back to the sizes already on the order */ }
       const raw = (Array.isArray(args.changes) ? args.changes : []) as Array<Record<string, unknown>>;
       const changes: SizeQtyChange[] = raw.map((c) => ({ size: String(c.size ?? ""), add: c.add as number | undefined, setTo: c.set_to as number | undefined }));
-      const resolved = resolveQuantityChanges(current, available, changes);
+      let resolved = resolveQuantityChanges(current, Object.keys(current), changes);
+      // A size not yet on the order: check the product's real sizes in Shopify.
+      if (!resolved.ok && /not one of this product's sizes/.test(resolved.error)) {
+        try {
+          const product = await resolveProduct({ product_id: order.productId });
+          resolved = resolveQuantityChanges(current, Array.from(new Set([...Object.keys(current), ...product.variants.map((v) => v.title)])), changes);
+        } catch { /* keep the original error */ }
+      }
       if (!resolved.ok) throw new ToolInputError(resolved.error);
       const effective = resolved.changes.filter((c) => c.before !== c.after);
       if (!effective.length) throw new ToolInputError("These quantities are already on the order; nothing to change");
