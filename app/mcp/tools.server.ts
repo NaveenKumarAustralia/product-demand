@@ -223,7 +223,7 @@ async function audit(entry: {
 
 // ─── Pending changes ────────────────────────────────────────────────────────
 
-type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note";
+type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note";
 
 async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: unknown, before: unknown, summary: string, entityId: string | null, preview: unknown): Promise<ToolResult> {
   const id = `chg_${randomUUID()}`;
@@ -724,6 +724,27 @@ const previewTools: ToolDef[] = [
     },
   },
   {
+    name: "preview_replace_order_note",
+    title: "Preview replacement or removal of an order note",
+    description: `Replace the entire selected note field, or clear it with an empty string. Shows before and after. ${PREVIEW_NOTE}`,
+    inputSchema: { type: "object", properties: { order_id: { type: "integer" }, text: { type: "string", maxLength: 2000 }, field: { type: "string", enum: ["notes", "factory_notes"], default: "notes" } }, required: ["order_id", "text"], additionalProperties: false },
+    scope: "portal:write",
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    handler: async (args, ctx) => {
+      const id = int(args.order_id, "order_id", { required: true, min: 1 })!;
+      if (typeof args.text !== "string" || args.text.length > 2000) throw new ToolInputError("text must be a string of at most 2000 characters; use an empty string to clear");
+      if (args.field !== undefined && args.field !== "notes" && args.field !== "factory_notes") throw new ToolInputError("Invalid note field");
+      const field = args.field === "factory_notes" ? "factory_notes" : "notes";
+      const order = await loadOrder(id);
+      if (!order) throw new ToolInputError(`Order ${id} not found`);
+      const current = field === "factory_notes" ? order.factoryNotes : order.notes;
+      const next = args.text;
+      if ((current ?? "") === next) throw new ToolInputError("Nothing to change");
+      const summary = `${next === "" ? "Clear" : "Replace"} ${field} on order #${id} ${order.productTitle}`;
+      return stagePendingChange(ctx, "replace_note", { orderId: id, field, text: next }, { [field]: current ?? null }, summary, String(id), { order_id: id, field, before: current ?? null, after: next });
+    },
+  },
+  {
     name: "preview_add_order_note",
     title: "Preview note on an order",
     description: `Prepares a note or recommendation added to an order's notes (or factory notes, which the factory sees). Existing text is kept; the note is appended with a dated [ChatGPT] tag. ${PREVIEW_NOTE}`,
@@ -808,7 +829,8 @@ async function executeNote(p: { orderId: number; field: string; text: string }, 
   if ((current ?? null) !== (before[p.field] ?? null)) throw new ToolInputError(`The ${p.field} on order #${p.orderId} changed since the preview. Preview again.`);
   await callPortalIntent(p.field === "factory_notes" ? "update_factory_notes" : "update_notes", { orderId: p.orderId, value: p.text });
   const after = await loadOrder(p.orderId);
-  return { entityId: String(p.orderId), after: after ? presentOrder(after) : null };
+  if (!after || ((p.field === "factory_notes" ? after.factoryNotes : after.notes) ?? "") !== p.text) throw new Error("Portal did not save the expected note; check the order");
+  return { entityId: String(p.orderId), after: presentOrder(after) };
 }
 
 const confirmTools: ToolDef[] = [
@@ -840,7 +862,7 @@ const confirmTools: ToolDef[] = [
         if (change.kind === "create_order") result = await executeCreate(payload);
         else if (change.kind === "amend_quantities") result = await executeAmend(payload as never, before as never);
         else if (change.kind === "update_order") result = await executeUpdate(payload as never, before as never);
-        else if (change.kind === "add_note") result = await executeNote(payload as never, before as never);
+        else if ((change.kind === "add_note" || change.kind === "replace_note")) result = await executeNote(payload as never, before as never);
         else throw new Error(`Unknown change kind ${change.kind}`);
         await prisma.mcpPendingChange.update({ where: { id }, data: { status: "done", executedAt: new Date(), result: result as never } });
         await audit({ ctx, tool: "confirm_change", outcome: "applied", kind: change.kind, changeId: id, entityType: "SupplierOrder", entityId: result.entityId, input: payload, before, after: result.after });
