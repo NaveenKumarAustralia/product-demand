@@ -1,3 +1,4 @@
+import { internalMcpRequests } from "../mcp/internal-request.server";
 import bcrypt from "bcryptjs";
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -1437,6 +1438,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   try {
   const form = await request.formData();
   const intent = String(form.get("intent"));
+  if (internalMcpRequests.has(request)) {
+    if (intent === "mcp_list_fabric_order_sheets") return Response.json(await readFabricOrderSheets());
+    const gid = String(form.get("gid") ?? "");
+    const name = String(form.get("name") ?? "");
+    if (intent === "mcp_read_fabric_order_sheet") return Response.json(await readFabricOrderSheetSnapshot(gid, name));
+    if (intent === "mcp_append_fabric_order") {
+      return Response.json(await appendFabricOrderFromMcp(gid, name, Number(form.get("meters")), String(form.get("expected")), "ChatGPT"));
+    }
+  }
   const orderId = Number(form.get("orderId"));
   const usersSetting = await prisma.portalSetting.findUnique({
     where: { key: PORTAL_USERS_KEY },
@@ -9796,7 +9806,7 @@ async function getManualFabricSheets({
   return legacySheets;
 }
 
-export async function readFabricOrderSheets() {
+async function readFabricOrderSheets() {
   const sheets = await loadManualFabricSheetsForAction();
   return sheets.flatMap((sheet) => {
     const columns = fabricOrderColumns(sheet);
@@ -9820,12 +9830,12 @@ function fabricOrderSheetSnapshot(sheet: FabricStockSheet, name: string) {
   return { id: sheet.gid, name: sheet.name, kind: sheet.kind, columns, headers: sheet.headers, matchingQuantities };
 }
 
-export async function readFabricOrderSheetSnapshot(gid: string, name: string) {
+async function readFabricOrderSheetSnapshot(gid: string, name: string) {
   const sheet = (await loadManualFabricSheetsForAction()).find((item) => item.gid === gid);
   return sheet ? fabricOrderSheetSnapshot(sheet, name) : null;
 }
 
-export async function appendFabricOrderFromMcp(gid: string, name: string, meters: number, expected: string, actor: string) {
+async function appendFabricOrderFromMcp(gid: string, name: string, meters: number, expected: string, actor: string) {
   return withFabricSheetsLock(async () => {
     const sheets = await loadManualFabricSheetsForAction();
     const sheet = sheets.find((item) => item.gid === gid);

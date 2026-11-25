@@ -674,7 +674,7 @@ const previewTools: ToolDef[] = [
     description: `Record fabric and ordered meters on a selected portal order sheet. This does not send a supplier purchase order. ${PREVIEW_NOTE}`,
     inputSchema: {
       type: "object",
-      properties: { sheet_id: { type: "string" }, fabric: { type: "string", minLength: 2, maxLength: 200 }, meters: { type: "number", exclusiveMinimum: 0, maximum: 1000000 } },
+      properties: { sheet_id: { type: "string" }, fabric: { type: "string", minLength: 2, maxLength: 200 }, meters: { type: "number", minimum: 0.001, maximum: 1000000 } },
       required: ["sheet_id", "fabric", "meters"],
       additionalProperties: false,
     },
@@ -1029,7 +1029,7 @@ const confirmTools: ToolDef[] = [
         else if (change.kind === "amend_quantities") result = await executeAmend(payload as never, before as never);
         else if (change.kind === "create_fabric_order") {
           const { sheetId, fabric, meters, expected } = payload as { sheetId: string; fabric: string; meters: number; expected: string };
-          const after = await appendFabricOrderFromMcp(sheetId, fabric, meters, expected, MCP_PORTAL_USER_NAME);
+          const after = await appendFabricOrderFromMcp(sheetId, fabric, meters, expected);
           result = { entityId: sheetId, after };
         }
         else if (change.kind === "staff_reply") {
