@@ -249,6 +249,53 @@ async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: u
 
 const readTools: ToolDef[] = [
   {
+    name: "list_samples",
+    title: "List product samples",
+    description: "Search samples by name and read their latest recorded iteration, including size, fabric, status and factory cost.",
+    inputSchema: { type: "object", properties: { search: { type: "string", maxLength: 200 }, limit: { type: "integer", minimum: 1, maximum: 50 } }, additionalProperties: false },
+    scope: "portal:read",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async (args) => {
+      const search = str(args.search, "search", { max: 200 });
+      const limit = int(args.limit, "limit", { min: 1, max: 50 }) ?? 20;
+      const samples = await prisma.sample.findMany({
+        where: search ? { name: { contains: search, mode: "insensitive" } } : {},
+        orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+        take: limit + 1,
+        select: {
+          id: true, name: true, updatedAt: true,
+          iterations: {
+            orderBy: [{ version: "desc" }, { id: "desc" }],
+            take: 1,
+            select: { id: true, version: true, name: true, fabricType: true, sampleSize: true, buttonType: true, factoryCost: true, status: true },
+          },
+        },
+      });
+      return { structured: { samples: samples.slice(0, limit), truncated: samples.length > limit } };
+    },
+  },
+  {
+    name: "list_vision_boards",
+    title: "List vision boards",
+    description: "Read the names and item counts of saved vision boards. Choose the original or version 2 view.",
+    inputSchema: { type: "object", properties: { version: { type: "integer", enum: [1, 2] }, limit: { type: "integer", minimum: 1, maximum: 50 } }, additionalProperties: false },
+    scope: "portal:read",
+    annotations: { readOnlyHint: true, openWorldHint: false },
+    handler: async (args) => {
+      const version = int(args.version, "version", { min: 1, max: 2 }) ?? 2;
+      const limit = int(args.limit, "limit", { min: 1, max: 50 }) ?? 20;
+      const query = {
+        orderBy: [{ sortOrder: "asc" as const }, { id: "asc" as const }],
+        take: limit + 1,
+        select: { id: true, name: true, updatedAt: true, _count: { select: { items: true } } },
+      };
+      const boards = version === 1
+        ? await prisma.visionBoard.findMany(query)
+        : await prisma.visionBoardV2.findMany(query);
+      return { structured: { version, boards: boards.slice(0, limit), truncated: boards.length > limit } };
+    },
+  },
+  {
     name: "get_product_information",
     title: "Recorded product style information",
     description: "Read the Product Information style record (excluding image data), title overrides and recorded fabric consumption. A style match is not proof of a complete bill of materials; report missing component data.",
