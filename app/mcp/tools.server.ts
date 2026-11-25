@@ -316,18 +316,18 @@ const readTools: ToolDef[] = [
       const title = str(args.product_title, "product_title", { required: true, max: 200 })!;
       const key = title.toLowerCase();
       const rows = await prisma.$queryRaw<Array<{ style: unknown; category: unknown; style_override: unknown; fabric_override: unknown }>>`
-        SELECT (s - 'images' - 'image' - 'thumbnail') AS style, cat->'name' AS category,
-          value->'titleStyleOverrides'->${key} AS style_override,
-          value->'titleFabricOverrides'->${key} AS fabric_override
-        FROM "PortalSetting"
-        CROSS JOIN LATERAL jsonb_array_elements(value->'categories') cat
-        CROSS JOIN LATERAL jsonb_array_elements(cat->'styles') s
-        WHERE "PortalSetting".key = 'production-portal-product-info-v2'
-          AND (s->>'id' = value->'titleStyleOverrides'->>${key}
-            OR lower(trim(s->>'name')) = ${key}
-            OR left(${key}, length(trim(s->>'name')) + 1) = lower(trim(s->>'name')) || ' ')
-        ORDER BY (s->>'id' = value->'titleStyleOverrides'->>${key}) DESC NULLS LAST,
-          length(trim(s->>'name')) DESC
+        SELECT (sty.style - 'images' - 'image' - 'thumbnail') AS style, cat.category->'name' AS category,
+          ps."value"->'titleStyleOverrides'->${key} AS style_override,
+          ps."value"->'titleFabricOverrides'->${key} AS fabric_override
+        FROM "PortalSetting" AS ps
+        CROSS JOIN LATERAL jsonb_array_elements(ps."value"->'categories') AS cat(category)
+        CROSS JOIN LATERAL jsonb_array_elements(cat.category->'styles') AS sty(style)
+        WHERE ps.key = 'production-portal-product-info-v2'
+          AND (sty.style->>'id' = ps."value"->'titleStyleOverrides'->>${key}
+            OR lower(trim(sty.style->>'name')) = ${key}
+            OR left(${key}, length(trim(sty.style->>'name')) + 1) = lower(trim(sty.style->>'name')) || ' ')
+        ORDER BY (sty.style->>'id' = ps."value"->'titleStyleOverrides'->>${key}) DESC NULLS LAST,
+          length(trim(sty.style->>'name')) DESC
         LIMIT 10`;
       const fabric = await readFabric({ title });
       return { structured: compactForModel({ product_title: title, matching_styles: rows,
