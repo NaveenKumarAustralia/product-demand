@@ -248,7 +248,7 @@ const readTools: ToolDef[] = [
       properties: {
         product: { type: "string", description: "Part of the product title" },
         product_id: { type: "string" },
-        statuses: { type: "array", items: { type: "string", enum: STATUS_VALUES } },
+        statuses: { type: "array", items: { type: "string" }, description: "Production statuses, e.g. on_order, on_production, ready, in_shipment (see get_portal_options)" },
         supplier: { type: "string" },
         destination: { type: "string" },
         include_closed: { type: "boolean", default: false },
@@ -333,10 +333,10 @@ const readTools: ToolDef[] = [
           select: { qtys: true, packingList: { select: { id: true, title: true, status: true, shipmentDate: true, shippingMethod: true } } },
         }),
       ]);
-      const bySize = new Map<string, { size: string; shopify_stock: number | null; units_sold: number | null; on_order: number; in_production: number; ready_in_india: number; in_shipment_orders: number; in_packing_lists: number }>();
+      const bySize = new Map<string, { size: string; shopify_stock: number | null; units_sold: number | null; on_order: number; in_production: number; ready_in_india: number; in_shipment_orders: number; other_open_orders: number; in_packing_lists: number }>();
       const row = (size: string) => {
         const key = matchSize(size, Array.from(bySize.keys())) ?? size;
-        if (!bySize.has(key)) bySize.set(key, { size: key, shopify_stock: null, units_sold: null, on_order: 0, in_production: 0, ready_in_india: 0, in_shipment_orders: 0, in_packing_lists: 0 });
+        if (!bySize.has(key)) bySize.set(key, { size: key, shopify_stock: null, units_sold: null, on_order: 0, in_production: 0, ready_in_india: 0, in_shipment_orders: 0, other_open_orders: 0, in_packing_lists: 0 });
         return bySize.get(key)!;
       };
       for (const s of product.sizes) row(s);
@@ -349,6 +349,7 @@ const readTools: ToolDef[] = [
           else if (o.supplierStatus === "on_production") r.in_production += remaining;
           else if (o.supplierStatus === "ready") r.ready_in_india += remaining;
           else if (o.supplierStatus === "in_shipment") r.in_shipment_orders += remaining;
+          else if (o.supplierStatus !== "cancelled") r.other_open_orders += remaining;
         }
       }
       for (const line of shipmentLines) {
@@ -362,7 +363,7 @@ const readTools: ToolDef[] = [
           sizes: Array.from(bySize.values()),
           open_orders: orders.map(presentOrder),
           shipments: Array.from(new Map(shipmentLines.map((l) => [l.packingList.id, l.packingList])).values()),
-          notes: "on_order/in_production/ready_in_india/in_shipment_orders are remaining (ordered − received) on open orders. in_packing_lists counts shipment lines not yet loaded to Shopify; it can overlap with in_shipment_orders.",
+          notes: "on_order/in_production/ready_in_india/in_shipment_orders/other_open_orders (custom statuses such as packed_ready_to_leave or arrived_in_au) are remaining (ordered − received) on open orders; see each order's production_status. in_packing_lists counts shipment lines not yet loaded to Shopify; it can overlap with in_shipment_orders.",
         },
       };
     },
@@ -638,7 +639,7 @@ const previewTools: ToolDef[] = [
       type: "object",
       properties: {
         order_id: { type: "integer" },
-        production_status: { type: "string", enum: STATUS_VALUES },
+        production_status: { type: "string", description: "One of the statuses from get_portal_options, e.g. on_production" },
         priority: { type: "string", description: "Empty string clears it" },
         eta: { type: "string", description: "YYYY-MM-DD, or empty string to clear" },
         destination: { type: "string" },
