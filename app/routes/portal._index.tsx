@@ -15,6 +15,8 @@ import {
 import { randomUUID } from "node:crypto";
 import { prepareFabricRowKeyBackfill } from "../mcp/fabric-row-key-backfill.js";
 import { commitFabricSnapshot, createFabricSnapshotIfAbsent } from "../mcp/fabric-snapshot-store.js";
+import { commitFabricNoteSnapshot } from "../mcp/fabric-note-staff-save.js";
+import { normalizePortalMessageUsers } from "../portal-messages.server";
 import { planFabricRowMove } from "../mcp/fabric-row-move.js";
 import { fabricNoteCellPlan, applyFabricNoteCell, findUniqueFabricThreadRow } from "../mcp/fabric-note-cell.js";
 import { VisionBoardV2Panel } from "../portal-vision-board";
@@ -3676,14 +3678,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           return jsonResponse({ ok: false, error: error instanceof Error ? error.message : "fabric_note_conflict" });
         }
         const title = fabricNameForRow(found.sheet, found.rowIndex);
-        await saveManualFabricSheets(sheets);
-        if (isDelete) {
-          await prisma.portalMessage.deleteMany({
-            where: { entityType: "fabric_row", entityKey, field },
-          });
-        } else {
-          await syncFabricRowNote(entityKey, body, currentUser.name, title);
-        }
+        await saveManualFabricSheets(sheets, sheets, { rowKey: entityKey, text: body, fromName: currentUser.name, productTitle: title, purgeThread: isDelete, requireAuthor: true });
         return jsonResponse({ ok: true });
       });
     }
@@ -6745,10 +6740,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       sheet.rows[rowIndex][colIndex] = value;
     }
     const productTitle = isNotesCol ? fabricNameForRow(sheet, rowIndex) : null;
-    await saveManualFabricSheets(sheets);
-    if (isNotesCol && rowKey) {
-      await syncFabricRowNote(rowKey, value, currentUser?.name ?? null, productTitle);
-    }
+    await saveManualFabricSheets(sheets, sheets, isNotesCol && rowKey ? { rowKey, text: value, fromName: currentUser?.name ?? null, productTitle } : undefined);
     return null;
     });
   }
@@ -6803,8 +6795,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return jsonResponse({ ok: false, error: error instanceof Error ? error.message : "fabric_note_conflict" });
     }
     const notesTitle = fabricNameForRow(sheet, rowIndex);
-    await saveManualFabricSheets(sheets);
-    if (notesRowKey) await syncFabricRowNote(notesRowKey, value, currentUser?.name ?? null, notesTitle);
+    await saveManualFabricSheets(sheets, sheets, { rowKey: notesRowKey, text: value, fromName: currentUser?.name ?? null, productTitle: notesTitle });
     return null;
     });
   }
@@ -9212,22 +9203,6 @@ function fabricRowKeyAt(sheet: { headers: string[]; rows: string[][] }, rowIndex
 // Fabric note threads hang off entityType "fabric_row" with orderId 0 (there
 // is no integer parent record) and the row's stable key as entityKey.
 const FABRIC_ROW_THREAD_ORDER_ID = 0;
-async function syncFabricRowNote(rowKey: string, text: string, fromName: string | null, productTitle: string | null) {
-  try {
-    await syncEntityNoteMessages({
-      entityType: "fabric_row",
-      orderId: FABRIC_ROW_THREAD_ORDER_ID,
-      entityKey: rowKey,
-      field: "notes",
-      text,
-      fromName,
-      productTitle,
-    });
-  } catch (e) {
-    console.warn("[fabric note sync] failed:", e);
-  }
-}
-
 function fabricNameForRow(sheet: { headers: string[]; rows: string[][] }, rowIndex: number): string | null {
   const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h.trim()));
   if (nameIdx < 0) return null;
@@ -9543,13 +9518,17 @@ function editableFabricSnapshot(snapshot: FabricSnapshot): FabricStockSheet[] {
   return sheets;
 }
 
-async function saveManualFabricSheets(sheets: FabricStockSheet[], original = sheets) {
+async function saveManualFabricSheets(sheets: FabricStockSheet[], original = sheets, note?: Parameters<typeof commitFabricNoteSnapshot>[4]) {
   const expected = fabricSnapshots.get(original);
   if (!expected) throw new Error("Fabric snapshot unavailable; reload before saving.");
   const value = sheets.map(toManualFabricSheet);
   // Atomic conditional update: a different process cannot replace the snapshot
   // between our read and write without causing this operation to fail closed.
-  await commitFabricSnapshot(prisma.portalSetting, FABRIC_MANUAL_SHEETS_KEY, expected, value);
+  if (note) {
+    await commitFabricNoteSnapshot(prisma, FABRIC_MANUAL_SHEETS_KEY, expected, value, note, normalizePortalMessageUsers, taggedUsersFromText);
+  } else {
+    await commitFabricSnapshot(prisma.portalSetting, FABRIC_MANUAL_SHEETS_KEY, expected, value);
+  }
   // Do not emit disappearance alerts for a write rejected by the database.
   try {
     const before = normalizeManualFabricSheets(expected.value);
