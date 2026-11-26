@@ -10007,8 +10007,17 @@ async function getManualFabricSheets({
   return legacySheets;
 }
 
+// MCP reads/previews must never initialise legacy fabric storage. A missing
+// persisted snapshot requires an explicit portal setup before MCP can proceed.
+async function loadPersistedFabricSheetsForMcp() {
+  const row = await prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } });
+  const sheets = normalizeManualFabricSheets(row?.value);
+  if (!sheets.length) throw new Error("Saved fabric sheets are unavailable. Initialise them in the portal before using fabric order tools.");
+  return sheets;
+}
+
 async function readFabricOrderSheets() {
-  const sheets = await loadManualFabricSheetsForAction();
+  const sheets = await loadPersistedFabricSheetsForMcp();
   return sheets.flatMap((sheet) => {
     const columns = fabricOrderColumns(sheet);
     return columns ? [{ id: sheet.gid, name: sheet.name, kind: sheet.kind }] : [];
@@ -10032,13 +10041,13 @@ function fabricOrderSheetSnapshot(sheet: FabricStockSheet, name: string) {
 }
 
 async function readFabricOrderSheetSnapshot(gid: string, name: string) {
-  const sheet = (await loadManualFabricSheetsForAction()).find((item) => item.gid === gid);
+  const sheet = (await loadPersistedFabricSheetsForMcp()).find((item) => item.gid === gid);
   return sheet ? fabricOrderSheetSnapshot(sheet, name) : null;
 }
 
 async function appendFabricOrderFromMcp(gid: string, name: string, meters: number, expected: string, actor: string) {
   return withFabricSheetsLock(async () => {
-    const sheets = await loadManualFabricSheetsForAction();
+    const sheets = await loadPersistedFabricSheetsForMcp();
     const sheet = sheets.find((item) => item.gid === gid);
     const current = sheet && fabricOrderSheetSnapshot(sheet, name);
     if (!sheet || !current || JSON.stringify(current) !== expected) {
