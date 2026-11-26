@@ -15,6 +15,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { findFabricMessageRows } from "./fabric-message-rows.js";
+import { selectProductForLookup } from "./product-identity.js";
 import { orderNoteNotificationError } from "./order-note-notification-guard.js";
 import prisma from "../db.server";
 import { createReplyMessage, resolveReplyRecipients, normalizePortalMessageUsers, taggedUsersFromText, PORTAL_USERS_KEY } from "../portal-messages.server";
@@ -188,17 +189,12 @@ async function resolveProduct(args: Record<string, unknown>): Promise<SearchProd
   const known = await productFromOrders(args);
   const query = title ?? known?.title;
   if (!query) throw new ToolInputError("Product not found in the portal; search it by product_title");
-  const wantId = id ?? known?.id;
   const results = await searchProducts(query);
-  if (wantId) {
-    const exact = results.find((p) => p.id === wantId);
-    if (exact) return exact;
+  try {
+    return selectProductForLookup(results, query, id, title, known?.id);
+  } catch (error) {
+    throw new ToolInputError(error instanceof Error ? error.message : "Could not verify product identity");
   }
-  const byTitle = results.filter((p) => p.title.trim().toLowerCase() === query.trim().toLowerCase());
-  if (byTitle.length === 1) return byTitle[0];
-  if (byTitle.length > 1) throw new ToolInputError(`Several products are called "${query}". Use product_id: ${byTitle.map((p) => p.id).join(", ")}`);
-  if (!results.length) throw new ToolInputError(`Shopify search for "${query}" returned nothing (Shopify may be busy). Try again in a minute.`);
-  throw new ToolInputError(`No exact product "${query}". Closest: ${results.slice(0, 8).map((p) => `${p.title} (${p.id})`).join("; ")}`);
 }
 
 /** Product id + title without Shopify where possible (falls back to search). */
