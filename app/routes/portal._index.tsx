@@ -111,6 +111,60 @@ async function buildCollectionShipmentData(): Promise<CollectionShipmentData> {
   return { eta, shipment, shipDetail, restockStatus };
 }
 
+// ─── Shipment number parsing ───────────────────────────────────────────────
+// Packing-list invoice numbers are entered by hand and are messy, e.g.
+// "AEPL / 08 / 26-27", "AEPL - 26/27 / 19" (number is 19, 26/27 is the fiscal
+// year), typo "APEL 25", or "Next Shipment". The shipment NUMBER is the stray
+// integer once the "26-27"/"26/27" fiscal-year token is removed. These parse a
+// raw ship label (invoiceNumber || title || id) into a short display value.
+/** "AEPL / 27 / 26-27" → "27"; "AEPL - 26/27 / 19" → "19"; "Next Shipment" → "Next shipment". */
+function shipmentNumberDisplay(raw: string): string {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (/next/i.test(s)) return "Next shipment";
+  // The shipment number is the first integer that isn't part of the fiscal-year
+  // token. The year is a pair of ADJACENT 2-digit numbers that are consecutive
+  // (e.g. 26-27, 26/27, 27-28) separated only by - or /. A naive "strip NN/NN"
+  // also eats pairs like "08 / 26", so we detect the year pair positionally and
+  // skip exactly those two numbers.
+  const toks = [...s.matchAll(/\d+/g)].map((m) => ({ num: m[0], idx: m.index ?? 0 }));
+  if (!toks.length) return s;
+  const yearIdx = new Set<number>();
+  for (let i = 0; i < toks.length - 1; i++) {
+    const a = toks[i], b = toks[i + 1];
+    if (a.num.length === 2 && b.num.length === 2) {
+      const between = s.slice(a.idx + a.num.length, b.idx);
+      if (/^\s*[-/]\s*$/.test(between) && parseInt(b.num, 10) === parseInt(a.num, 10) + 1) {
+        yearIdx.add(i); yearIdx.add(i + 1);
+      }
+    }
+  }
+  const first = toks.find((_, i) => !yearIdx.has(i)) ?? toks[0];
+  return String(parseInt(first.num, 10));
+}
+
+/** Collapse a product's raw ship labels into the cell text, e.g. "In shipment 27, 28". */
+function buildShipmentChipText(rawShips: string[]): string {
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const r of rawShips) {
+    const d = shipmentNumberDisplay(r);
+    if (d && !seen.has(d)) { seen.add(d); labels.push(d); }
+  }
+  if (!labels.length) return "";
+  const nums = labels.filter((l) => /^\d+$/.test(l)).sort((a, b) => Number(a) - Number(b));
+  const others = labels.filter((l) => !/^\d+$/.test(l)); // e.g. "Next shipment"
+  const ordered = [...nums, ...others];
+  if (nums.length === 0) return ordered.join(", "); // just "Next shipment"
+  return "In shipment " + ordered.join(", ");
+}
+
+/** Popup row label for one shipment: numeric → "Shipment 27", else the raw ("Next shipment"). */
+function shipmentRowLabel(raw: string): string {
+  const d = shipmentNumberDisplay(raw);
+  return /^\d+$/.test(d) ? `Shipment ${d}` : d;
+}
+
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   // TEMP diagnostic: add ?perf=1 to the URL to get a timing/size breakdown of
@@ -22445,35 +22499,52 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
-                        // STATUS cell = two stacked chips:
-                        //  • TOP: the product's status, mirrored (read-only) from
-                        //    its restock order — the restock page is the source of
-                        //    truth, so it isn't edited here.
-                        //  • BOTTOM: a shipment chip (Not / Partly / Fully in
-                        //    shipment) built ONLY from Packing Lists; click it for
-                        //    the per-size shipment breakdown popup.
+                        // STATUS cell = two stacked parts:
+                        //  • TOP: the product's status. Two-way synced with the
+                        //    restock page — editable here with the SAME status set,
+                        //    and a change mirrors onto the product's restock order(s)
+                        //    (and vice versa). Products NOT yet on restock keep the
+                        //    collection's own editable chips.
+                        //  • BOTTOM: the shipment NUMBER(s) this product is in,
+                        //    read-only from Packing Lists; click for the per-size
+                        //    breakdown popup.
                         if (col.type === "chip" && col.id === "status") {
                           // Product is "in the restock page" when it has a restock order.
                           const inRestock = Boolean(rowRestockStatus);
                           const rsOpt = inRestock ? restockSettings.statusOptions.find((o) => o.value === rowRestockStatus) : null;
-                          let shipLabel = "—", shipBg = "#f3f4f6", shipColor = "#9ca3af";
-                          if (totalOrdered > 0 || rowShippedTotal > 0) {
-                            if (rowShippedTotal <= 0) { shipLabel = "Not shipped"; shipBg = "#f3f4f6"; shipColor = "#6b7280"; }
-                            else if (rowShippedTotal < totalOrdered) { shipLabel = "Partly in shipment"; shipBg = "#fef3c7"; shipColor = "#92400e"; }
-                            else { shipLabel = "Fully in shipment"; shipBg = "#dcfce7"; shipColor = "#166534"; }
-                          }
-                          const canOpen = totalOrdered > 0 || rowShippedTotal > 0;
+                          const statusKey = linkedProductId.replace(/\D/g, "");
+                          // Which shipment number(s) this product sits in (from the
+                          // packing lists), e.g. "In shipment 27, 28". Read-only.
+                          const shipText = rowShipDetail
+                            ? buildShipmentChipText(Object.values(rowShipDetail).flatMap((sz) => sz.parts.map((p) => p.ship)))
+                            : "";
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
                                 {inRestock ? (
-                                  // In the restock page → status comes from there (read-only).
-                                  <span
-                                    title={rsOpt ? `Status from the restock page: ${rsOpt.label}` : `Status from the restock page: ${rowRestockStatus}`}
-                                    style={{ display: "inline-block", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 999, whiteSpace: "nowrap", background: rsOpt?.bg ?? "#e5e7eb", color: rsOpt?.color ?? "#374151" }}
-                                  >{rsOpt?.label ?? rowRestockStatus}</span>
+                                  // On restock → editable + two-way synced. Picking a
+                                  // status writes the row status, which mirrors onto
+                                  // the product's restock order(s); the restock page
+                                  // mirrors back here. Uses the restock status set so
+                                  // both pages share one vocabulary.
+                                  <select
+                                    value={rowRestockStatus}
+                                    title="Status is shared with the restock page — changing it here changes it in both"
+                                    onChange={(e) => {
+                                      const v = e.target.value;
+                                      if (!v || v === rowRestockStatus) return;
+                                      updateCell(rIdx, "status", v);
+                                      if (statusKey) setFreshRestockStatus((prev) => ({ ...(prev ?? restockStatusByProductId), [statusKey]: v }));
+                                    }}
+                                    style={{ appearance: "none", WebkitAppearance: "none", MozAppearance: "none", textAlign: "center", textAlignLast: "center", fontSize: 11, fontWeight: 800, padding: "4px 22px 4px 10px", borderRadius: 999, border: "none", cursor: "pointer", whiteSpace: "nowrap", background: rsOpt?.bg ?? "#e5e7eb", color: rsOpt?.color ?? "#374151", fontFamily: "inherit" }}
+                                  >
+                                    {!rsOpt && <option value={rowRestockStatus}>{rowRestockStatus || "—"}</option>}
+                                    {restockSettings.statusOptions.map((o) => (
+                                      <option key={o.value} value={o.value} style={{ background: "#fff", color: "#111827" }}>{o.label}</option>
+                                    ))}
+                                  </select>
                                 ) : (
-                                  // Not in the restock page → editable here, same chips as before.
+                                  // Not on restock → editable collection chips.
                                   <CollectionChipDropdown
                                     value={value}
                                     options={localStatusOptions}
@@ -22482,16 +22553,17 @@ function CollectionSpreadsheetPage({
                                     onOptionsChange={(next) => saveChipOptions("statusOptions", next)}
                                   />
                                 )}
-                                {/* Only show the shipment chip once something has
-                                    actually shipped; otherwise show nothing. */}
-                                {rowShippedTotal > 0 && (
+                                {/* Shipment number(s) from Packing Lists (read-only).
+                                    Only shows once the product is in a shipment.
+                                    Click → per-size × per-shipment breakdown popup. */}
+                                {shipText && (
                                   <button
                                     type="button"
                                     onClick={() => setShipGridRowIdx(rIdx)}
-                                    title={`${rowShippedTotal} of ${totalOrdered} shipped — click for the per-size shipment breakdown`}
-                                    style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 999, background: shipBg, color: shipColor, whiteSpace: "nowrap", border: "none", cursor: "pointer", fontFamily: "inherit" }}
+                                    title="Which shipment(s) this product is in — click for the per-size breakdown"
+                                    style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 999, background: "#ccfbf1", color: "#0f766e", whiteSpace: "nowrap", border: "none", cursor: "pointer", fontFamily: "inherit" }}
                                   >
-                                    {shipLabel}
+                                    {shipText}
                                     <span aria-hidden style={{ fontSize: 8, opacity: 0.7 }}>▼</span>
                                   </button>
                                 )}
@@ -22870,9 +22942,7 @@ function CollectionSpreadsheetPage({
           const tOrdered = sizes.reduce((a, s) => a + s.ordered, 0);
           const tShipped = sizes.reduce((a, s) => a + s.shipped, 0);
           const tRemaining = Math.max(0, tOrdered - tShipped);
-          const statusLabel = tShipped <= 0 ? "Not shipped" : tShipped < tOrdered ? "Partly in shipment" : "Fully in shipment";
-          const statusBg = tShipped <= 0 ? "#f3f4f6" : tShipped < tOrdered ? "#fef3c7" : "#dcfce7";
-          const statusColor = tShipped <= 0 ? "#6b7280" : tShipped < tOrdered ? "#92400e" : "#166534";
+          const shipSummary = buildShipmentChipText(shipments.map((sh) => sh.ship));
           const cell: React.CSSProperties = { padding: "7px 6px", textAlign: "center", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
           const headCell: React.CSSProperties = { ...cell, background: "#f8fafc", fontSize: 11, fontWeight: 800, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: "1px solid #e5e7eb" };
           return (
@@ -22883,7 +22953,7 @@ function CollectionSpreadsheetPage({
                     <div style={{ fontSize: 15, fontWeight: 800, color: "#111827" }}>{row.name ?? row.title ?? "Product"}</div>
                     <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}><b style={{ color: "#111827" }}>{tShipped}</b> of <b style={{ color: "#111827" }}>{tOrdered}</b> shipped · {tRemaining} still to go</div>
                   </div>
-                  <span style={{ fontSize: 11, fontWeight: 800, padding: "5px 10px", borderRadius: 999, background: statusBg, color: statusColor, whiteSpace: "nowrap" }}>{statusLabel}</span>
+                  {shipSummary && <span style={{ fontSize: 11, fontWeight: 800, padding: "5px 10px", borderRadius: 999, background: "#ccfbf1", color: "#0f766e", whiteSpace: "nowrap" }}>{shipSummary}</span>}
                   <button type="button" onClick={() => setShipGridRowIdx(null)} title="Close" style={{ border: "none", background: "#f1f5f9", color: "#6b7280", width: 26, height: 26, borderRadius: 7, fontSize: 14, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>×</button>
                 </div>
                 <div style={{ overflow: "auto", padding: "6px 10px 12px" }}>
@@ -22902,7 +22972,7 @@ function CollectionSpreadsheetPage({
                         {shipments.map((sh) => (
                           <tr key={sh.ship}>
                             <th style={{ ...cell, textAlign: "left", paddingLeft: 12, fontWeight: 700, fontSize: 12.5, color: "#111827", borderBottom: "1px solid #f1f5f9" }}>
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#0d9488", flexShrink: 0 }} />#{sh.ship}</span>
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#0d9488", flexShrink: 0 }} />{shipmentRowLabel(sh.ship)}</span>
                             </th>
                             {sizes.map((s) => <td key={s.canon} style={{ ...cell, fontWeight: sh.cells[s.canon] ? 700 : 400, color: sh.cells[s.canon] ? "#111827" : "#cbd5e1", borderBottom: "1px solid #f1f5f9" }}>{sh.cells[s.canon] || "–"}</td>)}
                             <td style={{ ...cell, fontWeight: 800, color: "#0f766e", borderLeft: "1px solid #e5e7eb", borderBottom: "1px solid #f1f5f9" }}>{sh.total}</td>
