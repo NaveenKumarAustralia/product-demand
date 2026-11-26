@@ -13,6 +13,7 @@ import {
   type CollectionTask, type CollectionScopeType,
 } from "../collection-tasks.server";
 import { randomUUID } from "node:crypto";
+import { prepareFabricRowKeyBackfill } from "../mcp/fabric-row-key-backfill.js";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { PreordersDashboard } from "../portal-preorders";
 import { ProductionCutsPanel } from "../portal-production-cuts";
@@ -1199,8 +1200,41 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     // One-time (idempotent) backfill so every fabric row carries a stable key
     // for its note thread. After the first load this is a no-op.
     try {
-      if (ensureFabricRowKeys(manualFabricSheets)) {
-        await saveManualFabricSheets(manualFabricSheets);
+      // Only the full Fabric page may backfill IDs. Re-read under the write
+      // queue: the loader snapshot can be stale by the time we reach here.
+      if (manualFabricSheets.some((sheet) => {
+        const idx = fabricRowKeyIndex(sheet);
+        return idx < 0
+          ? sheet.rows.length > 0 && sheet.rows.every((row) => row.length <= sheet.headers.length)
+          : sheet.rows.some((row) => !(row[idx] ?? "").trim());
+      })) {
+        const refreshed = await withFabricSheetsLock(async () => {
+          const snapshot = await prisma.portalSetting.findUnique({
+            where: { key: FABRIC_MANUAL_SHEETS_KEY },
+            select: { value: true, updatedAt: true },
+          });
+          if (!snapshot) return null;
+          const prepared = prepareFabricRowKeyBackfill(snapshot.value, randomUUID);
+          if (!prepared.changed) return normalizeManualFabricSheets(snapshot.value);
+          // Compare the entire original JSON and timestamp, not just the
+          // affected cells. Never replace another process's intervening edit.
+          const saved = await prisma.portalSetting.updateMany({
+            where: {
+              key: FABRIC_MANUAL_SHEETS_KEY,
+              updatedAt: snapshot.updatedAt,
+              value: { equals: snapshot.value as never },
+            },
+            data: { value: prepared.value as never },
+          });
+          if (saved.count !== 1) {
+            const latest = await prisma.portalSetting.findUnique({
+              where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true },
+            });
+            return latest ? normalizeManualFabricSheets(latest.value) : null;
+          }
+          return normalizeManualFabricSheets(prepared.value);
+        });
+        if (refreshed) manualFabricSheets.splice(0, manualFabricSheets.length, ...refreshed);
       }
     } catch (e) {
       console.warn("[fabric row keys] backfill failed:", e);
@@ -9170,29 +9204,6 @@ const FABRIC_ROW_KEY_HEADER = "__rowKey";
 
 function fabricRowKeyIndex(sheet: { headers: string[] }): number {
   return sheet.headers.findIndex((h) => h.trim() === FABRIC_ROW_KEY_HEADER);
-}
-
-// Adds the hidden column / fills any blank keys. Returns true when something
-// changed so the caller knows to persist.
-function ensureFabricRowKeys(sheets: Array<{ headers: string[]; rows: string[][] }>): boolean {
-  let changed = false;
-  for (const sheet of sheets) {
-    let idx = fabricRowKeyIndex(sheet);
-    if (idx < 0) {
-      if (sheet.rows.length === 0) continue;
-      sheet.headers.push(FABRIC_ROW_KEY_HEADER);
-      idx = sheet.headers.length - 1;
-      changed = true;
-    }
-    for (const row of sheet.rows) {
-      while (row.length <= idx) row.push("");
-      if (!row[idx]) {
-        row[idx] = randomUUID();
-        changed = true;
-      }
-    }
-  }
-  return changed;
 }
 
 function fabricRowKeyAt(sheet: { headers: string[]; rows: string[][] }, rowIndex: number): string {
