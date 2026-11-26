@@ -15,6 +15,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { findFabricMessageRows } from "./fabric-message-rows.js";
+import { previewNewFabricStaffMessage, commitNewFabricStaffMessage } from "./fabric-staff-message-store.js";
 import { selectProductForLookup } from "./product-identity.js";
 import { orderNoteNotificationError } from "./order-note-notification-guard.js";
 import prisma from "../db.server";
@@ -223,7 +224,7 @@ async function audit(entry: {
 
 // ─── Pending changes ────────────────────────────────────────────────────────
 
-type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note" | "delete_order" | "staff_reply" | "create_fabric_order";
+type ChangeKind = "create_order" | "amend_quantities" | "update_order" | "add_note" | "replace_note" | "delete_order" | "staff_reply" | "create_fabric_order" | "fabric_staff_message";
 
 async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: unknown, before: unknown, summary: string, entityId: string | null, preview: unknown): Promise<ToolResult> {
   const id = `chg_${randomUUID()}`;
@@ -231,7 +232,7 @@ async function stagePendingChange(ctx: ToolContext, kind: ChangeKind, payload: u
   await prisma.mcpPendingChange.create({
     data: { id, grantId: ctx.principal.grantId, portalUserId: ctx.principal.portalUserId, kind, payload: payload as never, before: (before ?? undefined) as never, summary, expiresAt },
   });
-  await audit({ ctx, tool: `preview:${kind}`, outcome: "previewed", kind, changeId: id, entityType: "SupplierOrder", entityId: entityId ?? undefined, input: payload, before });
+  await audit({ ctx, tool: `preview:${kind}`, outcome: "previewed", kind, changeId: id, entityType: kind === "fabric_staff_message" ? "fabric_row" : "SupplierOrder", entityId: entityId ?? undefined, input: payload, before });
   return {
     structured: {
       change_id: id,
@@ -766,6 +767,51 @@ async function deletableOrderSnapshot(id: number) {
 
 const previewTools: ToolDef[] = [
   {
+    name: "preview_send_fabric_staff_message",
+    title: "Preview a new fabric staff message",
+    description: `Start a new note conversation on an exact saved Fabric in Stock row without a production order. First use list_fabric_message_rows and list_staff_users; copy the exact row identity, including fabric_type if present. Existing notes or conversations require preview_staff_thread_reply instead. Shows the exact posted text and recipients. ${PREVIEW_NOTE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity_key: { type: "string", minLength: 1, maxLength: 200 },
+        sheet_id: { type: "string", minLength: 1, maxLength: 200 },
+        fabric_name: { type: "string", minLength: 1, maxLength: 200 },
+        fabric_type: { type: "string", maxLength: 100 },
+        to: { type: "array", items: { type: "string", minLength: 1, maxLength: 120 }, minItems: 1, maxItems: 20 },
+        message: { type: "string", minLength: 1, maxLength: 1500 },
+      },
+      required: ["entity_key", "sheet_id", "fabric_name", "to", "message"],
+      additionalProperties: false,
+    },
+    scope: "portal:write",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    handler: async (args, ctx) => {
+      for (const key of ["entity_key", "sheet_id", "fabric_name", "message"]) {
+        const value = args[key];
+        if (typeof value !== "string" || !value.trim()) throw new ToolInputError(`${key} must be a non-empty string`);
+      }
+      if (args.fabric_type !== undefined && typeof args.fabric_type !== "string") throw new ToolInputError("fabric_type must be a string when supplied");
+      if (!Array.isArray(args.to) || args.to.length < 1 || args.to.length > 20 ||
+          args.to.some(t => typeof t !== "string" || !t.trim() || t.length > 120)) throw new ToolInputError("to must contain 1–20 staff names or ids");
+      const expected = {
+        entityKey: str(args.entity_key, "entity_key", { required: true, max: 200 })!,
+        sheetId: str(args.sheet_id, "sheet_id", { required: true, max: 200 })!,
+        name: str(args.fabric_name, "fabric_name", { required: true, max: 200 })!,
+        fabricType: str(args.fabric_type, "fabric_type", { max: 100 }) ?? "",
+        note: "",
+      };
+      const message = str(args.message, "message", { required: true, max: 1500 })!;
+      const setting = await prisma.portalSetting.findUnique({ where: { key: PORTAL_USERS_KEY }, select: { value: true } });
+      const users = normalizePortalMessageUsers(setting?.value).filter(u => u.id !== MCP_PORTAL_USER_ID);
+      const match = matchStaffRecipients(users, args.to as string[]);
+      if (!match.ok) throw new ToolInputError(match.error);
+      const preview = await previewNewFabricStaffMessage(prisma, expected, message, match.users, normalizePortalMessageUsers, taggedUsersFromText);
+      const summary = `Message ${match.users.map(u => u.name).join(", ")} on fabric ${expected.name} (${expected.fabricType || "no fabric type"}, sheet ${expected.sheetId}): "${message}"`;
+      return stagePendingChange(ctx, "fabric_staff_message", { expected, message, recipients: match.users }, expected, summary, expected.entityKey,
+        { ...preview, fabric_name: expected.name, fabric_type: expected.fabricType, sheet_id: expected.sheetId, before: expected.note, after: preview.body });
+    },
+  },
+  {
     name: "preview_create_fabric_order",
     title: "Preview recording a fabric order",
     description: `Record fabric and ordered meters on a selected portal order sheet. This does not send a supplier purchase order. ${PREVIEW_NOTE}`,
@@ -1194,6 +1240,14 @@ const confirmTools: ToolDef[] = [
           const after = await appendFabricOrderFromMcp(sheetId, fabric, meters, expected);
           result = { entityId: sheetId, after };
         }
+        else if (change.kind === "fabric_staff_message") {
+          const { expected, message, recipients } = payload as {
+            expected: { entityKey: string; sheetId: string; name: string; fabricType?: string; note: string };
+            message: string; recipients: { id: string; name: string }[];
+          };
+          const after = await commitNewFabricStaffMessage(prisma, expected, message, recipients, normalizePortalMessageUsers, taggedUsersFromText);
+          result = { entityId: expected.entityKey, after };
+        }
         else if (change.kind === "staff_reply") {
           const { parentMessageId, body, recipientIds } = payload as { parentMessageId: number; body: string; recipientIds: string[] };
           const parent = await prisma.portalMessage.findUnique({ where: { id: parentMessageId }, select: { body: true } });
@@ -1220,12 +1274,12 @@ const confirmTools: ToolDef[] = [
         else if ((change.kind === "add_note" || change.kind === "replace_note")) result = await executeNote(payload as never, before as never);
         else throw new Error(`Unknown change kind ${change.kind}`);
         await prisma.mcpPendingChange.update({ where: { id }, data: { status: "done", executedAt: new Date(), result: result as never } });
-        await audit({ ctx, tool: "confirm_change", outcome: "applied", kind: change.kind, changeId: id, entityType: "SupplierOrder", entityId: result.entityId, input: payload, before, after: result.after });
-        return { structured: { status: "applied", change_id: id, summary: change.summary, order: result.after }, text: `Done: ${change.summary}` };
+        await audit({ ctx, tool: "confirm_change", outcome: "applied", kind: change.kind, changeId: id, entityType: change.kind === "fabric_staff_message" ? "fabric_row" : "SupplierOrder", entityId: result.entityId, input: payload, before, after: result.after });
+        return { structured: { status: "applied", change_id: id, summary: change.summary, ...(change.kind === "fabric_staff_message" ? { fabric_message: result.after } : { order: result.after }) }, text: `Done: ${change.summary}` };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         await prisma.mcpPendingChange.update({ where: { id }, data: { status: "failed", error: message, executedAt: new Date() } });
-        await audit({ ctx, tool: "confirm_change", outcome: "failed", kind: change.kind, changeId: id, entityType: "SupplierOrder", input: payload, before, error: message });
+        await audit({ ctx, tool: "confirm_change", outcome: "failed", kind: change.kind, changeId: id, entityType: change.kind === "fabric_staff_message" ? "fabric_row" : "SupplierOrder", input: payload, before, error: message });
         throw err instanceof ToolInputError ? err : new Error(`Change failed: ${message}`);
       }
     },
