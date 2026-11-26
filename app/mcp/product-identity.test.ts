@@ -1,0 +1,16 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { selectProductForLookup } from "./product-identity.js";
+const a = {"id":"gid://shopify/Product/1","title":"Olive Dress","sizes":["S"]};
+const b = {"id":"gid://shopify/Product/2","title":"Olive Dress","sizes":["L"]};
+const c = {"id":"gid://shopify/Product/3","title":"Olive Dress Tall","sizes":["M"]};
+test("exact ID", () => assert.equal(selectProductForLookup([a,b], a.title, a.id, a.title, undefined), a));
+test("missing ID with same-title replacement", () => assert.throws(() => selectProductForLookup([b], a.title, a.id, a.title, undefined)));
+test("same ID duplicate", () => assert.throws(() => selectProductForLookup([a,{...a}], a.title, a.id, undefined, undefined)));
+test("conflicting supplied title", () => assert.throws(() => selectProductForLookup([a], a.title, a.id, 'Other', undefined)));
+test("ID only with old search title", () => assert.equal(selectProductForLookup([a], 'Old title', a.id, undefined, a.id), a));
+test("title only unique", () => assert.equal(selectProductForLookup([a,c], ' olive dress ', undefined, a.title, undefined), a));
+test("title only ambiguous despite historical ID", () => assert.throws(() => selectProductForLookup([a,b], a.title, undefined, a.title, a.id)));
+test("historical ID replaced", () => assert.throws(() => selectProductForLookup([b], a.title, undefined, a.title, a.id)));
+test("partial match only", () => assert.throws(() => selectProductForLookup([c], a.title, undefined, a.title, undefined)));
+test("empty search", () => assert.throws(() => selectProductForLookup([], a.title, a.id, a.title, undefined)));
