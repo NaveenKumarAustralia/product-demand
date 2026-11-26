@@ -9439,8 +9439,107 @@ function normalizeManualFabricSheets(value: unknown): FabricStockSheet[] {
   }).filter(Boolean) as FabricStockSheet[];
 }
 
+// ─── Fabric stock disappearance safeguard ──────────────────────────────────
+// Stock sheets (and the On Order tab) hold a fabric's on-hand meters in a cell
+// that can sit PAST the sheet's declared headers (the combined view pads a
+// "Meters in Stock" column onto them). Normal saves preserve full-length rows,
+// but as a safety net every save compares the incoming sheets to what's stored
+// and flags any row where REAL stock vanishes — the stock cell structurally
+// dropped (row truncated) or got blanked — so an accidental wipe is caught and
+// recoverable from 🕑 History / FabricSheetsBackup. Never blocks a save.
+const FABRIC_STOCK_ALERTS_KEY = "production-portal-fabric-stock-alerts-v1";
+type FabricStockDisappearance = { kind: "truncated" | "emptied"; sheet: string; name: string; fabricType: string; before: number };
+
+function parseFabricMeters(raw: string): number {
+  const n = Number(String(raw ?? "").split(/[^0-9.]/)[0]);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Per-row stock snapshot keyed by sheet gid + stable __rowKey, using the SAME
+// padded "Meters in Stock" column index the display/reader use.
+function fabricStockRowMap(sheets: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>) {
+  const map = new Map<string, { metersRaw: string; rawLen: number; metersIdx: number; name: string; fabricType: string; sheetName: string }>();
+  for (const sheet of sheets) {
+    if (!isCombinedFabricSource(sheet)) continue;
+    const paddedHeaders = padCombinedFabricSheet({ ...sheet, rows: [] } as unknown as FabricSheetData).headers;
+    const metersIdx = paddedHeaders.findIndex((h) => /meters?\s*in\s*stock|meters?\s*available|^meters?$/i.test(h.trim()));
+    if (metersIdx < 0) continue;
+    const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h.trim()));
+    const typeIdx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h.trim()) || /^type$/i.test(h.trim()));
+    const rkIdx = fabricRowKeyIndex(sheet);
+    if (rkIdx < 0) continue;
+    for (const row of sheet.rows) {
+      const rowKey = (row[rkIdx] ?? "").trim();
+      if (!rowKey) continue;
+      map.set(`${sheet.gid}::${rowKey}`, {
+        metersRaw: String(row[metersIdx] ?? ""),
+        rawLen: row.length,
+        metersIdx,
+        name: nameIdx >= 0 ? (row[nameIdx] ?? "").trim() : "",
+        fabricType: typeIdx >= 0 ? (row[typeIdx] ?? "").trim() : "",
+        sheetName: sheet.name,
+      });
+    }
+  }
+  return map;
+}
+
+function detectFabricStockDisappearances(
+  before: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>,
+  after: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>,
+): FabricStockDisappearance[] {
+  const b = fabricStockRowMap(before);
+  const a = fabricStockRowMap(after);
+  const flags: FabricStockDisappearance[] = [];
+  for (const [key, bv] of b) {
+    const beforeMeters = parseFabricMeters(bv.metersRaw);
+    if (!(beforeMeters > 0)) continue; // only flag when real stock existed
+    const av = a.get(key);
+    if (!av) continue; // whole row gone = a deliberate delete, not a silent wipe
+    if (av.rawLen <= bv.metersIdx) { // row truncated so the stock cell no longer exists
+      flags.push({ kind: "truncated", sheet: bv.sheetName, name: bv.name, fabricType: bv.fabricType, before: beforeMeters });
+      continue;
+    }
+    if (String(av.metersRaw).trim() === "") { // stock cell blanked (not a deliberate "0")
+      flags.push({ kind: "emptied", sheet: bv.sheetName, name: bv.name, fabricType: bv.fabricType, before: beforeMeters });
+    }
+  }
+  return flags;
+}
+
+async function recordFabricStockDisappearances(flags: FabricStockDisappearance[]) {
+  if (!flags.length) return;
+  console.warn(`[fabric stock guard] ${flags.length} disappearance(s):`, flags);
+  for (const f of flags) {
+    await logActivity("System (fabric safeguard)", "⚠️ Fabric stock disappeared", "Fabric", {
+      entityName: `${f.name}${f.fabricType ? " / " + f.fabricType : ""}`,
+      field: f.kind === "truncated" ? "Row truncated — stock cell dropped" : "Stock emptied",
+      toValue: `was ${f.before}m in "${f.sheet}" — restore from 🕑 History if this wasn't intended`,
+    }).catch(() => {});
+  }
+  try {
+    const row = await prisma.portalSetting.findUnique({ where: { key: FABRIC_STOCK_ALERTS_KEY }, select: { value: true } });
+    const prev = Array.isArray(row?.value) ? (row!.value as unknown[]) : [];
+    const stamped = flags.map((f) => ({ ...f, at: new Date().toISOString() }));
+    const next = [...stamped, ...prev].slice(0, 100);
+    await prisma.portalSetting.upsert({ where: { key: FABRIC_STOCK_ALERTS_KEY }, create: { key: FABRIC_STOCK_ALERTS_KEY, value: next as never }, update: { value: next as never } });
+  } catch (e) {
+    console.warn("[fabric stock guard] alert persist failed:", e);
+  }
+}
+
 async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
   const value = sheets.map(toManualFabricSheet);
+  // Safeguard: flag (never block) if this save makes positive fabric stock
+  // vanish via a truncated row or blanked stock cell.
+  try {
+    const prevRow = await prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } });
+    const before = normalizeManualFabricSheets(prevRow?.value);
+    const flags = detectFabricStockDisappearances(before, sheets);
+    if (flags.length) await recordFabricStockDisappearances(flags);
+  } catch (e) {
+    console.warn("[fabric stock guard] check failed:", e);
+  }
   await prisma.portalSetting.upsert({
     where: { key: FABRIC_MANUAL_SHEETS_KEY },
     create: { key: FABRIC_MANUAL_SHEETS_KEY, value },
