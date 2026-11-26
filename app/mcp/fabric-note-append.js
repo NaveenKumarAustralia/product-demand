@@ -1,9 +1,11 @@
+import { validFabricMessageSheets } from "./fabric-message-rows.js";
 /** Pure preparation only. Must be called again at confirmation inside the shared fabric lock and transaction. Does not persist data or notify staff. */
 /** @param {any[]} sheets @param {{entityKey:string,sheetId:string,name:string,fabricType?:string,note:string}} expected @param {string} message */
 export function prepareFabricNoteAppend(sheets, expected, message) {
   const clean = (v) => typeof v === "string" ? v.trim() : "";
-  const norm = (v) => clean(v).toLowerCase();
+  const norm = (v) => clean(v).toLowerCase().replace(/\s+/g, " ");
   if (!Array.isArray(sheets) || !expected || !clean(expected.entityKey) || expected.entityKey.includes(":") || !clean(expected.sheetId) || !clean(expected.name) || typeof expected.note !== "string" || typeof message !== "string" || !message.trim() || message.length > 2000) throw new Error("Invalid fabric message snapshot or body");
+  if (!validFabricMessageSheets(sheets)) throw new Error("Invalid or ambiguous saved fabric sheet layout; preview again");
   const matches = [];
   for (const sheet of sheets) {
     if (!sheet || !Array.isArray(sheet.headers) || !Array.isArray(sheet.rows)) throw new Error("Invalid saved fabric sheet");
