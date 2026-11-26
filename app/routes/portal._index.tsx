@@ -1952,13 +1952,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
     if (!packingList || !session?.shop || !session.accessToken) return null;
 
-    const variantCache = new Map<string, ShopifyInventoryVariantInfo[]>();
-    const getVariants = async (productId: string) => {
-      if (!variantCache.has(productId)) {
-        variantCache.set(productId, await getShopifyInventoryVariants(session.shop, productId));
+    const productCache = new Map<string, { title: string | null; variants: ShopifyInventoryVariantInfo[] }>();
+    const getProduct = async (productId: string) => {
+      if (!productCache.has(productId)) {
+        productCache.set(productId, await getShopifyProductForLoad(session.shop, session.accessToken, productId));
       }
-      return variantCache.get(productId) ?? [];
+      return productCache.get(productId) ?? { title: null, variants: [] };
     };
+    // Packing rows whose product link points at a differently-named product are
+    // NOT loaded — pushing into the wrong product silently corrupts two products'
+    // stock. Collect the skips so the slip is recorded and visible, not silent.
+    const mislinkedSkips: Array<{ lineId: number; rowTitle: string; productTitle: string }> = [];
 
     // Track which productIds successfully had inventory pushed, so we can
     // auto-close any open restock orders for them that the user already
@@ -2016,7 +2020,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const qtys = normalizeQtys(line.qtys);
       const loadedQtys = normalizeQtys(line.shopifyLoadedQtys);
       const manualQtys = normalizeQtys(line.manuallyLoadedQtys);
-      const variants = await getVariants(line.productId);
+      const product = await getProduct(line.productId);
+      // Mislinked-row guard: never push a row into a product whose title no
+      // longer matches the row (a renamed or recycled product id). Skip it and
+      // record it so staff fix the link instead of silently loading the wrong
+      // product. This is what would have stopped the Ruby → Scarlett slip.
+      if (product.title && !titlesLooselyMatch(line.productTitle, product.title)) {
+        mislinkedSkips.push({ lineId: line.id, rowTitle: line.productTitle, productTitle: product.title });
+        continue;
+      }
+      const variants = product.variants;
       const changes: ShopifyInventoryChange[] = [];
       const nextLoadedQtys: Record<string, number> = { ...loadedQtys };
 
@@ -2091,6 +2104,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       });
       loadedProductIds.add(line.productId);
+    }
+
+    // Record any rows we refused to load because their product link no longer
+    // matches the row's title. Logged to the activity feed so the skip is
+    // visible (the rows also stay un-green on the list), and to the server log.
+    if (mislinkedSkips.length) {
+      for (const skip of mislinkedSkips) {
+        await logActivity(currentUser?.name ?? "Unknown", "Skipped mislinked row", "Packing List Line", {
+          entityId: String(skip.lineId),
+          entityName: skip.rowTitle,
+          field: "Not loaded (link mismatch)",
+          toValue: `Linked to "${skip.productTitle}" — fix the product link, then load again`,
+        }).catch((e) => console.warn("[mislink skip log] failed:", e));
+      }
+      console.warn(`[load guard] skipped ${mislinkedSkips.length} mislinked row(s):`, mislinkedSkips);
     }
 
     // Close any open restock orders sitting in "in_shipment" status
@@ -7164,7 +7192,7 @@ async function logActivity(
 export type GlobalSearchResults = {
   orders: Array<{ id: number; title: string; supplier: string; linked: boolean }>;
   collections: Array<{ id: number; name: string; kind: string }>;
-  packing: Array<{ id: number; label: string }>;
+  packing: Array<{ id: number; label: string; hidden: boolean }>;
   samples: Array<{ id: number; name: string }>;
   photoShoots: Array<{ id: number; name: string }>;
 };
@@ -7178,10 +7206,13 @@ async function runGlobalSearch(q: string): Promise<GlobalSearchResults> {
       take: 50, orderBy: { updatedAt: "desc" },
     }).catch(() => [] as Array<{ id: number; productTitle: string; supplier: string; productId: string }>),
     prisma.packingList.findMany({
-      where: { hiddenAt: null, OR: [{ invoiceNumber: like }, { title: like }, { lines: { some: { OR: [{ productTitle: like }, { sku: like }] } } }] },
-      select: { id: true, invoiceNumber: true, title: true },
+      // Hidden/archived lists ARE included so site-wide search can find them;
+      // results flag them as hidden. (Collections track "hidden" in a setting,
+      // not a column, so that search already returns hidden ones.)
+      where: { OR: [{ invoiceNumber: like }, { title: like }, { lines: { some: { OR: [{ productTitle: like }, { sku: like }] } } }] },
+      select: { id: true, invoiceNumber: true, title: true, hiddenAt: true },
       take: 30, orderBy: { updatedAt: "desc" },
-    }).catch(() => [] as Array<{ id: number; invoiceNumber: string | null; title: string }>),
+    }).catch(() => [] as Array<{ id: number; invoiceNumber: string | null; title: string; hiddenAt: Date | null }>),
     prisma.sample.findMany({ where: { name: like }, select: { id: true, name: true }, take: 30, orderBy: { updatedAt: "desc" } })
       .catch(() => [] as Array<{ id: number; name: string }>),
     prisma.photoShoot.findMany({ where: { name: like }, select: { id: true, name: true }, take: 30 })
@@ -7193,7 +7224,7 @@ async function runGlobalSearch(q: string): Promise<GlobalSearchResults> {
   ]);
   return {
     orders: orders.map((o) => ({ id: o.id, title: o.productTitle, supplier: o.supplier, linked: Boolean(o.productId) })),
-    packing: packing.map((p) => ({ id: p.id, label: p.invoiceNumber || p.title || `#${p.id}` })),
+    packing: packing.map((p) => ({ id: p.id, label: p.invoiceNumber || p.title || `#${p.id}`, hidden: Boolean(p.hiddenAt) })),
     samples: samples.map((s) => ({ id: s.id, name: s.name })),
     photoShoots: photoShoots.map((p) => ({ id: p.id, name: p.name })),
     collections: collectionsRaw.map((c) => ({ id: c.id, name: c.name, kind: c.kind })),
@@ -11185,14 +11216,20 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
     }
   `;
   const json = await shopifyGraphql<any>(session.shop, session.accessToken, graphqlQuery, { id: productId });
+  return mapInventoryVariantNodes(json?.data?.product?.variants?.nodes ?? []);
+}
 
-  const nodes: any[] = json?.data?.product?.variants?.nodes ?? [];
-  // Relabel the lone default-title variant of a single-variant product to the
-  // "Free Size" sentinel so matchingVariantForSize("Free Size", …) finds it.
-  // For everything else, preserve the original variant title so existing
-  // size-only and multi-option products keep matching the way they did
-  // before (size-only: title is already the size; multi-option: title stays
-  // "Red / M" and is intentionally skipped by the matcher).
+/**
+ * Shared mapping of Shopify product.variants nodes → inventory variant info, so
+ * getShopifyInventoryVariants and getShopifyProductForLoad relabel "Free Size"
+ * and extract fields identically.
+ *
+ * Relabels the lone default-title variant of a single-variant product to the
+ * "Free Size" sentinel so matchingVariantForSize("Free Size", …) finds it. For
+ * everything else the original variant title is preserved so size-only and
+ * multi-option products keep matching the way they did before.
+ */
+function mapInventoryVariantNodes(nodes: any[]): ShopifyInventoryVariantInfo[] {
   const isFreeSize = nodes.length === 1 && (() => {
     const opts = (nodes[0]?.selectedOptions ?? []) as { name?: string | null; value?: string | null }[];
     if (!opts.length) return true;
@@ -11210,6 +11247,66 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
       inventoryItemId: variant.inventoryItem?.id ? String(variant.inventoryItem.id) : null,
     }))
     .filter((variant: ShopifyInventoryVariantInfo) => variant.id && variant.title);
+}
+
+/**
+ * Fetch a product's current title AND inventory variants in ONE query (no extra
+ * Shopify call vs. the variants-only fetch — important given the load-burst
+ * outage history). The load loop compares the live title to each packing row's
+ * title and refuses to push stock into a product whose title no longer matches.
+ * This is the guard against the mislinked / recycled-product-id slip that
+ * pushed "Ruby Skirt Poinsettia" rows into "Scarlett Dress Folklore" (Nov 2026).
+ */
+async function getShopifyProductForLoad(
+  shop: string,
+  accessToken: string,
+  productId: string,
+): Promise<{ title: string | null; variants: ShopifyInventoryVariantInfo[] }> {
+  const graphqlQuery = `
+    query ProductForLoad($id: ID!) {
+      product(id: $id) {
+        title
+        variants(first: 100) {
+          nodes {
+            id
+            title
+            sku
+            selectedOptions { name value }
+            inventoryItem {
+              id
+              inventoryLevels(first: 20) {
+                nodes { quantities(names: ["available"]) { name quantity } }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const json = await shopifyGraphql<any>(shop, accessToken, graphqlQuery, { id: productId });
+  return {
+    title: json?.data?.product?.title ?? null,
+    variants: mapInventoryVariantNodes(json?.data?.product?.variants?.nodes ?? []),
+  };
+}
+
+/** Normalise a product title for mismatch detection (ignore case/punctuation/spacing). */
+function normalizeTitleForMatch(s: string): string {
+  return String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/**
+ * True when two product titles are close enough to be the same product: an
+ * exact (normalised) match, or one contains the other (tolerates minor renames
+ * and suffixes like " - Red"). A no-overlap pair ("Ruby…" vs "Scarlett…")
+ * returns false — the case the load guard blocks. Empty/unknown titles return
+ * true so a missing title never blocks a legitimate load.
+ */
+function titlesLooselyMatch(rowTitle: string, productTitle: string): boolean {
+  const a = normalizeTitleForMatch(rowTitle);
+  const b = normalizeTitleForMatch(productTitle);
+  if (!a || !b) return true;
+  return a === b || a.includes(b) || b.includes(a);
 }
 
 // The Shopify location that incoming inventory (packing-list + JJ loads) is
@@ -35727,7 +35824,7 @@ function GlobalSearchPage({ query, results, isAdmin }: { query: string; results:
 
       <Section title="Packing lists" count={results.packing.length}>
         {results.packing.map((p) => (
-          <a key={`p${p.id}`} href={`/portal?page=packing&packingId=${p.id}`} style={linkStyle}>{p.label}{tag("Packing", "#fdf2f8", "#be185d")}</a>
+          <a key={`p${p.id}`} href={`/portal?page=packing&packingId=${p.id}`} style={linkStyle}>{p.label}{tag("Packing", "#fdf2f8", "#be185d")}{p.hidden && tag("hidden", "#f3f4f6", "#6b7280")}</a>
         ))}
       </Section>
 
