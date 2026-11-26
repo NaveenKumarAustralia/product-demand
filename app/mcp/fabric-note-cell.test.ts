@@ -1,0 +1,17 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { fabricNoteCellPlan, applyFabricNoteCell, findUniqueFabricThreadRow } from "./fabric-note-cell.js";
+const make=(headers: string[],rows: string[][])=>({headers,rows});
+const check=(v: unknown,msg: string)=>assert.ok(v,msg);
+const reject=(fn: ()=>unknown)=>assert.throws(fn);
+test("fabric note protection 1", ()=>{const s=make(["Name","Meters"],[["Olive","800"]]);const p=fabricNoteCellPlan([s],s,0,()=>"key1");check(s.headers.length===2,"plan changed source");applyFabricNoteCell(s,0,p,"note");check(JSON.stringify(s.rows[0])==='["Olive","800","note","key1"]',"append");});
+test("fabric note protection 2", ()=>{const s=make(["Name"],[["Olive","800"]]);const before=JSON.stringify(s);reject(()=>fabricNoteCellPlan([s],s,0,()=>"key"));check(JSON.stringify(s)===before,"changed source");});
+test("fabric note protection 3", ()=>{const s=make(["Name","Notes"],[["Olive","old","800"]]);reject(()=>fabricNoteCellPlan([s],s,0,()=>"key"));});
+test("fabric note protection 4", ()=>{const s=make(["Name","Notes","__rowKey"],[["Olive","old","x","800"]]);applyFabricNoteCell(s,0,fabricNoteCellPlan([s],s,0,()=>"new"),"new");check(JSON.stringify(s.rows[0])==='["Olive","new","x","800"]',"preserve extra");});
+test("fabric note protection 5", ()=>{const s=make(["Name","Notes","Note"],[["Olive","old","other"]]);reject(()=>fabricNoteCellPlan([s],s,0,()=>"key"));});
+test("fabric note protection 6", ()=>{const s=make(["Name","Notes","__rowKey"],[["Olive","old","x"]]);const t=make(["Name","__rowKey"],[["Hidden","x"]]);reject(()=>fabricNoteCellPlan([s,t],s,0,()=>"new"));reject(()=>findUniqueFabricThreadRow([s,t],"x"));});
+test("fabric note protection 7", ()=>{const s=make(["Name","Notes","__rowKey","__rowKey"],[["Olive","old","x","y"]]);reject(()=>fabricNoteCellPlan([s],s,0,()=>"new"));reject(()=>findUniqueFabricThreadRow([s],"x"));});
+test("fabric note protection 8", ()=>{const s=make(["Name","__rowKey"],[["Olive","x"]]);const p=fabricNoteCellPlan([s],s,0,()=>"new");applyFabricNoteCell(s,0,p,"note");check(JSON.stringify(s.rows[0])==='["Olive","x","note"]',"existing key");check(findUniqueFabricThreadRow([s],"x").sheet===s,"resolve");});
+test("fabric note protection 9", ()=>{const s=make(["Name","Notes"],[["Olive","old"],["Other","other","extra"]]);reject(()=>fabricNoteCellPlan([s],s,0,()=>"new"));});
+test("fabric note protection 10", ()=>{const s=make(["Name","Notes","__rowKey"],[["Olive","old",""]]);const t=make(["Name","__rowKey"],[["Other","x"]]);reject(()=>fabricNoteCellPlan([s,t],s,0,()=>"x"));});
+test("fabric note protection 11", ()=>{const s=make(["Name","Notes","__rowKey"],[["Olive","old","x"]]);reject(()=>findUniqueFabricThreadRow([s],"missing"));});
