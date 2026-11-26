@@ -64,7 +64,9 @@ function buildFabricStockIndex(sheets: Array<{ gid: string; kind: string; name: 
   return out;
 }
 
-function normalizeSheets(raw: unknown): Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }> {
+type LoaderSheet = { gid: string; kind: string; name: string; headers: string[]; rows: string[][] };
+
+function normalizeSheets(raw: unknown): LoaderSheet[] {
   if (!Array.isArray(raw)) return [];
   return (raw as RawSheet[]).map((s) => ({
     gid: String(s.gid ?? ""),
@@ -73,6 +75,49 @@ function normalizeSheets(raw: unknown): Array<{ gid: string; kind: string; name:
     headers: Array.isArray(s.headers) ? s.headers.map((h) => String(h ?? "")) : [],
     rows: Array.isArray(s.rows) ? s.rows.filter((r): r is unknown[] => Array.isArray(r)).map((r) => r.map((c) => String(c ?? ""))) : [],
   }));
+}
+
+// MUST match COMBINED_FABRIC_PAD_COLUMNS + isCombinedFabricSource + padCombinedFabricSheet
+// in portal._index.tsx. The portal's Fabric-in-Stock view PADS every combined
+// source sheet with these columns so a uniform set exists. Crucially the "On
+// Order" tab (gid 759049382) stores a fabric's real on-hand meters in cells
+// PAST its declared headers; padding exposes them as the "Meters in Stock"
+// column. Without this the loader read 0 in stock for fabrics like "Plain 40x40
+// Olive" (400 on-hand) while the portal correctly showed 400 — the ChatGPT/MCP
+// vs portal mismatch. Order matters: appended columns become stable indices.
+const COMBINED_FABRIC_PAD_COLUMNS: Array<{ header: string; regex: RegExp }> = [
+  { header: "Collection", regex: /^collection$/ },
+  { header: "Cost per Meter", regex: /cost\s*per\s*meter|price\s*per\s*meter|^price$/ },
+  { header: "Cut Pieces", regex: /^cut\s*pieces?$/ },
+  { header: "Received / Date", regex: /received|^order\s*date$/ },
+  { header: "Products", regex: /^products?$/ },
+  { header: "Order Date", regex: /^order\s*date$/ },
+  { header: "Meters in Stock", regex: /meters?\s*in\s*stock|meters?\s*available|^meters?$/ },
+  { header: "Quantity Ordered", regex: /quantity\s*ordered/ },
+];
+
+function isCombinedFabricSource(sheet: LoaderSheet): boolean {
+  if (HIDDEN_FABRIC_SHEET_NAMES.has(normName(sheet.name))) return false;
+  if (sheet.gid === COMBINED_FABRIC_ON_ORDER_GID) return true;
+  return sheet.kind === "stock" || sheet.kind === "simple-stock";
+}
+
+function padCombinedFabricSheet(sheet: LoaderSheet): LoaderSheet {
+  const existing = sheet.headers.map((h) => h.trim().toLowerCase());
+  const missing: string[] = [];
+  for (const col of COMBINED_FABRIC_PAD_COLUMNS) {
+    if (existing.some((h) => col.regex.test(h))) continue;
+    missing.push(col.header);
+  }
+  if (!missing.length) return sheet;
+  const newLength = sheet.headers.length + missing.length;
+  const padRow = (row: string[]) => {
+    if (row.length >= newLength) return row;
+    const result = [...row];
+    while (result.length < newLength) result.push("");
+    return result;
+  };
+  return { ...sheet, headers: [...sheet.headers, ...missing], rows: sheet.rows.map(padRow) };
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -112,7 +157,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     ]);
 
     const sheets = normalizeSheets(fabricRow?.value);
-    const stockSheets = sheets.filter((s) => !HIDDEN_FABRIC_SHEET_NAMES.has(normName(s.name)));
+    // Pad the combined stock sources the SAME way the portal's Fabric-in-Stock
+    // view does, so the On Order tab's on-hand meters (stored past its declared
+    // headers) are read as "Meters in Stock" instead of 0.
+    const stockSheets = sheets.filter(isCombinedFabricSource).map(padCombinedFabricSheet);
     const stockIndex = buildFabricStockIndex(stockSheets);
 
     // On-order meters, per fabric name + type. Read the order / wide-order sheets

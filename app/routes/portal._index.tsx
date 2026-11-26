@@ -47,7 +47,11 @@ async function buildCollectionShipmentData(): Promise<CollectionShipmentData> {
   try {
     const [lines, orders] = await Promise.all([
       prisma.packingListLine.findMany({
-        where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } },
+        // Include HIDDEN packing lists too: hiding/archiving a shipment must not
+        // erase its shipment number from a product's collection cell (a product
+        // can be in an old, now-hidden shipment AND a current one). User choice,
+        // Nov 26 2026 — matches the hidden-lists-in-search change.
+        where: { isCustom: false, productId: { not: null } },
         select: { productId: true, qtys: true, packingList: { select: { id: true, title: true, invoiceNumber: true, expectedLeaveFactoryDate: true, shipmentDate: true } } },
       }),
       prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true, supplierStatus: true } }).catch(() => [] as Array<{ productId: string; totalQty: number; supplierStatus: string }>),
@@ -109,6 +113,73 @@ async function buildCollectionShipmentData(): Promise<CollectionShipmentData> {
     console.warn("[collection shipment data] lookup failed:", e);
   }
   return { eta, shipment, shipDetail, restockStatus };
+}
+
+// ─── Shipment number parsing ───────────────────────────────────────────────
+// Packing-list invoice numbers are entered by hand and are messy, e.g.
+// "AEPL / 08 / 26-27", "AEPL - 26/27 / 19" (number is 19, 26/27 is the fiscal
+// year), typo "APEL 25", or "Next Shipment". The shipment NUMBER is the stray
+// integer once the "26-27"/"26/27" fiscal-year token is removed. These parse a
+// raw ship label (invoiceNumber || title || id) into a short display value.
+/** "AEPL / 27 / 26-27" → "27"; "AEPL - 26/27 / 19" → "19"; "Next Shipment" → "Next shipment". */
+function shipmentNumberDisplay(raw: string): string {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (/next/i.test(s)) return "Next shipment";
+  // The shipment number is the first integer that isn't part of the fiscal-year
+  // token. The year is a pair of ADJACENT 2-digit numbers that are consecutive
+  // (e.g. 26-27, 26/27, 27-28) separated only by - or /. A naive "strip NN/NN"
+  // also eats pairs like "08 / 26", so we detect the year pair positionally and
+  // skip exactly those two numbers.
+  const toks = [...s.matchAll(/\d+/g)].map((m) => ({ num: m[0], idx: m.index ?? 0 }));
+  if (!toks.length) return s;
+  const yearIdx = new Set<number>();
+  for (let i = 0; i < toks.length - 1; i++) {
+    const a = toks[i], b = toks[i + 1];
+    if (a.num.length === 2 && b.num.length === 2) {
+      const between = s.slice(a.idx + a.num.length, b.idx);
+      if (/^\s*[-/]\s*$/.test(between) && parseInt(b.num, 10) === parseInt(a.num, 10) + 1) {
+        yearIdx.add(i); yearIdx.add(i + 1);
+      }
+    }
+  }
+  const first = toks.find((_, i) => !yearIdx.has(i)) ?? toks[0];
+  return String(parseInt(first.num, 10));
+}
+
+/** Collapse a product's raw ship labels into the cell text, e.g. "In shipment 27, 28". */
+function buildShipmentChipText(rawShips: string[]): string {
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const r of rawShips) {
+    const d = shipmentNumberDisplay(r);
+    if (d && !seen.has(d)) { seen.add(d); labels.push(d); }
+  }
+  if (!labels.length) return "";
+  const nums = labels.filter((l) => /^\d+$/.test(l)).sort((a, b) => Number(a) - Number(b));
+  const others = labels.filter((l) => !/^\d+$/.test(l)); // e.g. "Next shipment"
+  const ordered = [...nums, ...others];
+  if (nums.length === 0) return ordered.join(", "); // just "Next shipment"
+  return "In shipment " + ordered.join(", ");
+}
+
+/** A product's distinct shipment labels, numbers first (ascending), then others ("Next shipment"). */
+function shipmentChipLabels(rawShips: string[]): string[] {
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const r of rawShips) {
+    const d = shipmentNumberDisplay(r);
+    if (d && !seen.has(d)) { seen.add(d); labels.push(d); }
+  }
+  const nums = labels.filter((l) => /^\d+$/.test(l)).sort((a, b) => Number(a) - Number(b));
+  const others = labels.filter((l) => !/^\d+$/.test(l));
+  return [...nums, ...others];
+}
+
+/** Popup row label for one shipment: numeric → "Shipment 27", else the raw ("Next shipment"). */
+function shipmentRowLabel(raw: string): string {
+  const d = shipmentNumberDisplay(raw);
+  return /^\d+$/.test(d) ? `Shipment ${d}` : d;
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -1952,13 +2023,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
     if (!packingList || !session?.shop || !session.accessToken) return null;
 
-    const variantCache = new Map<string, ShopifyInventoryVariantInfo[]>();
-    const getVariants = async (productId: string) => {
-      if (!variantCache.has(productId)) {
-        variantCache.set(productId, await getShopifyInventoryVariants(session.shop, productId));
+    const productCache = new Map<string, { title: string | null; variants: ShopifyInventoryVariantInfo[] }>();
+    const getProduct = async (productId: string) => {
+      if (!productCache.has(productId)) {
+        productCache.set(productId, await getShopifyProductForLoad(session.shop, session.accessToken, productId));
       }
-      return variantCache.get(productId) ?? [];
+      return productCache.get(productId) ?? { title: null, variants: [] };
     };
+    // Packing rows whose product link points at a differently-named product are
+    // NOT loaded — pushing into the wrong product silently corrupts two products'
+    // stock. Collect the skips so the slip is recorded and visible, not silent.
+    const mislinkedSkips: Array<{ lineId: number; rowTitle: string; productTitle: string }> = [];
 
     // Track which productIds successfully had inventory pushed, so we can
     // auto-close any open restock orders for them that the user already
@@ -2016,7 +2091,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const qtys = normalizeQtys(line.qtys);
       const loadedQtys = normalizeQtys(line.shopifyLoadedQtys);
       const manualQtys = normalizeQtys(line.manuallyLoadedQtys);
-      const variants = await getVariants(line.productId);
+      const product = await getProduct(line.productId);
+      // Mislinked-row guard: never push a row into a product whose title no
+      // longer matches the row (a renamed or recycled product id). Skip it and
+      // record it so staff fix the link instead of silently loading the wrong
+      // product. This is what would have stopped the Ruby → Scarlett slip.
+      if (product.title && !titlesLooselyMatch(line.productTitle, product.title)) {
+        mislinkedSkips.push({ lineId: line.id, rowTitle: line.productTitle, productTitle: product.title });
+        continue;
+      }
+      const variants = product.variants;
       const changes: ShopifyInventoryChange[] = [];
       const nextLoadedQtys: Record<string, number> = { ...loadedQtys };
 
@@ -2091,6 +2175,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       });
       loadedProductIds.add(line.productId);
+    }
+
+    // Record any rows we refused to load because their product link no longer
+    // matches the row's title. Logged to the activity feed so the skip is
+    // visible (the rows also stay un-green on the list), and to the server log.
+    if (mislinkedSkips.length) {
+      for (const skip of mislinkedSkips) {
+        await logActivity(currentUser?.name ?? "Unknown", "Skipped mislinked row", "Packing List Line", {
+          entityId: String(skip.lineId),
+          entityName: skip.rowTitle,
+          field: "Not loaded (link mismatch)",
+          toValue: `Linked to "${skip.productTitle}" — fix the product link, then load again`,
+        }).catch((e) => console.warn("[mislink skip log] failed:", e));
+      }
+      console.warn(`[load guard] skipped ${mislinkedSkips.length} mislinked row(s):`, mislinkedSkips);
     }
 
     // Close any open restock orders sitting in "in_shipment" status
@@ -7164,7 +7263,7 @@ async function logActivity(
 export type GlobalSearchResults = {
   orders: Array<{ id: number; title: string; supplier: string; linked: boolean }>;
   collections: Array<{ id: number; name: string; kind: string }>;
-  packing: Array<{ id: number; label: string }>;
+  packing: Array<{ id: number; label: string; hidden: boolean }>;
   samples: Array<{ id: number; name: string }>;
   photoShoots: Array<{ id: number; name: string }>;
 };
@@ -7178,10 +7277,13 @@ async function runGlobalSearch(q: string): Promise<GlobalSearchResults> {
       take: 50, orderBy: { updatedAt: "desc" },
     }).catch(() => [] as Array<{ id: number; productTitle: string; supplier: string; productId: string }>),
     prisma.packingList.findMany({
-      where: { hiddenAt: null, OR: [{ invoiceNumber: like }, { title: like }, { lines: { some: { OR: [{ productTitle: like }, { sku: like }] } } }] },
-      select: { id: true, invoiceNumber: true, title: true },
+      // Hidden/archived lists ARE included so site-wide search can find them;
+      // results flag them as hidden. (Collections track "hidden" in a setting,
+      // not a column, so that search already returns hidden ones.)
+      where: { OR: [{ invoiceNumber: like }, { title: like }, { lines: { some: { OR: [{ productTitle: like }, { sku: like }] } } }] },
+      select: { id: true, invoiceNumber: true, title: true, hiddenAt: true },
       take: 30, orderBy: { updatedAt: "desc" },
-    }).catch(() => [] as Array<{ id: number; invoiceNumber: string | null; title: string }>),
+    }).catch(() => [] as Array<{ id: number; invoiceNumber: string | null; title: string; hiddenAt: Date | null }>),
     prisma.sample.findMany({ where: { name: like }, select: { id: true, name: true }, take: 30, orderBy: { updatedAt: "desc" } })
       .catch(() => [] as Array<{ id: number; name: string }>),
     prisma.photoShoot.findMany({ where: { name: like }, select: { id: true, name: true }, take: 30 })
@@ -7193,7 +7295,7 @@ async function runGlobalSearch(q: string): Promise<GlobalSearchResults> {
   ]);
   return {
     orders: orders.map((o) => ({ id: o.id, title: o.productTitle, supplier: o.supplier, linked: Boolean(o.productId) })),
-    packing: packing.map((p) => ({ id: p.id, label: p.invoiceNumber || p.title || `#${p.id}` })),
+    packing: packing.map((p) => ({ id: p.id, label: p.invoiceNumber || p.title || `#${p.id}`, hidden: Boolean(p.hiddenAt) })),
     samples: samples.map((s) => ({ id: s.id, name: s.name })),
     photoShoots: photoShoots.map((p) => ({ id: p.id, name: p.name })),
     collections: collectionsRaw.map((c) => ({ id: c.id, name: c.name, kind: c.kind })),
@@ -9337,8 +9439,107 @@ function normalizeManualFabricSheets(value: unknown): FabricStockSheet[] {
   }).filter(Boolean) as FabricStockSheet[];
 }
 
+// ─── Fabric stock disappearance safeguard ──────────────────────────────────
+// Stock sheets (and the On Order tab) hold a fabric's on-hand meters in a cell
+// that can sit PAST the sheet's declared headers (the combined view pads a
+// "Meters in Stock" column onto them). Normal saves preserve full-length rows,
+// but as a safety net every save compares the incoming sheets to what's stored
+// and flags any row where REAL stock vanishes — the stock cell structurally
+// dropped (row truncated) or got blanked — so an accidental wipe is caught and
+// recoverable from 🕑 History / FabricSheetsBackup. Never blocks a save.
+const FABRIC_STOCK_ALERTS_KEY = "production-portal-fabric-stock-alerts-v1";
+type FabricStockDisappearance = { kind: "truncated" | "emptied"; sheet: string; name: string; fabricType: string; before: number };
+
+function parseFabricMeters(raw: string): number {
+  const n = Number(String(raw ?? "").split(/[^0-9.]/)[0]);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Per-row stock snapshot keyed by sheet gid + stable __rowKey, using the SAME
+// padded "Meters in Stock" column index the display/reader use.
+function fabricStockRowMap(sheets: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>) {
+  const map = new Map<string, { metersRaw: string; rawLen: number; metersIdx: number; name: string; fabricType: string; sheetName: string }>();
+  for (const sheet of sheets) {
+    if (!isCombinedFabricSource(sheet)) continue;
+    const paddedHeaders = padCombinedFabricSheet({ ...sheet, rows: [] } as unknown as FabricSheetData).headers;
+    const metersIdx = paddedHeaders.findIndex((h) => /meters?\s*in\s*stock|meters?\s*available|^meters?$/i.test(h.trim()));
+    if (metersIdx < 0) continue;
+    const nameIdx = sheet.headers.findIndex((h) => /^name$/i.test(h.trim()));
+    const typeIdx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h.trim()) || /^type$/i.test(h.trim()));
+    const rkIdx = fabricRowKeyIndex(sheet);
+    if (rkIdx < 0) continue;
+    for (const row of sheet.rows) {
+      const rowKey = (row[rkIdx] ?? "").trim();
+      if (!rowKey) continue;
+      map.set(`${sheet.gid}::${rowKey}`, {
+        metersRaw: String(row[metersIdx] ?? ""),
+        rawLen: row.length,
+        metersIdx,
+        name: nameIdx >= 0 ? (row[nameIdx] ?? "").trim() : "",
+        fabricType: typeIdx >= 0 ? (row[typeIdx] ?? "").trim() : "",
+        sheetName: sheet.name,
+      });
+    }
+  }
+  return map;
+}
+
+function detectFabricStockDisappearances(
+  before: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>,
+  after: Array<{ gid: string; kind: string; name: string; headers: string[]; rows: string[][] }>,
+): FabricStockDisappearance[] {
+  const b = fabricStockRowMap(before);
+  const a = fabricStockRowMap(after);
+  const flags: FabricStockDisappearance[] = [];
+  for (const [key, bv] of b) {
+    const beforeMeters = parseFabricMeters(bv.metersRaw);
+    if (!(beforeMeters > 0)) continue; // only flag when real stock existed
+    const av = a.get(key);
+    if (!av) continue; // whole row gone = a deliberate delete, not a silent wipe
+    if (av.rawLen <= bv.metersIdx) { // row truncated so the stock cell no longer exists
+      flags.push({ kind: "truncated", sheet: bv.sheetName, name: bv.name, fabricType: bv.fabricType, before: beforeMeters });
+      continue;
+    }
+    if (String(av.metersRaw).trim() === "") { // stock cell blanked (not a deliberate "0")
+      flags.push({ kind: "emptied", sheet: bv.sheetName, name: bv.name, fabricType: bv.fabricType, before: beforeMeters });
+    }
+  }
+  return flags;
+}
+
+async function recordFabricStockDisappearances(flags: FabricStockDisappearance[]) {
+  if (!flags.length) return;
+  console.warn(`[fabric stock guard] ${flags.length} disappearance(s):`, flags);
+  for (const f of flags) {
+    await logActivity("System (fabric safeguard)", "⚠️ Fabric stock disappeared", "Fabric", {
+      entityName: `${f.name}${f.fabricType ? " / " + f.fabricType : ""}`,
+      field: f.kind === "truncated" ? "Row truncated — stock cell dropped" : "Stock emptied",
+      toValue: `was ${f.before}m in "${f.sheet}" — restore from 🕑 History if this wasn't intended`,
+    }).catch(() => {});
+  }
+  try {
+    const row = await prisma.portalSetting.findUnique({ where: { key: FABRIC_STOCK_ALERTS_KEY }, select: { value: true } });
+    const prev = Array.isArray(row?.value) ? (row!.value as unknown[]) : [];
+    const stamped = flags.map((f) => ({ ...f, at: new Date().toISOString() }));
+    const next = [...stamped, ...prev].slice(0, 100);
+    await prisma.portalSetting.upsert({ where: { key: FABRIC_STOCK_ALERTS_KEY }, create: { key: FABRIC_STOCK_ALERTS_KEY, value: next as never }, update: { value: next as never } });
+  } catch (e) {
+    console.warn("[fabric stock guard] alert persist failed:", e);
+  }
+}
+
 async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
   const value = sheets.map(toManualFabricSheet);
+  // Safeguard: flag (never block) if this save makes positive fabric stock
+  // vanish via a truncated row or blanked stock cell.
+  try {
+    const prevRow = await prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } });
+    const before = normalizeManualFabricSheets(prevRow?.value);
+    const flags = detectFabricStockDisappearances(before, sheets);
+    if (flags.length) await recordFabricStockDisappearances(flags);
+  } catch (e) {
+    console.warn("[fabric stock guard] check failed:", e);
+  }
   await prisma.portalSetting.upsert({
     where: { key: FABRIC_MANUAL_SHEETS_KEY },
     create: { key: FABRIC_MANUAL_SHEETS_KEY, value },
@@ -11185,14 +11386,20 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
     }
   `;
   const json = await shopifyGraphql<any>(session.shop, session.accessToken, graphqlQuery, { id: productId });
+  return mapInventoryVariantNodes(json?.data?.product?.variants?.nodes ?? []);
+}
 
-  const nodes: any[] = json?.data?.product?.variants?.nodes ?? [];
-  // Relabel the lone default-title variant of a single-variant product to the
-  // "Free Size" sentinel so matchingVariantForSize("Free Size", …) finds it.
-  // For everything else, preserve the original variant title so existing
-  // size-only and multi-option products keep matching the way they did
-  // before (size-only: title is already the size; multi-option: title stays
-  // "Red / M" and is intentionally skipped by the matcher).
+/**
+ * Shared mapping of Shopify product.variants nodes → inventory variant info, so
+ * getShopifyInventoryVariants and getShopifyProductForLoad relabel "Free Size"
+ * and extract fields identically.
+ *
+ * Relabels the lone default-title variant of a single-variant product to the
+ * "Free Size" sentinel so matchingVariantForSize("Free Size", …) finds it. For
+ * everything else the original variant title is preserved so size-only and
+ * multi-option products keep matching the way they did before.
+ */
+function mapInventoryVariantNodes(nodes: any[]): ShopifyInventoryVariantInfo[] {
   const isFreeSize = nodes.length === 1 && (() => {
     const opts = (nodes[0]?.selectedOptions ?? []) as { name?: string | null; value?: string | null }[];
     if (!opts.length) return true;
@@ -11210,6 +11417,66 @@ async function getShopifyInventoryVariants(shop: string, productId: string): Pro
       inventoryItemId: variant.inventoryItem?.id ? String(variant.inventoryItem.id) : null,
     }))
     .filter((variant: ShopifyInventoryVariantInfo) => variant.id && variant.title);
+}
+
+/**
+ * Fetch a product's current title AND inventory variants in ONE query (no extra
+ * Shopify call vs. the variants-only fetch — important given the load-burst
+ * outage history). The load loop compares the live title to each packing row's
+ * title and refuses to push stock into a product whose title no longer matches.
+ * This is the guard against the mislinked / recycled-product-id slip that
+ * pushed "Ruby Skirt Poinsettia" rows into "Scarlett Dress Folklore" (Nov 2026).
+ */
+async function getShopifyProductForLoad(
+  shop: string,
+  accessToken: string,
+  productId: string,
+): Promise<{ title: string | null; variants: ShopifyInventoryVariantInfo[] }> {
+  const graphqlQuery = `
+    query ProductForLoad($id: ID!) {
+      product(id: $id) {
+        title
+        variants(first: 100) {
+          nodes {
+            id
+            title
+            sku
+            selectedOptions { name value }
+            inventoryItem {
+              id
+              inventoryLevels(first: 20) {
+                nodes { quantities(names: ["available"]) { name quantity } }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const json = await shopifyGraphql<any>(shop, accessToken, graphqlQuery, { id: productId });
+  return {
+    title: json?.data?.product?.title ?? null,
+    variants: mapInventoryVariantNodes(json?.data?.product?.variants?.nodes ?? []),
+  };
+}
+
+/** Normalise a product title for mismatch detection (ignore case/punctuation/spacing). */
+function normalizeTitleForMatch(s: string): string {
+  return String(s ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/**
+ * True when two product titles are close enough to be the same product: an
+ * exact (normalised) match, or one contains the other (tolerates minor renames
+ * and suffixes like " - Red"). A no-overlap pair ("Ruby…" vs "Scarlett…")
+ * returns false — the case the load guard blocks. Empty/unknown titles return
+ * true so a missing title never blocks a legitimate load.
+ */
+function titlesLooselyMatch(rowTitle: string, productTitle: string): boolean {
+  const a = normalizeTitleForMatch(rowTitle);
+  const b = normalizeTitleForMatch(productTitle);
+  if (!a || !b) return true;
+  return a === b || a.includes(b) || b.includes(a);
 }
 
 // The Shopify location that incoming inventory (packing-list + JJ loads) is
@@ -22348,35 +22615,54 @@ function CollectionSpreadsheetPage({
                             </Td>
                           );
                         }
-                        // STATUS cell = two stacked chips:
-                        //  • TOP: the product's status, mirrored (read-only) from
-                        //    its restock order — the restock page is the source of
-                        //    truth, so it isn't edited here.
-                        //  • BOTTOM: a shipment chip (Not / Partly / Fully in
-                        //    shipment) built ONLY from Packing Lists; click it for
-                        //    the per-size shipment breakdown popup.
+                        // STATUS cell = two stacked parts:
+                        //  • TOP: the product's status. Two-way synced with the
+                        //    restock page — editable here with the SAME status set,
+                        //    and a change mirrors onto the product's restock order(s)
+                        //    (and vice versa). Products NOT yet on restock keep the
+                        //    collection's own editable chips.
+                        //  • BOTTOM: the shipment NUMBER(s) this product is in,
+                        //    read-only from Packing Lists; click for the per-size
+                        //    breakdown popup.
                         if (col.type === "chip" && col.id === "status") {
                           // Product is "in the restock page" when it has a restock order.
                           const inRestock = Boolean(rowRestockStatus);
                           const rsOpt = inRestock ? restockSettings.statusOptions.find((o) => o.value === rowRestockStatus) : null;
-                          let shipLabel = "—", shipBg = "#f3f4f6", shipColor = "#9ca3af";
-                          if (totalOrdered > 0 || rowShippedTotal > 0) {
-                            if (rowShippedTotal <= 0) { shipLabel = "Not shipped"; shipBg = "#f3f4f6"; shipColor = "#6b7280"; }
-                            else if (rowShippedTotal < totalOrdered) { shipLabel = "Partly in shipment"; shipBg = "#fef3c7"; shipColor = "#92400e"; }
-                            else { shipLabel = "Fully in shipment"; shipBg = "#dcfce7"; shipColor = "#166534"; }
-                          }
-                          const canOpen = totalOrdered > 0 || rowShippedTotal > 0;
+                          const statusKey = linkedProductId.replace(/\D/g, "");
+                          // Which shipment number(s) this product sits in (from the
+                          // packing lists), read-only. Stacked one per line so a
+                          // narrow column stays readable instead of one long row.
+                          const shipLabels = rowShipDetail
+                            ? shipmentChipLabels(Object.values(rowShipDetail).flatMap((sz) => sz.parts.map((p) => p.ship)))
+                            : [];
+                          const shipHasNumbers = shipLabels.some((l) => /^\d+$/.test(l));
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
                                 {inRestock ? (
-                                  // In the restock page → status comes from there (read-only).
-                                  <span
-                                    title={rsOpt ? `Status from the restock page: ${rsOpt.label}` : `Status from the restock page: ${rowRestockStatus}`}
-                                    style={{ display: "inline-block", fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 999, whiteSpace: "nowrap", background: rsOpt?.bg ?? "#e5e7eb", color: rsOpt?.color ?? "#374151" }}
-                                  >{rsOpt?.label ?? rowRestockStatus}</span>
+                                  // On restock → editable + two-way synced. Picking a
+                                  // status writes the row status, which mirrors onto
+                                  // the product's restock order(s); the restock page
+                                  // mirrors back here. Uses the restock status set so
+                                  // both pages share one vocabulary.
+                                  <select
+                                    value={rowRestockStatus}
+                                    title="Status is shared with the restock page — changing it here changes it in both"
+                                    onChange={(e) => {
+                                      const v = e.target.value;
+                                      if (!v || v === rowRestockStatus) return;
+                                      updateCell(rIdx, "status", v);
+                                      if (statusKey) setFreshRestockStatus((prev) => ({ ...(prev ?? restockStatusByProductId), [statusKey]: v }));
+                                    }}
+                                    style={{ appearance: "none", WebkitAppearance: "none", MozAppearance: "none", textAlign: "center", textAlignLast: "center", fontSize: 11, fontWeight: 800, padding: "4px 22px 4px 10px", borderRadius: 999, border: "none", cursor: "pointer", whiteSpace: "nowrap", background: rsOpt?.bg ?? "#e5e7eb", color: rsOpt?.color ?? "#374151", fontFamily: "inherit" }}
+                                  >
+                                    {!rsOpt && <option value={rowRestockStatus}>{rowRestockStatus || "—"}</option>}
+                                    {restockSettings.statusOptions.map((o) => (
+                                      <option key={o.value} value={o.value} style={{ background: "#fff", color: "#111827" }}>{o.label}</option>
+                                    ))}
+                                  </select>
                                 ) : (
-                                  // Not in the restock page → editable here, same chips as before.
+                                  // Not on restock → editable collection chips.
                                   <CollectionChipDropdown
                                     value={value}
                                     options={localStatusOptions}
@@ -22385,16 +22671,23 @@ function CollectionSpreadsheetPage({
                                     onOptionsChange={(next) => saveChipOptions("statusOptions", next)}
                                   />
                                 )}
-                                {/* Only show the shipment chip once something has
-                                    actually shipped; otherwise show nothing. */}
-                                {rowShippedTotal > 0 && (
+                                {/* Shipment number(s) from Packing Lists (read-only).
+                                    Only shows once the product is in a shipment. Each
+                                    shipment sits on its own line so a narrow column
+                                    wraps nicely. Click → per-size breakdown popup. */}
+                                {shipLabels.length > 0 && (
                                   <button
                                     type="button"
                                     onClick={() => setShipGridRowIdx(rIdx)}
-                                    title={`${rowShippedTotal} of ${totalOrdered} shipped — click for the per-size shipment breakdown`}
-                                    style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 999, background: shipBg, color: shipColor, whiteSpace: "nowrap", border: "none", cursor: "pointer", fontFamily: "inherit" }}
+                                    title="Which shipment(s) this product is in — click for the per-size breakdown"
+                                    style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 12, background: "#ccfbf1", color: "#0f766e", border: "none", cursor: "pointer", fontFamily: "inherit", lineHeight: 1.25, maxWidth: "100%" }}
                                   >
-                                    {shipLabel}
+                                    {shipHasNumbers && (
+                                      <span style={{ fontSize: 8.5, fontWeight: 700, opacity: 0.75, textTransform: "uppercase", letterSpacing: "0.03em" }}>In shipment</span>
+                                    )}
+                                    {shipLabels.map((l) => (
+                                      <span key={l} style={{ whiteSpace: "nowrap" }}>{l}</span>
+                                    ))}
                                     <span aria-hidden style={{ fontSize: 8, opacity: 0.7 }}>▼</span>
                                   </button>
                                 )}
@@ -22773,9 +23066,7 @@ function CollectionSpreadsheetPage({
           const tOrdered = sizes.reduce((a, s) => a + s.ordered, 0);
           const tShipped = sizes.reduce((a, s) => a + s.shipped, 0);
           const tRemaining = Math.max(0, tOrdered - tShipped);
-          const statusLabel = tShipped <= 0 ? "Not shipped" : tShipped < tOrdered ? "Partly in shipment" : "Fully in shipment";
-          const statusBg = tShipped <= 0 ? "#f3f4f6" : tShipped < tOrdered ? "#fef3c7" : "#dcfce7";
-          const statusColor = tShipped <= 0 ? "#6b7280" : tShipped < tOrdered ? "#92400e" : "#166534";
+          const shipSummary = buildShipmentChipText(shipments.map((sh) => sh.ship));
           const cell: React.CSSProperties = { padding: "7px 6px", textAlign: "center", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" };
           const headCell: React.CSSProperties = { ...cell, background: "#f8fafc", fontSize: 11, fontWeight: 800, color: "#6b7280", textTransform: "uppercase", letterSpacing: "0.04em", borderBottom: "1px solid #e5e7eb" };
           return (
@@ -22786,7 +23077,7 @@ function CollectionSpreadsheetPage({
                     <div style={{ fontSize: 15, fontWeight: 800, color: "#111827" }}>{row.name ?? row.title ?? "Product"}</div>
                     <div style={{ fontSize: 12, color: "#6b7280", marginTop: 3 }}><b style={{ color: "#111827" }}>{tShipped}</b> of <b style={{ color: "#111827" }}>{tOrdered}</b> shipped · {tRemaining} still to go</div>
                   </div>
-                  <span style={{ fontSize: 11, fontWeight: 800, padding: "5px 10px", borderRadius: 999, background: statusBg, color: statusColor, whiteSpace: "nowrap" }}>{statusLabel}</span>
+                  {shipSummary && <span style={{ fontSize: 11, fontWeight: 800, padding: "5px 10px", borderRadius: 999, background: "#ccfbf1", color: "#0f766e", whiteSpace: "nowrap" }}>{shipSummary}</span>}
                   <button type="button" onClick={() => setShipGridRowIdx(null)} title="Close" style={{ border: "none", background: "#f1f5f9", color: "#6b7280", width: 26, height: 26, borderRadius: 7, fontSize: 14, cursor: "pointer", lineHeight: 1, flexShrink: 0 }}>×</button>
                 </div>
                 <div style={{ overflow: "auto", padding: "6px 10px 12px" }}>
@@ -22805,7 +23096,7 @@ function CollectionSpreadsheetPage({
                         {shipments.map((sh) => (
                           <tr key={sh.ship}>
                             <th style={{ ...cell, textAlign: "left", paddingLeft: 12, fontWeight: 700, fontSize: 12.5, color: "#111827", borderBottom: "1px solid #f1f5f9" }}>
-                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#0d9488", flexShrink: 0 }} />#{sh.ship}</span>
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#0d9488", flexShrink: 0 }} />{shipmentRowLabel(sh.ship)}</span>
                             </th>
                             {sizes.map((s) => <td key={s.canon} style={{ ...cell, fontWeight: sh.cells[s.canon] ? 700 : 400, color: sh.cells[s.canon] ? "#111827" : "#cbd5e1", borderBottom: "1px solid #f1f5f9" }}>{sh.cells[s.canon] || "–"}</td>)}
                             <td style={{ ...cell, fontWeight: 800, color: "#0f766e", borderLeft: "1px solid #e5e7eb", borderBottom: "1px solid #f1f5f9" }}>{sh.total}</td>
@@ -35727,7 +36018,7 @@ function GlobalSearchPage({ query, results, isAdmin }: { query: string; results:
 
       <Section title="Packing lists" count={results.packing.length}>
         {results.packing.map((p) => (
-          <a key={`p${p.id}`} href={`/portal?page=packing&packingId=${p.id}`} style={linkStyle}>{p.label}{tag("Packing", "#fdf2f8", "#be185d")}</a>
+          <a key={`p${p.id}`} href={`/portal?page=packing&packingId=${p.id}`} style={linkStyle}>{p.label}{tag("Packing", "#fdf2f8", "#be185d")}{p.hidden && tag("hidden", "#f3f4f6", "#6b7280")}</a>
         ))}
       </Section>
 
