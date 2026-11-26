@@ -1,7 +1,7 @@
 // @ts-nocheck
 import {test} from "node:test";
 import assert from "node:assert/strict";
-import {planNewFabricStaffMessage,commitNewFabricStaffMessage,FABRIC_MESSAGE_SHEETS_KEY} from "./fabric-staff-message-store.js";
+import {planNewFabricStaffMessage,commitNewFabricStaffMessage,previewNewFabricStaffMessage,FABRIC_MESSAGE_SHEETS_KEY} from "./fabric-staff-message-store.js";
 
 const expected={entityKey:"stable",sheetId:"sheet",name:"Olive",fabricType:"Cotton",note:""};
 const recipients=[{id:"g",name:"Girish"},{id:"m",name:"Manoj"}];
@@ -83,3 +83,30 @@ for(const [label,options,error] of [
     assert.deepEqual(db.state,before);
   });
 }
+
+const preview=db=>previewNewFabricStaffMessage(db,expected,"When will it arrive?",recipients,normalize,tags);
+test("preview returns exact anchor, body and recipients without writing any business data",async()=>{
+  const db=fake();const before=db.state;
+  const result=await preview(db);
+  assert.deepEqual(db.state,before);
+  assert.deepEqual(result.anchor,{entityType:"fabric_row",orderId:0,entityKey:"stable",field:"notes"});
+  assert.deepEqual(result.notified,recipients);
+  assert.equal(db.options.isolationLevel,"Serializable");
+  const applied=await run(db);
+  assert.equal(result.body,applied.body);
+});
+test("preview rejects an existing thread without changing it",async()=>{
+  const db=fake({existing:true});const before=db.state;
+  await assert.rejects(()=>preview(db),/Existing fabric conversation/);
+  assert.deepEqual(db.state,before);
+});
+test("preview rejects changed staff without writing data",async()=>{
+  const db=fake({staff:[{...users[0],active:false},...users.slice(1)]});const before=db.state;
+  await assert.rejects(()=>preview(db),/Staff changed/);
+  assert.deepEqual(db.state,before);
+});
+test("preview rejects a fabric row whose note changed",async()=>{
+  const db=fake({value:[{...sheets[0],rows:[["Olive","Cotton","new note","stable","900"]]}]});const before=db.state;
+  await assert.rejects(()=>preview(db),/changed since preview/);
+  assert.deepEqual(db.state,before);
+});
