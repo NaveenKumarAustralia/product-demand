@@ -14,6 +14,7 @@ import {
 } from "../collection-tasks.server";
 import { randomUUID } from "node:crypto";
 import { prepareFabricRowKeyBackfill } from "../mcp/fabric-row-key-backfill.js";
+import { fabricNoteCellPlan, applyFabricNoteCell, findUniqueFabricThreadRow } from "../mcp/fabric-note-cell.js";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { PreordersDashboard } from "../portal-preorders";
 import { ProductionCutsPanel } from "../portal-production-cuts";
@@ -3662,23 +3663,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // Locate the row across every sheet by its stable key, write the cell,
         // then re-sync (or purge) the thread.
         const sheets = await loadManualFabricSheetsForAction();
-        let found: { sheet: (typeof sheets)[number]; rowIndex: number } | null = null;
-        for (const sheet of sheets) {
-          const keyIdx = fabricRowKeyIndex(sheet);
-          if (keyIdx < 0) continue;
-          const rowIndex = sheet.rows.findIndex((r) => (r[keyIdx] ?? "").trim() === entityKey);
-          if (rowIndex >= 0) { found = { sheet, rowIndex }; break; }
+        let found: ReturnType<typeof findUniqueFabricThreadRow<FabricStockSheet>>;
+        try {
+          if (field !== "notes") throw new Error("Invalid fabric note field");
+          found = findUniqueFabricThreadRow(sheets, entityKey);
+          const plan = fabricNoteCellPlan(sheets, found.sheet, found.rowIndex, randomUUID);
+          await backupFabricSheets(sheets, currentUser.name, "autosave");
+          applyFabricNoteCell(found.sheet, found.rowIndex, plan, body);
+        } catch (error) {
+          return jsonResponse({ ok: false, error: error instanceof Error ? error.message : "fabric_note_conflict" });
         }
-        if (!found) return jsonResponse({ ok: false, error: "row_not_found" });
-        let notesIdx = found.sheet.headers.findIndex((h) => /^notes?$/i.test(h.trim()));
-        if (notesIdx < 0) {
-          found.sheet.headers.push("Notes");
-          notesIdx = found.sheet.headers.length - 1;
-          for (const r of found.sheet.rows) { while (r.length <= notesIdx) r.push(""); }
-        }
-        const row = found.sheet.rows[found.rowIndex];
-        while (row.length <= notesIdx) row.push("");
-        row[notesIdx] = body;
         const title = fabricNameForRow(found.sheet, found.rowIndex);
         await saveManualFabricSheets(sheets);
         if (isDelete) {
@@ -6731,12 +6725,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!sheet?.rows[rowIndex]) return null;
     // Periodic restore point of the pre-edit text (throttled; images stripped).
     await backupFabricSheets(sheets, currentUser?.name ?? null, "autosave");
-    while (sheet.rows[rowIndex].length <= colIndex) sheet.rows[rowIndex].push("");
-    sheet.rows[rowIndex][colIndex] = value;
-    // Editing the Notes column fans @mentions out as portal messages, same as
-    // the restock/collection note cells.
+    // Editing the Notes column fans @mentions out as portal messages.
     const isNotesCol = /^notes?$/i.test((sheet.headers[colIndex] ?? "").trim());
-    const rowKey = isNotesCol ? ensureFabricRowKeyAt(sheet, rowIndex) : "";
+    let rowKey = "";
+    if (isNotesCol) {
+      try {
+        const plan = fabricNoteCellPlan(sheets, sheet, rowIndex, randomUUID);
+        applyFabricNoteCell(sheet, rowIndex, plan, value);
+        rowKey = plan.key;
+      } catch (error) {
+        return jsonResponse({ ok: false, error: error instanceof Error ? error.message : "fabric_note_conflict" });
+      }
+    } else {
+      if ((sheet.headers[colIndex] ?? "").trim() === FABRIC_ROW_KEY_HEADER) return jsonResponse({ ok: false, error: "fabric_row_key_is_read_only" });
+      while (sheet.rows[rowIndex].length <= colIndex) sheet.rows[rowIndex].push("");
+      sheet.rows[rowIndex][colIndex] = value;
+    }
     const productTitle = isNotesCol ? fabricNameForRow(sheet, rowIndex) : null;
     await saveManualFabricSheets(sheets);
     if (isNotesCol && rowKey) {
@@ -6786,16 +6790,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const sheet = sheets.find((item) => item.gid === gid);
     if (!sheet?.rows[rowIndex]) return null;
     await backupFabricSheets(sheets, currentUser?.name ?? null, "autosave");
-    let idx = sheet.headers.findIndex((h) => /^notes?$/i.test(h.trim()));
-    if (idx < 0) {
-      if (!value.trim()) return null; // don't add an empty column
-      sheet.headers.push("Notes");
-      idx = sheet.headers.length - 1;
-      for (const r of sheet.rows) { while (r.length <= idx) r.push(""); }
+    if (!value.trim() && !sheet.headers.some(h => /^notes?$/i.test(h.trim()))) return null;
+    let notesRowKey: string;
+    try {
+      const plan = fabricNoteCellPlan(sheets, sheet, rowIndex, randomUUID);
+      applyFabricNoteCell(sheet, rowIndex, plan, value);
+      notesRowKey = plan.key;
+    } catch (error) {
+      return jsonResponse({ ok: false, error: error instanceof Error ? error.message : "fabric_note_conflict" });
     }
-    while (sheet.rows[rowIndex].length <= idx) sheet.rows[rowIndex].push("");
-    sheet.rows[rowIndex][idx] = value;
-    const notesRowKey = ensureFabricRowKeyAt(sheet, rowIndex);
     const notesTitle = fabricNameForRow(sheet, rowIndex);
     await saveManualFabricSheets(sheets);
     if (notesRowKey) await syncFabricRowNote(notesRowKey, value, currentUser?.name ?? null, notesTitle);
@@ -9210,22 +9213,6 @@ function fabricRowKeyAt(sheet: { headers: string[]; rows: string[][] }, rowIndex
   const idx = fabricRowKeyIndex(sheet);
   if (idx < 0) return "";
   return (sheet.rows[rowIndex]?.[idx] ?? "").trim();
-}
-
-// Find-or-create a key for one row (used when a note is saved before the
-// load-time backfill has run for that sheet).
-function ensureFabricRowKeyAt(sheet: { headers: string[]; rows: string[][] }, rowIndex: number): string {
-  let idx = fabricRowKeyIndex(sheet);
-  if (idx < 0) {
-    sheet.headers.push(FABRIC_ROW_KEY_HEADER);
-    idx = sheet.headers.length - 1;
-    for (const r of sheet.rows) { while (r.length <= idx) r.push(""); }
-  }
-  const row = sheet.rows[rowIndex];
-  if (!row) return "";
-  while (row.length <= idx) row.push("");
-  if (!row[idx]) row[idx] = randomUUID();
-  return row[idx];
 }
 
 // Fabric note threads hang off entityType "fabric_row" with orderId 0 (there
