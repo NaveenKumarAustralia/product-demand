@@ -14,6 +14,7 @@ import {
 } from "../collection-tasks.server";
 import { randomUUID } from "node:crypto";
 import { prepareFabricRowKeyBackfill } from "../mcp/fabric-row-key-backfill.js";
+import { planFabricRowMove } from "../mcp/fabric-row-move.js";
 import { fabricNoteCellPlan, applyFabricNoteCell, findUniqueFabricThreadRow } from "../mcp/fabric-note-cell.js";
 import { VisionBoardV2Panel } from "../portal-vision-board";
 import { PreordersDashboard } from "../portal-preorders";
@@ -6848,13 +6849,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const targetSheet = sheets.find((item) => item.gid === targetGid);
     if (!sourceSheet || !Number.isInteger(rowIndex) || rowIndex < 0) return null;
     if (intent === "move_fabric_row" && (!targetSheet || targetSheet.gid === sourceSheet.gid || isHiddenFabricSheet(targetSheet.name))) return null;
-    // Restore point before a row is deleted / moved / duplicated.
-    await backupFabricSheets(sheets, currentUser?.name ?? null, intent === "delete_fabric_row" ? "before-delete" : intent === "move_fabric_row" ? "before-move" : "before-duplicate", { force: true });
-
-    // Thread identity: a duplicate must NOT inherit the original's key (it
-    // would share its note thread); a move keeps it so the thread follows.
+    if (!sourceSheet.rows[rowIndex]) return null;
+    // Validate the existing thread before a move, duplicate, or delete.
     const sourceKeyIdx = fabricRowKeyIndex(sourceSheet);
     const movedRowKey = sourceKeyIdx >= 0 ? (sourceSheet.rows[rowIndex]?.[sourceKeyIdx] ?? "").trim() : "";
+    let movePlan: ReturnType<typeof planFabricRowMove> | undefined;
+    try {
+      if (sourceSheet.headers.filter(h => h.trim() === FABRIC_ROW_KEY_HEADER).length > 1) throw new Error("Ambiguous fabric row key columns");
+      if (movedRowKey) findUniqueFabricThreadRow(sheets, movedRowKey);
+      if (intent === "move_fabric_row" && targetSheet) {
+        movePlan = planFabricRowMove(sourceSheet, targetSheet, rowIndex, normalizeFabricHeader, fabricHeaderRole);
+      }
+    } catch (error) {
+      return jsonResponse({ ok: false, error: error instanceof Error ? error.message : "fabric_row_move_conflict" });
+    }
+    // Restore point before a row is deleted / moved / duplicated.
+    await backupFabricSheets(sheets, currentUser?.name ?? null, intent === "delete_fabric_row" ? "before-delete" : intent === "move_fabric_row" ? "before-move" : "before-duplicate", { force: true });
 
     if ((intent === "move_fabric_row" && targetSheet) || intent === "duplicate_fabric_row") {
       const row = sourceSheet.rows[rowIndex]?.map((value) => value);
@@ -6866,28 +6876,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         }
         sourceSheet.rows.push(row);
       } else if (targetSheet) {
-        const sourceHeaderMap = new Map<string, number>();
-        for (const [index, header] of sourceSheet.headers.entries()) {
-          sourceHeaderMap.set(normalizeFabricHeader(header), index);
-          const role = fabricHeaderRole(header);
-          if (!sourceHeaderMap.has(role)) sourceHeaderMap.set(role, index);
-        }
-        const movedRow = targetSheet.headers.map((header) => {
-          const sourceIndex = sourceHeaderMap.get(normalizeFabricHeader(header)) ?? sourceHeaderMap.get(fabricHeaderRole(header));
-          return sourceIndex == null ? "" : row[sourceIndex] ?? "";
-        });
-        // Carry the stable key so the row's note thread follows it.
-        if (movedRowKey) {
-          let targetKeyIdx = fabricRowKeyIndex(targetSheet);
-          if (targetKeyIdx < 0) {
-            targetSheet.headers.push(FABRIC_ROW_KEY_HEADER);
-            targetKeyIdx = targetSheet.headers.length - 1;
-            for (const r of targetSheet.rows) { while (r.length <= targetKeyIdx) r.push(""); }
-          }
-          while (movedRow.length <= targetKeyIdx) movedRow.push("");
-          movedRow[targetKeyIdx] = movedRowKey;
-        }
-        targetSheet.rows.push(movedRow);
+        if (!movePlan) return jsonResponse({ ok: false, error: "fabric_row_move_plan_missing" });
+        targetSheet.headers = movePlan.headers;
+        for (const r of targetSheet.rows) { while (r.length < targetSheet.headers.length) r.push(""); }
+        targetSheet.rows.push(movePlan.row);
       }
     }
 
