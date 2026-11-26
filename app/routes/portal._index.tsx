@@ -47,7 +47,11 @@ async function buildCollectionShipmentData(): Promise<CollectionShipmentData> {
   try {
     const [lines, orders] = await Promise.all([
       prisma.packingListLine.findMany({
-        where: { isCustom: false, productId: { not: null }, packingList: { hiddenAt: null } },
+        // Include HIDDEN packing lists too: hiding/archiving a shipment must not
+        // erase its shipment number from a product's collection cell (a product
+        // can be in an old, now-hidden shipment AND a current one). User choice,
+        // Nov 26 2026 — matches the hidden-lists-in-search change.
+        where: { isCustom: false, productId: { not: null } },
         select: { productId: true, qtys: true, packingList: { select: { id: true, title: true, invoiceNumber: true, expectedLeaveFactoryDate: true, shipmentDate: true } } },
       }),
       prisma.supplierOrder.findMany({ where: { productId: { not: "" } }, select: { productId: true, totalQty: true, supplierStatus: true } }).catch(() => [] as Array<{ productId: string; totalQty: number; supplierStatus: string }>),
