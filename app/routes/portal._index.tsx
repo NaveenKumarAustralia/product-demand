@@ -14,6 +14,7 @@ import {
 } from "../collection-tasks.server";
 import { randomUUID } from "node:crypto";
 import { prepareFabricRowKeyBackfill } from "../mcp/fabric-row-key-backfill.js";
+import { commitFabricSnapshot, createFabricSnapshotIfAbsent } from "../mcp/fabric-snapshot-store.js";
 import { planFabricRowMove } from "../mcp/fabric-row-move.js";
 import { fabricNoteCellPlan, applyFabricNoteCell, findUniqueFabricThreadRow } from "../mcp/fabric-note-cell.js";
 import { VisionBoardV2Panel } from "../portal-vision-board";
@@ -3906,7 +3907,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return await withFabricSheetsLock(async () => {
       const gid = String(form.get("gid") ?? "");
       if (!gid) return null;
-      await saveManualFabricSheets((await loadManualFabricSheetsForAction()).filter((sheet) => sheet.gid !== gid));
+      const sheets = await loadManualFabricSheetsForAction();
+      await saveManualFabricSheets(sheets.filter((sheet) => sheet.gid !== gid), sheets);
       return null;
     });
   }
@@ -6941,7 +6943,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         const current = await loadManualFabricSheetsForAction();
         await backupFabricSheets(current, currentUser?.name ?? null, "before-restore", { force: true });
         const restored = overlayFabricTextOntoCurrent(snapshot, current);
-        await saveManualFabricSheets(restored);
+        await saveManualFabricSheets(restored, current);
         return jsonResponse({ ok: true });
       } catch (e) {
         console.warn("[restore_fabric_backup]", e);
@@ -9528,23 +9530,34 @@ async function recordFabricStockDisappearances(flags: FabricStockDisappearance[]
   }
 }
 
-async function saveManualFabricSheets(sheets: FabricStockSheet[]) {
+// Retain the original, unmodified database JSON separately from the editable
+// normalized array. Derived arrays (delete sheet / restore) pass their original
+// loaded array explicitly. Never compare a fresh read taken at save time.
+type FabricSnapshot = { value: unknown; updatedAt: Date };
+const fabricSnapshots = new WeakMap<FabricStockSheet[], FabricSnapshot>();
+function editableFabricSnapshot(snapshot: FabricSnapshot): FabricStockSheet[] {
+  if (!Array.isArray(snapshot.value)) throw new Error("Invalid saved fabric sheets; inspect the database before editing.");
+  const sheets = normalizeManualFabricSheets(snapshot.value);
+  if (sheets.length !== snapshot.value.length) throw new Error("Invalid saved fabric sheet; repair it before editing.");
+  fabricSnapshots.set(sheets, snapshot);
+  return sheets;
+}
+
+async function saveManualFabricSheets(sheets: FabricStockSheet[], original = sheets) {
+  const expected = fabricSnapshots.get(original);
+  if (!expected) throw new Error("Fabric snapshot unavailable; reload before saving.");
   const value = sheets.map(toManualFabricSheet);
-  // Safeguard: flag (never block) if this save makes positive fabric stock
-  // vanish via a truncated row or blanked stock cell.
+  // Atomic conditional update: a different process cannot replace the snapshot
+  // between our read and write without causing this operation to fail closed.
+  await commitFabricSnapshot(prisma.portalSetting, FABRIC_MANUAL_SHEETS_KEY, expected, value);
+  // Do not emit disappearance alerts for a write rejected by the database.
   try {
-    const prevRow = await prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } });
-    const before = normalizeManualFabricSheets(prevRow?.value);
+    const before = normalizeManualFabricSheets(expected.value);
     const flags = detectFabricStockDisappearances(before, sheets);
     if (flags.length) await recordFabricStockDisappearances(flags);
   } catch (e) {
     console.warn("[fabric stock guard] check failed:", e);
   }
-  await prisma.portalSetting.upsert({
-    where: { key: FABRIC_MANUAL_SHEETS_KEY },
-    create: { key: FABRIC_MANUAL_SHEETS_KEY, value },
-    update: { value },
-  });
 }
 
 // Every fabric mutation is a read-modify-write of the ENTIRE sheets blob
@@ -9989,8 +10002,14 @@ async function getManualFabricSheets({
   overridesValue?: unknown;
   deletedSheetsValue?: unknown;
 }) {
-  const savedSheets = normalizeManualFabricSheets(savedValue);
-  if (savedSheets.length) return savedSheets;
+  // An existing empty array is intentional, not missing storage.
+  if (Array.isArray(savedValue)) return normalizeManualFabricSheets(savedValue);
+  // A loader may have used an image-stripped snapshot or caught a read error.
+  // Re-read the real setting before any initialization.
+  const existing = await prisma.portalSetting.findUnique({
+    where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true, updatedAt: true },
+  });
+  if (existing) return editableFabricSnapshot(existing);
 
   const legacySheets = getFabricSheets(
     overridesValue,
@@ -10003,17 +10022,16 @@ async function getManualFabricSheets({
     initialFabricStockSheets,
     { includeHidden: true },
   ).map(toManualFabricSheet);
-  await saveManualFabricSheets(legacySheets);
-  return legacySheets;
+  const snapshot = await createFabricSnapshotIfAbsent(prisma.portalSetting, FABRIC_MANUAL_SHEETS_KEY, legacySheets);
+  return editableFabricSnapshot(snapshot);
 }
 
 // MCP reads/previews must never initialise legacy fabric storage. A missing
 // persisted snapshot requires an explicit portal setup before MCP can proceed.
 async function loadPersistedFabricSheetsForMcp() {
-  const row = await prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } });
-  const sheets = normalizeManualFabricSheets(row?.value);
-  if (!sheets.length) throw new Error("Saved fabric sheets are unavailable. Initialise them in the portal before using fabric order tools.");
-  return sheets;
+  const row = await prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true, updatedAt: true } });
+  if (!row) throw new Error("Saved fabric sheets are unavailable. Initialise them in the portal before using fabric order tools.");
+  return editableFabricSnapshot(row);
 }
 
 async function readFabricOrderSheets() {
@@ -10072,15 +10090,16 @@ async function loadManualFabricSheetsForAction() {
     overridesSetting,
     deletedSheetsSetting,
   ] = await Promise.all([
-    prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true } }),
+    prisma.portalSetting.findUnique({ where: { key: FABRIC_MANUAL_SHEETS_KEY }, select: { value: true, updatedAt: true } }),
     prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_SHEETS_KEY }, select: { value: true } }),
     prisma.portalSetting.findUnique({ where: { key: FABRIC_CUSTOM_ROWS_KEY }, select: { value: true } }),
     prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_ROWS_KEY }, select: { value: true } }),
     prisma.portalSetting.findUnique({ where: { key: FABRIC_CELL_OVERRIDES_KEY }, select: { value: true } }),
     prisma.portalSetting.findUnique({ where: { key: FABRIC_DELETED_SHEETS_KEY }, select: { value: true } }),
   ]);
+  if (manualSheetsSetting) return editableFabricSnapshot(manualSheetsSetting);
   return getManualFabricSheets({
-    savedValue: manualSheetsSetting?.value,
+    savedValue: undefined,
     customSheetsValue: customSheetsSetting?.value,
     customRowsValue: customRowsSetting?.value,
     deletedRowsValue: deletedRowsSetting?.value,
