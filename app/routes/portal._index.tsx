@@ -159,6 +159,19 @@ function buildShipmentChipText(rawShips: string[]): string {
   return "In shipment " + ordered.join(", ");
 }
 
+/** A product's distinct shipment labels, numbers first (ascending), then others ("Next shipment"). */
+function shipmentChipLabels(rawShips: string[]): string[] {
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const r of rawShips) {
+    const d = shipmentNumberDisplay(r);
+    if (d && !seen.has(d)) { seen.add(d); labels.push(d); }
+  }
+  const nums = labels.filter((l) => /^\d+$/.test(l)).sort((a, b) => Number(a) - Number(b));
+  const others = labels.filter((l) => !/^\d+$/.test(l));
+  return [...nums, ...others];
+}
+
 /** Popup row label for one shipment: numeric → "Shipment 27", else the raw ("Next shipment"). */
 function shipmentRowLabel(raw: string): string {
   const d = shipmentNumberDisplay(raw);
@@ -22514,10 +22527,12 @@ function CollectionSpreadsheetPage({
                           const rsOpt = inRestock ? restockSettings.statusOptions.find((o) => o.value === rowRestockStatus) : null;
                           const statusKey = linkedProductId.replace(/\D/g, "");
                           // Which shipment number(s) this product sits in (from the
-                          // packing lists), e.g. "In shipment 27, 28". Read-only.
-                          const shipText = rowShipDetail
-                            ? buildShipmentChipText(Object.values(rowShipDetail).flatMap((sz) => sz.parts.map((p) => p.ship)))
-                            : "";
+                          // packing lists), read-only. Stacked one per line so a
+                          // narrow column stays readable instead of one long row.
+                          const shipLabels = rowShipDetail
+                            ? shipmentChipLabels(Object.values(rowShipDetail).flatMap((sz) => sz.parts.map((p) => p.ship)))
+                            : [];
+                          const shipHasNumbers = shipLabels.some((l) => /^\d+$/.test(l));
                           return (
                             <Td key={col.id} rowIndex={rIdx} colIndex={colIdx} center {...tdSticky}>
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
@@ -22554,16 +22569,22 @@ function CollectionSpreadsheetPage({
                                   />
                                 )}
                                 {/* Shipment number(s) from Packing Lists (read-only).
-                                    Only shows once the product is in a shipment.
-                                    Click → per-size × per-shipment breakdown popup. */}
-                                {shipText && (
+                                    Only shows once the product is in a shipment. Each
+                                    shipment sits on its own line so a narrow column
+                                    wraps nicely. Click → per-size breakdown popup. */}
+                                {shipLabels.length > 0 && (
                                   <button
                                     type="button"
                                     onClick={() => setShipGridRowIdx(rIdx)}
                                     title="Which shipment(s) this product is in — click for the per-size breakdown"
-                                    style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 999, background: "#ccfbf1", color: "#0f766e", whiteSpace: "nowrap", border: "none", cursor: "pointer", fontFamily: "inherit" }}
+                                    style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, fontSize: 10.5, fontWeight: 800, padding: "3px 9px", borderRadius: 12, background: "#ccfbf1", color: "#0f766e", border: "none", cursor: "pointer", fontFamily: "inherit", lineHeight: 1.25, maxWidth: "100%" }}
                                   >
-                                    {shipText}
+                                    {shipHasNumbers && (
+                                      <span style={{ fontSize: 8.5, fontWeight: 700, opacity: 0.75, textTransform: "uppercase", letterSpacing: "0.03em" }}>In shipment</span>
+                                    )}
+                                    {shipLabels.map((l) => (
+                                      <span key={l} style={{ whiteSpace: "nowrap" }}>{l}</span>
+                                    ))}
                                     <span aria-hidden style={{ fontSize: 8, opacity: 0.7 }}>▼</span>
                                   </button>
                                 )}
