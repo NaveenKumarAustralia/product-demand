@@ -3624,36 +3624,38 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return jsonResponse({ ok: true });
     }
     if (entityType === "fabric_row") {
-      // Locate the row across every sheet by its stable key, write the cell,
-      // then re-sync (or purge) the thread.
-      const sheets = await loadManualFabricSheetsForAction();
-      let found: { sheet: (typeof sheets)[number]; rowIndex: number } | null = null;
-      for (const sheet of sheets) {
-        const keyIdx = fabricRowKeyIndex(sheet);
-        if (keyIdx < 0) continue;
-        const rowIndex = sheet.rows.findIndex((r) => (r[keyIdx] ?? "").trim() === entityKey);
-        if (rowIndex >= 0) { found = { sheet, rowIndex }; break; }
-      }
-      if (!found) return jsonResponse({ ok: false, error: "row_not_found" });
-      let notesIdx = found.sheet.headers.findIndex((h) => /^notes?$/i.test(h.trim()));
-      if (notesIdx < 0) {
-        found.sheet.headers.push("Notes");
-        notesIdx = found.sheet.headers.length - 1;
-        for (const r of found.sheet.rows) { while (r.length <= notesIdx) r.push(""); }
-      }
-      const row = found.sheet.rows[found.rowIndex];
-      while (row.length <= notesIdx) row.push("");
-      row[notesIdx] = body;
-      const title = fabricNameForRow(found.sheet, found.rowIndex);
-      await saveManualFabricSheets(sheets);
-      if (isDelete) {
-        await prisma.portalMessage.deleteMany({
-          where: { entityType: "fabric_row", entityKey, field },
-        });
-      } else {
-        await syncFabricRowNote(entityKey, body, currentUser.name, title);
-      }
-      return jsonResponse({ ok: true });
+      return await withFabricSheetsLock(async () => {
+        // Locate the row across every sheet by its stable key, write the cell,
+        // then re-sync (or purge) the thread.
+        const sheets = await loadManualFabricSheetsForAction();
+        let found: { sheet: (typeof sheets)[number]; rowIndex: number } | null = null;
+        for (const sheet of sheets) {
+          const keyIdx = fabricRowKeyIndex(sheet);
+          if (keyIdx < 0) continue;
+          const rowIndex = sheet.rows.findIndex((r) => (r[keyIdx] ?? "").trim() === entityKey);
+          if (rowIndex >= 0) { found = { sheet, rowIndex }; break; }
+        }
+        if (!found) return jsonResponse({ ok: false, error: "row_not_found" });
+        let notesIdx = found.sheet.headers.findIndex((h) => /^notes?$/i.test(h.trim()));
+        if (notesIdx < 0) {
+          found.sheet.headers.push("Notes");
+          notesIdx = found.sheet.headers.length - 1;
+          for (const r of found.sheet.rows) { while (r.length <= notesIdx) r.push(""); }
+        }
+        const row = found.sheet.rows[found.rowIndex];
+        while (row.length <= notesIdx) row.push("");
+        row[notesIdx] = body;
+        const title = fabricNameForRow(found.sheet, found.rowIndex);
+        await saveManualFabricSheets(sheets);
+        if (isDelete) {
+          await prisma.portalMessage.deleteMany({
+            where: { entityType: "fabric_row", entityKey, field },
+          });
+        } else {
+          await syncFabricRowNote(entityKey, body, currentUser.name, title);
+        }
+        return jsonResponse({ ok: true });
+      });
     }
     if (entityType === "supplier_order") {
       const fieldMap: Record<string, string> = { factory_notes: "factoryNotes", notes: "notes" };
@@ -3852,43 +3854,49 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   }
 
   if (intent === "create_fabric_sheet") {
-    const name = String(form.get("name") ?? "").trim();
-    const gid = String(form.get("gid") ?? "").trim();
-    if (!name) return null;
-    const sheets = await loadManualFabricSheetsForAction();
-    sheets.push({
-      gid: gid.startsWith("custom_") ? gid : `custom_${Date.now()}`,
-      name,
-      kind: "stock",
-      headers: DEFAULT_FABRIC_HEADERS,
-      rows: Array.from({ length: 3 }, () => Array.from({ length: DEFAULT_FABRIC_HEADERS.length }, () => "")),
-      rowCount: 3,
-      totalQuantity: 3,
+    return await withFabricSheetsLock(async () => {
+      const name = String(form.get("name") ?? "").trim();
+      const gid = String(form.get("gid") ?? "").trim();
+      if (!name) return null;
+      const sheets = await loadManualFabricSheetsForAction();
+      sheets.push({
+        gid: gid.startsWith("custom_") ? gid : `custom_${Date.now()}`,
+        name,
+        kind: "stock",
+        headers: DEFAULT_FABRIC_HEADERS,
+        rows: Array.from({ length: 3 }, () => Array.from({ length: DEFAULT_FABRIC_HEADERS.length }, () => "")),
+        rowCount: 3,
+        totalQuantity: 3,
+      });
+      await saveManualFabricSheets(sheets);
+      return null;
     });
-    await saveManualFabricSheets(sheets);
-    return null;
   }
 
   if (intent === "delete_fabric_sheet") {
-    const gid = String(form.get("gid") ?? "");
-    if (!gid) return null;
-    await saveManualFabricSheets((await loadManualFabricSheetsForAction()).filter((sheet) => sheet.gid !== gid));
-    return null;
+    return await withFabricSheetsLock(async () => {
+      const gid = String(form.get("gid") ?? "");
+      if (!gid) return null;
+      await saveManualFabricSheets((await loadManualFabricSheetsForAction()).filter((sheet) => sheet.gid !== gid));
+      return null;
+    });
   }
 
   if (intent === "restore_fabric_sheet") {
-    const gid = String(form.get("gid") ?? "");
-    const sheetJson = String(form.get("sheet") ?? "");
-    if (!gid) return null;
-    const sheets = await loadManualFabricSheetsForAction();
-    try {
-      const restoredSheet = normalizeFabricCustomSheets([JSON.parse(sheetJson)])[0];
-      if (restoredSheet && !sheets.some((sheet) => sheet.gid === restoredSheet.gid)) {
-        sheets.push(toManualFabricSheet(restoredSheet));
-      }
-    } catch { /* ignore malformed undo payload */ }
-    await saveManualFabricSheets(sheets);
-    return null;
+    return await withFabricSheetsLock(async () => {
+      const gid = String(form.get("gid") ?? "");
+      const sheetJson = String(form.get("sheet") ?? "");
+      if (!gid) return null;
+      const sheets = await loadManualFabricSheetsForAction();
+      try {
+        const restoredSheet = normalizeFabricCustomSheets([JSON.parse(sheetJson)])[0];
+        if (restoredSheet && !sheets.some((sheet) => sheet.gid === restoredSheet.gid)) {
+          sheets.push(toManualFabricSheet(restoredSheet));
+        }
+      } catch { /* ignore malformed undo payload */ }
+      await saveManualFabricSheets(sheets);
+      return null;
+    });
   }
 
   if (intent === "update_restock_settings") {
@@ -3977,17 +3985,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
 
     if (chipKind === "fabricTypeOptions") {
-      const sheets = await loadManualFabricSheetsForAction();
-      let touched = false;
-      for (const sheet of sheets) {
-        const idx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h.trim()) || /^type$/i.test(h.trim()));
-        if (idx < 0) continue;
-        for (const row of sheet.rows) {
-          const cell = String(row[idx] ?? "").trim();
-          if (cell && canonicalizeFabricType(cell) === targetCanonical) { row[idx] = ""; touched = true; }
+      await withFabricSheetsLock(async () => {
+        const sheets = await loadManualFabricSheetsForAction();
+        let touched = false;
+        for (const sheet of sheets) {
+          const idx = sheet.headers.findIndex((h) => /^fabric\s*type$/i.test(h.trim()) || /^type$/i.test(h.trim()));
+          if (idx < 0) continue;
+          for (const row of sheet.rows) {
+            const cell = String(row[idx] ?? "").trim();
+            if (cell && canonicalizeFabricType(cell) === targetCanonical) { row[idx] = ""; touched = true; }
+          }
         }
-      }
-      if (touched) await saveManualFabricSheets(sheets);
+        if (touched) await saveManualFabricSheets(sheets);
+      });
     }
     return null;
   }
