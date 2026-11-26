@@ -841,9 +841,10 @@ const previewTools: ToolDef[] = [
       }
       const current = field === "factory_notes" ? order.factoryNotes : order.notes;
       const next = appendNote(current, noteBody);
+      await assertFreshStaffMessage(orderId, field, current ?? null, next, wantIds);
       const names = match.users.map((u) => u.name).join(", ");
       const summary = `Message ${names} on order #${orderId} ${order.productTitle} (${field === "factory_notes" ? "factory notes, visible to the factory" : "internal notes"}): "${message}"`;
-      return stagePendingChange(ctx, "add_note", { orderId, field, text: next }, { [field]: current ?? null }, summary, String(orderId),
+      return stagePendingChange(ctx, "add_note", { orderId, field, text: next, recipientIds: wantIds }, { [field]: current ?? null }, summary, String(orderId),
         { order_id: orderId, field, notify: match.users, message, posted_text: noteBody, before: current ?? null, after: next });
     },
   },
@@ -1116,11 +1117,30 @@ async function executeUpdate(p: { orderId: number; set: Record<string, string> }
   return { entityId: String(p.orderId), after: after ? presentOrder(after) : null };
 }
 
-async function executeNote(p: { orderId: number; field: string; text: string }, before: Record<string, string | null>) {
+// Interim guard: the portal's normal note editor re-syncs ALL mentions and
+// deletes unread top-level notifications. Never use it for a new staff
+// message when it would touch an existing conversation. A dedicated atomic
+// append/message operation is needed before supporting those cases.
+async function assertFreshStaffMessage(orderId: number, field: string, current: string | null, next: string, recipientIds: string[]) {
+  const setting = await prisma.portalSetting.findUnique({ where: { key: PORTAL_USERS_KEY }, select: { value: true } });
+  const users = normalizePortalMessageUsers(setting?.value);
+  if (taggedUsersFromText(current, users).length) {
+    throw new ToolInputError("This note already contains staff mentions. Use an existing thread reply or wait for dedicated new-thread support; no note was changed.");
+  }
+  const unread = await prisma.portalMessage.count({ where: { entityType: "supplier_order", orderId, entityKey: null, field, parentMessageId: null, readAt: null } });
+  if (unread) throw new ToolInputError("This note has existing unread messages. A new note could replace them; no note was changed.");
+  const actual = new Set(taggedUsersFromText(next, users).map((u) => u.id));
+  if (!recipientIds.length || actual.size !== recipientIds.length || recipientIds.some((id) => !actual.has(id))) {
+    throw new ToolInputError("The notification recipients do not match the preview. Preview again.");
+  }
+}
+
+async function executeNote(p: { orderId: number; field: string; text: string; recipientIds?: string[] }, before: Record<string, string | null>) {
   const order = await loadOrder(p.orderId);
   if (!order) throw new ToolInputError(`Order ${p.orderId} no longer exists`);
   const current = p.field === "factory_notes" ? order.factoryNotes : order.notes;
   if ((current ?? null) !== (before[p.field] ?? null)) throw new ToolInputError(`The ${p.field} on order #${p.orderId} changed since the preview. Preview again.`);
+  if (p.recipientIds) await assertFreshStaffMessage(p.orderId, p.field, current ?? null, p.text, p.recipientIds);
   await callPortalIntent(p.field === "factory_notes" ? "update_factory_notes" : "update_notes", { orderId: p.orderId, value: p.text });
   const after = await loadOrder(p.orderId);
   if (!after || ((p.field === "factory_notes" ? after.factoryNotes : after.notes) ?? "") !== p.text) throw new Error("Portal did not save the expected note; check the order");
