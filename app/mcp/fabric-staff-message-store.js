@@ -69,3 +69,24 @@ export async function commitNewFabricStaffMessage(db, expected, message, recipie
     return {entity_key:expected.entityKey, sheet_id:expected.sheetId, body:plan.body, notified:recipients.map(r=>({id:r.id,name:r.name}))};
   }, {isolationLevel:"Serializable"});
 }
+
+/**
+ * Read-only preview using the same validation as commit. No note or bell
+ * notification is written here; confirmation re-reads and revalidates both.
+ * @param {any} db
+ * @param {{entityKey:string,sheetId:string,name:string,fabricType?:string,note:string}} expected
+ * @param {string} message
+ * @param {{id:string,name:string}[]} recipients
+ * @param {(value:unknown)=>any[]} normalizeUsers
+ * @param {(body:string, users:any[])=>any[]} taggedUsers
+ */
+export async function previewNewFabricStaffMessage(db, expected, message, recipients, normalizeUsers, taggedUsers) {
+  return db.$transaction(async tx => {
+    const snapshot = await tx.portalSetting.findUnique({where:{key:FABRIC_MESSAGE_SHEETS_KEY},select:{value:true}});
+    if (!snapshot) throw new Error("Saved fabric sheets unavailable");
+    const staff = await tx.portalSetting.findUnique({where:{key:USERS_KEY},select:{value:true}});
+    const plan = planNewFabricStaffMessage(snapshot.value, expected, message, recipients, normalizeUsers(staff?.value), taggedUsers);
+    if (await tx.portalMessage.count({where:plan.anchor})) throw new Error("Existing fabric conversation: preview a reply instead");
+    return {body:plan.body, anchor:plan.anchor, notified:recipients.map(r=>({id:r.id,name:r.name}))};
+  }, {isolationLevel:"Serializable"});
+}
