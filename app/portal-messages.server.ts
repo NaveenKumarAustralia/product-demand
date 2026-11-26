@@ -1,4 +1,5 @@
 import prisma from "./db.server";
+import { resolveHistoricalReplyAuthor, isActiveReplyRecipient } from "./mcp/reply-recipient-safety.js";
 
 export const PORTAL_USERS_KEY = "supplier-portal-users-v1";
 
@@ -216,13 +217,8 @@ export async function resolveReplyRecipients({
   const allFromNames = new Set<string>();
   for (const m of allInThread) if (m.fromName) allFromNames.add(m.fromName.toLowerCase());
   if (parent.fromName) allFromNames.add(parent.fromName.toLowerCase());
-  const lookupByName = new Map<string, PortalMessageUser>();
-  for (const u of users) {
-    lookupByName.set(u.name.toLowerCase(), u);
-    lookupByName.set(u.name.toLowerCase().split(/\s+/)[0] ?? "", u);
-  }
   const participantsFromNames = Array.from(allFromNames)
-    .map((name) => lookupByName.get(name))
+    .map((name) => resolveHistoricalReplyAuthor(users, name))
     .filter(Boolean) as PortalMessageUser[];
 
   // Union: thread participants (by userId), participants resolved
@@ -232,7 +228,7 @@ export async function resolveReplyRecipients({
   for (const u of participantsFromNames) recipientsByUserId.set(u.id, u);
   for (const userId of participantUserIds) {
     const found = users.find((u) => u.id === userId);
-    if (found) recipientsByUserId.set(found.id, found);
+    if (found && isActiveReplyRecipient(found)) recipientsByUserId.set(found.id, found);
   }
   recipientsByUserId.delete(fromUserId);
 
