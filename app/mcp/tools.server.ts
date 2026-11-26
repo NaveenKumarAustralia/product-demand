@@ -15,6 +15,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { findFabricMessageRows } from "./fabric-message-rows.js";
+import { orderNoteNotificationError } from "./order-note-notification-guard.js";
 import prisma from "../db.server";
 import { createReplyMessage, resolveReplyRecipients, normalizePortalMessageUsers, taggedUsersFromText, PORTAL_USERS_KEY } from "../portal-messages.server";
 import type { McpPrincipal } from "./oauth-core";
@@ -1042,7 +1043,7 @@ const previewTools: ToolDef[] = [
   {
     name: "preview_replace_order_note",
     title: "Preview replacement or removal of an order note",
-    description: `Replace the entire selected note field, or clear it with an empty string. Shows before and after. ${PREVIEW_NOTE}`,
+    description: `Replace the entire selected note field, or clear it with an empty string. Shows before and after. Blocks edits that could alter existing staff notifications or send new ones; use dedicated messaging tools. ${PREVIEW_NOTE}`,
     inputSchema: { type: "object", properties: { order_id: { type: "integer" }, text: { type: "string", maxLength: 2000 }, field: { type: "string", enum: ["notes", "factory_notes"], default: "notes" } }, required: ["order_id", "text"], additionalProperties: false },
     scope: "portal:write",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -1056,6 +1057,7 @@ const previewTools: ToolDef[] = [
       const current = field === "factory_notes" ? order.factoryNotes : order.notes;
       const next = args.text;
       if ((current ?? "") === next) throw new ToolInputError("Nothing to change");
+      await assertFreshStaffMessage(id, field, current ?? null, next, null);
       const summary = `${next === "" ? "Clear" : "Replace"} ${field} on order #${id} ${order.productTitle}`;
       return stagePendingChange(ctx, "replace_note", { orderId: id, field, text: next }, { [field]: current ?? null }, summary, String(id), { order_id: id, field, before: current ?? null, after: next });
     },
@@ -1063,7 +1065,7 @@ const previewTools: ToolDef[] = [
   {
     name: "preview_add_order_note",
     title: "Preview note on an order",
-    description: `Prepares a note or recommendation added to an order's notes (or factory notes, which the factory sees). Existing text is kept; the note is appended with a dated [ChatGPT] tag. ${PREVIEW_NOTE}`,
+    description: `Prepares a note or recommendation added to an order's notes (or factory notes, which the factory sees). Existing text is kept; the note is appended with a dated [ChatGPT] tag. Blocks edits that could alter existing staff notifications or send new ones; use dedicated messaging tools. ${PREVIEW_NOTE}`,
     inputSchema: {
       type: "object",
       properties: { order_id: { type: "integer" }, note: { type: "string", minLength: 1, maxLength: 2000 }, field: { type: "string", enum: ["notes", "factory_notes"], default: "notes" } },
@@ -1080,6 +1082,7 @@ const previewTools: ToolDef[] = [
       if (!order) throw new ToolInputError(`Order ${id} not found`);
       const current = field === "factory_notes" ? order.factoryNotes : order.notes;
       const next = appendNote(current, note);
+      await assertFreshStaffMessage(id, field, current ?? null, next, null);
       const summary = `Add to ${field === "factory_notes" ? "factory notes (visible to the factory)" : "notes"} on order #${id} ${order.productTitle}: "${note}"`;
       return stagePendingChange(ctx, "add_note", { orderId: id, field, text: next }, { [field]: current ?? null }, summary, String(id), { order_id: id, field, before: current ?? null, after: next });
     },
@@ -1142,18 +1145,12 @@ async function executeUpdate(p: { orderId: number; set: Record<string, string> }
 // deletes unread top-level notifications. Never use it for a new staff
 // message when it would touch an existing conversation. A dedicated atomic
 // append/message operation is needed before supporting those cases.
-async function assertFreshStaffMessage(orderId: number, field: string, current: string | null, next: string, recipientIds: string[]) {
+async function assertFreshStaffMessage(orderId: number, field: string, current: string | null, next: string, recipientIds: string[] | null) {
   const setting = await prisma.portalSetting.findUnique({ where: { key: PORTAL_USERS_KEY }, select: { value: true } });
   const users = normalizePortalMessageUsers(setting?.value);
-  if (taggedUsersFromText(current, users).length) {
-    throw new ToolInputError("This note already contains staff mentions. Use an existing thread reply or wait for dedicated new-thread support; no note was changed.");
-  }
   const unread = await prisma.portalMessage.count({ where: { entityType: "supplier_order", orderId, entityKey: null, field, parentMessageId: null, readAt: null } });
-  if (unread) throw new ToolInputError("This note has existing unread messages. A new note could replace them; no note was changed.");
-  const actual = new Set(taggedUsersFromText(next, users).map((u) => u.id));
-  if (!recipientIds.length || actual.size !== recipientIds.length || recipientIds.some((id) => !actual.has(id))) {
-    throw new ToolInputError("The notification recipients do not match the preview. Preview again.");
-  }
+  const error = orderNoteNotificationError(taggedUsersFromText(current, users).map((u) => u.id), unread, taggedUsersFromText(next, users).map((u) => u.id), recipientIds);
+  if (error) throw new ToolInputError(error);
 }
 
 async function executeNote(p: { orderId: number; field: string; text: string; recipientIds?: string[] }, before: Record<string, string | null>) {
@@ -1161,7 +1158,7 @@ async function executeNote(p: { orderId: number; field: string; text: string; re
   if (!order) throw new ToolInputError(`Order ${p.orderId} no longer exists`);
   const current = p.field === "factory_notes" ? order.factoryNotes : order.notes;
   if ((current ?? null) !== (before[p.field] ?? null)) throw new ToolInputError(`The ${p.field} on order #${p.orderId} changed since the preview. Preview again.`);
-  if (p.recipientIds) await assertFreshStaffMessage(p.orderId, p.field, current ?? null, p.text, p.recipientIds);
+  await assertFreshStaffMessage(p.orderId, p.field, current ?? null, p.text, p.recipientIds ?? null);
   await callPortalIntent(p.field === "factory_notes" ? "update_factory_notes" : "update_notes", { orderId: p.orderId, value: p.text });
   const after = await loadOrder(p.orderId);
   if (!after || ((p.field === "factory_notes" ? after.factoryNotes : after.notes) ?? "") !== p.text) throw new Error("Portal did not save the expected note; check the order");
