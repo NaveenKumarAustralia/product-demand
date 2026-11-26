@@ -1,3 +1,15 @@
+/** Validate the entire saved snapshot, including hidden sheets, before resolving an anchor. */
+export function validFabricMessageSheets(value) {
+  if (!Array.isArray(value) || !value.length) return false;
+  const gids = new Set();
+  for (const s of value) {
+    if (!s || typeof s !== "object" || typeof s.gid !== "string" || !s.gid.trim() || typeof s.name !== "string" || !s.name.trim() || !Array.isArray(s.headers) || !Array.isArray(s.rows) || s.rows.some(row => !Array.isArray(row))) return false;
+    if (gids.has(s.gid.trim()) || s.headers.filter(h => typeof h === "string" && h.trim() === "__rowKey").length > 1) return false;
+    gids.add(s.gid.trim());
+  }
+  return true;
+}
+
 /** Read only: locate saved fabric note cells without backfilling IDs or touching sheets. message_ready refers to snapshot preparation only, not live sending. */
 /** @param {unknown} value @param {{search:string, fabricType?:string, limit?:number}} options */
 export function findFabricMessageRows(value, options) {
@@ -12,7 +24,7 @@ export function findFabricMessageRows(value, options) {
   if (!sheets.length) return { status: "manual_sheets_unavailable", rows: [], truncated: false };
   const counts = new Map();
   const rows = [];
-  let invalidLayout = sheets.length !== value.length;
+  let invalidLayout = !validFabricMessageSheets(value);
   for (const sheet of sheets) {
     const cols = (predicate) => sheet.headers.flatMap((h,i) => predicate(h) ? [i] : []);
     const keys = cols(h => clean(h) === "__rowKey");
