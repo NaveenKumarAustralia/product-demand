@@ -1,0 +1,61 @@
+name: MCP Isolated Development Validation
+on:
+  push:
+    branches:
+      - chatgpt/mcp-staff-message-safety-20261126
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mcp-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mcp_test
+          POSTGRES_PASSWORD: mcp_test
+          POSTGRES_DB: mcp_audit_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mcp_test -d mcp_audit_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgresql://mcp_test:mcp_test@127.0.0.1:5432/mcp_audit_test?schema=public
+      MCP_DISPOSABLE_DB: "yes"
+      SHOPIFY_API_KEY: synthetic-ci-key
+      SHOPIFY_API_SECRET: synthetic-ci-secret
+      SHOPIFY_APP_URL: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npx prisma generate
+      - name: MCP unit regression suite
+        run: npm run test:mcp
+      - name: Preorder regression suite
+        run: npm run test:preorder
+      - name: Prepare fresh disposable PostgreSQL schema
+        run: npx prisma migrate deploy
+      - name: Real PostgreSQL transaction regression
+        run: node --test scripts/mcp-postgres-audit.test.mjs
+      - name: Application typecheck
+        if: always()
+        run: npm run typecheck
+      - name: Application build (no deployment)
+        if: always()
+        run: npm run build
