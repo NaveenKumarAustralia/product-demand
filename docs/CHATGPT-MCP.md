@@ -22,9 +22,22 @@ Read: `get_portal_options`, `search_products`, `list_production_orders`,
 `list_shipments`, `get_shipment`, `get_fabric_availability`,
 `list_new_collections`, `get_new_collection`, `recent_activity`, `list_pending_changes`.
 
+Staff directory / messages (read): `list_staff_users`, `list_staff_messages`.
+
 Write (always two steps): `preview_create_production_order`,
-`preview_amend_order_quantities`, `preview_update_order`, `preview_add_order_note`
-→ Koku approves → `confirm_change`. `cancel_change` discards a preview.
+`preview_amend_order_quantities`, `preview_update_order`, `preview_add_order_note`,
+`preview_replace_order_note`, `preview_staff_thread_reply` (reply in an existing
+thread), `preview_send_staff_message` (start a NEW message to named staff, posted
+on an order so it rings their bell) → Koku approves → `confirm_change`.
+`cancel_change` discards a preview.
+
+`preview_send_staff_message` resolves each recipient with `list_staff_users`
+(refuses ambiguous or unknown names rather than guessing), composes an
+`@mention` that is verified to reach exactly those people, and posts it to the
+order's factory notes (visible to the factory) or internal notes. It reuses the
+existing note-append + mention fan-out, so recipients get the normal unread
+bell. Nothing is sent until Koku approves the specific message and
+`confirm_change` runs.
 
 ## Safeguards
 - Previews change nothing. A change id applies once only; re-sending it does nothing.

@@ -19,7 +19,7 @@ import {
   type PortalUserDirectory,
 } from "./oauth-core.ts";
 import { handleJsonRpc } from "./protocol.ts";
-import { appendNote, compactForModel, findPotentialDuplicates, matchSize, resolveNewOrderQuantities, resolveQuantityChanges, stableStringify } from "./mcp-logic.ts";
+import { appendNote, compactForModel, findPotentialDuplicates, matchSize, matchStaffRecipients, resolveNewOrderQuantities, resolveQuantityChanges, stableStringify } from "./mcp-logic.ts";
 
 // ─── In-memory OAuth store ──────────────────────────────────────────────────
 
@@ -308,6 +308,28 @@ describe("write safety", () => {
     const out = compactForModel({ img: "data:image/png;base64,AAAA", name: "x".repeat(3000) }) as Record<string, string>;
     assert.equal(out.img, "[image omitted]");
     assert.ok(out.name.length < 2100);
+  });
+
+  test("staff recipients resolve by id, full name, unique first name; never guess", () => {
+    const users = [
+      { id: "u1", name: "Girish Kumar" },
+      { id: "u2", name: "Girish Patel" },
+      { id: "u3", name: "Kat" },
+      { id: "u4", name: "Leela", active: false },
+    ];
+    // exact id and unique first name
+    assert.deepEqual(matchStaffRecipients(users, ["u1", "Kat"]), { ok: true, users: [{ id: "u1", name: "Girish Kumar" }, { id: "u3", name: "Kat" }] });
+    // full name disambiguates two Girishes
+    assert.deepEqual(matchStaffRecipients(users, ["Girish Patel"]), { ok: true, users: [{ id: "u2", name: "Girish Patel" }] });
+    // ambiguous first name is refused, not guessed
+    const amb = matchStaffRecipients(users, ["Girish"]);
+    assert.equal(amb.ok, false);
+    // unknown name is refused
+    assert.equal(matchStaffRecipients(users, ["Nobody"]).ok, false);
+    // inactive staff are not matchable
+    assert.equal(matchStaffRecipients(users, ["Leela"]).ok, false);
+    // duplicates collapse to one recipient
+    assert.deepEqual(matchStaffRecipients(users, ["Kat", "kat"]), { ok: true, users: [{ id: "u3", name: "Kat" }] });
   });
 });
 

@@ -91,6 +91,36 @@ export function appendNote(existing: string | null | undefined, note: string, da
   return prev ? `${prev}\n${line}` : line;
 }
 
+/**
+ * Resolve requested staff identifiers (ids or names) against the portal user
+ * list, for messaging. Case-insensitive; matches an exact id, then a full name,
+ * then a unique first name. Never guesses: returns an error that names what was
+ * missing or ambiguous rather than picking one, so a message can't go to the
+ * wrong person. Only active users are considered.
+ */
+export function matchStaffRecipients(
+  users: Array<{ id: string; name: string; active?: boolean }>,
+  requested: string[],
+): { ok: true; users: Array<{ id: string; name: string }> } | { ok: false; error: string } {
+  const active = users.filter((u) => u.active !== false && u.name.trim());
+  const picked = new Map<string, { id: string; name: string }>();
+  for (const raw of requested) {
+    const q = (raw ?? "").trim();
+    if (!q) continue;
+    const ql = q.toLowerCase();
+    const byId = active.find((u) => u.id === q);
+    if (byId) { picked.set(byId.id, { id: byId.id, name: byId.name }); continue; }
+    const byFull = active.filter((u) => u.name.trim().toLowerCase() === ql);
+    const byFirst = active.filter((u) => u.name.trim().toLowerCase().split(/\s+/)[0] === ql);
+    const matches = byFull.length ? byFull : byFirst;
+    if (matches.length === 0) return { ok: false, error: `No active staff member matches "${q}". Call list_staff_users for the exact names.` };
+    if (matches.length > 1) return { ok: false, error: `"${q}" matches ${matches.length} staff (${matches.map((m) => m.name).join(", ")}). Use a full name or the id from list_staff_users.` };
+    picked.set(matches[0].id, { id: matches[0].id, name: matches[0].name });
+  }
+  if (!picked.size) return { ok: false, error: "No recipients were given." };
+  return { ok: true, users: [...picked.values()] };
+}
+
 /** Stable string for comparing a "before" snapshot at preview and at confirm time. */
 export function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value ?? null);

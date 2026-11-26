@@ -15,7 +15,7 @@
  */
 import { randomUUID } from "node:crypto";
 import prisma from "../db.server";
-import { createReplyMessage, resolveReplyRecipients, normalizePortalMessageUsers, PORTAL_USERS_KEY } from "../portal-messages.server";
+import { createReplyMessage, resolveReplyRecipients, normalizePortalMessageUsers, taggedUsersFromText, PORTAL_USERS_KEY } from "../portal-messages.server";
 import type { McpPrincipal } from "./oauth-core";
 import { appendFabricOrderFromMcp, readFabricOrderSheets, readFabricOrderSheetSnapshot, callPortalIntent, ensureMcpPortalUser, MCP_PORTAL_USER_ID, MCP_PORTAL_USER_NAME, readFabric } from "./portal-bridge.server";
 import {
@@ -24,6 +24,7 @@ import {
   findPotentialDuplicates,
   isValidIsoDate,
   matchSize,
+  matchStaffRecipients,
   PENDING_CHANGE_TTL_MS,
   resolveNewOrderQuantities,
   resolveQuantityChanges,
@@ -795,6 +796,55 @@ const previewTools: ToolDef[] = [
       const before = { parentBody: resolved.parent.body };
       return stagePendingChange(ctx, "staff_reply", { parentMessageId, body, recipientIds: recipients.map(({ id }) => id).sort() },
         before, summary, String(parentMessageId), { parent_message_id: parentMessageId, recipients, message: body });
+    },
+  },
+  {
+    name: "preview_send_staff_message",
+    title: "Send a message to portal staff",
+    description: `Prepares a NEW message to one or more staff members (e.g. "ask Girish when the Olive fabric arrives"). Resolve names with list_staff_users first. The message is posted on the given order so it rings each recipient's in-portal notification bell, and is clearly tagged as sent by ChatGPT for Koku. Posts to factory notes (which the factory sees) by default. To reply inside an existing conversation, use preview_staff_thread_reply instead. ${PREVIEW_NOTE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "array", items: { type: "string", maxLength: 120 }, minItems: 1, maxItems: 20, description: "Staff names or ids from list_staff_users" },
+        message: { type: "string", minLength: 1, maxLength: 1500 },
+        order_id: { type: "integer", minimum: 1, description: "The order this message is about; it anchors the message and rings the recipients' bell." },
+        field: { type: "string", enum: ["factory_notes", "notes"], default: "factory_notes", description: "factory_notes is visible to the factory; notes is internal." },
+      },
+      required: ["to", "message", "order_id"],
+      additionalProperties: false,
+    },
+    scope: "portal:write",
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    handler: async (args, ctx) => {
+      if (!Array.isArray(args.to) || !args.to.length || args.to.some((t) => typeof t !== "string")) throw new ToolInputError("to must be a non-empty array of staff names or ids");
+      const message = str(args.message, "message", { required: true, max: 1500 })!;
+      const orderId = int(args.order_id, "order_id", { required: true, min: 1 })!;
+      if (args.field !== undefined && args.field !== "factory_notes" && args.field !== "notes") throw new ToolInputError("field must be factory_notes or notes");
+      const field = args.field === "notes" ? "notes" : "factory_notes";
+      const order = await loadOrder(orderId);
+      if (!order) throw new ToolInputError(`Order ${orderId} not found`);
+      const setting = await prisma.portalSetting.findUnique({ where: { key: PORTAL_USERS_KEY }, select: { value: true } });
+      const users = normalizePortalMessageUsers(setting?.value).filter((u) => u.id !== MCP_PORTAL_USER_ID);
+      const match = matchStaffRecipients(users, args.to as string[]);
+      if (!match.ok) throw new ToolInputError(match.error);
+      // Mention each recipient by their full name with spaces removed, so the
+      // portal's @-tag matcher lands on exactly that person even when two staff
+      // share a first name.
+      const mentions = match.users.map((u) => "@" + u.name.replace(/\s+/g, ""));
+      const noteBody = `${mentions.join(" ")} ${message} — sent by ChatGPT for Koku`;
+      // Verify the composed @-tags resolve to exactly the intended recipients, so
+      // the message can never silently notify the wrong person or nobody.
+      const taggedIds = new Set(taggedUsersFromText(noteBody, users).map((u) => u.id));
+      const wantIds = match.users.map((u) => u.id);
+      if (taggedIds.size !== wantIds.length || wantIds.some((id) => !taggedIds.has(id))) {
+        throw new ToolInputError(`Could not build an unambiguous mention for ${match.users.map((u) => u.name).join(", ")}; two staff may share a name. Use their ids from list_staff_users.`);
+      }
+      const current = field === "factory_notes" ? order.factoryNotes : order.notes;
+      const next = appendNote(current, noteBody);
+      const names = match.users.map((u) => u.name).join(", ");
+      const summary = `Message ${names} on order #${orderId} ${order.productTitle} (${field === "factory_notes" ? "factory notes, visible to the factory" : "internal notes"}): "${message}"`;
+      return stagePendingChange(ctx, "add_note", { orderId, field, text: next }, { [field]: current ?? null }, summary, String(orderId),
+        { order_id: orderId, field, notify: match.users, message, posted_text: noteBody, before: current ?? null, after: next });
     },
   },
   {
