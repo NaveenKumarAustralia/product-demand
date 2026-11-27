@@ -3006,17 +3006,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const order = await prisma.supplierOrder.findUnique({ where: { id: orderId }, include: { lines: { orderBy: { id: "asc" } } } });
     if (!order) return null;
 
-    // Available per size + the line to copy variant metadata from.
+    // Available per size + the line to copy variant metadata from. Keyed by the
+    // CANONICAL size (folds "S-M"→"S/M" etc.) because the split popup shows and
+    // sends folded sizes while the order's lines store the raw variantTitle —
+    // matching raw against folded found nothing, so the split silently did
+    // nothing and the optimistic row reverted.
     const firstLineBySize = new Map<string, (typeof order.lines)[number]>();
     const availBySize = new Map<string, number>();
     for (const l of order.lines) {
-      if (!firstLineBySize.has(l.variantTitle)) firstLineBySize.set(l.variantTitle, l);
-      availBySize.set(l.variantTitle, (availBySize.get(l.variantTitle) ?? 0) + l.qtyOrdered);
+      const cs = canonicalRestockSize(l.variantTitle);
+      if (!firstLineBySize.has(cs)) firstLineBySize.set(cs, l);
+      availBySize.set(cs, (availBySize.get(cs) ?? 0) + l.qtyOrdered);
     }
 
     const linesToCreate: Array<{ variantId: string; variantTitle: string; sku: string | null; barcode: string | null; qtyOrdered: number; costPrice: number | null }> = [];
     const deductions: Array<{ size: string; qty: number }> = [];
-    for (const [size, rawQty] of Object.entries(moveQtys)) {
+    for (const [rawSize, rawQty] of Object.entries(moveQtys)) {
+      const size = canonicalRestockSize(rawSize);
       const want = Math.max(0, Math.floor(Number(rawQty) || 0));
       if (want <= 0) continue;
       const move = Math.min(want, availBySize.get(size) ?? 0);
@@ -3024,7 +3030,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       const src = firstLineBySize.get(size);
       linesToCreate.push({
         variantId: src?.variantId ?? `${orderId}:${size}`,
-        variantTitle: size,
+        // Keep the real line's variant title so the split-off order stays a true
+        // variant of the product (not the folded display label).
+        variantTitle: src?.variantTitle ?? size,
         sku: src?.sku ?? null,
         barcode: src?.barcode ?? null,
         qtyOrdered: move,
@@ -3062,7 +3070,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       // lines for a size if there are any).
       for (const d of deductions) {
         let remaining = d.qty;
-        for (const l of order.lines.filter((x) => x.variantTitle === d.size)) {
+        // d.size is canonical; match it against each line's canonical size so
+        // folded sizes (S-M/S/M) deduct from the right lines.
+        for (const l of order.lines.filter((x) => canonicalRestockSize(x.variantTitle) === d.size)) {
           if (remaining <= 0) break;
           const take = Math.min(remaining, l.qtyOrdered);
           if (take > 0) { await tx.orderLine.update({ where: { id: l.id }, data: { qtyOrdered: l.qtyOrdered - take } }); remaining -= take; }
@@ -3087,10 +3097,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const original = await prisma.supplierOrder.findUnique({ where: { id: orderId }, include: { lines: { orderBy: { id: "asc" } } } });
     if (original) {
       await prisma.$transaction(async (tx) => {
-        for (const [size, rawQty] of Object.entries(restore)) {
+        for (const [rawSize, rawQty] of Object.entries(restore)) {
+          const size = canonicalRestockSize(rawSize);
           const add = Math.max(0, Math.floor(Number(rawQty) || 0));
           if (add <= 0) continue;
-          const line = original.lines.find((l) => l.variantTitle === size);
+          // Match by canonical size so a folded-size restore lands on the real
+          // line (e.g. "S-M") instead of forking a duplicate "S/M" line.
+          const line = original.lines.find((l) => canonicalRestockSize(l.variantTitle) === size);
           if (line) await tx.orderLine.update({ where: { id: line.id }, data: { qtyOrdered: line.qtyOrdered + add } });
           else await tx.orderLine.create({ data: { orderId, variantId: `${orderId}:${size}`, variantTitle: size, qtyOrdered: add } });
         }
