@@ -32555,7 +32555,7 @@ function RestockPinControl({ mark, pinTypes, onSet, onEditPinTypes }: {
   }, [open, place]);
   const openNow = () => { setDraft({ type: mark?.type ?? "", note: mark?.note ?? "" }); setEditMode(false); setOpen(true); };
 
-  const chip: React.CSSProperties = { appearance: "none", display: "inline-flex", alignItems: "center", gap: 6, maxWidth: "100%", borderRadius: 999, cursor: "pointer", font: "800 11px/1 Inter, sans-serif", padding: "5px 9px" };
+  const chip: React.CSSProperties = { appearance: "none", display: "inline-flex", alignItems: "center", gap: 6, maxWidth: "100%", borderRadius: 999, cursor: "pointer", font: "800 11px/1 Inter, sans-serif", padding: "5px 9px", marginBottom: 6 };
   const addType = () => onEditPinTypes([...pinTypes, { k: "t" + Math.random().toString(36).slice(2, 7), label: "New pin", emoji: "", color: "#64748b" }]);
   const editType = (k: string, patch: Partial<{ label: string; emoji: string; color: string }>) => onEditPinTypes(pinTypes.map((p) => p.k === k ? { ...p, ...patch } : p));
   const removeType = (k: string) => onEditPinTypes(pinTypes.filter((p) => p.k !== k));
@@ -32924,16 +32924,14 @@ function OrderRow({
             Sticky cells are already positioning contexts for absolute
             children, so the stamp anchors to this cell without us having
             to add position:relative (which would break sticky). */}
-        <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={{ ...(destinationRowBg || {}), verticalAlign: "top" }}>
+        <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={destinationRowBg}>
           {pinOwner && onSetPin && (
-            <div style={{ marginTop: -2, marginBottom: 10 }}>
-              <RestockPinControl
-                mark={pinMark ?? null}
-                pinTypes={pinTypes ?? []}
-                onSet={(m) => onSetPin(order.id, m)}
-                onEditPinTypes={(t) => onEditPinTypes && onEditPinTypes(t)}
-              />
-            </div>
+            <RestockPinControl
+              mark={pinMark ?? null}
+              pinTypes={pinTypes ?? []}
+              onSet={(m) => onSetPin(order.id, m)}
+              onEditPinTypes={(t) => onEditPinTypes && onEditPinTypes(t)}
+            />
           )}
           <span style={s.productName}>{order.productTitle}</span>
           {(order.productId ?? "").trim() && (
