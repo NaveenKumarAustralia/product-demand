@@ -3075,6 +3075,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return jsonResponse({ ok: true });
   }
 
+  // Units sold per size over the last N days (restock page Shopify dropdown).
+  // Same sell-through source the reorder planner uses (the sales dashboard).
+  // Sizes are canonicalised to match the restock grid's columns.
+  if (intent === "product_sales") {
+    const productId = String(form.get("productId") ?? "").trim();
+    const productTitle = String(form.get("productTitle") ?? "").trim();
+    const days = Math.max(1, Math.min(365, Math.floor(Number(form.get("days")) || 30)));
+    const until = new Date();
+    const since = new Date(until.getTime() - days * 24 * 60 * 60 * 1000);
+    const iso = (d: Date) => d.toISOString().slice(0, 10);
+    const rows = await fetchReorderVariantSales(productId, productTitle, iso(since), iso(until));
+    if (!rows) return jsonResponse({ ok: false, soldBySize: {}, total: 0, days });
+    // Key by the SAME normalized size label the Shopify stock row matches on
+    // (lowercased, hyphen→slash) so the sold numbers line up under each column.
+    const soldBySize: Record<string, number> = {};
+    let total = 0;
+    for (const r of rows) {
+      const sz = normalizeVariantSizeLabel(r.variant);
+      const n = Number(r.unitsSold) || 0;
+      if (!sz) continue;
+      soldBySize[sz] = (soldBySize[sz] ?? 0) + n;
+      total += n;
+    }
+    return jsonResponse({ ok: true, soldBySize, total, days });
+  }
+
   // ─── Reorder Planner ──────────────────────────────────────────────────────
   // Product search (reuses the Shopify search) for the planner's search box.
   if (intent === "reorder_search") {
@@ -7241,7 +7267,8 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
   if (intent === "vb_get_item" || intent === "get_sample_full"
     || intent === "get_sample_iteration_thumbnails"
     || intent === "get_collection_full" || intent === "ps_get_shoot"
-    || intent === "reorder_search" || intent === "reorder_plan" || intent === "reorder_overview") return false;
+    || intent === "reorder_search" || intent === "reorder_plan" || intent === "reorder_overview"
+    || intent === "product_sales") return false;
   return defaultShouldRevalidate;
 };
 
@@ -13782,6 +13809,12 @@ export default function PortalDashboard() {
   // background revalidation resyncs this to the real split when it lands.
   const [localRestockOrders, setLocalRestockOrders] = useState<Order[]>(orders);
   useEffect(() => { setLocalRestockOrders(orders); }, [orders]);
+  // Sales window (days) for the Shopify dropdown's "Sold" row — one global
+  // choice for every row, remembered per browser. Quick picks: 1/7/14/30/90.
+  const [salesWindowDays, setSalesWindowDays] = useState<number>(() => {
+    try { const v = Number(localStorage.getItem("restock-sales-window-days")); return [1, 7, 14, 30, 90].includes(v) ? v : 30; } catch { return 30; }
+  });
+  useEffect(() => { try { localStorage.setItem("restock-sales-window-days", String(salesWindowDays)); } catch { /* ignore */ } }, [salesWindowDays]);
   const restockSplitFetcher = useFetcher();
   // Rows currently playing a fireworks celebration (the just-created split row).
   const [celebrateRows, setCelebrateRows] = useState<Set<number>>(new Set());
@@ -14840,6 +14873,8 @@ export default function PortalDashboard() {
                     celebrating={celebrateRows.has(order.id)}
                     canManagePreorder={canManagePreorder}
                     preorder={preorderByOrderId?.[order.id]}
+                    salesWindowDays={salesWindowDays}
+                    onSalesWindowChange={setSalesWindowDays}
                   />
                   );
                 })}
@@ -32358,6 +32393,8 @@ function OrderRow({
   celebrating,
   canManagePreorder,
   preorder,
+  salesWindowDays,
+  onSalesWindowChange,
 }: {
   order: Order;
   rowIndex: number;
@@ -32385,6 +32422,8 @@ function OrderRow({
   celebrating?: boolean;
   canManagePreorder?: boolean;
   preorder?: { enabled: boolean; activated: boolean; shipDate: string | null; market: "AU" | "USA" | null; reservedBySize?: Record<string, { reserved: number; available: number }> };
+  salesWindowDays: number;
+  onSalesWindowChange: (days: number) => void;
 }) {
   const fetcher = useFetcher();
   const trRef = useRef<HTMLTableRowElement | null>(null);
@@ -32406,7 +32445,29 @@ function OrderRow({
     }
   }, [refreshFetcher.state, refreshFetcher.data]);
   const inventoryFetcher = useFetcher<{ variantsBySize?: Record<string, number>; total?: number }>();
+  // Units sold per size over the chosen window (dashboard sell-through), shown
+  // under the Shopify stock row. Fetched when the dropdown opens and whenever
+  // the window changes while it's open.
+  const salesFetcher = useFetcher<{ ok?: boolean; soldBySize?: Record<string, number>; total?: number; days?: number }>();
   const [inventoryOpen, setInventoryOpen] = useState(false);
+  useEffect(() => {
+    if (!inventoryOpen || !order.productId) return;
+    salesFetcher.submit(
+      { intent: "product_sales", productId: order.productId, productTitle: order.productTitle ?? "", days: String(salesWindowDays) },
+      { method: "post" },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inventoryOpen, salesWindowDays, order.productId]);
+  const soldData = salesFetcher.data?.soldBySize ?? null;
+  const salesLoading = salesFetcher.state !== "idle";
+  const salesFailed = Boolean(salesFetcher.data && salesFetcher.data.ok === false);
+  const soldBySize: Record<string, number | null> = (() => {
+    if (!soldData) return Object.fromEntries(sizes.map((sz) => [sz, null]));
+    const out: Record<string, number | null> = {};
+    for (const size of sizes) out[size] = soldData[normalizeVariantSizeLabel(size)] ?? 0;
+    return out;
+  })();
+  const soldTotal = salesFetcher.data?.total ?? 0;
   // Re-pick the style/fabric behind the ₹ cost even when a cost already resolved.
   const [costReselect, setCostReselect] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -32872,6 +32933,7 @@ function OrderRow({
         </tr>
       )}
       {inventoryOpen && (
+        <>
         <tr style={s.inventoryRow}>
           <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
@@ -32890,6 +32952,39 @@ function OrderRow({
           <td style={s.inventoryBlankCell} />
           <td style={s.inventoryBlankCell} />
         </tr>
+        {/* Units sold per size over the chosen window, with a quick date picker. */}
+        <tr style={s.inventoryRow}>
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryLabelCell}>
+            <select
+              value={salesWindowDays}
+              onChange={(e) => onSalesWindowChange(Number(e.target.value))}
+              title="How many were sold in the last N days (from the sales dashboard)"
+              style={{ width: "100%", boxSizing: "border-box", fontSize: 10, fontWeight: 800, border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 3px", background: "#fff", color: "#92400e", cursor: "pointer" }}
+            >
+              <option value={1}>Sold 1d</option>
+              <option value={7}>Sold 7d</option>
+              <option value={14}>Sold 14d</option>
+              <option value={30}>Sold 30d</option>
+              <option value={90}>Sold 90d</option>
+            </select>
+          </td>
+          {sizes.map((size) => (
+            <td key={size} style={{ ...s.td, ...s.inventoryQtyCell, color: "#b45309" }}>
+              {salesLoading && !soldData ? "…" : salesFailed ? "—" : (soldBySize[size] == null ? "—" : soldBySize[size])}
+            </td>
+          ))}
+          <td style={{ ...s.td, ...s.inventoryQtyCell }}><span style={{ ...s.total, color: "#b45309" }}>{salesLoading && !soldData ? "…" : salesFailed ? "—" : soldTotal}</span></td>
+          <td style={{ ...s.td, ...s.inventoryStatusCell, color: "#b45309" }}>{salesLoading && !soldData ? "Loading…" : salesFailed ? "No sales data" : `Sold ${salesWindowDays}d`}</td>
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+          <td style={s.inventoryBlankCell} />
+        </tr>
+        </>
       )}
     </>
   );
