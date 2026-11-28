@@ -188,61 +188,6 @@ function shipmentRowLabel(raw: string): string {
   return /^\d+$/.test(d) ? `Shipment ${d}` : d;
 }
 
-// ─── Restock row pins (private, owner-only) ─────────────────────────────────
-// A personal marker for the weekly restock review: pin a row with a type + a
-// private note, shown at the top of the Name cell. Stored per portal user (so
-// it is private) and only shown to the owner account.
-const RESTOCK_PIN_OWNER_USERNAME = "koku";
-type RestockPinType = { k: string; label: string; emoji: string; color: string };
-type RestockPinMark = { type: string; note: string };
-const DEFAULT_RESTOCK_PIN_TYPES: RestockPinType[] = [
-  { k: "pri", label: "Priority", emoji: "⭐", color: "#d97706" },
-  { k: "rev", label: "Revisit", emoji: "👀", color: "#2563eb" },
-  { k: "wait", label: "Waiting", emoji: "⏳", color: "#7c3aed" },
-  { k: "ask", label: "Ask Koku", emoji: "❓", color: "#dc2626" },
-  { k: "done", label: "Decided", emoji: "✅", color: "#16a34a" },
-];
-const restockPinsKey = (userId: string) => `restock-pins:${userId}`;
-function isRestockPinOwner(user: { username?: string | null } | null | undefined): boolean {
-  return (user?.username ?? "").trim().toLowerCase() === RESTOCK_PIN_OWNER_USERNAME;
-}
-function normalizeRestockPinTypes(value: unknown): RestockPinType[] {
-  if (!Array.isArray(value)) return DEFAULT_RESTOCK_PIN_TYPES;
-  const out: RestockPinType[] = [];
-  const seen = new Set<string>();
-  for (const raw of value as Array<Record<string, unknown>>) {
-    const k = String(raw?.k ?? "").trim().slice(0, 24);
-    if (!k || seen.has(k)) continue;
-    seen.add(k);
-    const color = String(raw?.color ?? "");
-    out.push({
-      k,
-      label: String(raw?.label ?? k).slice(0, 40) || k,
-      emoji: String(raw?.emoji ?? "").slice(0, 4),
-      color: /^#[0-9a-fA-F]{6}$/.test(color) ? color : "#64748b",
-    });
-    if (out.length >= 12) break;
-  }
-  return out.length ? out : DEFAULT_RESTOCK_PIN_TYPES;
-}
-function normalizeRestockPinMarks(value: unknown): Record<string, RestockPinMark> {
-  const out: Record<string, RestockPinMark> = {};
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    for (const [k, v] of Object.entries(value as Record<string, { type?: unknown; note?: unknown }>)) {
-      if (!/^\d+$/.test(k)) continue;
-      const type = String(v?.type ?? "").trim().slice(0, 24);
-      const note = String(v?.note ?? "").slice(0, 500);
-      if (type || note.trim()) out[k] = { type, note };
-    }
-  }
-  return out;
-}
-async function loadRestockPins(userId: string): Promise<{ owner: boolean; types: RestockPinType[]; marks: Record<string, RestockPinMark> }> {
-  const row = await prisma.portalSetting.findUnique({ where: { key: restockPinsKey(userId) }, select: { value: true } }).catch(() => null);
-  const v = (row?.value ?? {}) as { types?: unknown; marks?: unknown };
-  return { owner: true, types: normalizeRestockPinTypes(v.types), marks: normalizeRestockPinMarks(v.marks) };
-}
-
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   // TEMP diagnostic: add ?perf=1 to the URL to get a timing/size breakdown of
@@ -1461,15 +1406,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const productionCuts = page === "production-cuts" ? await buildProductionCutsData(url.searchParams) : null;
 
-  // Private restock pins: only the owner account gets them (and only when on a
-  // restock page, to avoid an extra query everywhere else).
-  const restockPins = currentUser && isRestockPinOwner(currentUser) && (page === "restock" || page === "jj-restock")
-    ? await loadRestockPins(currentUser.id)
-    : { owner: false, types: [] as RestockPinType[], marks: {} as Record<string, RestockPinMark> };
-
   return {
     perf,
-    restockPins,
     orders,
     productionCuts,
     preorderByOrderId,
@@ -3174,36 +3112,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       });
     }
     return jsonResponse({ ok: true });
-  }
-
-  // Private restock pin: set/clear a row's pin type + note for the owner only.
-  if (intent === "set_restock_pin") {
-    if (!currentUser || !isRestockPinOwner(currentUser)) return jsonResponse({ ok: false });
-    const orderId = String(form.get("orderId") ?? "").replace(/\D/g, "");
-    if (!orderId) return jsonResponse({ ok: false });
-    const type = String(form.get("type") ?? "").trim().slice(0, 24);
-    const note = String(form.get("note") ?? "").slice(0, 500);
-    const key = restockPinsKey(currentUser.id);
-    const row = await prisma.portalSetting.findUnique({ where: { key }, select: { value: true } });
-    const v = (row?.value ?? {}) as { types?: unknown; marks?: unknown };
-    const marks = normalizeRestockPinMarks(v.marks);
-    if (type || note.trim()) marks[orderId] = { type, note }; else delete marks[orderId];
-    const next = { types: normalizeRestockPinTypes(v.types), marks };
-    await prisma.portalSetting.upsert({ where: { key }, create: { key, value: next as never }, update: { value: next as never } });
-    return jsonResponse({ ok: true });
-  }
-  // Private restock pin TYPES: the owner's editable list of pin labels/colours.
-  if (intent === "save_restock_pin_types") {
-    if (!currentUser || !isRestockPinOwner(currentUser)) return jsonResponse({ ok: false });
-    let parsed: unknown = [];
-    try { parsed = JSON.parse(String(form.get("types") ?? "[]")); } catch { parsed = []; }
-    const key = restockPinsKey(currentUser.id);
-    const row = await prisma.portalSetting.findUnique({ where: { key }, select: { value: true } });
-    const v = (row?.value ?? {}) as { marks?: unknown };
-    const types = normalizeRestockPinTypes(parsed);
-    const next = { types, marks: normalizeRestockPinMarks(v.marks) };
-    await prisma.portalSetting.upsert({ where: { key }, create: { key, value: next as never }, update: { value: next as never } });
-    return jsonResponse({ ok: true, types });
   }
 
   // Units sold per size over the last N days (restock page Shopify dropdown).
@@ -7392,7 +7300,7 @@ export const shouldRevalidate: ShouldRevalidateFunction = ({ formData, defaultSh
     || intent === "get_sample_iteration_thumbnails"
     || intent === "get_collection_full" || intent === "ps_get_shoot"
     || intent === "reorder_search" || intent === "reorder_plan" || intent === "reorder_overview"
-    || intent === "product_sales" || intent === "set_restock_pin" || intent === "save_restock_pin_types") return false;
+    || intent === "product_sales") return false;
   return defaultShouldRevalidate;
 };
 
@@ -13669,7 +13577,6 @@ export default function PortalDashboard() {
     jjInboxCollectionId,
     jjTabs,
     fabricStockIndex,
-    restockPins,
   } = useLoaderData<typeof loader>();
   // Both the Karma East ("restock") and JJ ("jj-restock") pages render the
   // shared restock table; the loader has already scoped `orders` to the
@@ -13915,32 +13822,6 @@ export default function PortalDashboard() {
     try { const v = Number(localStorage.getItem("restock-sales-window-days")); return [1, 7, 14, 30, 90].includes(v) ? v : 30; } catch { return 30; }
   });
   useEffect(() => { try { localStorage.setItem("restock-sales-window-days", String(salesWindowDays)); } catch { /* ignore */ } }, [salesWindowDays]);
-
-  // Private restock pins (owner-only). Marks + the editable pin-type list come
-  // from the loader; kept in local state for instant optimistic updates and
-  // saved per-user in the background. pinFilter narrows the table to one type
-  // (or any pinned). Non-owner: pinOwner is false and nothing renders.
-  const pinOwner = Boolean(restockPins?.owner);
-  const [pinMarks, setPinMarks] = useState<Record<string, { type: string; note: string }>>(restockPins?.marks ?? {});
-  const [pinTypes, setPinTypes] = useState<Array<{ k: string; label: string; emoji: string; color: string }>>(restockPins?.types ?? []);
-  useEffect(() => { setPinMarks(restockPins?.marks ?? {}); setPinTypes(restockPins?.types ?? []); }, [restockPins]);
-  const [pinFilter, setPinFilter] = useState<string | null>(null); // null | "__any" | typeKey
-  const pinSaveFetcher = useFetcher();
-  const pinTypesFetcher = useFetcher();
-  const setRestockPin = useCallback((orderId: number, mark: { type: string; note: string } | null) => {
-    setPinMarks((prev) => {
-      const next = { ...prev };
-      if (mark && (mark.type || (mark.note ?? "").trim())) next[String(orderId)] = { type: mark.type, note: mark.note };
-      else delete next[String(orderId)];
-      return next;
-    });
-    pinSaveFetcher.submit({ intent: "set_restock_pin", orderId: String(orderId), type: mark?.type ?? "", note: mark?.note ?? "" }, { method: "post" });
-  }, [pinSaveFetcher]);
-  const saveRestockPinTypes = useCallback((next: Array<{ k: string; label: string; emoji: string; color: string }>) => {
-    setPinTypes(next);
-    pinTypesFetcher.submit({ intent: "save_restock_pin_types", types: JSON.stringify(next) }, { method: "post" });
-  }, [pinTypesFetcher]);
-
   const restockSplitFetcher = useFetcher();
   // Rows currently playing a fireworks celebration (the just-created split row).
   const [celebrateRows, setCelebrateRows] = useState<Set<number>>(new Set());
@@ -14068,13 +13949,9 @@ export default function PortalDashboard() {
   const canManagePreorder = Boolean(
     currentUser && (currentUser.admin === true || currentUser.role === "superadmin" || currentUser.preorderAccess?.manage === true),
   );
-  const baseVisibleOrders = page === "restock" && restockSearch
+  const visibleOrders = page === "restock" && restockSearch
     ? localRestockOrders.filter((order) => order.productTitle.toLowerCase().includes(restockSearch))
     : localRestockOrders;
-  // Narrow to pinned rows when a pin filter is active (owner only).
-  const visibleOrders = (pinOwner && pinFilter)
-    ? baseVisibleOrders.filter((o) => { const m = pinMarks[String(o.id)]; return m ? (pinFilter === "__any" || m.type === pinFilter) : false; })
-    : baseVisibleOrders;
   // Restock rows render in a growing window (50 at a time, more on scroll) so a
   // long list paints fast instead of mounting every heavy row up front.
   const RESTOCK_PAGE_SIZE = 50;
@@ -14920,26 +14797,6 @@ export default function PortalDashboard() {
         ) : !isRestockPage ? (
           <div style={s.empty}>{activePageTitle} will be set up here.</div>
         ) : (
-          <>
-          {pinOwner && page === "restock" && (() => {
-            const counts: Record<string, number> = {}; let anyN = 0;
-            for (const m of Object.values(pinMarks)) { anyN++; if (m.type) counts[m.type] = (counts[m.type] ?? 0) + 1; }
-            const chipBase: React.CSSProperties = { appearance: "none", borderRadius: 999, padding: "5px 10px", font: "700 12px/1 Inter, sans-serif", cursor: "pointer", display: "inline-flex", gap: 6, alignItems: "center", border: "1px solid #d4dae2", background: "#fff", color: "#334155" };
-            const on: React.CSSProperties = { background: "#0f766e", borderColor: "#0f766e", color: "#fff" };
-            const num = (n: number) => <span style={{ font: "800 10.5px/1 Inter", background: "rgba(0,0,0,.06)", borderRadius: 999, padding: "2px 6px" }}>{n}</span>;
-            return (
-              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", padding: "4px 2px 8px", flexShrink: 0 }}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: "#b45309", marginRight: 2 }}>🔖 My pins</span>
-                <button type="button" style={{ ...chipBase, ...(!pinFilter ? on : {}) }} onClick={() => setPinFilter(null)}>All rows</button>
-                <button type="button" style={{ ...chipBase, ...(pinFilter === "__any" ? on : {}) }} onClick={() => setPinFilter(pinFilter === "__any" ? null : "__any")}>📌 Pinned {num(anyN)}</button>
-                {pinTypes.map((pt) => (
-                  <button key={pt.k} type="button" style={{ ...chipBase, ...(pinFilter === pt.k ? on : {}) }} onClick={() => setPinFilter(pinFilter === pt.k ? null : pt.k)}>
-                    <span style={{ width: 10, height: 10, borderRadius: "50%", background: pt.color, display: "inline-block" }} />{pt.emoji ? pt.emoji + " " : ""}{pt.label} {num(counts[pt.k] ?? 0)}
-                  </button>
-                ))}
-              </div>
-            );
-          })()}
           <div className="portal-table-scroll" style={s.tableWrap} ref={setRestockTableScrollRef}>
             <table style={{ ...s.table, width: tableWidth }} onKeyDown={handleTableGridKeyDown}>
               <colgroup>
@@ -15025,11 +14882,6 @@ export default function PortalDashboard() {
                     preorder={preorderByOrderId?.[order.id]}
                     salesWindowDays={salesWindowDays}
                     onSalesWindowChange={setSalesWindowDays}
-                    pinOwner={pinOwner}
-                    pinTypes={pinTypes}
-                    pinMark={pinMarks[String(order.id)] ?? null}
-                    onSetPin={setRestockPin}
-                    onEditPinTypes={saveRestockPinTypes}
                   />
                   );
                 })}
@@ -15063,7 +14915,6 @@ export default function PortalDashboard() {
               </tbody>
             </table>
           </div>
-          </>
         )}
       </main>
       {imageLightbox && typeof document !== "undefined" && createPortal(
@@ -32522,126 +32373,6 @@ function RestockSplitModal({
   );
 }
 
-// Private pin + note control that sits at the top of the restock Name cell.
-// Owner-only. Opens a dropdown to pick a pin type, write a private note, and
-// edit the pin-type list. The dropdown renders through a portal so it is never
-// clipped by the scrolling table.
-function RestockPinControl({ mark, pinTypes, onSet, onEditPinTypes }: {
-  mark: { type: string; note: string } | null;
-  pinTypes: Array<{ k: string; label: string; emoji: string; color: string }>;
-  onSet: (mark: { type: string; note: string } | null) => void;
-  onEditPinTypes: (types: Array<{ k: string; label: string; emoji: string; color: string }>) => void;
-}) {
-  const btnRef = useRef<HTMLButtonElement | null>(null);
-  const [open, setOpen] = useState(false);
-  const [editMode, setEditMode] = useState(false);
-  const [pos, setPos] = useState<{ left: number; top: number }>({ left: -9999, top: -9999 });
-  const [draft, setDraft] = useState<{ type: string; note: string }>({ type: mark?.type ?? "", note: mark?.note ?? "" });
-  const draftRef = useRef(draft); draftRef.current = draft;
-  const meta = pinTypes.find((p) => p.k === (mark?.type ?? "")) ?? null;
-
-  const place = useCallback(() => {
-    const el = btnRef.current; if (!el) return;
-    const r = el.getBoundingClientRect();
-    const w = 252, h = 340;
-    let left = Math.min(r.left, window.innerWidth - w - 10); left = Math.max(10, left);
-    let top = r.bottom + 5; if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 5);
-    setPos({ left, top });
-  }, []);
-  const commit = useCallback(() => {
-    const d = draftRef.current;
-    if (d.type || (d.note ?? "").trim()) onSet({ type: d.type, note: (d.note ?? "").trim() }); else onSet(null);
-    setOpen(false);
-  }, [onSet]);
-  useEffect(() => {
-    if (!open) return;
-    place();
-    const onScroll = () => place();
-    window.addEventListener("scroll", onScroll, true); window.addEventListener("resize", onScroll);
-    return () => { window.removeEventListener("scroll", onScroll, true); window.removeEventListener("resize", onScroll); };
-  }, [open, place]);
-  const openNow = () => { setDraft({ type: mark?.type ?? "", note: mark?.note ?? "" }); setEditMode(false); setOpen(true); };
-
-  const chip: React.CSSProperties = { appearance: "none", display: "inline-flex", alignItems: "center", gap: 6, maxWidth: "100%", borderRadius: 999, cursor: "pointer", font: "800 11px/1 Inter, sans-serif", padding: "5px 9px" };
-  const addType = () => onEditPinTypes([...pinTypes, { k: "t" + Math.random().toString(36).slice(2, 7), label: "New pin", emoji: "", color: "#64748b" }]);
-  const editType = (k: string, patch: Partial<{ label: string; emoji: string; color: string }>) => onEditPinTypes(pinTypes.map((p) => p.k === k ? { ...p, ...patch } : p));
-  const removeType = (k: string) => onEditPinTypes(pinTypes.filter((p) => p.k !== k));
-
-  const pop = open && typeof document !== "undefined" ? createPortal(
-    <>
-      <div onClick={commit} style={{ position: "fixed", inset: 0, zIndex: 2147483000, background: "transparent" }} />
-      <div style={{ position: "fixed", left: pos.left, top: pos.top, zIndex: 2147483001, width: 252, background: "#fff", border: "1px solid #d4dae2", borderRadius: 13, boxShadow: "0 14px 44px rgba(15,23,42,.24)", padding: 9, font: "13px Inter, sans-serif", color: "#1e293b" }}>
-        {!editMode ? (
-          <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "2px 4px 7px" }}>
-              <span style={{ font: "800 10px/1 Inter", letterSpacing: ".06em", textTransform: "uppercase", color: "#64748b" }}>Pin as…</span>
-              <button type="button" onClick={() => setEditMode(true)} style={{ border: "none", background: "none", color: "#0f766e", font: "700 11px/1 Inter", cursor: "pointer" }}>✎ Edit pins</button>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 190, overflowY: "auto" }}>
-              {pinTypes.map((p) => {
-                const sel = draft.type === p.k;
-                return (
-                  <button key={p.k} type="button" onClick={() => setDraft((d) => ({ ...d, type: sel ? "" : p.k }))}
-                    style={{ display: "flex", alignItems: "center", gap: 9, width: "100%", border: "none", background: sel ? "rgba(15,118,110,.12)" : "transparent", color: "#1e293b", font: "600 12.5px/1 Inter", padding: "8px 8px", borderRadius: 9, cursor: "pointer", textAlign: "left" }}>
-                    <span style={{ width: 12, height: 12, borderRadius: "50%", background: p.color, flex: "none" }} />
-                    <span style={{ flex: 1 }}>{p.emoji ? p.emoji + " " : ""}{p.label}</span>
-                    {sel && <span style={{ color: "#115e59", fontWeight: 800 }}>✓</span>}
-                  </button>
-                );
-              })}
-            </div>
-            <div style={{ marginTop: 8, borderTop: "1px solid #e5e9ef", paddingTop: 9 }}>
-              <label style={{ font: "800 9.5px/1 Inter", letterSpacing: ".05em", textTransform: "uppercase", color: "#64748b", display: "block", marginBottom: 5 }}>Private note (only you)</label>
-              <textarea value={draft.note} onChange={(e) => setDraft((d) => ({ ...d, note: e.target.value }))} placeholder="e.g. check fabric before cut"
-                style={{ width: "100%", resize: "vertical", minHeight: 46, font: "12.5px Inter", border: "1px solid #d4dae2", borderRadius: 8, padding: "7px 8px", background: "#f8fafc", color: "#1e293b" }} />
-            </div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 9 }}>
-              <button type="button" onClick={() => { setDraft({ type: "", note: "" }); onSet(null); setOpen(false); }} style={{ border: "none", background: "none", color: "#dc2626", font: "700 12px/1 Inter", cursor: "pointer", padding: "7px 4px" }}>Remove</button>
-              <button type="button" onClick={commit} style={{ border: "none", background: "#0f766e", color: "#fff", font: "800 12px/1 Inter", borderRadius: 8, padding: "8px 16px", cursor: "pointer" }}>Done</button>
-            </div>
-          </>
-        ) : (
-          <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "2px 4px 7px" }}>
-              <span style={{ font: "800 10px/1 Inter", letterSpacing: ".06em", textTransform: "uppercase", color: "#64748b" }}>Edit pins</span>
-              <button type="button" onClick={() => setEditMode(false)} style={{ border: "none", background: "none", color: "#0f766e", font: "700 11px/1 Inter", cursor: "pointer" }}>Done</button>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 230, overflowY: "auto" }}>
-              {pinTypes.map((p) => (
-                <div key={p.k} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                  <input value={p.emoji} onChange={(e) => editType(p.k, { emoji: e.target.value.slice(0, 2) })} placeholder="🙂" style={{ width: 30, textAlign: "center", font: "13px Inter", border: "1px solid #d4dae2", borderRadius: 6, padding: "6px 2px", background: "#fff" }} />
-                  <input value={p.label} onChange={(e) => editType(p.k, { label: e.target.value.slice(0, 40) })} style={{ flex: 1, minWidth: 0, font: "12.5px Inter", border: "1px solid #d4dae2", borderRadius: 6, padding: "6px 7px", background: "#fff", color: "#1e293b" }} />
-                  <input type="color" value={p.color} onChange={(e) => editType(p.k, { color: e.target.value })} style={{ width: 28, height: 28, border: "1px solid #d4dae2", borderRadius: 6, padding: 1, background: "#fff", cursor: "pointer" }} />
-                  <button type="button" onClick={() => removeType(p.k)} title="Remove" style={{ border: "none", background: "none", color: "#94a3b8", font: "16px Inter", cursor: "pointer", padding: "2px 4px" }}>×</button>
-                </div>
-              ))}
-            </div>
-            <button type="button" onClick={addType} style={{ marginTop: 8, width: "100%", border: "1px dashed #d4dae2", background: "transparent", color: "#64748b", font: "700 12px/1 Inter", borderRadius: 8, padding: "9px", cursor: "pointer" }}>+ Add pin type</button>
-          </>
-        )}
-      </div>
-    </>, document.body) : null;
-
-  return (
-    <div>
-      {mark ? (
-        <button ref={btnRef} type="button" onClick={openNow} title={mark.note || (meta ? meta.label : "Pinned")}
-          style={{ ...chip, border: "1px solid " + (meta ? meta.color : "#d97706"), background: (meta ? meta.color : "#d97706") + "22", color: "#1e293b" }}>
-          {meta && <span style={{ width: 10, height: 10, borderRadius: "50%", background: meta.color, flex: "none" }} />}
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta ? (meta.emoji ? meta.emoji + " " : "") + meta.label : "Note"}</span>
-          {mark.note && <span style={{ flex: "none" }}>📝</span>}
-          <span style={{ opacity: .55, fontSize: 9, flex: "none" }}>▾</span>
-        </button>
-      ) : (
-        <button ref={btnRef} type="button" onClick={openNow} style={{ ...chip, border: "1px dashed #d4dae2", background: "transparent", color: "#64748b" }}>
-          🔖 Pin / note <span style={{ opacity: .55, fontSize: 9 }}>▾</span>
-        </button>
-      )}
-      {pop}
-    </div>
-  );
-}
-
 function OrderRow({
   order,
   rowIndex,
@@ -32671,11 +32402,6 @@ function OrderRow({
   preorder,
   salesWindowDays,
   onSalesWindowChange,
-  pinOwner,
-  pinTypes,
-  pinMark,
-  onSetPin,
-  onEditPinTypes,
 }: {
   order: Order;
   rowIndex: number;
@@ -32705,11 +32431,6 @@ function OrderRow({
   preorder?: { enabled: boolean; activated: boolean; shipDate: string | null; market: "AU" | "USA" | null; reservedBySize?: Record<string, { reserved: number; available: number }> };
   salesWindowDays: number;
   onSalesWindowChange: (days: number) => void;
-  pinOwner?: boolean;
-  pinTypes?: Array<{ k: string; label: string; emoji: string; color: string }>;
-  pinMark?: { type: string; note: string } | null;
-  onSetPin?: (orderId: number, mark: { type: string; note: string } | null) => void;
-  onEditPinTypes?: (types: Array<{ k: string; label: string; emoji: string; color: string }>) => void;
 }) {
   const fetcher = useFetcher();
   const trRef = useRef<HTMLTableRowElement | null>(null);
@@ -32931,17 +32652,7 @@ function OrderRow({
             Sticky cells are already positioning contexts for absolute
             children, so the stamp anchors to this cell without us having
             to add position:relative (which would break sticky). */}
-        <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={{ ...(destinationRowBg || {}), verticalAlign: "top" }}>
-          {pinOwner && onSetPin && (
-            <div style={{ marginTop: -2, marginBottom: 10 }}>
-              <RestockPinControl
-                mark={pinMark ?? null}
-                pinTypes={pinTypes ?? []}
-                onSet={(m) => onSetPin(order.id, m)}
-                onEditPinTypes={(t) => onEditPinTypes && onEditPinTypes(t)}
-              />
-            </div>
-          )}
+        <Td rowIndex={rowIndex} colIndex={3} overflowVisible historyEntity="Restock Order" historyEntityId={String(order.id)} historyField="Product name" historyEntityName={order.productTitle} stickyLeft={frozenOffsets?.[3]} isLastFrozen style={destinationRowBg}>
           <span style={s.productName}>{order.productTitle}</span>
           {(order.productId ?? "").trim() && (
             <button
